@@ -3963,6 +3963,55 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(duration_seconds, 3 * 60 * 60)
 
+    def test_scheduler_decorates_explicit_hard_schedule_states(self) -> None:
+        def decorated(**overrides: object) -> dict[str, object]:
+            payload: dict[str, object] = {
+                "job_id": "job-schedule-state",
+                "prefix": "tv/show",
+                "status": "queued",
+                "manifest_path": "",
+                "item_count": 1,
+                "host": {},
+                "bypass_schedule": False,
+                "attempt_count": 0,
+                "progress": {},
+            }
+            payload.update(overrides)
+            result = web_app._decorate_encode_job_for_scheduler(self.config, payload)
+            assert result is not None
+            return result
+
+        hard_stop = decorated(
+            status="running",
+            schedule_close_deadline_at="2026-07-24T19:00:00+00:00",
+        )
+        bypassed = decorated(status="running", bypass_schedule=True)
+        interrupted = decorated(
+            progress={"progress_state": "schedule_waiting"},
+            waiting_reason=encode_runtime.SCHEDULE_CLOSE_WAITING_REASON,
+        )
+        interrupted_parent = decorated(
+            waiting_reason=encode_runtime.SCHEDULE_CLOSE_WAITING_REASON,
+        )
+        draining = decorated(
+            waiting_reason="Estimated runtime about 2h; waiting for a host window with enough time remaining.",
+        )
+        impossible = decorated(
+            waiting_reason=(
+                "Estimated runtime about 4h is longer than every configured host schedule window "
+                "(longest about 3h). Widen a host window or use Bypass scheduler."
+            ),
+        )
+
+        self.assertEqual(hard_stop["schedule_state"], "active_hard_stop")
+        self.assertEqual(hard_stop["scheduler_status_copy"], "running until the work window closes")
+        self.assertEqual(bypassed["schedule_state"], "bypassed")
+        self.assertEqual(bypassed["scheduler_status_copy"], "bypassing the work schedule")
+        self.assertEqual(interrupted["schedule_state"], "schedule_interrupted")
+        self.assertEqual(interrupted_parent["schedule_state"], "schedule_interrupted")
+        self.assertEqual(draining["schedule_state"], "draining_no_fit")
+        self.assertEqual(impossible["schedule_state"], "draining_impossible")
+
     def test_scheduler_transition_closes_at_first_repeated_hour(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
             {
@@ -15323,6 +15372,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "lease_expires_at": now,
                     "heartbeat_at": now,
                     "worker_id": "worker-a",
+                    "schedule_close_deadline_at": "2026-07-24T19:00:00+00:00",
                     "retry_not_before": None,
                     "waiting_reason": None,
                     "terminal_reason": None,
@@ -15369,6 +15419,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "lease_expires_at": now,
                     "heartbeat_at": now,
                     "worker_id": "worker-b",
+                    "schedule_close_deadline_at": "2026-07-24T18:00:00+00:00",
                     "retry_not_before": None,
                     "waiting_reason": None,
                     "terminal_reason": None,
@@ -15402,6 +15453,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(resolved["running_shard_count"], 2)
         self.assertEqual(resolved["shard_count"], 2)
         self.assertEqual(len(resolved["active_hosts"]), 2)
+        self.assertEqual(resolved["schedule_close_deadline_at"], "2026-07-24T18:00:00+00:00")
         self.assertAlmostEqual(float(resolved["progress"]["percent_complete"]), (140.0 / 300.0) * 100.0, places=2)
         self.assertAlmostEqual(float(resolved["progress"]["speed"]), 3.5, places=2)
         self.assertAlmostEqual(float(resolved["progress"]["fps"]), 30.0, places=2)

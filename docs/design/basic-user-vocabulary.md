@@ -76,6 +76,18 @@ debugging a worker, or comparing logs against backend output.
 - Worker available: `Ready`. This worker can accept work now.
 - Worker schedule closed: `Off schedule`. This is normal and not a failure if
   other workers are ready.
+- Worker window open with a known close: `Open` when idle and `Working` while
+  processing. Show the exact host-local close time beside the state.
+- Worker has time left but no queued episode safely fits: `Draining`. Work
+  resumes automatically in the next compatible full window.
+- Episode stopped at a schedule boundary: `Paused by schedule`. Explain that
+  the whole episode restarts automatically and no failure attempt was used.
+- Active episode with a hard boundary: `Stops at close`. Show the exact
+  host-local deadline and remaining time.
+- Explicit schedule exception: `Bypassing schedule`. State clearly that work
+  may continue past the normal close time.
+- Episode longer than every compatible work window: `Window too short`. Route
+  the operator to widen a work window or intentionally bypass the schedule.
 - Worker setup missing: `Needs setup`. The worker needs preparation before it
   can run work.
 - Queue paused: `Paused`. Mediaforce will not start new processing work.

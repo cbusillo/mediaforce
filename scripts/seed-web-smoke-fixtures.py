@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from mediaforce.core.config import load_config
+from mediaforce.core.config import load_config, update_runtime_settings
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import (
     background_work_state,
@@ -370,6 +370,71 @@ def _encode_host() -> dict[str, Any]:
     }
 
 
+def _seed_schedule_settings(config: Any, now: datetime) -> datetime:
+    start_hour = (now.hour - 1) % 24
+    end_hour = (now.hour + 3) % 24
+    next_start_hour = (now.hour + 2) % 24
+    next_end_hour = (now.hour + 5) % 24
+    days_of_week = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    scheduler = {
+        "mode": "night",
+        "timezone": "utc",
+        "start_hour": start_hour,
+        "end_hour": end_hour,
+        "days_of_week": days_of_week,
+    }
+    open_schedule_profile = {
+        **scheduler,
+        "key": "web_smoke_window",
+        "label": "Smoke work window",
+    }
+    next_schedule_profile = {
+        "mode": "night",
+        "timezone": "utc",
+        "start_hour": next_start_hour,
+        "end_hour": next_end_hour,
+        "days_of_week": days_of_week,
+        "key": "web_smoke_next_window",
+        "label": "Smoke next window",
+    }
+    configured_hosts = [dict(host) for host in config.remote_hosts]
+    primary_host = next(
+        (host for host in configured_hosts if str(host.get("key") or "") == "web-smoke-worker"),
+        _encode_host(),
+    )
+    primary_host["schedule_profile"] = "web_smoke_window"
+    drain_host = {
+        **primary_host,
+        "key": "web-smoke-drain-worker",
+        "label": "Smoke Drain Worker",
+        "host": "web-smoke-drain-worker.invalid",
+    }
+    standby_host = {
+        **primary_host,
+        "key": "web-smoke-standby-worker",
+        "label": "Smoke Standby Worker",
+        "host": "web-smoke-standby-worker.invalid",
+        "schedule_profile": "web_smoke_next_window",
+    }
+    remote_hosts = [
+        host
+        for host in configured_hosts
+        if not str(host.get("key") or "").startswith("web-smoke-")
+    ]
+    remote_hosts.extend((primary_host, drain_host, standby_host))
+
+    def _apply(runtime_settings: dict[str, Any]) -> dict[str, Any]:
+        encode_queue = dict(runtime_settings.get("encode_queue") or {})
+        encode_queue["scheduler"] = scheduler
+        encode_queue["schedule_profiles"] = [open_schedule_profile, next_schedule_profile]
+        runtime_settings["encode_queue"] = encode_queue
+        runtime_settings["remote_hosts"] = remote_hosts
+        return runtime_settings
+
+    update_runtime_settings(config.paths.runtime_settings_path, _apply)
+    return now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=3)
+
+
 def _manifest(project_root: Path, rel_path: str, job_id: str) -> Path:
     manifest_path = project_root / "state/web-smoke/runs" / f"{job_id}.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -402,6 +467,8 @@ def _encode_job(
     progress: dict[str, Any] | None = None,
     error: str | None = None,
     waiting_reason: str | None = None,
+    bypass_schedule: bool = False,
+    schedule_close_deadline_at: str | None = None,
 ) -> dict[str, Any]:
     timestamp = _now()
     started_at = timestamp if status == "running" else None
@@ -424,12 +491,13 @@ def _encode_job(
         "notes": "Seeded browser QA encode fixture.",
         "process_pid": None,
         "error": error,
-        "bypass_schedule": 0,
+        "bypass_schedule": int(bypass_schedule),
         "attempt_count": 1 if started_at else 0,
         "leased_at": started_at,
         "lease_expires_at": None,
         "heartbeat_at": started_at,
         "worker_id": "web-smoke-worker" if status == "running" else None,
+        "schedule_close_deadline_at": schedule_close_deadline_at,
         "retry_not_before": None,
         "waiting_reason": waiting_reason,
         "terminal_reason": "quality_threshold" if status == "needs_attention" else None,
@@ -742,6 +810,8 @@ def _clear_fixture_files(config: Any) -> None:
 
 def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
     config = load_config(config_path)
+    fixture_now = datetime.now(UTC)
+    schedule_closes_at = _seed_schedule_settings(config, fixture_now)
     project_root = config.paths.project_root
     archive_root = _resolve_under_project(project_root, config.archive_root)
     staging_root = _resolve_under_project(project_root, config.staging_root)
@@ -1503,7 +1573,6 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         policy = config.resolve_policy(rows[0]["rel_path"])
         sampling_policy = _policy_with_target(policy, 225)
         retry_policy = _policy_with_target(policy, 225)
-        fixture_now = datetime.now(UTC)
         active_started_at = (fixture_now - timedelta(minutes=15)).isoformat(timespec="seconds")
         heartbeat_at = fixture_now.isoformat(timespec="seconds")
         for item_id, row, job in (
@@ -1699,6 +1768,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 prefix=ENCODE_RUNNING_PREFIX,
                 rel_path="tv/Encoding Show/Season 1/Episode 01.mkv",
                 status="running",
+                schedule_close_deadline_at=schedule_closes_at.isoformat(timespec="seconds"),
                 progress={
                     "total_duration_seconds": 3600.0,
                     "overall_completed_duration_seconds": 1512.0,
@@ -1733,7 +1803,29 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 prefix=ENCODE_WAITING_PREFIX,
                 rel_path="movies/Waiting Encode/Feature.mkv",
                 status="queued",
-                waiting_reason="No configured host is available for queued encode work.",
+                waiting_reason="Waiting for a host schedule window.",
+                progress={"progress_state": "schedule_waiting"},
+            ),
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-encode-window-too-short",
+                prefix="movies/Window Too Short",
+                rel_path="movies/Window Too Short/Feature.mkv",
+                status="queued",
+                waiting_reason=(
+                    "Estimated runtime about 4h is longer than every configured host schedule window "
+                    "(longest about 3h on Smoke Worker). Widen a host window or use Bypass scheduler."
+                ),
+            ),
+            _encode_job(
+                project_root=project_root,
+                job_id="web-smoke-encode-waiting-for-full-window",
+                prefix="tv/Waiting for Full Window/Season 1",
+                rel_path="tv/Waiting for Full Window/Season 1/Episode 01.mkv",
+                status="queued",
+                waiting_reason=(
+                    "Estimated runtime about 2h; waiting for a host window with enough time remaining."
+                ),
             ),
             _encode_job(
                 project_root=project_root,
@@ -1741,6 +1833,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 prefix=OTHER_ACTIVE_PREFIX,
                 rel_path="other/Active Batch/Camera C.mkv",
                 status="running",
+                bypass_schedule=True,
                 progress={
                     "total_duration_seconds": 3600.0,
                     "overall_completed_duration_seconds": 900.0,
@@ -1985,7 +2078,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         ],
         "completedPrefix": COMPLETED_PREFIX,
         "libraryItems": len(rows),
-        "encodeJobs": 4,
+        "encodeJobs": 6,
     }
 
 

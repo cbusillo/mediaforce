@@ -214,6 +214,82 @@ describe('Ops workstation mapping', () => {
 		expect(rowRecoveryLabel(rows[3])).toBe('Automatic');
 	});
 
+	it('renders exact hard-stop and bypass states in the work-window column', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [
+			{
+				job_id: 'encode-hard-stop',
+				prefix: 'tv/show/season 1',
+				status: 'running',
+				host: { key: 'worker-1', label: 'worker-1' },
+				schedule_state: 'active_hard_stop',
+				schedule_close_deadline_at: '2026-07-24T19:00:00Z'
+			},
+			{
+				job_id: 'encode-bypass',
+				prefix: 'tv/show/season 2',
+				status: 'running',
+				host: { key: 'worker-1', label: 'worker-1' },
+				bypass_schedule: true,
+				schedule_state: 'bypassed'
+			}
+		];
+		dashboard.encode_queue.running_count = 2;
+		const hosts = hostsFixture();
+		hosts.hosts[0].schedule_timezone = 'America/New_York';
+		hosts.hosts[0].schedule_closes_at = '2026-07-24T19:00:00Z';
+
+		const rows = buildOpsQueueRows(dashboard, hosts, new Date('2026-07-24T16:00:00Z'));
+
+		expect(rows[0]).toMatchObject({
+			scheduler: 'Stops at close',
+			schedulerTone: 'active',
+			scheduleState: 'active_hard_stop'
+		});
+		expect(rows[0].schedulerDetail).toContain('today at 3:00 PM EDT');
+		expect(rows[1]).toMatchObject({
+			scheduler: 'Bypassing schedule',
+			schedulerTone: 'wait',
+			scheduleState: 'bypassed'
+		});
+	});
+
+	it('surfaces impossible work windows as actionable instead of passive waiting', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.queued = [
+			{
+				job_id: 'encode-window-impossible',
+				prefix: 'tv/Long Show/Season 1',
+				status: 'queued',
+				schedule_state: 'draining_impossible',
+				waiting_reason:
+					'Estimated runtime about 4h is longer than every configured host schedule window. Widen a host window or use Bypass scheduler.'
+			}
+		];
+		dashboard.encode_queue.queued_count = 1;
+
+		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
+		const readiness = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
+
+		expect(blockers[0]).toMatchObject({
+			key: 'schedule-window-impossible',
+			tone: 'fail',
+			title: 'Long Show · Season 1 needs a longer work window',
+			href: '/settings',
+			linkLabel: 'Edit work windows'
+		});
+		expect(readiness).toMatchObject({
+			tone: 'fail',
+			title: 'A season needs a longer work window',
+			metricLabel: 'Blocked',
+			metricValue: '1'
+		});
+	});
+
 	it('keeps old sample failures in history instead of current work', () => {
 		const rows = buildOpsHistoryRows(dashboardFixture());
 
@@ -377,7 +453,7 @@ describe('Ops workstation mapping', () => {
 		expect(hostTone(ready)).toBe('active');
 		expect(hostStateCopy(ready)).toBe('Busy');
 		expect(hostTone(scheduledOff)).toBe('wait');
-		expect(hostStateCopy(scheduledOff)).toBe('Window closed');
+		expect(hostStateCopy(scheduledOff)).toBe('Off schedule');
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');

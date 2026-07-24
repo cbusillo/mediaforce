@@ -4,6 +4,7 @@ import type {
 	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
+import { hostSchedulePresentation, jobSchedulePresentation } from '$lib/hosts/schedule';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export type OpsQueueKind = 'encode' | 'sample' | 'proof';
@@ -29,6 +30,9 @@ export type OpsQueueRow = {
 	phase: string;
 	progress: string;
 	scheduler: string;
+	schedulerDetail: string;
+	schedulerTone: ShellTone;
+	scheduleState?: string;
 	detail: string;
 	action?: OpsActionId;
 	actionScope?: 'global' | 'row';
@@ -40,6 +44,8 @@ export type OpsBlocker = {
 	title: string;
 	detail: string;
 	action?: OpsActionId;
+	href?: '/settings';
+	linkLabel?: string;
 };
 
 export type OpsReadinessSummary = {
@@ -97,17 +103,25 @@ function activeJobStatus(status: unknown): boolean {
 	return ['running', 'processing', 'active', 'queued'].includes(String(status ?? '').toLowerCase());
 }
 
-function hostEncodeReady(host: HostRuntime): boolean {
+function hostEncodeReady(
+	host: HostRuntime,
+	queue?: DashboardSummaryPayload['encode_queue'] | null
+): boolean {
 	const storageRecovery = host.storage_recovery_available === true;
+	const schedule = hostSchedulePresentation(host, queue);
 	return (
 		(host.available || storageRecovery) &&
 		host.schedule_open !== false &&
+		schedule?.state !== 'host_draining' &&
 		(storageRecovery || host.queue_active !== false) &&
 		numberValue(host.active_encode_count) < numberValue(host.max_parallel_encodes)
 	);
 }
 
-function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
+function hostCapacityCounts(
+	hosts: HostsPayload | null | undefined,
+	queue?: DashboardSummaryPayload['encode_queue'] | null
+) {
 	const rows = hosts?.hosts ?? [];
 	const available = rows.filter(
 		(host) => host.available || host.storage_recovery_available === true
@@ -115,7 +129,7 @@ function hostCapacityCounts(hosts: HostsPayload | null | undefined) {
 	return {
 		available,
 		activeEncodes: rows.reduce((total, host) => total + numberValue(host.active_encode_count), 0),
-		encodeReady: rows.filter(hostEncodeReady).length,
+		encodeReady: rows.filter((host) => hostEncodeReady(host, queue)).length,
 		busy: rows.filter(
 			(host) =>
 				(host.available || host.storage_recovery_available === true) &&
@@ -262,23 +276,28 @@ export function hostWorkReason(
 	hosts: HostsPayload | null | undefined,
 	dashboard: DashboardSummaryPayload | null | undefined
 ): string {
+	const schedule = hostSchedulePresentation(host, dashboard?.encode_queue);
 	if (host.available && host.schedule_open === false) {
-		return host.schedule_detail || 'Outside its schedule; this is a normal wait.';
+		return (
+			schedule?.detail || host.schedule_detail || 'Outside its schedule; this is a normal wait.'
+		);
 	}
 	const activeCount = numberValue(host.active_encode_count);
 	const maxParallel = Math.max(numberValue(host.max_parallel_encodes), 1);
 	if (host.available && activeCount > 0) {
+		if (schedule) return schedule.detail;
 		return activeCount >= maxParallel
 			? 'Working at capacity.'
 			: `Processing ${activeCount} episode part${activeCount === 1 ? '' : 's'}; capacity remains.`;
 	}
 	if (host.available && host.queue_active !== false) {
+		if (schedule?.state === 'host_draining') return schedule.detail;
 		const queue = dashboard?.encode_queue;
 		const allCurrentWorkAssigned =
 			(queue?.running_count ?? 0) > 0 && (queue?.queued_count ?? 0) === 0;
 		if (allCurrentWorkAssigned) {
 			const readyHosts = (hosts?.hosts ?? [])
-				.filter(hostEncodeReady)
+				.filter((candidate) => hostEncodeReady(candidate, dashboard?.encode_queue))
 				.sort(
 					(left, right) => right.priority - left.priority || left.label.localeCompare(right.label)
 				);
@@ -371,7 +390,9 @@ export function retryableEncodeJobIds(jobs: EncodeQueueJob[]): Set<string> {
 }
 
 export function buildEncodeRows(
-	dashboard: DashboardSummaryPayload | null | undefined
+	dashboard: DashboardSummaryPayload | null | undefined,
+	hosts?: HostsPayload | null,
+	now = new Date()
 ): OpsQueueRow[] {
 	const queue = dashboard?.encode_queue;
 	if (!queue) return [];
@@ -383,13 +404,15 @@ export function buildEncodeRows(
 	const retryableJobIds = retryableEncodeJobIds(displayJobs);
 	return displayJobs.map((job) => {
 		const status = String(job.status ?? '').toLowerCase();
+		const schedule = jobSchedulePresentation(job, hosts?.hosts ?? [], now);
+		const jobTone = encodeJobTone(job);
 		const canRetryPrefix = prefixRetryStatuses.has(status) && retryableJobIds.has(job.job_id);
 		const activePartCount =
 			numberValue(job.running_shard_count) || job.progress?.active_host_labels?.length || 0;
 		return {
 			key: `encode:${job.job_id}`,
 			kind: 'encode',
-			tone: encodeJobTone(job),
+			tone: jobTone === 'fail' || schedule.tone !== 'fail' ? jobTone : 'fail',
 			status: statusCopy(job.status || 'unknown'),
 			prefix: job.prefix || 'system scope',
 			host: encodeHostCopy(job),
@@ -397,8 +420,10 @@ export function buildEncodeRows(
 				? `${activePartCount} active episode ${activePartCount === 1 ? 'part' : 'parts'}`
 				: 'processing queue',
 			progress: encodeJobProgress(job),
-			scheduler:
-				job.scheduler_status_copy || (job.schedule_waiting ? 'waiting for window' : 'ready'),
+			scheduler: schedule.label,
+			schedulerDetail: schedule.detail,
+			schedulerTone: schedule.tone,
+			scheduleState: schedule.state,
 			detail: encodeJobDetail(job),
 			action: canRetryPrefix ? 'retry-encode-prefix' : undefined,
 			actionScope: canRetryPrefix ? 'row' : undefined
@@ -429,6 +454,8 @@ function buildCalibrationLaneRows(
 		progress: compactText(job.progress) || compactText(job.stage) || '—',
 		scheduler:
 			compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
+		schedulerDetail: '',
+		schedulerTone: 'idle',
 		detail: calibrationDetail(job)
 	}));
 }
@@ -504,10 +531,12 @@ export function buildOpsHistoryRows(
 }
 
 export function buildOpsQueueRows(
-	dashboard: DashboardSummaryPayload | null | undefined
+	dashboard: DashboardSummaryPayload | null | undefined,
+	hosts?: HostsPayload | null,
+	now = new Date()
 ): OpsQueueRow[] {
 	return [
-		...buildEncodeRows(dashboard),
+		...buildEncodeRows(dashboard, hosts, now),
 		...buildCalibrationRows(dashboard, { includeHistory: false })
 	];
 }
@@ -523,8 +552,11 @@ export function buildOpsBlockers(
 	const attentionJob = (queue?.recent ?? []).find((job) =>
 		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
 	);
+	const impossibleWindowJobs = (queue?.queued ?? []).filter(
+		(job) => job.schedule_state === 'draining_impossible'
+	);
 	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
-	const capacity = hostCapacityCounts(hosts);
+	const capacity = hostCapacityCounts(hosts, queue);
 	const runningCount = queue?.running_count ?? 0;
 	const queuedWork = (queue?.queued_count ?? 0) + (queue?.running_count ?? 0);
 	const scheduleWaiting = queue?.queued_waiting_count ?? 0;
@@ -568,6 +600,22 @@ export function buildOpsBlockers(
 			action: 'retry-failed-encode'
 		});
 	}
+	if (impossibleWindowJobs.length > 0) {
+		const firstJob = impossibleWindowJobs[0];
+		blockers.push({
+			key: 'schedule-window-impossible',
+			tone: 'fail',
+			title:
+				impossibleWindowJobs.length === 1
+					? `${opsWorkLabel(firstJob.prefix)} needs a longer work window`
+					: `${impossibleWindowJobs.length} seasons need longer work windows`,
+			detail:
+				firstJob.waiting_reason ??
+				'The estimated episode is longer than every compatible worker window.',
+			href: '/settings',
+			linkLabel: 'Edit work windows'
+		});
+	}
 	if (storageWaitingJobs.length > 0) {
 		blockers.push({
 			key: 'controller-storage',
@@ -578,6 +626,7 @@ export function buildOpsBlockers(
 				'Mount the media storage on this computer to continue.'
 		});
 	} else if (
+		impossibleWindowJobs.length === 0 &&
 		capacity.total > 0 &&
 		capacity.encodeReady === 0 &&
 		queuedWork > 0 &&
@@ -600,7 +649,11 @@ export function buildOpsBlockers(
 					? 'The computers are reachable but cannot start another season right now.'
 					: 'Work is waiting, but every configured computer is unavailable or outside its schedule.'
 		});
-	} else if (scheduleWaiting > 0 && capacity.encodeReady === 0) {
+	} else if (
+		impossibleWindowJobs.length === 0 &&
+		scheduleWaiting > 0 &&
+		capacity.encodeReady === 0
+	) {
 		blockers.push({
 			key: 'schedule-waiting',
 			tone: 'wait',
@@ -618,7 +671,7 @@ export function buildOpsReadinessSummary(
 ): OpsReadinessSummary {
 	const queue = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
-	const capacity = hostCapacityCounts(hosts);
+	const capacity = hostCapacityCounts(hosts, queue);
 	const runningCount = queue?.running_count ?? 0;
 	const queuedCount = queue?.queued_count ?? 0;
 	const queuedWaiting = queue?.queued_waiting_count ?? 0;
@@ -626,6 +679,12 @@ export function buildOpsReadinessSummary(
 	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
 	const activeChecks = calibration?.active_count ?? 0;
 	const queuedWork = runningCount + queuedCount;
+	const impossibleWindowJobs = (queue?.queued ?? []).filter(
+		(job) => job.schedule_state === 'draining_impossible'
+	);
+	const drainingJobs = (queue?.queued ?? []).filter(
+		(job) => job.schedule_state === 'draining_no_fit'
+	);
 
 	if (loadError) {
 		return {
@@ -672,6 +731,27 @@ export function buildOpsReadinessSummary(
 				'Mount the media storage on this computer to continue.',
 			metricLabel: 'Waiting',
 			metricValue: String(storageWaitingJobs.length)
+		};
+	}
+	if (impossibleWindowJobs.length > 0) {
+		return {
+			tone: 'fail',
+			title: 'A season needs a longer work window',
+			detail:
+				impossibleWindowJobs[0].waiting_reason ??
+				'Widen a compatible worker window or intentionally bypass the schedule.',
+			metricLabel: 'Blocked',
+			metricValue: String(impossibleWindowJobs.length)
+		};
+	}
+	if (drainingJobs.length > 0 && runningCount === 0) {
+		return {
+			tone: 'wait',
+			title: 'Workers are draining',
+			detail:
+				'No queued episode safely fits the time left. Work resumes automatically in the next compatible full window.',
+			metricLabel: 'Waiting',
+			metricValue: String(drainingJobs.length)
 		};
 	}
 	if (capacity.total > 0 && capacity.encodeReady === 0 && queuedWork > 0 && runningCount === 0) {
@@ -756,7 +836,7 @@ export function buildOpsStatusTiles(
 ): StatusTile[] {
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
-	const capacity = hostCapacityCounts(hosts);
+	const capacity = hostCapacityCounts(hosts, encode);
 	return [
 		{
 			label: 'Work schedule',
@@ -850,20 +930,29 @@ export function buildOpsFooterSignals(
 	];
 }
 
-export function hostTone(host: HostRuntime, fleetHasReadyCapacity = false): ShellTone {
+export function hostTone(
+	host: HostRuntime,
+	fleetHasReadyCapacity = false,
+	dashboard?: DashboardSummaryPayload | null
+): ShellTone {
 	if (host.storage_recovery_available === true) return 'wait';
 	if (!host.available) return fleetHasReadyCapacity ? 'wait' : 'fail';
+	const schedule = hostSchedulePresentation(host, dashboard?.encode_queue);
+	if (schedule) return schedule.tone;
 	if (host.active_encode_count > 0) return 'active';
-	if (host.schedule_open === false) return 'wait';
 	if (host.queue_active === false) return 'idle';
 	return 'ready';
 }
 
-export function hostStateCopy(host: HostRuntime): string {
+export function hostStateCopy(
+	host: HostRuntime,
+	dashboard?: DashboardSummaryPayload | null
+): string {
 	if (host.storage_recovery_available === true) return 'Reconnects storage';
 	if (!host.available) return 'Unavailable';
+	const schedule = hostSchedulePresentation(host, dashboard?.encode_queue);
+	if (schedule) return schedule.label;
 	if (host.active_encode_count > 0) return 'Busy';
-	if (host.schedule_open === false) return 'Window closed';
 	if (host.queue_active === false) return 'Not accepting';
 	return 'Ready';
 }

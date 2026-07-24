@@ -378,7 +378,29 @@ export interface EncodeJobProgressTelemetry {
 	progress_state?: string;
 	active_host_labels?: string[];
 	failure_analysis?: EncodeFailureAnalysis | null;
+	admission_estimate?: EncodeAdmissionEstimate | null;
 }
+
+export interface EncodeAdmissionEstimate {
+	total_seconds?: number;
+	encode_seconds?: number;
+	quality_search_seconds?: number;
+	source_duration_seconds?: number;
+	host_sample_size?: number;
+	confidence?: 'limited' | 'moderate' | 'high';
+}
+
+export type EncodeScheduleState =
+	| 'none'
+	| 'ready'
+	| 'waiting'
+	| 'running'
+	| 'active_hard_stop'
+	| 'bypassed'
+	| 'schedule_interrupted'
+	| 'draining_no_fit'
+	| 'draining_impossible'
+	| 'off_schedule';
 
 export interface EncodeFailureCandidate {
 	crf?: number;
@@ -410,6 +432,7 @@ export interface EncodeQueueJob {
 	job_id: string;
 	prefix: string;
 	status: string;
+	bypass_schedule?: boolean;
 	recoverable_item_count?: number;
 	host?: Record<string, unknown>;
 	error?: string | null;
@@ -419,6 +442,7 @@ export interface EncodeQueueJob {
 	finished_at?: string | null;
 	updated_at?: string | null;
 	schedule_close_deadline_at?: string | null;
+	waiting_reason?: string | null;
 	attempt_summary?: string | null;
 	active_hosts?: Array<Record<string, unknown>>;
 	running_shard_count?: number;
@@ -428,6 +452,7 @@ export interface EncodeQueueJob {
 	queue_position?: number;
 	queue_depth?: number;
 	schedule_waiting?: boolean;
+	schedule_state?: EncodeScheduleState;
 	scheduler_status_copy?: string;
 	telemetry_summary?: string;
 	progress?: EncodeJobProgressTelemetry | null;

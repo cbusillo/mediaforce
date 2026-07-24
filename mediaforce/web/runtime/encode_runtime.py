@@ -37,6 +37,8 @@ from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupEr
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
+from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
+    SCHEDULE_CLOSE_WAITING_REASON
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
@@ -68,9 +70,7 @@ class EncodeQueueRuntimeDeps:
 
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
-SCHEDULE_CLOSE_WAITING_REASON = "Waiting for a host schedule window."
 SCHEDULE_CLOSE_ERROR_MESSAGE = "Encode host schedule window closed."
-HOST_WINDOW_TOO_SHORT_REASON = "waiting for a host schedule window with enough time remaining"
 
 
 def recover_encode_queue(
@@ -464,6 +464,7 @@ def aggregate_encode_parent_job(
     recoverable_item_count = 0
     speed_reporting_children = 0
     running_progress_states: list[str] = []
+    running_schedule_deadlines: list[tuple[datetime, str]] = []
     active_hosts: list[dict[str, Any]] = []
     seen_host_keys: set[str] = set()
     current_items: list[str] = []
@@ -492,6 +493,15 @@ def aggregate_encode_parent_job(
         child_progress_state = str(progress.get("progress_state") or "").strip().lower()
         if str(child.get("status") or "") == "running" and child_progress_state:
             running_progress_states.append(child_progress_state)
+        if str(child.get("status") or "") == "running":
+            schedule_deadline_text = str(child.get("schedule_close_deadline_at") or "").strip()
+            if schedule_deadline_text:
+                try:
+                    schedule_deadline = parse_schedule_close_deadline(schedule_deadline_text)
+                except ValueError:
+                    schedule_deadline = None
+                if schedule_deadline is not None:
+                    running_schedule_deadlines.append((schedule_deadline, schedule_deadline_text))
         if str(child.get("status") or "") == "running" and speed > 0:
             aggregate_speed += speed
             speed_reporting_children += 1
@@ -615,6 +625,11 @@ def aggregate_encode_parent_job(
         "waiting_reason": waiting_reason,
         "terminal_reason": terminal_reason,
         "error": error,
+        "schedule_close_deadline_at": (
+            min(running_schedule_deadlines, key=lambda candidate: candidate[0])[1]
+            if running_schedule_deadlines
+            else None
+        ),
         "started_at": min(started_candidates) if started_candidates else job.get("started_at"),
         "finished_at": max(finished_candidates) if len(finished_candidates) == len(children) else None,
         "updated_at": deps.now_iso(),
@@ -1593,7 +1608,7 @@ def _duration_aware_encode_waiting_reason(
         longest_copy = _format_estimated_duration(longest_window_seconds)
         host_copy = f" on {longest_window_host}" if longest_window_host else ""
         return (
-            f"Estimated runtime {impossible_estimate_copy} is longer than every configured host schedule window "
+            f"Estimated runtime {impossible_estimate_copy} is {HOST_WINDOW_IMPOSSIBLE_MARKER} "
             f"(longest {longest_copy}{host_copy}). Widen a host window or use Bypass scheduler."
         )
     if impossible_only:

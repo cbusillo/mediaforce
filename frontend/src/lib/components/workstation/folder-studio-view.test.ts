@@ -3,6 +3,7 @@ import type {
 	EncodeQueueJob,
 	FolderPayload,
 	FolderStatusPayload,
+	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
 import type { FolderCalibrationJob } from '$lib/folders/studio';
@@ -96,6 +97,32 @@ function hostsPayload(overrides: Partial<HostsPayload> = {}): HostsPayload {
 	return {
 		compact: true,
 		hosts: [],
+		...overrides
+	};
+}
+
+function scheduleHost(overrides: Partial<HostRuntime> = {}): HostRuntime {
+	return {
+		key: 'worker-1',
+		label: 'Worker 1',
+		available: true,
+		message: 'ready',
+		missing_paths: [],
+		issues: [],
+		detail: null,
+		capabilities: ['encode_queue'],
+		priority: 10,
+		max_parallel_encodes: 1,
+		active_encode_count: 0,
+		schedule_profile_label: 'Evening',
+		schedule_detail: 'window 18:00-15:00 in host local time',
+		schedule_open: false,
+		schedule_timezone: 'America/New_York',
+		schedule_closes_at: null,
+		schedule_next_opens_at: '2026-07-24T22:00:00Z',
+		active_flag: 'idle',
+		active_reason: '',
+		queue_active: false,
 		...overrides
 	};
 }
@@ -1505,6 +1532,12 @@ describe('Folder Studio review request mapping', () => {
 
 	it('shows queued processing waits before active processing copy', () => {
 		const folder = folderPayload({
+			encode_job: {
+				job_id: 'encode-scheduled-wait',
+				prefix: 'tv/Example/Season 1',
+				status: 'queued',
+				schedule_state: 'off_schedule'
+			},
 			encode_queue_summary:
 				'0 running · 1 queued · this folder is 1 of 1 · waiting for a host schedule window',
 			workflow_state: workflowState({
@@ -1526,11 +1559,134 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(workflow).toMatchObject({
 			tone: 'wait',
-			label: 'Waiting for worker',
-			title: 'Queued, not encoding yet',
+			label: 'Off schedule',
+			title: 'Queued for the next work window',
 			primary: 'Open Ops',
 			primaryAction: 'open-ops'
 		});
+	});
+
+	it('explains schedule-interrupted processing as an automatic whole-episode restart', () => {
+		const encodeJob: EncodeQueueJob = {
+			job_id: 'encode-schedule-interrupted',
+			prefix: 'tv/Example/Season 1',
+			status: 'queued',
+			schedule_state: 'schedule_interrupted',
+			progress: { progress_state: 'schedule_waiting' }
+		};
+		const folder = folderPayload({
+			encode_job: encodeJob,
+			workflow_state: workflowState({
+				state: 'processing',
+				primary_lane: 'processing',
+				label: 'Processing',
+				tone: 'active',
+				detail: 'Encode job is queued.',
+				next_action: {
+					kind: 'monitor_encode',
+					label: 'Monitor encode',
+					enabled: true,
+					target_prefix: 'tv/Example/Season 1'
+				}
+			})
+		});
+		const hosts = hostsPayload({ hosts: [scheduleHost()] });
+
+		const workflow = resolveWorkflow(
+			folder,
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			encodeJob,
+			false,
+			false,
+			false,
+			hosts
+		);
+
+		expect(workflow).toMatchObject({
+			tone: 'wait',
+			label: 'Paused by schedule',
+			title: 'Restarts automatically',
+			primary: 'Open Ops'
+		});
+		expect(workflow.copy).toContain('restart from the beginning automatically');
+		expect(workflow.copy).toContain('No failure attempt was used');
+	});
+
+	it('shows hard-stop and bypass schedule state on active folder processing', () => {
+		const hardStopJob: EncodeQueueJob = {
+			job_id: 'encode-hard-stop',
+			prefix: 'tv/Example/Season 1',
+			status: 'running',
+			host: { key: 'worker-1' },
+			schedule_state: 'active_hard_stop',
+			schedule_close_deadline_at: '2026-07-24T19:00:00Z'
+		};
+		const bypassJob: EncodeQueueJob = {
+			...hardStopJob,
+			job_id: 'encode-bypass',
+			bypass_schedule: true,
+			schedule_state: 'bypassed',
+			schedule_close_deadline_at: null
+		};
+		const hosts = hostsPayload({
+			hosts: [
+				scheduleHost({
+					schedule_open: true,
+					schedule_closes_at: '2026-07-24T19:00:00Z',
+					active_encode_count: 1,
+					queue_active: false
+				})
+			]
+		});
+		const activeWorkflow = workflowState({
+			state: 'processing',
+			primary_lane: 'processing',
+			label: 'Processing',
+			tone: 'active',
+			detail: 'Encode job is active.',
+			next_action: {
+				kind: 'monitor_encode',
+				label: 'Monitor encode',
+				enabled: true,
+				target_prefix: 'tv/Example/Season 1'
+			}
+		});
+
+		const hardStopWorkflow = resolveWorkflow(
+			folderPayload({ encode_job: hardStopJob, workflow_state: activeWorkflow }),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			hardStopJob,
+			false,
+			false,
+			false,
+			hosts
+		);
+		const bypassWorkflow = resolveWorkflow(
+			folderPayload({ encode_job: bypassJob, workflow_state: activeWorkflow }),
+			folderStatusPayload(),
+			null,
+			null,
+			null,
+			null,
+			bypassJob,
+			false,
+			false,
+			false,
+			hosts
+		);
+
+		expect(hardStopWorkflow.label).toBe('Stops at close');
+		expect(hardStopWorkflow.copy).toContain('returns to the queue automatically');
+		expect(bypassWorkflow.label).toBe('Bypassing schedule');
+		expect(bypassWorkflow.copy).toContain('can continue past it');
 	});
 
 	it('keeps retry processing on the output encoding facts and workspace', () => {

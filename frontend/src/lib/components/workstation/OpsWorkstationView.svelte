@@ -9,6 +9,7 @@
 		OperatorWorkPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { hostSchedulePresentation } from '$lib/hosts/schedule';
 	import OperatorWorkConsole from './OperatorWorkConsole.svelte';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
@@ -51,7 +52,7 @@
 		onOperatorRefresh?: (query?: OperatorWorkQuery) => Promise<void>;
 	} = $props();
 
-	const queueRows = $derived(buildOpsQueueRows(dashboard));
+	const queueRows = $derived(buildOpsQueueRows(dashboard, hosts));
 	const historyRows = $derived(buildOpsHistoryRows(dashboard));
 	const blockers = $derived(buildOpsBlockers(dashboard, hosts, loadError));
 	const readiness = $derived(buildOpsReadinessSummary(dashboard, hosts, loadError));
@@ -66,7 +67,15 @@
 	);
 	const readyHosts = $derived(hosts?.hosts.filter((host) => host.available).length ?? 0);
 	const fleetHasReadyCapacity = $derived(readyHosts > 0);
-	const closedHosts = $derived(hosts?.hosts.filter((host) => host.schedule_open === false) ?? []);
+	const notableScheduleHosts = $derived(
+		(hosts?.hosts ?? [])
+			.map((host) => ({ host, schedule: hostSchedulePresentation(host, encodeQueue) }))
+			.filter(
+				(entry) =>
+					entry.schedule &&
+					['host_off_schedule', 'host_draining', 'bypassed'].includes(entry.schedule.state)
+			)
+	);
 	const liveRefreshInterval = $derived(
 		operatorRefreshInterval(operatorWork) ??
 			(!encodeQueue?.state.is_paused &&
@@ -378,6 +387,8 @@
 									title={actionTitle(action)}
 									onclick={() => runAction(action)}>{queueActionLabel(action)}</button
 								>
+							{:else if blocker.href}
+								<a class="control" href={resolve(blocker.href)}>{blocker.linkLabel ?? 'Open'}</a>
 							{/if}
 						</div>
 					{:else}
@@ -508,10 +519,20 @@
 										</td>
 										<td data-label="Computer">{row.host}</td>
 										<td data-label="Progress">
-											<strong>{row.progress}</strong>
-											<span>{row.detail}</span>
+											<div class="cell-stack">
+												<strong>{row.progress}</strong>
+												<span>{row.detail}</span>
+											</div>
 										</td>
-										<td data-label="Work window">{row.scheduler}</td>
+										<td data-label="Work window" class="schedule-cell">
+											<div class="cell-stack schedule-cell__content">
+												<StateBadge compact tone={row.schedulerTone} label={row.scheduler} />
+												<span>{row.schedulerDetail}</span>
+												{#if row.scheduleState === 'draining_impossible'}
+													<a class="inline-link" href={resolve('/settings')}>Edit work windows</a>
+												{/if}
+											</div>
+										</td>
 										<td data-label="Next step">
 											{#if row.action}
 												{@const action = row.action}
@@ -608,20 +629,20 @@
 			>
 				<div class="host-list">
 					{#each hosts?.hosts ?? [] as host (host.key)}
-						<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity)}">
+						{@const schedule = hostSchedulePresentation(host, encodeQueue)}
+						<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity, dashboard)}">
 							<div class="host-row__head">
 								<StateBadge
 									compact
-									tone={hostTone(host, fleetHasReadyCapacity)}
-									label={hostStateCopy(host)}
+									tone={hostTone(host, fleetHasReadyCapacity, dashboard)}
+									label={hostStateCopy(host, dashboard)}
 								/>
 								<strong>{host.label}</strong>
 							</div>
 							<dl>
 								<dt>Window</dt>
 								<dd title={host.schedule_detail}>
-									{host.schedule_open === false ? 'Closed now' : 'Open now'} · {host.schedule_profile_label ||
-										'Host schedule'}
+									{schedule?.detail || host.schedule_profile_label || 'Always available'}
 								</dd>
 								<dt>Now</dt>
 								<dd>
@@ -687,15 +708,16 @@
 						<span>Current schedule</span>
 						<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
 						<small
-							>{queuedWaitingCount.toLocaleString('en-US')} seasons waiting for their scheduled time</small
+							>{queuedWaitingCount.toLocaleString('en-US')}
+							{queuedWaitingCount === 1 ? 'season' : 'seasons'} waiting for the next work window</small
 						>
 						<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
 					</div>
-					{#each closedHosts as host (host.key)}
+					{#each notableScheduleHosts as entry (entry.host.key)}
 						<div class="scope-row scope-row--wait">
-							<span>{host.label}</span>
-							<strong>Outside its schedule</strong>
-							<small>{host.schedule_detail}</small>
+							<span>{entry.host.label}</span>
+							<strong>{entry.schedule?.label}</strong>
+							<small>{entry.schedule?.detail}</small>
 						</div>
 					{:else}
 						<div class="scope-row">
@@ -1062,27 +1084,44 @@
 	}
 
 	.ops-table--jobs th:nth-child(1) {
-		width: 16%;
+		width: 13%;
 	}
 
 	.ops-table--jobs th:nth-child(2) {
-		width: 22%;
+		width: 21%;
 	}
 
 	.ops-table--jobs th:nth-child(3) {
-		width: 17%;
+		width: 14%;
 	}
 
 	.ops-table--jobs th:nth-child(4) {
-		width: 22%;
+		width: 20%;
 	}
 
 	.ops-table--jobs th:nth-child(5) {
-		width: 13%;
+		width: 22%;
 	}
 
 	.ops-table--jobs th:nth-child(6) {
 		width: 10%;
+	}
+
+	.cell-stack {
+		display: grid;
+		gap: var(--mf-space-2);
+		justify-items: start;
+		min-width: 0;
+	}
+
+	.schedule-cell__content > span {
+		color: var(--mf-fg-secondary);
+		display: block;
+		line-height: 1.35;
+	}
+
+	.schedule-cell__content .inline-link {
+		display: inline-block;
 	}
 
 	th,
