@@ -237,6 +237,9 @@ Guidance:
 - `quality_observations.py`
   - append-only structured search observations, bounded candidate traces,
     native-versus-backfill authority, corrections, and historical backfill
+- `quality_shadow.py`
+  - passive first-CRF recommendations, historical trace rejection, measured
+    shadow comparisons, and aggregate readiness metrics
 
 Guidance:
 
@@ -248,8 +251,9 @@ Guidance:
   re-deriving them independently in routes, prompts, or the frontend.
 - Keep quality-memory retrieval read-only and under
   `mediaforce/tuning/quality_memory.py`; keep passive persistence under
-  `mediaforce/tuning/quality_observations.py`. Persisted observations and active
-  search behavior remain separate explicit phases.
+  `mediaforce/tuning/quality_observations.py`; keep passive recommendation and
+  evaluation under `mediaforce/tuning/quality_shadow.py`. Persisted observations,
+  shadow inference, and active search behavior remain separate explicit phases.
 - The stream budget ledger is the only non-video arithmetic authority. Search,
   manifests, queued jobs, production, and API payloads may project compatibility
   fields from it, but must not add audio, subtitle, attachment, or container

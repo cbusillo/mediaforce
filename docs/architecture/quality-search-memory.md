@@ -115,6 +115,44 @@ accepted staged-outcome path, and observations do not alter search ordering,
 bounds, targets, policy, or fallback behavior until shadow evaluation is
 completed in a later phase.
 
+## Shadow Recommendations
+
+Runtime-native selected observations now carry an immutable `shadow_json`
+payload. The payload records the first CRF that earlier compatible evidence
+would have suggested, its scope, confidence, sample count, dispersion, typed
+fallback reason, and a comparison with the search that actually ran. Shadow
+evaluation happens only after the production search is complete and uses an
+explicit evidence cutoff at that search's start time, so the current result
+cannot recommend itself.
+
+Shadow evidence comes from the highest-authority append-only revision that
+already existed at the search-start cutoff. It must be selected,
+learning-eligible, within the age limit, and compatible with the current search
+signature. Exact-item evidence also requires the same source fingerprint.
+Historical traces that are non-monotonic, changed their quality target during
+the run, or contain conflicting quality-floor measurements are excluded before
+cohort statistics are computed. Runtime and correction rows require the current
+policy hash; historical staged backfill without one remains eligible through its
+complete search signature.
+
+The measured comparison records candidate count, search wall time, eventual CRF,
+quality margin, size error, within-one-CRF accuracy, fallback need, and projected
+candidate/time savings. The projection models the planned warm-start contract:
+a within-one hint replaces the baseline search with one first-candidate probe;
+a miss adds one probe before the unchanged full fallback. Negative savings are
+retained rather than hidden.
+
+Aggregate shadow metrics report recommendation coverage, within-one hit rate,
+false-narrow rate, fallback need, median projected candidate/time savings, and
+safety outcomes. Performance thresholds require at least ten recommendations,
+at least 70% within-one accuracy, at least 20% median candidate and time savings,
+and zero measured production quality-floor or final-size violations. Meeting
+those thresholds still does not mark active behavior eligible: counterfactual
+hint safety remains explicitly unmeasured until the warm-start phase executes a
+real hint probe behind the unchanged fallback. The safety counters describe
+production outcomes during the shadow window, not an unexecuted hint's quality
+or size.
+
 ## Cohorts And Confidence
 
 Compatible outcomes are evaluated in this order:
@@ -137,12 +175,11 @@ aggregate metric evidence counts and never produces CRF guidance.
 ## Current Limitations
 
 - `load_quality_memory` still reads the latest accepted staged artifact per item;
-  the append-only log is not yet an active guidance source.
+  the append-only log is used only for passive shadow inference.
 - full validation replaces the encode-time validation payload, so older staged
   rows may not retain target-size search traces.
 - historical backfill can reconstruct only accepted successes and cannot recover
   unavailable policy hashes, search wall time, or ambiguous historical failures.
 
-Shadow recommendations, operator explainability, and active warm starts remain
-separate later phases. Passive evidence must prove useful before any encode
-behavior changes.
+Operator explainability and active warm starts remain separate later phases.
+Passive evidence must prove useful before any encode behavior changes.
