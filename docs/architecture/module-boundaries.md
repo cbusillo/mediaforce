@@ -234,6 +234,9 @@ Guidance:
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
+- `quality_observations.py`
+  - append-only structured search observations, bounded candidate traces,
+    native-versus-backfill authority, corrections, and historical backfill
 
 Guidance:
 
@@ -244,8 +247,9 @@ Guidance:
   current review authority under `mediaforce/tuning/quality_risk.py` instead of
   re-deriving them independently in routes, prompts, or the frontend.
 - Keep quality-memory retrieval read-only and under
-  `mediaforce/tuning/quality_memory.py`; persisted observations and active search
-  behavior must remain separate explicit phases.
+  `mediaforce/tuning/quality_memory.py`; keep passive persistence under
+  `mediaforce/tuning/quality_observations.py`. Persisted observations and active
+  search behavior remain separate explicit phases.
 - The stream budget ledger is the only non-video arithmetic authority. Search,
   manifests, queued jobs, production, and API payloads may project compatibility
   fields from it, but must not add audio, subtitle, attachment, or container

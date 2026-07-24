@@ -37,6 +37,7 @@ class QualitySearchResult:
     score: float
     stdout: str
     target_size_trace: dict[str, object] | None = None
+    quality_search_trace: dict[str, object] | None = None
 
 
 @dataclass(slots=True)
@@ -75,7 +76,9 @@ class QualityFailureAnalysis:
 
 
 class QualitySearchError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, quality_search_trace: dict[str, object] | None = None) -> None:
+        super().__init__(message)
+        self.quality_search_trace = quality_search_trace
 
 
 class SampleEncodeError(RuntimeError):

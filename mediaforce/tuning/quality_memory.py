@@ -100,7 +100,10 @@ class QualitySearchContext:
 
     @property
     def signature_id(self) -> str:
-        payload = {
+        return f"qms1_{stable_json_hash(self.to_payload())[:32]}"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
             "schema_version": QUALITY_MEMORY_SIGNATURE_VERSION,
             "metric": self.metric,
             "target": self.target,
@@ -118,7 +121,6 @@ class QualitySearchContext:
             "video_filter": self.video_filter,
             "output_container": self.output_container,
         }
-        return f"qms1_{stable_json_hash(payload)[:32]}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,13 +175,31 @@ class QualityMemoryResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _QualityMemoryObservation:
+class AcceptedQualityOutcome:
     library_item_id: int
     rel_path: str
     source_fingerprint: str | None
+    source_size_bytes: int | None
+    source_duration_seconds: float | None
+    source_video_codec: str
     chosen_crf: float
+    quality_metric: str
+    quality_target: float
+    quality_score: float
+    staging_size_bytes: int | None
+    size_ratio: float | None
+    encode_duration_seconds: float | None
+    encode_completed_at: datetime
     promoted_at: datetime
     context: QualitySearchContext
+    manifest_run_id: str | None
+    item_index: int | None
+    encode_origin: str | None
+    encode_job_id: str | None
+    encode_worker_id: str | None
+    encode_host_key: str | None
+    quality_search_run_id: str | None
+    target_size_trace: dict[str, Any] | None
 
 
 def load_quality_memory(
@@ -194,17 +214,14 @@ def load_quality_memory(
 ) -> QualityMemoryResult:
     _validate_scope_chain(exact_scope, season_scope, series_scope)
     current_time = _as_utc(as_of)
-    exclusion_counts: Counter[str] = Counter()
-    observations: list[_QualityMemoryObservation] = []
-    for row in _quality_memory_rows(connection, expected_context.metric):
-        observation, exclusion_reason = _accepted_observation(row, as_of=current_time)
-        if observation is None:
-            exclusion_counts[exclusion_reason or "invalid_outcome"] += 1
-            continue
-        observations.append(observation)
+    observations, exclusion_counts = accepted_quality_outcomes(
+        connection,
+        metric=expected_context.metric,
+        as_of=current_time,
+    )
 
     global_metric_evidence_count = len(observations)
-    matching_context: list[_QualityMemoryObservation] = []
+    matching_context: list[AcceptedQualityOutcome] = []
     for observation in observations:
         if observation.context.signature_id != expected_context.signature_id:
             exclusion_counts["search_signature_changed"] += 1
@@ -226,7 +243,7 @@ def load_quality_memory(
             if media_scope.includes(observation.rel_path)
         ]
         if scope_name == "item":
-            matching_fingerprints: list[_QualityMemoryObservation] = []
+            matching_fingerprints: list[AcceptedQualityOutcome] = []
             for observation in scoped_observations:
                 if normalized_current_fingerprint is None:
                     exclusion_counts["source_fingerprint_unavailable"] += 1
@@ -268,7 +285,25 @@ def load_quality_memory(
     )
 
 
-def _quality_memory_rows(connection: DBClient, metric: str) -> list[Any]:
+def accepted_quality_outcomes(
+        connection: DBClient,
+        *,
+        metric: str | None,
+        as_of: datetime,
+) -> tuple[list[AcceptedQualityOutcome], Counter[str]]:
+    current_time = _as_utc(as_of)
+    exclusion_counts: Counter[str] = Counter()
+    outcomes: list[AcceptedQualityOutcome] = []
+    for row in _quality_memory_rows(connection, metric):
+        outcome, exclusion_reason = _accepted_observation(row, as_of=current_time)
+        if outcome is None:
+            exclusion_counts[exclusion_reason or "invalid_outcome"] += 1
+            continue
+        outcomes.append(outcome)
+    return outcomes, exclusion_counts
+
+
+def _quality_memory_rows(connection: DBClient, metric: str | None) -> list[Any]:
     completion_events = item_events.alias("quality_memory_completion_events")
     completion_event_json = (
         select(completion_events.c.details_json)
@@ -288,6 +323,7 @@ def _quality_memory_rows(connection: DBClient, metric: str) -> list[Any]:
                 staged_artifacts.c.library_item_id,
                 staged_artifacts.c.encode_origin,
                 staged_artifacts.c.source_rel_path,
+                staged_artifacts.c.source_size_bytes,
                 staged_artifacts.c.source_duration_seconds,
                 staged_artifacts.c.source_fingerprint,
                 staged_artifacts.c.source_video_codec,
@@ -295,6 +331,14 @@ def _quality_memory_rows(connection: DBClient, metric: str) -> list[Any]:
                 staged_artifacts.c.quality_metric,
                 staged_artifacts.c.quality_target,
                 staged_artifacts.c.quality_score,
+                staged_artifacts.c.staging_size_bytes,
+                staged_artifacts.c.size_ratio,
+                staged_artifacts.c.encode_duration_seconds,
+                staged_artifacts.c.manifest_run_id,
+                staged_artifacts.c.item_index,
+                staged_artifacts.c.encode_job_id,
+                staged_artifacts.c.encode_worker_id,
+                staged_artifacts.c.encode_host_key,
                 staged_artifacts.c.encode_command_json,
                 staged_artifacts.c.validation_json,
                 staged_artifacts.c.encode_completed_at,
@@ -316,7 +360,11 @@ def _quality_memory_rows(connection: DBClient, metric: str) -> list[Any]:
                 )
             )
             .where(staged_artifacts.c.promoted_at.is_not(None))
-            .where(func.upper(staged_artifacts.c.quality_metric) == metric.upper())
+            .where(
+                func.upper(staged_artifacts.c.quality_metric) == metric.upper()
+                if metric is not None
+                else True
+            )
             .order_by(
                 staged_artifacts.c.promoted_at.desc(),
                 staged_artifacts.c.library_item_id.asc(),
@@ -325,7 +373,7 @@ def _quality_memory_rows(connection: DBClient, metric: str) -> list[Any]:
     )
 
 
-def _accepted_observation(row: Any, *, as_of: datetime) -> tuple[_QualityMemoryObservation | None, str | None]:
+def _accepted_observation(row: Any, *, as_of: datetime) -> tuple[AcceptedQualityOutcome | None, str | None]:
     if str(row["encode_origin"] or "").strip().casefold() not in _ALLOWED_ORIGINS:
         return None, "unsupported_encode_origin"
     if str(row["status"] or "").strip().casefold() != "promoted":
@@ -410,7 +458,7 @@ def _accepted_observation(row: Any, *, as_of: datetime) -> tuple[_QualityMemoryO
     if quality_score < minimum_quality_score:
         return None, "quality_floor_not_met"
     try:
-        context = _context_from_command(
+        context = quality_search_context_from_command(
             command,
             metric=str(row["quality_metric"] or ""),
             target=quality_target,
@@ -425,17 +473,44 @@ def _accepted_observation(row: Any, *, as_of: datetime) -> tuple[_QualityMemoryO
     except ValueError:
         return None, "encode_context_invalid"
 
-    return _QualityMemoryObservation(
+    source_size_bytes = _strict_positive_int(row["source_size_bytes"])
+    source_duration_seconds = _strict_number(row["source_duration_seconds"])
+    staging_size_bytes = _strict_positive_int(row["staging_size_bytes"])
+    size_ratio = _strict_number(row["size_ratio"])
+    encode_duration_seconds = _strict_number(row["encode_duration_seconds"])
+    return AcceptedQualityOutcome(
         library_item_id=int(row["library_item_id"]),
         rel_path=rel_path,
         source_fingerprint=_optional_text(row["source_fingerprint"]),
+        source_size_bytes=source_size_bytes,
+        source_duration_seconds=source_duration_seconds,
+        source_video_codec=source_codec,
         chosen_crf=chosen_crf,
+        quality_metric=context.metric,
+        quality_target=quality_target,
+        quality_score=quality_score,
+        staging_size_bytes=staging_size_bytes,
+        size_ratio=size_ratio,
+        encode_duration_seconds=encode_duration_seconds,
+        encode_completed_at=encode_completed_at,
         promoted_at=promoted_at,
         context=context,
+        manifest_run_id=_optional_text(row["manifest_run_id"]),
+        item_index=_strict_int(row["item_index"]),
+        encode_origin=_optional_text(row["encode_origin"]),
+        encode_job_id=_optional_text(row["encode_job_id"]),
+        encode_worker_id=_optional_text(row["encode_worker_id"]),
+        encode_host_key=_optional_text(row["encode_host_key"]),
+        quality_search_run_id=_optional_text(completion_event.get("quality_search_run_id")),
+        target_size_trace=(
+            dict(target_size_trace)
+            if isinstance((target_size_trace := completion_event.get("target_size_trace")), dict)
+            else None
+        ),
     ), None
 
 
-def _context_from_command(
+def quality_search_context_from_command(
         command: list[str],
         *,
         metric: str,
@@ -496,7 +571,7 @@ def _search_objective(
             or duration_seconds <= 0
     ):
         return None
-    target_video_bitrate = _rounded_target_video_bitrate(
+    target_video_bitrate = rounded_target_video_bitrate(
         target_video_bytes=target_video_bytes,
         source_duration_seconds=duration_seconds,
     )
@@ -508,7 +583,7 @@ def _summarize_cohort(
         scope: QualityMemoryScope,
         scope_prefix: str,
         signature_id: str,
-        observations: list[_QualityMemoryObservation],
+        observations: list[AcceptedQualityOutcome],
 ) -> QualityMemoryCohort:
     crfs = sorted(observation.chosen_crf for observation in observations)
     evidence_count = len(crfs)
@@ -650,7 +725,7 @@ def _optional_command_option(command: list[str], *names: str) -> str | None:
     return None
 
 
-def _rounded_target_video_bitrate(*, target_video_bytes: int, source_duration_seconds: float) -> int:
+def rounded_target_video_bitrate(*, target_video_bytes: int, source_duration_seconds: float) -> int:
     bits_per_second = target_video_bytes * 8 / source_duration_seconds
     return max(
         TARGET_VIDEO_BITRATE_BUCKET,
@@ -685,6 +760,12 @@ def _strict_number(value: Any) -> float | None:
 
 def _strict_positive_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _strict_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
 
