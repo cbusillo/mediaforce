@@ -68,6 +68,11 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(observation["actual_output_bytes"], 5_100_000)
             self.assertEqual(observation["candidate_count"], 2)
             self.assertIsNotNone(observation["policy_hash"])
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            self.assertEqual(shadow["fallback_reason"], "no_history")
+            self.assertFalse(shadow["production_search_changed"])
+            self.assertEqual(shadow["comparison"]["candidate_count"], 2)
+            self.assertEqual(shadow["comparison"]["size_error_percent"], 2.0)
 
     def test_quality_only_encode_persists_structured_observation(self) -> None:
         source_path = self._source_file("episode-quality-only.mkv")
@@ -91,6 +96,76 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(observation["candidate_count"], 1)
             self.assertEqual(trace["candidates"][0]["predicted_encode_size_bytes"], 5 * 1024 ** 2)
             self.assertNotIn("line", trace["candidates"][0])
+
+    def test_shadow_evaluation_failure_never_masks_a_completed_encode(self) -> None:
+        source_path = self._source_file("episode-shadow-failure.mkv")
+        staging_path = self._staging_path("episode-shadow-failure.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            quality = QualitySearchResult(
+                crf=30.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="crf 30 VMAF 86 predicted video stream size 5 MiB (25%)",
+            )
+
+            with self.assertLogs("mediaforce.encoding.manifest", level="WARNING"), patch(
+                "mediaforce.encoding.manifest.recommend_quality_search",
+                side_effect=RuntimeError("shadow unavailable"),
+            ):
+                self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            self.assertEqual(shadow["fallback_reason"], "shadow_evaluation_error")
+            self.assertFalse(shadow["production_search_changed"])
+
+    def test_relaxed_quality_target_is_recorded_without_a_savings_projection(self) -> None:
+        source_path = self._source_file("episode-relaxed-target.mkv")
+        staging_path = self._staging_path("episode-relaxed-target.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            quality = QualitySearchResult(
+                crf=30.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="",
+                quality_search_trace={
+                    "initial_target": 86.0,
+                    "attempts": [
+                        {
+                            "metric_target": 86.0,
+                            "status": "no_selection",
+                            "candidate_count": 2,
+                            "candidates": [
+                                {"crf": 26.0, "metric_score": 87.0},
+                                {"crf": 28.0, "metric_score": 86.0},
+                            ],
+                        },
+                        {
+                            "metric_target": 85.0,
+                            "status": "selected",
+                            "candidate_count": 2,
+                            "candidates": [
+                                {"crf": 29.0, "metric_score": 85.5},
+                                {"crf": 30.0, "metric_score": 86.0},
+                            ],
+                        },
+                    ],
+                },
+            )
+
+            self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            self.assertEqual(shadow["fallback_reason"], "search_target_changed")
+            self.assertIsNone(shadow["recommendation"])
+            self.assertEqual(shadow["comparison"]["candidate_count"], 4)
 
     def test_runtime_signature_uses_final_probe_and_command_context(self) -> None:
         source_path = self._source_file("episode-context-parity.mkv")
@@ -179,6 +254,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(observation["learning_eligible"], 0)
             self.assertEqual(observation["exclusion_reason"], "search_context_incomplete")
             self.assertIsNone(observation["search_signature_id"])
+            self.assertIsNone(observation["shadow_json"])
 
     def test_parseable_quality_failure_persists_diagnostic_observation(self) -> None:
         source_path = self._source_file("episode-quality-failure.mkv")

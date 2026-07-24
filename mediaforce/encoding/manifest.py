@@ -35,6 +35,14 @@ from mediaforce.tuning.quality_memory import (
     quality_search_context_from_command,
     rounded_target_video_bitrate,
 )
+from mediaforce.tuning.quality_shadow import (
+    build_quality_shadow_payload,
+    failed_quality_shadow_recommendation,
+    quality_result_candidate_count,
+    quality_result_target_changed,
+    recommend_quality_search,
+    unavailable_quality_shadow_recommendation,
+)
 from mediaforce.tuning.target_size_search import (
     FinalSizeMissError,
     FinalSizeVerification,
@@ -898,6 +906,58 @@ def encode_one_item(
     for event_error in completion_event_errors:
         LOGGER.warning("%s", event_error)
     quality_result.target_size_trace = final_trace
+    shadow_payload = None
+    if quality_observation_context is not None:
+        try:
+            if quality_result_target_changed(quality_result):
+                shadow_recommendation = unavailable_quality_shadow_recommendation(
+                    expected_context=quality_observation_context,
+                    as_of=quality_search_started_at,
+                    fallback_reason="search_target_changed",
+                    reason=(
+                        "The search changed its quality target during this run, so a leak-free "
+                        "first-CRF projection is unavailable."
+                    ),
+                )
+            else:
+                shadow_recommendation = recommend_quality_search(
+                    connection,
+                    source_rel_path=_item_text(item, "rel_path"),
+                    source_fingerprint=current_source_fingerprint,
+                    expected_context=quality_observation_context,
+                    policy_hash=quality_policy_hash,
+                    as_of=quality_search_started_at,
+                    library_types=config.library_type_map,
+                )
+            shadow_payload = build_quality_shadow_payload(
+                shadow_recommendation,
+                selected_crf=quality_result.crf,
+                selected_score=quality_result.score,
+                minimum_quality_score=quality_observation_context.minimum_quality_score,
+                candidate_count=quality_result_candidate_count(quality_result),
+                search_duration_seconds=quality_search_duration_seconds,
+                actual_output_bytes=staged_stat.st_size,
+                size_target_bytes=quality_observation_context.size_target_bytes,
+            )
+        except Exception as shadow_error:
+            LOGGER.warning("Quality-shadow evaluation failed: %s", shadow_error)
+            try:
+                shadow_payload = build_quality_shadow_payload(
+                    failed_quality_shadow_recommendation(
+                        expected_context=quality_observation_context,
+                        as_of=quality_search_started_at,
+                    ),
+                    selected_crf=quality_result.crf,
+                    selected_score=quality_result.score,
+                    minimum_quality_score=quality_observation_context.minimum_quality_score,
+                    candidate_count=quality_result_candidate_count(quality_result),
+                    search_duration_seconds=quality_search_duration_seconds,
+                    actual_output_bytes=staged_stat.st_size,
+                    size_target_bytes=quality_observation_context.size_target_bytes,
+                )
+            except Exception as fallback_error:
+                LOGGER.warning("Quality-shadow fallback recording failed: %s", fallback_error)
+                shadow_payload = None
     observation = build_selected_quality_observation(
         **observation_common(quality_observation_partial_context),
         context=quality_observation_context,
@@ -908,6 +968,7 @@ def encode_one_item(
         actual_output_bytes=staged_stat.st_size,
         size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
         recorded_at=now,
+        shadow_payload=shadow_payload,
     )
     for observation_error in _persist_quality_observation_best_effort(connection, observation):
         LOGGER.warning("%s", observation_error)
