@@ -231,6 +231,9 @@ Guidance:
     contract
   - allow-listed transform compilation checks, typed risk shaping, and
     evidence-bound review-record precedence
+- `quality_memory.py`
+  - read-only accepted-outcome cohorts, command-derived search signatures,
+    confidence, dispersion, and explainable central CRF hints
 
 Guidance:
 
@@ -240,6 +243,9 @@ Guidance:
 - Keep quality-risk facts, deterministic gates, typed risk normalization, and
   current review authority under `mediaforce/tuning/quality_risk.py` instead of
   re-deriving them independently in routes, prompts, or the frontend.
+- Keep quality-memory retrieval read-only and under
+  `mediaforce/tuning/quality_memory.py`; persisted observations and active search
+  behavior must remain separate explicit phases.
 - The stream budget ledger is the only non-video arithmetic authority. Search,
   manifests, queued jobs, production, and API payloads may project compatibility
   fields from it, but must not add audio, subtitle, attachment, or container

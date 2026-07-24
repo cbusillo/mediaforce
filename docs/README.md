@@ -30,6 +30,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   non-video overhead, uncertainty, and deterministic size feasibility
 - `docs/architecture/quality-risk-contract.md`: versioned quality-risk facts,
   gates, interpretation, and current review authority
+- `docs/architecture/quality-search-memory.md`: read-only accepted-outcome
+  cohorts, signature invalidation, robust CRF summaries, and authority limits
 - `docs/architecture/advisor-routing.md`: evaluated task routing, Codex Lab
   execution, deterministic bypasses, privacy-safe telemetry, and eval operation
 - `docs/architecture/library-lifecycle-policy.md`: current-season protection,
