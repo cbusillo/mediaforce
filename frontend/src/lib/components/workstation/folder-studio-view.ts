@@ -27,12 +27,14 @@ import {
 } from '$lib/folders/studio';
 import type {
 	EncodeQueueJob,
+	EncodeQueueSummary,
 	FolderPayload,
 	FolderStatusPayload,
 	HostRuntime,
 	FolderWorkflowState,
 	HostsPayload
 } from '$lib/api/types';
+import { hostSchedulePresentation, jobSchedulePresentation } from '$lib/hosts/schedule';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export const REVIEW_ASSISTANT_PENDING_COPY =
@@ -360,7 +362,10 @@ export function buildBenchHostOptions(
 		.filter((host) => host.key);
 }
 
-export function buildProcessingHostOptions(hosts: HostsPayload): ProcessingHostOption[] {
+export function buildProcessingHostOptions(
+	hosts: HostsPayload,
+	queue?: EncodeQueueSummary | null
+): ProcessingHostOption[] {
 	return hosts.hosts
 		.map((host) => {
 			const key = compactText(host.key);
@@ -370,7 +375,7 @@ export function buildProcessingHostOptions(hosts: HostsPayload): ProcessingHostO
 			return {
 				key,
 				label: compactText(host.label) || key,
-				...processingHostState(host, active, capacity)
+				...processingHostState(host, active, capacity, queue)
 			};
 		})
 		.filter((host): host is ProcessingHostOption => Boolean(host));
@@ -379,7 +384,8 @@ export function buildProcessingHostOptions(hosts: HostsPayload): ProcessingHostO
 function processingHostState(
 	host: HostRuntime,
 	active: number,
-	capacity: number
+	capacity: number,
+	queue?: EncodeQueueSummary | null
 ): Omit<ProcessingHostOption, 'key' | 'label'> {
 	const capacityCopy = capacity
 		? `${active}/${capacity} encoding`
@@ -400,11 +406,12 @@ function processingHostState(
 			detail: compactText(host.detail) || compactText(host.message) || host.active_reason
 		};
 	}
-	if (host.schedule_open === false) {
+	const schedule = hostSchedulePresentation(host, queue);
+	if (schedule) {
 		return {
-			state: 'Off schedule',
-			tone: 'wait',
-			detail: compactText(host.schedule_detail) || compactText(host.message) || capacityCopy
+			state: schedule.label,
+			tone: schedule.tone,
+			detail: schedule.detail
 		};
 	}
 	if (active > 0) {
@@ -1626,29 +1633,29 @@ function workflowToneToShellTone(tone: FolderWorkflowState['tone']): ShellTone {
 	return 'idle';
 }
 
-function encodeSchedulerWaitCopy(
+function encodeSchedulePresentation(
 	folder: FolderPayload,
-	encodeJob: EncodeQueueJob | null | undefined = folder.encode_job
-): string {
-	const schedulerCopy = String(encodeJob?.scheduler_status_copy ?? '').trim();
-	const folderSummary = String(folder.encode_queue_summary ?? '').trim();
-	const combined = `${schedulerCopy} ${folderSummary}`.toLowerCase();
-	if (!combined.includes('waiting') && !combined.includes('schedule window')) return '';
-	return (
-		folderSummary || schedulerCopy || 'Queued processing is waiting for a worker schedule window.'
-	);
+	encodeJob: EncodeQueueJob | null | undefined = folder.encode_job,
+	hosts?: HostsPayload | null
+) {
+	if (!encodeJob) return null;
+	return jobSchedulePresentation(encodeJob, hosts?.hosts ?? []);
 }
 
 function encodeActiveCopy(
 	folder: FolderPayload,
-	encodeJob: EncodeQueueJob | null | undefined
+	encodeJob: EncodeQueueJob | null | undefined,
+	hosts?: HostsPayload | null
 ): string {
-	return (
+	const telemetry =
 		encodeJob?.telemetry_summary ??
 		folder.encode_queue?.telemetry?.eta_copy ??
 		folder.encode_queue_summary ??
-		'Workers are encoding this folder now.'
-	);
+		'Workers are encoding this folder now.';
+	const schedule = encodeJob ? jobSchedulePresentation(encodeJob, hosts?.hosts ?? []) : null;
+	return [telemetry, schedule?.state === 'running' ? null : schedule?.detail]
+		.filter(Boolean)
+		.join(' · ');
 }
 
 function actionFromBackendWorkflow(
@@ -1665,7 +1672,8 @@ function actionFromBackendWorkflow(
 
 function resolveBackendWorkflow(
 	folder: FolderPayload,
-	workflow: FolderWorkflowState
+	workflow: FolderWorkflowState,
+	hosts?: HostsPayload | null
 ): WorkflowState | null {
 	const action = actionFromBackendWorkflow(workflow.next_action.kind);
 	if (
@@ -1739,13 +1747,25 @@ function resolveBackendWorkflow(
 		};
 	}
 	if (workflow.state === 'processing') {
-		const waitingCopy = encodeSchedulerWaitCopy(folder);
-		if (waitingCopy) {
+		const schedule = encodeSchedulePresentation(folder, folder.encode_job, hosts);
+		if (
+			schedule &&
+			['schedule_interrupted', 'draining_no_fit', 'draining_impossible', 'off_schedule'].includes(
+				schedule.state
+			)
+		) {
 			return {
-				tone: 'wait',
-				label: 'Waiting for worker',
-				title: 'Queued, not encoding yet',
-				copy: waitingCopy,
+				tone: schedule.tone,
+				label: schedule.label,
+				title:
+					schedule.state === 'schedule_interrupted'
+						? 'Restarts automatically'
+						: schedule.state === 'draining_impossible'
+							? 'Adjust a worker schedule'
+							: schedule.state === 'draining_no_fit'
+								? 'Waiting for a full work window'
+								: 'Queued for the next work window',
+				copy: schedule.detail,
 				primary: 'Open Ops',
 				primaryAction: 'open-ops',
 				secondary: 'Download pack',
@@ -1754,10 +1774,10 @@ function resolveBackendWorkflow(
 			};
 		}
 		return {
-			tone: 'active',
-			label: 'Encoding now',
+			tone: schedule?.tone ?? 'active',
+			label: schedule && schedule.state !== 'running' ? schedule.label : 'Encoding now',
 			title: 'Encoding now',
-			copy: encodeActiveCopy(folder, folder.encode_job),
+			copy: encodeActiveCopy(folder, folder.encode_job, hosts),
 			primary: '',
 			primaryAction: 'monitor-processing',
 			secondary: folder.series_context ? 'Open whole show' : 'Download pack',
@@ -1788,7 +1808,8 @@ export function resolveWorkflow(
 	encodeJob: EncodeQueueJob | null,
 	reviewPackReady = false,
 	approvalReviewReady = Boolean(calibration?.review_media_ready),
-	folderPending = false
+	folderPending = false,
+	hosts?: HostsPayload | null
 ): WorkflowState {
 	if (folderPending) {
 		return {
@@ -1824,18 +1845,25 @@ export function resolveWorkflow(
 	}
 	const backendWorkflow = folder.workflow_state ?? status.workflow_state ?? null;
 	if (backendWorkflow) {
-		const resolvedBackendWorkflow = resolveBackendWorkflow(folder, backendWorkflow);
+		const resolvedBackendWorkflow = resolveBackendWorkflow(folder, backendWorkflow, hosts);
 		if (resolvedBackendWorkflow) return resolvedBackendWorkflow;
 	}
 	if (['running', 'queued', 'retry_backoff'].includes(encodeStatus)) {
-		const waitingCopy = encodeSchedulerWaitCopy(folder, encodeJob);
-		if (encodeStatus === 'queued' || waitingCopy) {
+		const schedule = encodeSchedulePresentation(folder, encodeJob, hosts);
+		if (encodeStatus === 'queued') {
 			return {
-				tone: 'wait',
-				label: waitingCopy ? 'Waiting for worker' : 'Queued',
-				title: waitingCopy ? 'Queued, not encoding yet' : 'Queued for processing',
+				tone: schedule?.tone ?? 'wait',
+				label: schedule?.label ?? 'Queued',
+				title:
+					schedule?.state === 'schedule_interrupted'
+						? 'Restarts automatically'
+						: schedule?.state === 'draining_impossible'
+							? 'Adjust a worker schedule'
+							: schedule?.state === 'draining_no_fit'
+								? 'Waiting for a full work window'
+								: 'Queued for processing',
 				copy:
-					waitingCopy ||
+					schedule?.detail ||
 					encodeJob?.telemetry_summary ||
 					folder.encode_queue_summary ||
 					'Folder settings are approved and waiting for a worker to claim it.',
@@ -1847,13 +1875,10 @@ export function resolveWorkflow(
 			};
 		}
 		return {
-			tone: 'active',
-			label: 'Processing',
+			tone: schedule?.tone ?? 'active',
+			label: schedule && schedule.state !== 'running' ? schedule.label : 'Processing',
 			title: 'Approved folder is processing',
-			copy:
-				encodeJob?.telemetry_summary ??
-				folder.encode_queue_summary ??
-				'Folder settings are approved. Monitor progress here or open Ops for deeper worker state.',
+			copy: encodeActiveCopy(folder, encodeJob, hosts),
 			primary: 'Monitor processing',
 			primaryAction: 'monitor-processing',
 			secondary: 'Download pack',

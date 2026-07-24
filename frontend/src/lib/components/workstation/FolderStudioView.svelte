@@ -98,7 +98,9 @@
 	const seriesContext = $derived(studioFolder.series_context ?? null);
 	const seriesRoute = $derived(seriesContext ? folderRoutePath(seriesContext.prefix) : '/folders');
 	const sampleHostOptions = $derived(buildBenchHostOptions(studioFolder.sample_host_options));
-	const processingHostOptions = $derived(buildProcessingHostOptions(hosts));
+	const processingHostOptions = $derived(
+		buildProcessingHostOptions(hosts, studioFolder.encode_queue)
+	);
 	const folderSampleHostKey = $derived(String(folder.sample_host_key ?? '').trim());
 	const fallbackHostKey = $derived(folderSampleHostKey || sampleHostOptions[0]?.key || '');
 
@@ -166,7 +168,8 @@
 			encodeJob,
 			reviewPackReady,
 			approvalReviewReady,
-			folderPending
+			folderPending,
+			hosts
 		)
 	);
 	const workflowSteps = $derived(buildWorkflowSteps(workflow, activeScopeLabel));

@@ -518,6 +518,14 @@ that exceeds every compatible configured window receives an actionable waiting
 reason. The hard close deadline remains the correctness backstop when an
 estimate is wrong, and `Bypass scheduler` skips duration admission entirely.
 
+Activity and Folder Studio present those schedule outcomes directly. Worker rows
+show exact host-local open/close transitions, active episodes show their hard
+stop time, and draining is distinct from off-schedule or unavailable. An episode
+stopped at close is labeled `Paused by schedule` with its automatic whole-episode
+restart expectation, while an explicit bypass is labeled `Bypassing schedule`
+and a job that cannot fit any configured window links to the work-window
+settings that need attention.
+
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if
 the host only needs first-time trust, enter the remote account password once so
