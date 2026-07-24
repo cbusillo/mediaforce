@@ -70,6 +70,15 @@ debugging a worker, or comparing logs against backend output.
 - Encode queued or running: `Processing`. Folder-wide work is underway.
 - Encode failed or stopped: `Processing needs attention`. The user must inspect
   or retry from the route that owns recovery.
+- Quality memory has no prior observation: `No memory yet`.
+- Quality memory lacks enough compatible runs: `Sparse memory`.
+- Quality memory no longer matches source or settings: `Memory invalidated`.
+- Quality-memory evaluation failed without affecting production search: `Memory
+  unavailable`.
+- Quality-memory evidence disagrees or is unstable: `Evidence conflict`.
+- A stable recommendation has ten or more item/season observations: `High
+  confidence`. Always pair these states with `quality floors and saved policy
+  remain unchanged` while memory is observation-only.
 
 ### Ops
 
@@ -144,7 +153,9 @@ debugging a worker, or comparing logs against backend output.
   `worker`, and `next action`. Avoid `calibration`, `proof`, and `host` in
   basic table columns.
 - Folder Studio should say `Review assistant`, `sample`, `proposal`, `approved`,
-  and `processing`. Keep `Bench` out of visible labels unless a product naming
+  `processing`, and `quality memory`. Use `measured production run` for what
+  actually encoded and `shadow recommendation` for the observation-only first
+  CRF suggestion. Keep `Bench` out of visible labels unless a product naming
   decision intentionally keeps it.
 - Ops may expose more technical detail, but first-level headings should still
   use `workers`, `sample queue`, `processing queue`, and `retry available`.

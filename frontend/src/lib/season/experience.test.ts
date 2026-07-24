@@ -6,6 +6,7 @@ import type {
 	DashboardSummaryPayload,
 	EncodeQueueJob,
 	FolderCard,
+	FolderQualityMemoryPayload,
 	FolderPayload,
 	FolderStatusPayload,
 	FolderWorkflowState,
@@ -36,6 +37,7 @@ import {
 	normalizeReviewPairs,
 	overlappingCalibrationActivity,
 	plainFailureMessage,
+	qualityMemoryView,
 	resolvedTargetSummary,
 	reviewFeedbackIntent,
 	reviewFeedbackRequest,
@@ -278,6 +280,117 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 		...overrides
 	};
 }
+
+function qualityMemoryPayload(): FolderQualityMemoryPayload {
+	return {
+		schema_version: 1,
+		algorithm_version: 'qsh1',
+		observation_id: 'qso1_fixture',
+		source_rel_path: 'tv/Big Brother (US)/Season 19/Episode 03.mkv',
+		recorded_at: '2026-07-24T17:00:00+00:00',
+		evidence_cutoff_at: '2026-07-24T16:00:00+00:00',
+		measured: {
+			selected_crf: 51,
+			quality_metric: 'VMAF',
+			quality_score: 86.5,
+			quality_target: 85,
+			quality_floor: 84,
+			quality_margin: 2.5,
+			output_bytes: 510_000_000,
+			size_error_percent: 2,
+			candidate_count: 5,
+			search_duration_seconds: 100
+		},
+		recommendation: {
+			first_crf: 50,
+			scope: 'season',
+			confidence: 'high',
+			sample_count: 12,
+			evidence_count: 12,
+			minimum_crf: 48,
+			maximum_crf: 52,
+			iqr: 2,
+			median_absolute_deviation: 1
+		},
+		comparison: { crf_delta: 1, within_one_crf: true },
+		fallback_reason: null,
+		reason: 'Season memory stayed within one CRF of the production result.',
+		production_search_changed: false
+	};
+}
+
+describe('quality memory explanation', () => {
+	it('keeps the empty state compact and explicit about unchanged policy', () => {
+		const view = qualityMemoryView(folder({ quality_memory: null }));
+
+		expect(view).toMatchObject({
+			state: 'empty',
+			tone: 'quiet',
+			badge: 'No memory yet',
+			measured: []
+		});
+		expect(view.reason).toContain('No completed quality search');
+		expect(view.policyCopy).toContain('Quality floors and saved policy remain unchanged');
+	});
+
+	it('separates a measured production run from a high-confidence recommendation', () => {
+		const view = qualityMemoryView(folder({ quality_memory: qualityMemoryPayload() }));
+
+		expect(view).toMatchObject({
+			state: 'high-confidence',
+			tone: 'success',
+			badge: 'High confidence',
+			source: 'Episode 03',
+			recommendation: {
+				label: 'Shadow first CRF',
+				value: '50.0',
+				detail: '12 observations · season · high confidence'
+			},
+			comparison: 'Within 1 CRF · Δ +1.0',
+			dispersion: 'CRF 48.0–52.0 · IQR 2.0 · MAD 1.0'
+		});
+		expect(view.measured).toEqual([
+			{ label: 'Chosen CRF', value: '51.0', detail: '5 candidates · 1m 40s' },
+			{
+				label: 'Measured VMAF',
+				value: '86.5',
+				detail: 'target 85.0 · floor 84.0 · margin +2.5'
+			},
+			{ label: 'Final size', value: '510 MB', detail: '2% over saved size target' }
+		]);
+	});
+
+	it('flags a high-confidence recommendation that differed from production', () => {
+		const payload = qualityMemoryPayload();
+		payload.comparison = { crf_delta: 3, within_one_crf: false };
+
+		const view = qualityMemoryView(folder({ quality_memory: payload }));
+
+		expect(view.tone).toBe('attention');
+		expect(view.badge).toBe('High confidence · differed');
+		expect(view.comparison).toBe('Outside 1 CRF · Δ +3.0');
+	});
+
+	it.each([
+		['sparse_cohort', 'sparse', 'Sparse memory'],
+		['stale_signature', 'stale', 'Memory invalidated'],
+		['shadow_evaluation_error', 'unavailable', 'Memory unavailable'],
+		['conflicting_quality_evidence', 'conflicting', 'Evidence conflict']
+	] as const)('maps %s into a compact %s state', (fallbackReason, state, badge) => {
+		const payload = qualityMemoryPayload();
+		payload.recommendation = null;
+		payload.comparison = { crf_delta: null, within_one_crf: null };
+		payload.fallback_reason = fallbackReason;
+
+		const view = qualityMemoryView(folder({ quality_memory: payload }));
+
+		expect(view.state).toBe(state);
+		expect(view.badge).toBe(badge);
+		expect(view.recommendation.value).toBe('Held back');
+		expect(view.reason.length).toBeGreaterThan(20);
+		expect(view.policyCopy).toContain('saved policy remain unchanged');
+	});
+});
 
 function sizeOption(
 	key: string,
