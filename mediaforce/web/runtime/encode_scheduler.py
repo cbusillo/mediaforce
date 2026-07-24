@@ -9,6 +9,9 @@ from mediaforce.core.timezones import system_timezone, valid_timezone_name
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
 SCHEDULE_DAY_ORDER = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+SCHEDULE_CLOSE_WAITING_REASON = "Waiting for a host schedule window."
+HOST_WINDOW_TOO_SHORT_REASON = "waiting for a host window with enough time remaining"
+HOST_WINDOW_IMPOSSIBLE_MARKER = "longer than every configured host schedule window"
 
 
 @dataclass(slots=True)
@@ -501,14 +504,27 @@ def decorate_encode_job_for_scheduler(
             host_payload=host_payload,
         )
     )
+    schedule_state = _encode_job_schedule_state(
+        status=status,
+        bypass_schedule=bypass_schedule,
+        schedule_close_deadline_at=decorated.get("schedule_close_deadline_at"),
+        schedule_waiting=schedule_waiting,
+        waiting_reason=waiting_reason,
+        progress_state=str(progress.get("progress_state") or ""),
+    )
     decorated["schedule_waiting"] = schedule_waiting
+    decorated["schedule_state"] = schedule_state
     decorated["scheduler_summary"] = str(policy["summary"])
     decorated["attempt_summary"] = (
         f"attempt {display_attempt_count} of {deps.encode_job_max_attempts}"
         if display_attempt_count
         else "not started yet"
     )
-    if status == "running":
+    if schedule_state == "active_hard_stop":
+        decorated["scheduler_status_copy"] = "running until the work window closes"
+    elif schedule_state == "bypassed":
+        decorated["scheduler_status_copy"] = "bypassing the work schedule"
+    elif status == "running":
         decorated["scheduler_status_copy"] = "running now"
     elif status == "needs_attention":
         decorated["scheduler_status_copy"] = waiting_reason or "needs attention before retrying"
@@ -516,13 +532,46 @@ def decorate_encode_job_for_scheduler(
         decorated["scheduler_status_copy"] = waiting_reason or "waiting for retry backoff"
     elif waiting_reason:
         decorated["scheduler_status_copy"] = waiting_reason
-    elif bypass_schedule:
-        decorated["scheduler_status_copy"] = "bypassing scheduler"
     elif schedule_waiting:
         decorated["scheduler_status_copy"] = f"waiting for {policy['summary']}"
     else:
         decorated["scheduler_status_copy"] = "ready when a worker is free"
     return decorate_encode_job_telemetry(decorated, encode_job_manifest_totals=deps.encode_job_manifest_totals)
+
+
+def _encode_job_schedule_state(
+        *,
+        status: str,
+        bypass_schedule: bool,
+        schedule_close_deadline_at: Any,
+        schedule_waiting: bool,
+        waiting_reason: str,
+        progress_state: str,
+) -> str:
+    normalized_status = status.strip().lower()
+    normalized_waiting_reason = waiting_reason.casefold()
+    if normalized_status in {"running", "queued"} and bypass_schedule:
+        return "bypassed"
+    if normalized_status == "running":
+        if str(schedule_close_deadline_at or "").strip():
+            return "active_hard_stop"
+        return "running"
+    if normalized_status != "queued":
+        return "none"
+    if (
+            progress_state.strip().lower() == "schedule_waiting"
+            or normalized_waiting_reason == SCHEDULE_CLOSE_WAITING_REASON.casefold()
+    ):
+        return "schedule_interrupted"
+    if HOST_WINDOW_IMPOSSIBLE_MARKER in normalized_waiting_reason:
+        return "draining_impossible"
+    if HOST_WINDOW_TOO_SHORT_REASON in normalized_waiting_reason:
+        return "draining_no_fit"
+    if schedule_waiting:
+        return "off_schedule"
+    if waiting_reason:
+        return "waiting"
+    return "ready"
 
 
 def decorate_encode_queue_for_scheduler(
