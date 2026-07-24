@@ -15,6 +15,7 @@ from mediaforce.core.db_tables import quality_search_observations
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualitySearchResult, parse_quality_search_measurements
+from mediaforce.library.media_scopes import MediaScope, scope_rel_path_filter
 from mediaforce.tuning.quality_memory import (
     QualitySearchContext,
     accepted_quality_outcomes,
@@ -326,6 +327,7 @@ def load_current_quality_search_observations(
         connection: DBClient,
         *,
         recorded_before: str | None = None,
+        scope: MediaScope | None = None,
 ) -> list[Mapping[str, Any]]:
     authority_rank = case(
         (quality_search_observations.c.authority == AUTHORITY_CORRECTION, 30),
@@ -342,10 +344,11 @@ def load_current_quality_search_observations(
     if recorded_before is not None:
         ranked_query = ranked_query.where(quality_search_observations.c.recorded_at < recorded_before)
     ranked = ranked_query.subquery()
+    current_query = select(ranked).where(ranked.c.observation_rank == 1)
+    if scope is not None:
+        current_query = current_query.where(scope_rel_path_filter(ranked.c.source_rel_path, scope))
     return list(
-        connection.execute(
-            select(ranked).where(ranked.c.observation_rank == 1)
-        ).mappings()
+        connection.execute(current_query).mappings()
     )
 
 

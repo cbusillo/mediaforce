@@ -7,10 +7,12 @@ from mediaforce.tuning.quality_shadow import (
     MIN_SHADOW_RECOMMENDATIONS,
     QualityShadowRecommendation,
     build_quality_shadow_payload,
+    quality_shadow_public_view,
     quality_result_candidate_count,
     quality_result_target_changed,
     quality_shadow_metrics,
     recommend_quality_search_from_rows,
+    select_latest_quality_shadow_observation,
 )
 
 
@@ -236,6 +238,133 @@ class QualityShadowTests(unittest.TestCase):
         self.assertEqual(comparison["candidate_savings_rate"], -0.2)
         self.assertTrue(comparison["fallback_needed"])
         self.assertTrue(comparison["false_narrow"])
+
+    def test_public_view_separates_measured_run_from_shadow_recommendation(self) -> None:
+        recommendation = self._available_recommendation(first_crf=50.0)
+        shadow = build_quality_shadow_payload(
+            recommendation,
+            selected_crf=51.0,
+            selected_score=86.5,
+            minimum_quality_score=84.0,
+            candidate_count=5,
+            search_duration_seconds=100.0,
+            actual_output_bytes=510_000_000,
+            size_target_bytes=500_000_000,
+        )
+        row = {
+            **self._row(index=1, crf=51.0),
+            "quality_metric": "VMAF",
+            "selected_target": 85.0,
+            "selected_score": 86.5,
+            "actual_output_bytes": 510_000_000,
+            "context_json": json.dumps({"search": {"minimum_quality_score": 84.0}}),
+            "shadow_json": json.dumps(shadow),
+        }
+
+        public = quality_shadow_public_view(row)
+
+        self.assertIsNotNone(public)
+        assert public is not None
+        self.assertEqual(public["source_rel_path"], "tv/Show/Season 01/Episode 01.mkv")
+        self.assertEqual(
+            public["measured"],
+            {
+                "selected_crf": 51.0,
+                "quality_metric": "VMAF",
+                "quality_score": 86.5,
+                "quality_target": 85.0,
+                "quality_floor": 84.0,
+                "quality_margin": 2.5,
+                "output_bytes": 510_000_000,
+                "size_error_percent": 2.0,
+                "candidate_count": 5,
+                "search_duration_seconds": 100.0,
+            },
+        )
+        self.assertEqual(public["recommendation"]["first_crf"], 50.0)
+        self.assertEqual(public["recommendation"]["scope"], "season")
+        self.assertEqual(public["recommendation"]["sample_count"], 6)
+        self.assertEqual(public["recommendation"]["evidence_count"], 1)
+        self.assertEqual(public["comparison"], {"crf_delta": 1.0, "within_one_crf": True})
+        self.assertFalse(public["production_search_changed"])
+
+    def test_public_view_keeps_typed_fallback_without_a_recommendation(self) -> None:
+        recommendation = QualityShadowRecommendation(
+            search_signature_id=self.context.signature_id,
+            evidence_cutoff_at=self.as_of.isoformat(),
+            first_crf=None,
+            scope=None,
+            confidence="none",
+            sample_count=0,
+            cohort_id=None,
+            minimum_crf=None,
+            maximum_crf=None,
+            iqr=None,
+            median_absolute_deviation=None,
+            evidence_observation_ids=(),
+            fallback_reason="sparse_cohort",
+            reason="Compatible observations exist, but the cohort is too small.",
+            exclusions=(),
+        )
+        shadow = build_quality_shadow_payload(
+            recommendation,
+            selected_crf=52.0,
+            selected_score=85.0,
+            minimum_quality_score=84.0,
+            candidate_count=4,
+            search_duration_seconds=80.0,
+            actual_output_bytes=None,
+            size_target_bytes=None,
+        )
+        public = quality_shadow_public_view(
+            {
+                **self._row(index=1, crf=52.0),
+                "quality_metric": "VMAF",
+                "shadow_json": json.dumps(shadow),
+            }
+        )
+
+        self.assertIsNotNone(public)
+        assert public is not None
+        self.assertIsNone(public["recommendation"])
+        self.assertEqual(public["fallback_reason"], "sparse_cohort")
+        self.assertIn("cohort is too small", public["reason"])
+
+    def test_latest_shadow_selection_uses_current_valid_completed_observation(self) -> None:
+        shadow = build_quality_shadow_payload(
+            self._available_recommendation(first_crf=50.0),
+            selected_crf=50.0,
+            selected_score=85.0,
+            minimum_quality_score=84.0,
+            candidate_count=5,
+            search_duration_seconds=100.0,
+            actual_output_bytes=None,
+            size_target_bytes=None,
+        )
+        older = {
+            **self._row(index=2, crf=50.0),
+            "shadow_json": json.dumps(shadow),
+        }
+        newer = {
+            **self._row(index=1, crf=51.0),
+            "shadow_json": json.dumps(shadow),
+        }
+        invalid = {
+            **self._row(
+                index=0,
+                crf=52.0,
+                completed_at=self.as_of + timedelta(minutes=1),
+            ),
+            "shadow_json": json.dumps({"algorithm_version": "old"}),
+        }
+
+        selected = select_latest_quality_shadow_observation([older, invalid, newer])
+
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected["observation_id"], newer["observation_id"])
+        self.assertIsNone(quality_shadow_public_view(None))
+        self.assertIsNone(quality_shadow_public_view(invalid))
 
     def test_metrics_apply_accuracy_savings_and_safety_gates(self) -> None:
         rows = []
