@@ -13,9 +13,16 @@ from sqlalchemy import select
 from mediaforce import execution
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
+from mediaforce.core.db_tables import item_events, library_items, quality_search_observations, staged_artifacts
 from mediaforce.core.models import ProbeSummary
-from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.core.process_control import ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.encoding.quality import (
+    QualitySearchError,
+    QualitySearchResult,
+    QualityTempSetupError,
+    SampleEncodeResult,
+)
+from mediaforce.tuning.quality_memory import quality_search_context_from_command, rounded_target_video_bitrate
 
 
 class TargetSizeProductionTests(unittest.TestCase):
@@ -55,6 +62,186 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(validation["target_size_trace"]["selected_candidate"]["predicted_whole_episode_bytes"], 5_000_000)
             self.assertEqual(len(build_calls), 1)
             self.assertEqual(measure_calls, [])
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            self.assertEqual(observation["outcome_kind"], "selected")
+            self.assertEqual(observation["learning_eligible"], 1)
+            self.assertEqual(observation["actual_output_bytes"], 5_100_000)
+            self.assertEqual(observation["candidate_count"], 2)
+            self.assertIsNotNone(observation["policy_hash"])
+
+    def test_quality_only_encode_persists_structured_observation(self) -> None:
+        source_path = self._source_file("episode-quality-only.mkv")
+        staging_path = self._staging_path("episode-quality-only.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            quality = QualitySearchResult(
+                crf=30.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="crf 30 VMAF 86 predicted video stream size 5 MiB (25%)",
+            )
+
+            self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            trace = json.loads(cast(str, observation["candidate_trace_json"]))
+            self.assertEqual(observation["search_objective"], "quality")
+            self.assertEqual(observation["candidate_count"], 1)
+            self.assertEqual(trace["candidates"][0]["predicted_encode_size_bytes"], 5 * 1024 ** 2)
+            self.assertNotIn("line", trace["candidates"][0])
+
+    def test_runtime_signature_uses_final_probe_and_command_context(self) -> None:
+        source_path = self._source_file("episode-context-parity.mkv")
+        staging_path = self._staging_path("episode-context-parity.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+            command = [
+                "ffmpeg",
+                "-i",
+                str(source_path),
+                "-c:v",
+                "libsvtav1",
+                "-pix_fmt",
+                "yuv420p10le",
+                "-preset",
+                "4",
+                "-svtav1-params",
+                "tune=0:film-grain=0:film-grain-denoise=0",
+                "-vf",
+                "scale=-2:720",
+                str(staging_path),
+            ]
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                encode_command=command,
+                staged_width=1280,
+                staged_height=720,
+            )
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            target_video_bitrate = rounded_target_video_bitrate(
+                target_video_bytes=1_000_000,
+                source_duration_seconds=60.0,
+            )
+            expected = quality_search_context_from_command(
+                command,
+                metric="VMAF",
+                target=85.0,
+                minimum_quality_score=80.0,
+                search_objective="target_size",
+                size_target_bytes=5_000_000,
+                target_video_bitrate=target_video_bitrate,
+                source_codec="h264",
+                output_width=1280,
+                output_height=720,
+            )
+            self.assertEqual(observation["search_signature_id"], expected.signature_id)
+            self.assertEqual(observation["learning_eligible"], 1)
+            context = json.loads(cast(str, observation["context_json"]))
+            self.assertEqual(context["search"]["target_video_bitrate"], 133_000)
+            self.assertEqual(context["search"]["output_width"], 1280)
+            self.assertEqual(context["search"]["video_filter"], "scale=-2:720")
+
+    def test_success_with_incomplete_context_persists_diagnostic_observation(self) -> None:
+        source_path = self._source_file("episode-incomplete-context.mkv")
+        staging_path = self._staging_path("episode-incomplete-context.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            quality = QualitySearchResult(30.0, "VMAF", 85.0, 86.0, "")
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                encode_command=["ffmpeg", "-i", str(source_path), str(staging_path)],
+            )
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            self.assertEqual(observation["outcome_kind"], "selected")
+            self.assertEqual(observation["learning_eligible"], 0)
+            self.assertEqual(observation["exclusion_reason"], "search_context_incomplete")
+            self.assertIsNone(observation["search_signature_id"])
+
+    def test_parseable_quality_failure_persists_diagnostic_observation(self) -> None:
+        source_path = self._source_file("episode-quality-failure.mkv")
+        staging_path = self._staging_path("episode-quality-failure.mkv")
+        error = QualitySearchError(
+            "crf 38 VMAF 84 predicted video stream size 17 MiB (85%)\n"
+            "Error: Failed to find a suitable crf"
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+            ), patch("mediaforce.execution._search_quality", side_effect=error):
+                with self.assertRaises(QualitySearchError):
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest.json",
+                        {"run_id": "quality-failure-run", "items": [item]},
+                        0,
+                        item,
+                        overwrite=False,
+                    )
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            self.assertEqual(observation["outcome_kind"], "deterministic_search_failure")
+            self.assertEqual(observation["learning_eligible"], 0)
+            self.assertEqual(observation["exclusion_reason"], "quality_search_exhausted")
+            self.assertEqual(observation["candidate_count"], 1)
+
+    def test_operational_search_failures_do_not_persist_observations(self) -> None:
+        failures = (
+            ScheduleWindowClosedError("schedule closed"),
+            ProcessCancelledError("cancelled"),
+            QualityTempSetupError("storage unavailable"),
+            BlockingIOError("resource busy"),
+            TimeoutError("ssh transport timeout"),
+        )
+        for index, error in enumerate(failures, start=1):
+            with self.subTest(error=type(error).__name__):
+                source_path = self._source_file(f"episode-operational-{index}.mkv")
+                staging_path = self._staging_path(f"episode-operational-{index}.mkv")
+                with open_db(self.config.paths.db_path) as connection:
+                    item_id = self._insert_item(connection, source_path)
+                    item = self._manifest_item(item_id, source_path, staging_path)
+                    with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                        "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+                    ), patch("mediaforce.execution._search_quality", side_effect=error):
+                        with self.assertRaises(type(error)):
+                            execution.encode_one_item(
+                                connection,
+                                self.config,
+                                self.root / "runs" / "manifest.json",
+                                {"run_id": f"operational-{index}", "items": [item]},
+                                0,
+                                item,
+                                overwrite=False,
+                            )
+                    count = connection.execute(
+                        select(quality_search_observations.c.observation_id)
+                    ).all()
+                    self.assertEqual(count, [])
 
     def test_encode_uses_one_logged_retry_from_measured_candidate_for_final_miss(self) -> None:
         source_path = self._source_file("episode-target-retry.mkv")
@@ -174,6 +361,13 @@ class TargetSizeProductionTests(unittest.TestCase):
             failed_details = json.loads(cast(str, events[-1]["details_json"]))
             self.assertEqual(failed_details["failure_kind"], "target_size_needs_review")
             self.assertEqual(failed_details["target_size_verification"]["status"], "over_target")
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            outcome = json.loads(cast(str, observation["outcome_json"]))
+            self.assertEqual(observation["outcome_kind"], "final_size_failure")
+            self.assertEqual(observation["learning_eligible"], 0)
+            self.assertEqual(observation["exclusion_reason"], "final_size_miss")
+            self.assertTrue(outcome["search_selected"])
+            self.assertFalse(outcome["terminal_success"])
             self.assertFalse(staging_path.exists())
 
     def test_encode_persists_rejected_retry_measurement_reason(self) -> None:
@@ -279,6 +473,10 @@ class TargetSizeProductionTests(unittest.TestCase):
             )
             self.assertTrue(any("cleanup failed" in note for note in raised.exception.__notes__))
             self.assertEqual(connection.execute(select(1)).scalar_one(), 1)
+            self.assertEqual(
+                connection.execute(select(quality_search_observations.c.observation_id)).all(),
+                [],
+            )
 
     def test_standalone_encode_allows_web_worker_write_during_media_work(self) -> None:
         source_path = self._source_file("episode-concurrent-writer.mkv")
@@ -451,6 +649,9 @@ class TargetSizeProductionTests(unittest.TestCase):
             retry_sample: SampleEncodeResult | None = None,
             during_encode: Callable[[], None] | None = None,
             during_quality_search: Callable[[], None] | None = None,
+            encode_command: list[str] | None = None,
+            staged_width: int = 1920,
+            staged_height: int = 1080,
     ) -> tuple[list[Any], list[Any]]:
         sizes = list(output_sizes)
 
@@ -466,8 +667,8 @@ class TargetSizeProductionTests(unittest.TestCase):
             duration_seconds=60.0,
             video_codec="av1",
             video_bitrate=900_000,
-            width=1920,
-            height=1080,
+            width=staged_width,
+            height=staged_height,
             pix_fmt="yuv420p10le",
             audio_track_count=0,
             subtitle_track_count=0,
@@ -489,12 +690,30 @@ class TargetSizeProductionTests(unittest.TestCase):
                 during_quality_search()
             return quality
 
+        resolved_encode_command = encode_command or [
+            "ffmpeg",
+            "-i",
+            item["source_path"],
+            "-c:v",
+            "libsvtav1",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-preset",
+            "4",
+            "-svtav1-params",
+            "tune=0:film-grain=0:film-grain-denoise=0",
+            item["staging_path"],
+        ]
         with patch("mediaforce.execution.resolve_item_source_path", return_value=Path(item["source_path"])), patch(
             "mediaforce.execution.resolve_item_staging_path", return_value=Path(item["staging_path"])
         ), patch("mediaforce.execution._search_quality", side_effect=search_quality_side_effect), patch(
             "mediaforce.execution._measure_quality_candidate", side_effect=measure_retry_side_effect
         ) as measure_mock, patch(
-            "mediaforce.execution._build_ffmpeg_command", return_value=["ffmpeg", "-i", item["source_path"], item["staging_path"]]
+            "mediaforce.execution._select_streams",
+            return_value={"audio_tracks": [], "subtitle_tracks": []},
+        ), patch(
+            "mediaforce.execution._build_ffmpeg_command",
+            return_value=resolved_encode_command,
         ) as command_mock, patch(
             "mediaforce.execution._run_encode_command", side_effect=run_encode_side_effect
         ), patch("mediaforce.execution.probe_media", return_value=staged_probe), patch(

@@ -34,6 +34,7 @@ from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary, update_job_telemetry
+from mediaforce.tuning.quality_observations import backfill_quality_search_observations
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
     update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
@@ -452,6 +453,20 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             daemon=True,
         ).start()
         with open_db(config.paths.db_path) as connection:
+            try:
+                backfill_result = backfill_quality_search_observations(
+                    connection,
+                    as_of=datetime.now(UTC),
+                )
+                connection.commit()
+                if backfill_result.inserted:
+                    LOGGER.info(
+                        "Backfilled %s accepted quality-search observations.",
+                        backfill_result.inserted,
+                    )
+            except Exception:
+                connection.rollback()
+                LOGGER.exception("Quality-search observation backfill failed; it will retry at next startup.")
             repaired_host_rows = repair_persisted_encode_job_hosts(connection)
             if repaired_host_rows:
                 LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)

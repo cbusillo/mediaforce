@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -11,12 +12,29 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
-from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
+from mediaforce.encoding.quality import (
+    QualitySearchError,
+    analyze_quality_policy_failure,
+    quality_error_message,
+    resolve_local_quality_temp_root,
+)
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.encoding.streams import ProductionStreamPlan
+from mediaforce.tuning.quality_observations import (
+    OUTCOME_FINAL_SIZE_FAILURE,
+    append_quality_search_observation,
+    build_failed_quality_observation,
+    build_selected_quality_observation,
+)
+from mediaforce.tuning.quality_memory import (
+    QualitySearchContext,
+    quality_search_context_from_command,
+    rounded_target_video_bitrate,
+)
 from mediaforce.tuning.target_size_search import (
     FinalSizeMissError,
     FinalSizeVerification,
@@ -234,6 +252,23 @@ def _persist_failure_event_without_masking(
         primary_error.add_note(note)
 
 
+def _persist_quality_observation_best_effort(
+        connection: DBClient,
+        observation: Any,
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        append_quality_search_observation(connection, observation)
+        connection.commit()
+    except Exception as persistence_error:
+        errors.append(f"Failed to persist quality-search observation: {persistence_error}")
+        try:
+            connection.rollback()
+        except Exception as rollback_error:
+            errors.append(f"Failed to roll back quality-search observation transaction: {rollback_error}")
+    return errors
+
+
 def _cleanup_paths_without_masking(primary_error: Exception, *paths: Path) -> None:
     for path in paths:
         try:
@@ -364,6 +399,41 @@ def encode_one_item(
         else host
     )
     stream_budget = _persisted_stream_budget(item)
+    quality_search_run_id = f"qsr1_{uuid.uuid4().hex}"
+    quality_search_started_at = timestamp()
+    quality_search_start_monotonic = time.monotonic()
+    quality_policy_hash = stable_json_hash(policy["video"])
+    configured_min_crf = float_value(policy["video"].get("min_crf")) or None
+    configured_max_crf = float_value(policy["video"].get("max_crf")) or None
+    max_encoded_percent = float_value(policy["video"].get("max_encoded_percent")) or None
+
+    def observation_provenance() -> dict[str, Any]:
+        return _quality_observation_provenance(
+            manifest=manifest,
+            manifest_path=manifest_path,
+            index=index,
+            item=item,
+            source_path=source_path,
+            host=host,
+            encode_context=encode_context,
+        )
+
+    def observation_common(partial_context: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "search_run_id": quality_search_run_id,
+            "library_item_id": int(item["library_item_id"]),
+            "source_rel_path": _item_text(item, "rel_path"),
+            "source_fingerprint": current_source_fingerprint,
+            "partial_context": partial_context,
+            "policy_hash": quality_policy_hash,
+            "configured_min_crf": configured_min_crf,
+            "configured_max_crf": configured_max_crf,
+            "max_encoded_percent": max_encoded_percent,
+            "search_started_at": quality_search_started_at,
+            "search_completed_at": quality_search_completed_at,
+            "search_duration_seconds": quality_search_duration_seconds,
+            "provenance": observation_provenance(),
+        }
     try:
         quality_result = search_quality(
             quality_source_path,
@@ -380,8 +450,43 @@ def encode_one_item(
             quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
             stream_budget_ledger=stream_budget,
         )
+        quality_search_completed_at = timestamp()
+        quality_search_duration_seconds = round(
+            max(time.monotonic() - quality_search_start_monotonic, 0.0),
+            3,
+        )
     except TargetSizeSearchError as exc:
+        quality_search_completed_at = timestamp()
+        quality_search_duration_seconds = round(
+            max(time.monotonic() - quality_search_start_monotonic, 0.0),
+            3,
+        )
         blocked_at = timestamp()
+        trace = object_dict(exc.trace)
+        quality_floor = object_dict(trace.get("quality_floor"))
+        partial_context = _quality_partial_context(
+            video_policy=policy["video"],
+            item=item,
+            preset=preset,
+            output_container=staging_path.suffix,
+            stream_budget=stream_budget,
+            metric=str(quality_floor.get("metric") or "UNKNOWN"),
+            target=float_value(quality_floor.get("target")),
+            minimum_quality_score=float_value(quality_floor.get("minimum")),
+        )
+        observation = build_failed_quality_observation(
+            **observation_common(partial_context),
+            context=None,
+            quality_metric=str(quality_floor.get("metric") or "UNKNOWN"),
+            search_objective="target_size",
+            exclusion_reason=f"target_size_{exc.status}",
+            target_size_trace=trace,
+            quality_search_trace=None,
+            quality_error_text=None,
+            recorded_at=blocked_at,
+        )
+        for note in _persist_quality_observation_best_effort(connection, observation):
+            exc.add_note(note)
         _persist_failure_event_without_masking(
             connection,
             item["library_item_id"],
@@ -399,11 +504,67 @@ def encode_one_item(
                 "failure_kind": f"target_size_{exc.status}",
                 "error": quality_error_message(exc),
                 "target_size_trace": exc.trace,
+                "quality_search_run_id": quality_search_run_id,
             },
             exc,
             record_event,
         )
         raise
+    except QualitySearchError as exc:
+        quality_search_completed_at = timestamp()
+        quality_search_duration_seconds = round(
+            max(time.monotonic() - quality_search_start_monotonic, 0.0),
+            3,
+        )
+        failure_analysis = analyze_quality_policy_failure(str(exc), policy["video"])
+        if failure_analysis is not None:
+            metric = str(failure_analysis.get("requested_metric") or "UNKNOWN")
+            partial_context = _quality_partial_context(
+                video_policy=policy["video"],
+                item=item,
+                preset=preset,
+                output_container=staging_path.suffix,
+                stream_budget=None,
+                metric=metric,
+                target=float_value(failure_analysis.get("target_score")),
+                minimum_quality_score=float_value(failure_analysis.get("min_score")),
+            )
+            observation = build_failed_quality_observation(
+                **observation_common(partial_context),
+                context=None,
+                quality_metric=metric,
+                search_objective="quality",
+                exclusion_reason="quality_search_exhausted",
+                target_size_trace=None,
+                quality_search_trace=object_dict(exc.quality_search_trace),
+                quality_error_text=str(exc),
+                recorded_at=quality_search_completed_at,
+            )
+            for note in _persist_quality_observation_best_effort(connection, observation):
+                exc.add_note(note)
+        raise
+    quality_trace = object_dict(quality_result.target_size_trace)
+    quality_floor = object_dict(quality_trace.get("quality_floor"))
+    minimum_quality_score = (
+        float_value(quality_floor.get("minimum"))
+        if quality_floor
+        else float_value(
+            policy["video"].get(
+                f"min_target_{str(quality_result.metric).lower()}",
+                quality_result.target,
+            )
+        )
+    )
+    quality_observation_partial_context = _quality_partial_context(
+        video_policy=policy["video"],
+        item=item,
+        preset=preset,
+        output_container=staging_path.suffix,
+        stream_budget=stream_budget,
+        metric=quality_result.metric,
+        target=quality_result.target,
+        minimum_quality_score=minimum_quality_score,
+    )
     selection = stream_budget.stream_plan if stream_budget is not None else select_streams(item)
     ffmpeg_cmd = build_ffmpeg_command(
         source_path=source_path,
@@ -451,6 +612,7 @@ def encode_one_item(
     final_verification: FinalSizeVerification | None = None
     final_trace = object_dict(getattr(quality_result, "target_size_trace", None)) or None
     retry_count = 0
+    quality_retry_measurement_seconds = 0.0
     try:
         while True:
             result = run_encode_command(
@@ -483,6 +645,9 @@ def encode_one_item(
             quality_result.target_size_trace = final_trace
 
             def measure_retry_candidate(crf: float) -> Any:
+                nonlocal quality_retry_measurement_seconds
+                nonlocal quality_search_completed_at
+                nonlocal quality_search_duration_seconds
                 if progress_callback is not None:
                     progress_callback(
                         {
@@ -495,21 +660,31 @@ def encode_one_item(
                             "out_time_seconds": 0.0,
                         }
                     )
-                return measure_quality_candidate(
-                    quality_source_path,
-                    policy["video"],
-                    crf=crf,
-                    source_codec=str(item.get("video_codec") or ""),
-                    width=width,
-                    height=height,
-                    detected_crop=detected_crop,
-                    cadence_decision=cadence_decision,
-                    cadence_evidence=cadence_evidence,
-                    cadence_source_fingerprint=current_source_fingerprint,
-                    process_controller=process_controller,
-                    host=quality_search_host,
-                    quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
-                )
+                measurement_started = time.monotonic()
+                try:
+                    return measure_quality_candidate(
+                        quality_source_path,
+                        policy["video"],
+                        crf=crf,
+                        source_codec=str(item.get("video_codec") or ""),
+                        width=width,
+                        height=height,
+                        detected_crop=detected_crop,
+                        cadence_decision=cadence_decision,
+                        cadence_evidence=cadence_evidence,
+                        cadence_source_fingerprint=current_source_fingerprint,
+                        process_controller=process_controller,
+                        host=quality_search_host,
+                        quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
+                    )
+                finally:
+                    measurement_seconds = max(time.monotonic() - measurement_started, 0.0)
+                    quality_retry_measurement_seconds += measurement_seconds
+                    quality_search_duration_seconds = round(
+                        quality_search_duration_seconds + measurement_seconds,
+                        3,
+                    )
+                    quality_search_completed_at = timestamp()
 
             retry_quality = retry_quality_result_for_final_miss(
                 quality_result,
@@ -571,6 +746,34 @@ def encode_one_item(
             )
     except Exception as exc:
         failed_at = timestamp()
+        if (
+                isinstance(exc, FinalSizeMissError)
+                and final_verification is not None
+        ):
+            quality_result.target_size_trace = final_trace
+            actual_output_bytes = final_verification.actual_output_bytes
+            source_size_bytes = int_value(item.get("source_size_bytes"))
+            size_ratio = (
+                actual_output_bytes / source_size_bytes
+                if actual_output_bytes is not None and source_size_bytes > 0
+                else None
+            )
+            observation = build_selected_quality_observation(
+                **observation_common(quality_observation_partial_context),
+                context=None,
+                quality_result=quality_result,
+                retry_measurement_seconds=quality_retry_measurement_seconds,
+                encode_completed_at=failed_at,
+                encode_duration_seconds=round(max(time.monotonic() - start_monotonic, 0.0), 3),
+                actual_output_bytes=actual_output_bytes,
+                size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
+                recorded_at=failed_at,
+                outcome_kind=OUTCOME_FINAL_SIZE_FAILURE,
+                learning_eligible=False,
+                exclusion_reason="final_size_miss",
+            )
+            for note in _persist_quality_observation_best_effort(connection, observation):
+                exc.add_note(note)
         if isinstance(exc, FinalSizeMissError):
             event_type = "encoding_needs_review"
         else:
@@ -588,6 +791,7 @@ def encode_one_item(
                 "error": quality_error_message(exc),
                 "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
                 "target_size_trace": final_trace,
+                "quality_search_run_id": quality_search_run_id,
             },
             exc,
             record_event,
@@ -598,6 +802,16 @@ def encode_one_item(
     staged_stat = staging_path.stat()
     staged_probe = probe_media(staging_path)
     staged_fingerprint = file_fingerprint(staging_path, staged_stat, staged_probe.duration_seconds)
+    quality_observation_context, quality_observation_partial_context = _completed_quality_observation_context(
+        command=ffmpeg_cmd,
+        item=item,
+        quality_result=quality_result,
+        minimum_quality_score=minimum_quality_score,
+        stream_budget=stream_budget,
+        output_width=staged_probe.width,
+        output_height=staged_probe.height,
+        fallback_context=quality_observation_partial_context,
+    )
     now = timestamp()
     encode_duration_seconds = round(max(time.monotonic() - start_monotonic, 0.0), 3)
     source_size_bytes = int(item["source_size_bytes"])
@@ -677,11 +891,26 @@ def encode_one_item(
             "quality_score": quality_result.score,
             "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
             "target_size_trace": final_trace,
+            "quality_search_run_id": quality_search_run_id,
         },
         record_event,
     )
     for event_error in completion_event_errors:
         LOGGER.warning("%s", event_error)
+    quality_result.target_size_trace = final_trace
+    observation = build_selected_quality_observation(
+        **observation_common(quality_observation_partial_context),
+        context=quality_observation_context,
+        quality_result=quality_result,
+        retry_measurement_seconds=quality_retry_measurement_seconds,
+        encode_completed_at=now,
+        encode_duration_seconds=encode_duration_seconds,
+        actual_output_bytes=staged_stat.st_size,
+        size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
+        recorded_at=now,
+    )
+    for observation_error in _persist_quality_observation_best_effort(connection, observation):
+        LOGGER.warning("%s", observation_error)
 
     return encode_result_factory(
         staging_path=staging_path,
@@ -702,6 +931,113 @@ def _persisted_stream_budget(item: Mapping[str, Any]) -> StreamBudgetLedger | No
     ledger = StreamBudgetLedger.from_payload(payload)
     ledger.validate_item(item)
     return ledger
+
+
+def _quality_partial_context(
+        *,
+        video_policy: Mapping[str, Any],
+        item: Mapping[str, Any],
+        preset: int,
+        output_container: str,
+        stream_budget: StreamBudgetLedger | None,
+        metric: str,
+        target: float,
+        minimum_quality_score: float,
+) -> dict[str, Any]:
+    search_objective = "target_size" if stream_budget is not None else "quality"
+    return {
+        "metric": metric,
+        "target": target,
+        "minimum_quality_score": minimum_quality_score,
+        "search_objective": search_objective,
+        "size_target_bytes": stream_budget.total_target_bytes if stream_budget is not None else None,
+        "target_video_bitrate": stream_budget.remaining_video_bitrate_bps if stream_budget is not None else None,
+        "source_codec": _item_text(item, "video_codec"),
+        "output_width": int_value(item.get("width")) or None,
+        "output_height": int_value(item.get("height")) or None,
+        "encoder": str(video_policy.get("encoder") or ""),
+        "pixel_format": str(video_policy.get("pixel_format") or ""),
+        "preset": str(preset),
+        "output_container": output_container.removeprefix("."),
+        "context_source": "planned_runtime_facts",
+    }
+
+
+def _completed_quality_observation_context(
+        *,
+        command: list[str],
+        item: Mapping[str, Any],
+        quality_result: Any,
+        minimum_quality_score: float,
+        stream_budget: StreamBudgetLedger | None,
+        output_width: int | None,
+        output_height: int | None,
+        fallback_context: Mapping[str, Any],
+) -> tuple[QualitySearchContext | None, dict[str, Any]]:
+    normalized_width = int_value(output_width) or None
+    normalized_height = int_value(output_height) or None
+    partial_context = {
+        **fallback_context,
+        "output_width": normalized_width,
+        "output_height": normalized_height,
+        "context_source": "final_encode_command_and_probe",
+    }
+    search_objective = "target_size" if stream_budget is not None else "quality"
+    size_target_bytes = stream_budget.total_target_bytes if stream_budget is not None else None
+    target_video_bitrate = None
+    duration_seconds = float_value(item.get("duration_seconds"))
+    target = object_dict(object_dict(quality_result.target_size_trace).get("target"))
+    target_video_bytes = int_value(target.get("target_video_bytes")) or (
+        stream_budget.remaining_video_bytes if stream_budget is not None else None
+    )
+    if target_video_bytes is not None and target_video_bytes > 0 and duration_seconds > 0:
+        target_video_bitrate = rounded_target_video_bitrate(
+            target_video_bytes=target_video_bytes,
+            source_duration_seconds=duration_seconds,
+        )
+    partial_context["target_video_bitrate"] = target_video_bitrate
+    try:
+        if normalized_width is None or normalized_height is None:
+            return None, partial_context
+        return quality_search_context_from_command(
+            command,
+            metric=str(quality_result.metric),
+            target=float(quality_result.target),
+            minimum_quality_score=minimum_quality_score,
+            search_objective=search_objective,
+            size_target_bytes=size_target_bytes,
+            target_video_bitrate=target_video_bitrate,
+            source_codec=_item_text(item, "video_codec"),
+            output_width=normalized_width,
+            output_height=normalized_height,
+        ), partial_context
+    except ValueError:
+        return None, partial_context
+
+
+def _quality_observation_provenance(
+        *,
+        manifest: Mapping[str, Any],
+        manifest_path: Path,
+        index: int,
+        item: dict[str, Any],
+        source_path: Path,
+        host: dict[str, Any] | None,
+        encode_context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "source": "runtime_search",
+        "manifest_run_id": str(manifest.get("run_id") or "") or None,
+        **_encode_event_details(
+            manifest_path=manifest_path,
+            index=index,
+            item=item,
+            source_path=source_path,
+            host=host,
+            encode_context=encode_context,
+        ),
+    }
 
 
 def _encode_event_details(

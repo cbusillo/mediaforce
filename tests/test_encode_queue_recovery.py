@@ -11079,6 +11079,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             [call.kwargs["metric_target"] for call in run_crf_search_mock.call_args_list],
             [88.0, 88.0],
         )
+        trace = object_dict(result.quality_search_trace)
+        self.assertEqual(trace["attempt_count"], 2)
+        self.assertEqual(trace["search_max_crf"], 63)
+        self.assertEqual(
+            [object_dict(attempt)["status"] for attempt in object_list(trace["attempts"])],
+            ["no_selection", "selected"],
+        )
 
     def test_search_quality_clamps_configured_crf_ceiling_above_encoder_range(self) -> None:
         run_crf_search_mock = Mock(
@@ -13714,6 +13721,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
         metric_refresh_mock = Mock(side_effect=AssertionError("metric refresh should not run synchronously"))
         safe_collect_mock = Mock(return_value=[])
+        observation_backfill_mock = Mock(return_value=Mock(inserted=0))
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
                 "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
         ), patch(
@@ -13722,6 +13730,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 "mediaforce.web.app._start_calibration_queue_worker"
         ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
                 "mediaforce.web.app._safe_collect_host_statuses", safe_collect_mock
+        ), patch(
+                "mediaforce.web.app.backfill_quality_search_observations",
+                observation_backfill_mock,
         ):
             app = web_app.create_app(self.config.paths.config_path)
 
@@ -13734,6 +13745,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         cleanup_mock.assert_not_called()
         metric_refresh_mock.assert_not_called()
         safe_collect_mock.assert_called_once_with(self.config)
+        observation_backfill_mock.assert_called_once()
         self.assertEqual(len(startup_threads), 2)
         threads_by_name = {thread.name: thread for thread in startup_threads}
         cleanup_thread = threads_by_name["transient-cleanup"]
