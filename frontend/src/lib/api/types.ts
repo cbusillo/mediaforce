@@ -1317,6 +1317,60 @@ export interface QualityRiskPayload {
 	pre_test_instruction?: QualityRiskPreTestInstruction | null;
 }
 
+export type QualityMemoryScope = 'item' | 'season' | 'series';
+export type QualityMemoryConfidence = 'none' | 'limited' | 'moderate' | 'high';
+export type QualityMemoryFallbackReason =
+	| 'no_history'
+	| 'stale_evidence'
+	| 'stale_signature'
+	| 'source_fingerprint_unavailable'
+	| 'source_fingerprint_changed'
+	| 'sparse_cohort'
+	| 'high_dispersion'
+	| 'search_target_changed'
+	| 'non_monotonic_trace'
+	| 'conflicting_quality_evidence'
+	| 'shadow_evaluation_error';
+
+export interface FolderQualityMemoryPayload {
+	schema_version: number;
+	algorithm_version: string;
+	observation_id: string | null;
+	source_rel_path: string | null;
+	recorded_at: string | null;
+	evidence_cutoff_at: string | null;
+	measured: {
+		selected_crf: number | null;
+		quality_metric: string | null;
+		quality_score: number | null;
+		quality_target: number | null;
+		quality_floor: number | null;
+		quality_margin: number | null;
+		output_bytes: number | null;
+		size_error_percent: number | null;
+		candidate_count: number;
+		search_duration_seconds: number | null;
+	};
+	recommendation: {
+		first_crf: number;
+		scope: QualityMemoryScope;
+		confidence: QualityMemoryConfidence;
+		sample_count: number;
+		evidence_count: number;
+		minimum_crf: number | null;
+		maximum_crf: number | null;
+		iqr: number | null;
+		median_absolute_deviation: number | null;
+	} | null;
+	comparison: {
+		crf_delta: number | null;
+		within_one_crf: boolean | null;
+	};
+	fallback_reason: QualityMemoryFallbackReason | null;
+	reason: string;
+	production_search_changed: boolean;
+}
+
 export interface FolderPayload {
 	prefix: string;
 	media_scope: MediaScopePayload;
@@ -1333,6 +1387,7 @@ export interface FolderPayload {
 	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];
 	quality_risk?: QualityRiskPayload | null;
+	quality_memory?: FolderQualityMemoryPayload | null;
 	failed_target_size_search?: QualityRiskTargetSizeSearch | null;
 	approved_season_shortcut?: Record<string, unknown> | null;
 	series_context?: { prefix: string; title: string } | null;

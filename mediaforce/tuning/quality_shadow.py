@@ -505,6 +505,121 @@ def build_quality_shadow_payload(
     return payload
 
 
+def select_latest_quality_shadow_observation(
+        rows: Iterable[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    selected: tuple[datetime, str, Mapping[str, Any]] | None = None
+    for row in _resolve_current_rows(rows):
+        if str(row.get("outcome_kind") or "") != OUTCOME_SELECTED:
+            continue
+        if int_value(row.get("learning_eligible")) != 1:
+            continue
+        shadow = _json_object(row.get("shadow_json"))
+        if (
+            int_value(shadow.get("schema_version")) != QUALITY_SHADOW_SCHEMA_VERSION
+            or str(shadow.get("algorithm_version") or "") != QUALITY_SHADOW_ALGORITHM_VERSION
+        ):
+            continue
+        completed_at = _observation_completion_at(row)
+        if completed_at is None:
+            continue
+        observation_id = str(row.get("observation_id") or "")
+        candidate = (completed_at, observation_id, row)
+        if selected is None or candidate[:2] > selected[:2]:
+            selected = candidate
+    return selected[2] if selected is not None else None
+
+
+def quality_shadow_public_view(observation: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    row = object_dict(observation)
+    shadow = _json_object(row.get("shadow_json"))
+    if (
+        not row
+        or int_value(shadow.get("schema_version")) != QUALITY_SHADOW_SCHEMA_VERSION
+        or str(shadow.get("algorithm_version") or "") != QUALITY_SHADOW_ALGORITHM_VERSION
+    ):
+        return None
+    comparison = object_dict(shadow.get("comparison"))
+    recommendation_payload = object_dict(shadow.get("recommendation"))
+    recommendation = None
+    recommendation_scope = str(recommendation_payload.get("scope") or "")
+    recommendation_confidence = str(recommendation_payload.get("confidence") or "none")
+    recommendation_crf = _strict_number(recommendation_payload.get("first_crf"))
+    if (
+        recommendation_crf is not None
+        and recommendation_scope in {"item", "season", "series"}
+        and recommendation_confidence in {"none", "limited", "moderate", "high"}
+    ):
+        evidence_ids = [
+            str(value)
+            for value in object_list(recommendation_payload.get("evidence_observation_ids"))
+            if str(value).strip()
+        ]
+        recommendation = {
+            "first_crf": recommendation_crf,
+            "scope": recommendation_scope,
+            "confidence": recommendation_confidence,
+            "sample_count": max(int_value(recommendation_payload.get("sample_count")), 0),
+            "evidence_count": len(evidence_ids),
+            "minimum_crf": _strict_number(recommendation_payload.get("minimum_crf")),
+            "maximum_crf": _strict_number(recommendation_payload.get("maximum_crf")),
+            "iqr": _strict_number(recommendation_payload.get("iqr")),
+            "median_absolute_deviation": _strict_number(
+                recommendation_payload.get("median_absolute_deviation")
+            ),
+        }
+    selected_score = _strict_number(row.get("selected_score"))
+    context = _json_object(row.get("context_json"))
+    quality_floor = _strict_number(object_dict(context.get("search")).get("minimum_quality_score"))
+    quality_margin = (
+        round(selected_score - quality_floor, 3)
+        if selected_score is not None and quality_floor is not None
+        else None
+    )
+    selected_crf = _strict_number(comparison.get("selected_crf"))
+    if selected_crf is None:
+        selected_crf = _strict_number(row.get("selected_crf"))
+    candidate_count = int_value(comparison.get("candidate_count"))
+    if "candidate_count" not in comparison:
+        candidate_count = int_value(row.get("candidate_count"))
+    search_duration_seconds = _strict_number(comparison.get("search_duration_seconds"))
+    if search_duration_seconds is None:
+        search_duration_seconds = _strict_number(row.get("search_duration_seconds"))
+    fallback_reason = _optional_text(shadow.get("fallback_reason"))
+    return {
+        "schema_version": QUALITY_SHADOW_SCHEMA_VERSION,
+        "algorithm_version": QUALITY_SHADOW_ALGORITHM_VERSION,
+        "observation_id": _optional_text(row.get("observation_id")),
+        "source_rel_path": _optional_text(row.get("source_rel_path")),
+        "recorded_at": _optional_text(row.get("recorded_at")),
+        "evidence_cutoff_at": _optional_text(shadow.get("evidence_cutoff_at")),
+        "measured": {
+            "selected_crf": selected_crf,
+            "quality_metric": _optional_text(row.get("quality_metric")),
+            "quality_score": selected_score,
+            "quality_target": _strict_number(row.get("selected_target")),
+            "quality_floor": quality_floor,
+            "quality_margin": quality_margin,
+            "output_bytes": int_value(row.get("actual_output_bytes")) or None,
+            "size_error_percent": _strict_number(comparison.get("size_error_percent")),
+            "candidate_count": max(candidate_count, 0),
+            "search_duration_seconds": search_duration_seconds,
+        },
+        "recommendation": recommendation,
+        "comparison": {
+            "crf_delta": _strict_number(comparison.get("crf_delta")),
+            "within_one_crf": (
+                comparison.get("within_one_crf")
+                if isinstance(comparison.get("within_one_crf"), bool)
+                else None
+            ),
+        },
+        "fallback_reason": fallback_reason,
+        "reason": str(shadow.get("reason") or "").strip(),
+        "production_search_changed": False,
+    }
+
+
 def load_quality_shadow_metrics(connection: DBClient) -> QualityShadowMetrics:
     return quality_shadow_metrics(load_current_quality_search_observations(connection))
 

@@ -145,6 +145,30 @@ export interface CalibrationEtaSummary {
 	tone: 'quiet' | 'attention';
 }
 
+export type QualityMemoryState =
+	'empty' | 'sparse' | 'stale' | 'conflicting' | 'unavailable' | 'available' | 'high-confidence';
+
+export interface QualityMemoryFact {
+	label: string;
+	value: string;
+	detail: string;
+}
+
+export interface QualityMemoryView {
+	state: QualityMemoryState;
+	tone: HumanSeasonTone;
+	badge: string;
+	title: string;
+	source: string;
+	measured: QualityMemoryFact[];
+	recommendation: QualityMemoryFact;
+	evidence: string;
+	dispersion: string;
+	comparison: string;
+	reason: string;
+	policyCopy: string;
+}
+
 export interface ReviewConcern {
 	tag: QualityRiskTag;
 	label: string;
@@ -510,6 +534,214 @@ export function formatDecimalFileSize(bytes: number | null | undefined): string 
 		}
 	}
 	return `${Math.round(value / 1_000)} KB`;
+}
+
+function formatQualityMemoryNumber(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value)) return '—';
+	return value.toLocaleString('en-US', {
+		minimumFractionDigits: 1,
+		maximumFractionDigits: 1
+	});
+}
+
+function formatSignedQualityMemoryNumber(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value)) return '—';
+	return `${value >= 0 ? '+' : '−'}${formatQualityMemoryNumber(Math.abs(value))}`;
+}
+
+function formatQualityMemoryDuration(value: number | null): string {
+	if (value === null || !Number.isFinite(value) || value <= 0) return '';
+	const totalSeconds = Math.round(value);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	if (minutes && seconds) return `${minutes}m ${seconds}s`;
+	if (minutes) return `${minutes}m`;
+	return `${seconds}s`;
+}
+
+function qualityMemorySizeDetail(value: number | null): string {
+	if (value === null || !Number.isFinite(value)) return 'No saved size target for this run';
+	if (Math.abs(value) < 0.05) return 'On saved size target';
+	const percent = Math.abs(value).toLocaleString('en-US', { maximumFractionDigits: 1 });
+	return `${percent}% ${value > 0 ? 'over' : 'under'} saved size target`;
+}
+
+function qualityMemoryFallbackCopy(reason: string | null, storedReason: string): string {
+	const copy: Record<string, string> = {
+		no_history: 'No compatible prior runs were available for this search.',
+		stale_evidence: 'Matching runs are older than the quality-memory age limit.',
+		stale_signature: 'The recorded search signature or saved policy no longer matches.',
+		source_fingerprint_unavailable: 'The source identity could not be verified for item memory.',
+		source_fingerprint_changed: 'The source changed, so item memory was invalidated.',
+		sparse_cohort: 'Compatible runs exist, but the cohort is still too small.',
+		high_dispersion: 'Prior chosen CRFs vary too much for a stable recommendation.',
+		search_target_changed: 'Prior searches changed their quality target and were excluded.',
+		non_monotonic_trace: 'Prior measurements were non-monotonic and were excluded.',
+		conflicting_quality_evidence: 'Prior runs disagree about the quality floor.',
+		shadow_evaluation_error: 'Memory evaluation failed; production search continued normally.'
+	};
+	return copy[reason ?? ''] ?? (storedReason || 'No shadow recommendation was available.');
+}
+
+function qualityMemoryState(reason: string | null, confidence: string | null): QualityMemoryState {
+	if (confidence === 'high') return 'high-confidence';
+	if (confidence) return 'available';
+	if (reason === 'no_history' || reason === 'sparse_cohort') return 'sparse';
+	if (reason === 'shadow_evaluation_error') return 'unavailable';
+	if (
+		reason === 'stale_evidence' ||
+		reason === 'stale_signature' ||
+		reason === 'source_fingerprint_unavailable' ||
+		reason === 'source_fingerprint_changed'
+	) {
+		return 'stale';
+	}
+	return 'conflicting';
+}
+
+export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
+	const memory = folder.quality_memory;
+	const policyCopy =
+		'Quality floors and saved policy remain unchanged. Memory is observation-only; production search ran normally.';
+	if (!memory) {
+		return {
+			state: 'empty',
+			tone: 'quiet',
+			badge: 'No memory yet',
+			title: 'No recorded runs yet',
+			source: '',
+			measured: [],
+			recommendation: {
+				label: 'Shadow recommendation',
+				value: 'Not available',
+				detail: 'A completed quality search will create the first observation.'
+			},
+			evidence: '0 observations',
+			dispersion: '—',
+			comparison: '—',
+			reason:
+				'No completed quality search has been recorded for this folder yet. Quality floors and saved policy remain unchanged.',
+			policyCopy
+		};
+	}
+
+	const recommendation = memory.recommendation;
+	const state = qualityMemoryState(memory.fallback_reason, recommendation?.confidence ?? null);
+	const withinOne = memory.comparison.within_one_crf;
+	const tone: HumanSeasonTone = recommendation
+		? withinOne === false
+			? 'attention'
+			: state === 'high-confidence'
+				? 'success'
+				: 'ready'
+		: state === 'sparse'
+			? 'quiet'
+			: 'attention';
+	const badge = recommendation
+		? state === 'high-confidence'
+			? withinOne === false
+				? 'High confidence · differed'
+				: 'High confidence'
+			: withinOne === false
+				? 'Memory differed'
+				: withinOne
+					? 'Memory agreed'
+					: 'Recommendation recorded'
+		: state === 'sparse'
+			? 'Sparse memory'
+			: state === 'stale'
+				? 'Memory invalidated'
+				: state === 'unavailable'
+					? 'Memory unavailable'
+					: 'Evidence conflict';
+	const measured = memory.measured;
+	const metric = text(measured.quality_metric).toUpperCase() || 'Quality';
+	const qualityDetail = [
+		measured.quality_target === null
+			? ''
+			: `target ${formatQualityMemoryNumber(measured.quality_target)}`,
+		measured.quality_floor === null
+			? ''
+			: `floor ${formatQualityMemoryNumber(measured.quality_floor)}`,
+		measured.quality_margin === null
+			? ''
+			: `margin ${formatSignedQualityMemoryNumber(measured.quality_margin)}`
+	]
+		.filter(Boolean)
+		.join(' · ');
+	const searchDetail = [
+		measured.candidate_count > 0
+			? `${measured.candidate_count} candidate${measured.candidate_count === 1 ? '' : 's'}`
+			: '',
+		formatQualityMemoryDuration(measured.search_duration_seconds)
+	]
+		.filter(Boolean)
+		.join(' · ');
+	const evidence = recommendation
+		? `${recommendation.sample_count.toLocaleString('en-US')} observation${recommendation.sample_count === 1 ? '' : 's'} · ${recommendation.scope} · ${recommendation.confidence} confidence`
+		: 'No qualifying evidence cohort';
+	const dispersion = recommendation
+		? [
+				recommendation.minimum_crf === null || recommendation.maximum_crf === null
+					? ''
+					: `CRF ${formatQualityMemoryNumber(recommendation.minimum_crf)}–${formatQualityMemoryNumber(recommendation.maximum_crf)}`,
+				recommendation.iqr === null ? '' : `IQR ${formatQualityMemoryNumber(recommendation.iqr)}`,
+				recommendation.median_absolute_deviation === null
+					? ''
+					: `MAD ${formatQualityMemoryNumber(recommendation.median_absolute_deviation)}`
+			]
+				.filter(Boolean)
+				.join(' · ') || 'Dispersion not recorded'
+		: '—';
+	const comparison = recommendation
+		? memory.comparison.crf_delta === null
+			? 'Production comparison unavailable'
+			: `${withinOne ? 'Within 1 CRF' : 'Outside 1 CRF'} · Δ ${formatSignedQualityMemoryNumber(memory.comparison.crf_delta)}`
+		: 'No recommendation to compare';
+	return {
+		state,
+		tone,
+		badge,
+		title: recommendation
+			? 'Measured run and shadow recommendation'
+			: 'Measured run; memory held back',
+		source: memory.source_rel_path ? episodeLabel(memory.source_rel_path) : '',
+		measured: [
+			{
+				label: 'Chosen CRF',
+				value: formatQualityMemoryNumber(measured.selected_crf),
+				detail: searchDetail || 'Production selection'
+			},
+			{
+				label: `Measured ${metric}`,
+				value: formatQualityMemoryNumber(measured.quality_score),
+				detail: qualityDetail || 'No quality target details recorded'
+			},
+			{
+				label: 'Final size',
+				value: formatDecimalFileSize(measured.output_bytes),
+				detail: qualityMemorySizeDetail(measured.size_error_percent)
+			}
+		],
+		recommendation: recommendation
+			? {
+					label: 'Shadow first CRF',
+					value: formatQualityMemoryNumber(recommendation.first_crf),
+					detail: evidence
+				}
+			: {
+					label: 'Shadow recommendation',
+					value: 'Held back',
+					detail: 'Production search still ran normally.'
+				},
+		evidence,
+		dispersion,
+		comparison,
+		reason: recommendation
+			? text(memory.reason) || 'The recommendation was recorded for comparison only.'
+			: qualityMemoryFallbackCopy(memory.fallback_reason, memory.reason),
+		policyCopy
+	};
 }
 
 export function calibrationJobTargetContract(

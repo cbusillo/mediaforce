@@ -34,7 +34,14 @@ from mediaforce.advisor import TuningPolicyResponse
 from mediaforce.advising.routing import advisor_routing_from_config
 from mediaforce.tuning.calibration_jobs import load_active_job, load_job, \
     list_queue_summary, update_job_telemetry
-from mediaforce.tuning.quality_observations import backfill_quality_search_observations
+from mediaforce.tuning.quality_observations import (
+    backfill_quality_search_observations,
+    load_current_quality_search_observations,
+)
+from mediaforce.tuning.quality_shadow import (
+    quality_shadow_public_view,
+    select_latest_quality_shadow_observation,
+)
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
     update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
@@ -1202,6 +1209,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             latest_failed_sample_job_payload = object_dict(
                 _load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
             ) or None
+            quality_memory = quality_shadow_public_view(
+                select_latest_quality_shadow_observation(
+                    load_current_quality_search_observations(connection, scope=media_scope)
+                )
+            )
         policy = _folder_display_policy(
             sample_item=sample_item,
             calibration=calibration,
@@ -1296,6 +1308,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
                 "quality_risk": quality_risk_public_view(quality_risk_contract),
+                "quality_memory": quality_memory,
                 "failed_target_size_search": target_size_search_public_view(latest_failed_target_trace),
                 "pending_proposal": pending_proposal,
                 "recent_tuning_sessions": recent_sessions,

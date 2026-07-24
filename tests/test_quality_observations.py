@@ -18,6 +18,7 @@ from mediaforce.core.db_tables import (
     staged_artifacts,
 )
 from mediaforce.encoding.quality import QualitySearchResult
+from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.tuning.quality_memory import QualitySearchContext
 from mediaforce.tuning.quality_observations import (
     AUTHORITY_CORRECTION,
@@ -183,6 +184,31 @@ class QualityObservationTests(unittest.TestCase):
         self.assertEqual(current[0]["selected_crf"], 31.0)
         self.assertEqual(current_before_correction[0]["observation_id"], initial.observation_id)
 
+    def test_current_observations_can_be_limited_to_a_folder_scope(self) -> None:
+        in_scope = self._selected_observation(
+            search_run_id="qsr1_in_scope",
+            library_item_id=1,
+            source_rel_path="tv/Example/Season 01/Episode 01.mkv",
+        )
+        out_of_scope = self._selected_observation(
+            search_run_id="qsr1_out_of_scope",
+            library_item_id=2,
+            source_rel_path="tv/Other/Season 01/Episode 01.mkv",
+        )
+        append_quality_search_observation(self.connection, in_scope)
+        append_quality_search_observation(self.connection, out_of_scope)
+
+        current = load_current_quality_search_observations(
+            self.connection,
+            scope=media_scope_from_prefix(
+                "tv/Example/Season 01",
+                match="descendants",
+                library_types={"tv": "tv"},
+            ),
+        )
+
+        self.assertEqual([row["search_run_id"] for row in current], ["qsr1_in_scope"])
+
     def test_database_rejects_update_and_delete(self) -> None:
         observation = self._selected_observation()
         append_quality_search_observation(self.connection, observation)
@@ -284,6 +310,9 @@ class QualityObservationTests(unittest.TestCase):
             self,
             *,
             result: QualitySearchResult | None = None,
+            search_run_id: str = "qsr1_success",
+            library_item_id: int = 1,
+            source_rel_path: str = "tv/Example/Season 01/Episode 01.mkv",
             authority: str = "runtime_native",
             revision: int = 0,
             supersedes_observation_id: str | None = None,
@@ -292,9 +321,9 @@ class QualityObservationTests(unittest.TestCase):
             recorded_at: str = "2026-07-24T17:00:00+00:00",
     ) -> QualitySearchObservation:
         return build_selected_quality_observation(
-            search_run_id="qsr1_success",
-            library_item_id=1,
-            source_rel_path="tv/Example/Season 01/Episode 01.mkv",
+            search_run_id=search_run_id,
+            library_item_id=library_item_id,
+            source_rel_path=source_rel_path,
             source_fingerprint="source-fingerprint",
             context=self._context(),
             policy_hash="policy-hash",

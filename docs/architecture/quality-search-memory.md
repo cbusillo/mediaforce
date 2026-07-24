@@ -153,6 +153,23 @@ real hint probe behind the unchanged fallback. The safety counters describe
 production outcomes during the shadow window, not an unexecuted hint's quality
 or size.
 
+## Folder Studio Projection
+
+Folder Studio reads the newest current, learning-eligible selected observation
+inside the active media scope and projects its immutable shadow record. The
+surface keeps the production result and the counterfactual recommendation
+separate: chosen CRF, measured quality, final size, candidate count, and search
+time describe what actually ran; the shadow first CRF, evidence scope, sample
+count, confidence, dispersion, and comparison describe what memory would have
+tried first.
+
+When no recommendation was safe, Folder Studio shows the stored typed fallback
+as sparse, stale, or conflicting evidence instead of recomputing guidance in the
+web layer. A folder with no shadow-bearing observation gets a compact empty
+state. Every state says that the evidence is observation-only: quality floors,
+saved policy, production search order, bounds, and fallback behavior remain
+unchanged.
+
 ## Cohorts And Confidence
 
 Compatible outcomes are evaluated in this order:
@@ -181,5 +198,5 @@ aggregate metric evidence counts and never produces CRF guidance.
 - historical backfill can reconstruct only accepted successes and cannot recover
   unavailable policy hashes, search wall time, or ambiguous historical failures.
 
-Operator explainability and active warm starts remain separate later phases.
-Passive evidence must prove useful before any encode behavior changes.
+Active warm starts remain a separate later phase. Passive evidence must prove
+useful before any encode behavior changes.

@@ -36,6 +36,7 @@
 		overlappingCalibrationActivity,
 		plainFailureMessage,
 		predictedEpisodeSize,
+		qualityMemoryView,
 		resolvedTargetSummary,
 		reviewFeedbackIntent,
 		reviewFeedbackRequest,
@@ -232,6 +233,7 @@
 		['over_target', 'under_target', 'missing_prediction'].includes(sizeTarget.status)
 	);
 	const riskSummary = $derived(compareRiskSummary(folder));
+	const qualityMemory = $derived(qualityMemoryView(folder));
 	const approvalBlocked = $derived(Boolean(targetConstraint || riskSummary?.blocked));
 	const hasReviewFeedback = $derived(
 		selectedConcerns.length > 0 || reviewFeedback.trim().length > 0
@@ -1998,6 +2000,58 @@
 				</div>
 			</div>
 		{/if}
+
+		<section
+			class="quality-memory"
+			class:quality-memory--empty={qualityMemory.state === 'empty'}
+			class:quality-memory--attention={qualityMemory.tone === 'attention'}
+			aria-labelledby="quality-memory-title"
+		>
+			<header class="quality-memory__header">
+				<div>
+					<span>Quality memory</span>
+					<h2 id="quality-memory-title">{qualityMemory.title}</h2>
+					{#if qualityMemory.source}<small>{qualityMemory.source}</small>{/if}
+				</div>
+				<strong class="quality-memory__badge quality-memory__badge--{qualityMemory.tone}"
+					>{qualityMemory.badge}</strong
+				>
+			</header>
+
+			{#if qualityMemory.state !== 'empty'}
+				<div class="quality-memory__comparison">
+					<div class="quality-memory__measured">
+						<span>Measured production run</span>
+						<div class="quality-memory__facts">
+							{#each qualityMemory.measured as fact (fact.label)}
+								<div>
+									<small>{fact.label}</small>
+									<strong>{fact.value}</strong>
+									<p>{fact.detail}</p>
+								</div>
+							{/each}
+						</div>
+					</div>
+
+					<div class="quality-memory__recommendation">
+						<span>{qualityMemory.recommendation.label}</span>
+						<strong>{qualityMemory.recommendation.value}</strong>
+						<p>{qualityMemory.recommendation.detail}</p>
+						<dl>
+							<dt>Comparison</dt>
+							<dd>{qualityMemory.comparison}</dd>
+							<dt>Spread</dt>
+							<dd>{qualityMemory.dispersion}</dd>
+						</dl>
+					</div>
+				</div>
+			{/if}
+
+			<p class="quality-memory__reason">{qualityMemory.reason}</p>
+			{#if qualityMemory.state !== 'empty'}
+				<p class="quality-memory__policy">{qualityMemory.policyCopy}</p>
+			{/if}
+		</section>
 
 		<details class="details-drawer">
 			<summary>
@@ -4624,6 +4678,158 @@
 		font-size: 12px;
 	}
 
+	.quality-memory {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-left: 3px solid var(--mf-ready-fg);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 13px;
+		margin: 18px 0 0;
+		padding: 16px;
+	}
+
+	.quality-memory--empty {
+		border-left-color: var(--mf-idle-fg);
+		gap: 8px;
+	}
+
+	.quality-memory--attention {
+		border-left-color: var(--mf-wait-fg);
+	}
+
+	.quality-memory__header {
+		align-items: start;
+		display: flex;
+		gap: 14px;
+		justify-content: space-between;
+	}
+
+	.quality-memory__header > div {
+		display: grid;
+		gap: 3px;
+	}
+
+	.quality-memory__header span,
+	.quality-memory__measured > span,
+	.quality-memory__recommendation > span,
+	.quality-memory__facts small,
+	.quality-memory__recommendation dt {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.quality-memory__header h2 {
+		font-size: 15px;
+		margin: 0;
+	}
+
+	.quality-memory__header small {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+	}
+
+	.quality-memory__badge {
+		border-radius: 999px;
+		font-size: 11px;
+		font-weight: 700;
+		padding: 6px 9px;
+		white-space: nowrap;
+	}
+
+	.quality-memory__badge--quiet {
+		background: var(--mf-idle-bg);
+		color: var(--mf-idle-fg);
+	}
+
+	.quality-memory__badge--ready,
+	.quality-memory__badge--success {
+		background: var(--mf-ready-bg);
+		color: var(--mf-ready-fg);
+	}
+
+	.quality-memory__badge--attention {
+		background: var(--mf-wait-bg);
+		color: var(--mf-wait-fg);
+	}
+
+	.quality-memory__comparison {
+		border: 1px solid var(--mf-line-muted);
+		display: grid;
+		grid-template-columns: minmax(0, 1.45fr) minmax(250px, 0.75fr);
+	}
+
+	.quality-memory__measured,
+	.quality-memory__recommendation {
+		display: grid;
+		gap: 10px;
+		min-width: 0;
+		padding: 13px;
+	}
+
+	.quality-memory__recommendation {
+		background: var(--mf-bg-panel-2);
+		border-left: 1px solid var(--mf-line-muted);
+	}
+
+	.quality-memory__facts {
+		display: grid;
+		gap: 12px;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.quality-memory__facts div {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.quality-memory__facts strong,
+	.quality-memory__recommendation > strong,
+	.quality-memory__recommendation dd {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-mono), monospace;
+	}
+
+	.quality-memory__facts p,
+	.quality-memory__recommendation p,
+	.quality-memory__reason,
+	.quality-memory__policy {
+		font-size: 12px;
+		margin: 0;
+	}
+
+	.quality-memory__recommendation > strong {
+		font-size: 22px;
+	}
+
+	.quality-memory__recommendation dl {
+		display: grid;
+		gap: 4px 10px;
+		grid-template-columns: max-content minmax(0, 1fr);
+		margin: 0;
+	}
+
+	.quality-memory__recommendation dd {
+		font-size: 11px;
+		margin: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.quality-memory__reason {
+		border-left: 2px solid var(--mf-line-strong);
+		color: var(--mf-fg-secondary);
+		padding-left: 10px;
+	}
+
+	.quality-memory__policy {
+		color: var(--mf-fg-tertiary);
+		font-weight: 600;
+	}
+
 	.details-drawer,
 	.cinematic .details-drawer {
 		background: transparent;
@@ -5160,6 +5366,21 @@
 		.older-season-option {
 			align-items: stretch;
 			flex-direction: column;
+		}
+
+		.quality-memory__header {
+			align-items: flex-start;
+			flex-direction: column;
+		}
+
+		.quality-memory__comparison,
+		.quality-memory__facts {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.quality-memory__recommendation {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-muted);
 		}
 
 		.active-facts div,
