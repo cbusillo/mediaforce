@@ -2,13 +2,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from mediaforce.encoding.quality import QualitySearchError, QualitySearchResult, SampleEncodeResult
+from mediaforce.encoding.quality import (
+    QualitySearchError,
+    QualitySearchResult,
+    SampleEncodeResult,
+    parse_quality_search_measurements,
+)
 from mediaforce.encoding.video_filters import build_video_filter
 from mediaforce.core.type_defs import object_dict
 from mediaforce.tuning.target_size_search import build_target_size_transform_plan, search_target_size
 from mediaforce.tuning.stream_budget import StreamBudgetLedger
 
 MAX_CRF_SEARCH_CEILING = 63
+QUALITY_SEARCH_TRACE_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +67,7 @@ def search_quality(
     )
     attempted_target = context.metric_target
     last_error: Exception | None = None
+    attempts: list[dict[str, Any]] = []
     configured_max_crf = int(video_policy["max_crf"])
     target_search_max_crf = int(video_policy.get("target_search_max_crf", configured_max_crf))
     max_encoded_percent = float(video_policy["max_encoded_percent"])
@@ -94,7 +101,7 @@ def search_quality(
     while attempted_target >= context.min_metric_score:
         for max_crf in _max_crf_attempts(configured_max_crf):
             try:
-                return run_crf_search(
+                result = run_crf_search(
                     source_path,
                     source_codec=source_codec,
                     preferred_metric=context.metric_name,
@@ -113,14 +120,48 @@ def search_quality(
                     host=context.host,
                     quality_temp_dir=quality_temp_dir,
                 )
+                attempts.append(
+                    _quality_search_attempt(
+                        attempt=len(attempts) + 1,
+                        metric_target=attempted_target,
+                        max_crf=max_crf,
+                        status="selected",
+                        output=result.stdout,
+                    )
+                )
+                result.quality_search_trace = _quality_search_trace(
+                    status="selected",
+                    context=context,
+                    video_policy=video_policy,
+                    configured_max_crf=configured_max_crf,
+                    attempts=attempts,
+                )
+                return result
             except QualitySearchError as exc:
                 last_error = exc
+                attempts.append(
+                    _quality_search_attempt(
+                        attempt=len(attempts) + 1,
+                        metric_target=attempted_target,
+                        max_crf=max_crf,
+                        status="no_selection",
+                        output=str(exc),
+                    )
+                )
                 if max_crf < MAX_CRF_SEARCH_CEILING and _failed_to_find_suitable_crf(exc):
                     continue
                 break
         attempted_target = round(attempted_target - context.relax_step, 3)
 
     if last_error is not None:
+        if isinstance(last_error, QualitySearchError):
+            last_error.quality_search_trace = _quality_search_trace(
+                status="deterministic_search_failure",
+                context=context,
+                video_policy=video_policy,
+                configured_max_crf=configured_max_crf,
+                attempts=attempts,
+            )
         raise last_error
     raise RuntimeError("Quality search did not run")
 
@@ -185,6 +226,63 @@ def _max_crf_attempts(configured_max_crf: int) -> list[int]:
 
 def _failed_to_find_suitable_crf(exc: QualitySearchError) -> bool:
     return "failed to find a suitable crf" in str(exc).lower()
+
+
+def _quality_search_attempt(
+        *,
+        attempt: int,
+        metric_target: float,
+        max_crf: int,
+        status: str,
+        output: str,
+) -> dict[str, Any]:
+    candidates = [
+        {
+            "crf": measurement.crf,
+            "metric": measurement.metric,
+            "metric_score": measurement.score,
+            "predicted_encode_percent": measurement.predicted_encode_percent,
+            "predicted_encode_size_bytes": measurement.predicted_encode_size_bytes,
+        }
+        for measurement in parse_quality_search_measurements(output)
+    ]
+    return {
+        "attempt": attempt,
+        "metric_target": metric_target,
+        "max_crf": max_crf,
+        "status": status,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+
+
+def _quality_search_trace(
+        *,
+        status: str,
+        context: _QualityContext,
+        video_policy: dict[str, Any],
+        configured_max_crf: int,
+        attempts: list[dict[str, Any]],
+) -> dict[str, object]:
+    return {
+        "schema_version": QUALITY_SEARCH_TRACE_SCHEMA_VERSION,
+        "objective": "quality",
+        "status": status,
+        "metric": context.metric_name.upper(),
+        "initial_target": context.metric_target,
+        "minimum_quality_score": context.min_metric_score,
+        "target_relax_step": context.relax_step,
+        "configured_min_crf": int(video_policy["min_crf"]),
+        "configured_max_crf": configured_max_crf,
+        "search_max_crf": max(
+            (int(attempt["max_crf"]) for attempt in attempts),
+            default=configured_max_crf,
+        ),
+        "max_encoded_percent": float(video_policy["max_encoded_percent"]),
+        "attempt_count": len(attempts),
+        "candidate_count": sum(int(attempt["candidate_count"]) for attempt in attempts),
+        "attempts": attempts,
+    }
 
 
 def _quality_context(

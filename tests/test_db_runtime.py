@@ -27,7 +27,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 
-CURRENT_DB_REVISION = "20260723_0016"
+CURRENT_DB_REVISION = "20260724_0017"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):

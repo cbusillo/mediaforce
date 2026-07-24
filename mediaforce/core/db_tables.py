@@ -1,4 +1,5 @@
 from sqlalchemy import Column
+from sqlalchemy import CheckConstraint
 from sqlalchemy import ForeignKey
 from sqlalchemy import Index
 from sqlalchemy import Integer
@@ -339,6 +340,107 @@ learning_artifacts = Table(
     Column("updated_at", Text, nullable=False),
 )
 Index("idx_learning_artifacts_prefix_updated", learning_artifacts.c.prefix, learning_artifacts.c.updated_at.desc())
+
+quality_search_observations = Table(
+    "quality_search_observations",
+    metadata,
+    Column("observation_id", Text, primary_key=True),
+    Column("search_run_id", Text, nullable=False),
+    Column("revision", Integer, nullable=False, server_default="0"),
+    Column(
+        "supersedes_observation_id",
+        Text,
+        ForeignKey("quality_search_observations.observation_id", ondelete="RESTRICT"),
+    ),
+    Column("supersession_reason", Text),
+    Column("schema_version", Integer, nullable=False, server_default="1"),
+    Column("library_item_id", Integer, nullable=False),
+    Column("prefix", Text, nullable=False),
+    Column("source_rel_path", Text, nullable=False),
+    Column("source_fingerprint", Text),
+    Column("search_signature_id", Text),
+    Column("policy_hash", Text),
+    Column("search_objective", Text, nullable=False),
+    Column("quality_metric", Text, nullable=False),
+    Column("outcome_kind", Text, nullable=False),
+    Column("authority", Text, nullable=False),
+    Column("learning_eligible", Integer, nullable=False),
+    Column("exclusion_reason", Text),
+    Column("selected_crf", REAL),
+    Column("selected_target", REAL),
+    Column("selected_score", REAL),
+    Column("actual_output_bytes", Integer),
+    Column("candidate_count", Integer, nullable=False, server_default="0"),
+    Column("search_duration_seconds", REAL),
+    Column("context_json", Text, nullable=False),
+    Column("bounds_json", Text, nullable=False),
+    Column("candidate_trace_json", Text, nullable=False),
+    Column("outcome_json", Text, nullable=False),
+    Column("timing_json", Text, nullable=False),
+    Column("provenance_json", Text, nullable=False),
+    Column("payload_sha256", Text, nullable=False),
+    Column("recorded_at", Text, nullable=False),
+    CheckConstraint("revision >= 0", name="ck_quality_search_observations_revision"),
+    CheckConstraint(
+        "(supersedes_observation_id IS NULL AND revision = 0 AND supersession_reason IS NULL) "
+        "OR (supersedes_observation_id IS NOT NULL AND revision > 0 AND supersession_reason IS NOT NULL)",
+        name="ck_quality_search_observations_revision_chain",
+    ),
+    CheckConstraint(
+        "authority IN ('staged_backfill', 'runtime_native', 'correction')",
+        name="ck_quality_search_observations_authority",
+    ),
+    CheckConstraint(
+        "outcome_kind IN ('selected', 'deterministic_search_failure', 'final_size_failure')",
+        name="ck_quality_search_observations_outcome",
+    ),
+    CheckConstraint(
+        "learning_eligible IN (0, 1)",
+        name="ck_quality_search_observations_eligible",
+    ),
+    CheckConstraint(
+        "(learning_eligible = 1 AND exclusion_reason IS NULL AND search_signature_id IS NOT NULL) "
+        "OR (learning_eligible = 0 AND exclusion_reason IS NOT NULL)",
+        name="ck_quality_search_observations_exclusion",
+    ),
+    CheckConstraint(
+        "selected_crf IS NULL OR (selected_crf >= 0 AND selected_crf <= 63)",
+        name="ck_quality_search_observations_crf",
+    ),
+    CheckConstraint(
+        "outcome_kind != 'selected' OR "
+        "(selected_crf IS NOT NULL AND selected_target IS NOT NULL AND selected_score IS NOT NULL)",
+        name="ck_quality_search_observations_selected",
+    ),
+    CheckConstraint(
+        "candidate_count >= 0 AND (search_duration_seconds IS NULL OR search_duration_seconds >= 0)",
+        name="ck_quality_search_observations_counts",
+    ),
+)
+Index(
+    "uq_quality_search_observations_run_authority_revision",
+    quality_search_observations.c.search_run_id,
+    quality_search_observations.c.authority,
+    quality_search_observations.c.revision,
+    unique=True,
+)
+Index(
+    "uq_quality_search_observations_supersedes",
+    quality_search_observations.c.supersedes_observation_id,
+    unique=True,
+    sqlite_where=quality_search_observations.c.supersedes_observation_id.is_not(None),
+)
+Index(
+    "idx_quality_search_observations_lookup",
+    quality_search_observations.c.search_signature_id,
+    quality_search_observations.c.prefix,
+    quality_search_observations.c.recorded_at.desc(),
+)
+Index(
+    "idx_quality_search_observations_item_time",
+    quality_search_observations.c.library_item_id,
+    quality_search_observations.c.recorded_at.desc(),
+)
 
 staged_artifacts = Table(
     "staged_artifacts",

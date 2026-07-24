@@ -79,6 +79,42 @@ Paths, hosts, timestamps, chosen CRF, measured score, output size, and
 MediaForce metadata are not signature inputs. They describe one outcome rather
 than the assumptions that made outcomes comparable.
 
+## Append-Only Observations
+
+Structured quality-search observations are stored in
+`quality_search_observations`. Each logical search run records one terminal
+snapshot after a staged encode succeeds or after a deterministic search-domain
+failure can be reconstructed. Target relaxation, CRF-bound expansion,
+target-size candidates, and the bounded final-size retry remain part of that
+single run rather than becoming separate observations.
+
+The log stores typed identity, signature, selected-result, timing, and output
+fields alongside bounded JSON for context, bounds, candidates, outcome, and
+provenance. Candidate JSON contains parsed measurements only; raw tool stdout is
+never persisted. Schedule interruption, cancellation, resource contention,
+stale leases, host or transport failures, storage failures, malformed output,
+and unrelated encode failures do not create observations.
+
+Runtime-native observations have higher authority than reconstructed staged
+history. Startup maintenance backfills only outcomes that already satisfy the
+strict accepted-history rules above, marks them `staged_backfill`, leaves
+unavailable policy and search-timing facts explicitly absent, and is safe to
+rerun. Schema migration remains independent of application extraction code; a
+failed backfill is logged and retried at the next startup. A later native row
+for the same run wins during current-revision resolution without mutating the
+historical row.
+
+The table is database-enforced append-only: updates and deletes are rejected.
+Corrections append a complete successor with the same run identity, the next
+revision, a predecessor pointer, and a machine-readable reason. Library-item
+deletion does not cascade into this audit history; item identity and path are
+copied into every observation.
+
+This phase remains passive. `load_quality_memory` continues to use the existing
+accepted staged-outcome path, and observations do not alter search ordering,
+bounds, targets, policy, or fallback behavior until shadow evaluation is
+completed in a later phase.
+
 ## Cohorts And Confidence
 
 Compatible outcomes are evaluated in this order:
@@ -100,14 +136,13 @@ aggregate metric evidence counts and never produces CRF guidance.
 
 ## Current Limitations
 
-- `staged_artifacts` stores one latest row per item, not longitudinal search
-  history. Until append-only observations exist, exact-item evidence can report
-  only a sparse diagnostic and cannot meet the four-sample hint threshold.
+- `load_quality_memory` still reads the latest accepted staged artifact per item;
+  the append-only log is not yet an active guidance source.
 - full validation replaces the encode-time validation payload, so older staged
   rows may not retain target-size search traces.
-- command-derived signatures are lower-authority historical evidence until
-  structured search observations exist.
+- historical backfill can reconstruct only accepted successes and cannot recover
+  unavailable policy hashes, search wall time, or ambiguous historical failures.
 
-Append-only structured observations, shadow recommendations, operator
-explainability, and active warm starts are separate later phases. The read-only
-foundation must prove useful before any encode behavior changes.
+Shadow recommendations, operator explainability, and active warm starts remain
+separate later phases. Passive evidence must prove useful before any encode
+behavior changes.
