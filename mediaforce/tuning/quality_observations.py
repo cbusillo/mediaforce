@@ -70,6 +70,7 @@ class QualitySearchObservation:
     outcome_json: str
     timing_json: str
     provenance_json: str
+    shadow_json: str | None
     payload_sha256: str
     recorded_at: str
 
@@ -107,6 +108,7 @@ def build_selected_quality_observation(
         size_ratio: float | None,
         provenance: Mapping[str, Any],
         recorded_at: str,
+        shadow_payload: Mapping[str, Any] | None = None,
         authority: str = AUTHORITY_RUNTIME_NATIVE,
         outcome_kind: str = OUTCOME_SELECTED,
         learning_eligible: bool | None = None,
@@ -191,6 +193,7 @@ def build_selected_quality_observation(
         outcome=outcome,
         timing=timing,
         provenance=provenance,
+        shadow_payload=shadow_payload,
         recorded_at=recorded_at,
     )
 
@@ -218,6 +221,7 @@ def build_failed_quality_observation(
         search_duration_seconds: float | None,
         provenance: Mapping[str, Any],
         recorded_at: str,
+        shadow_payload: Mapping[str, Any] | None = None,
         outcome_kind: str = OUTCOME_DETERMINISTIC_FAILURE,
 ) -> QualitySearchObservation:
     trace, candidate_count = _failed_candidate_trace(
@@ -282,6 +286,7 @@ def build_failed_quality_observation(
         outcome=outcome,
         timing=timing,
         provenance=provenance,
+        shadow_payload=shadow_payload,
         recorded_at=recorded_at,
     )
 
@@ -317,19 +322,26 @@ def append_quality_search_observation(
     )
 
 
-def load_current_quality_search_observations(connection: DBClient) -> list[Mapping[str, Any]]:
+def load_current_quality_search_observations(
+        connection: DBClient,
+        *,
+        recorded_before: str | None = None,
+) -> list[Mapping[str, Any]]:
     authority_rank = case(
         (quality_search_observations.c.authority == AUTHORITY_CORRECTION, 30),
         (quality_search_observations.c.authority == AUTHORITY_RUNTIME_NATIVE, 20),
         else_=10,
     )
-    ranked = select(
+    ranked_query = select(
         *quality_search_observations.c,
         func.row_number().over(
             partition_by=quality_search_observations.c.search_run_id,
             order_by=(authority_rank.desc(), quality_search_observations.c.revision.desc()),
         ).label("observation_rank"),
-    ).subquery()
+    )
+    if recorded_before is not None:
+        ranked_query = ranked_query.where(quality_search_observations.c.recorded_at < recorded_before)
+    ranked = ranked_query.subquery()
     return list(
         connection.execute(
             select(ranked).where(ranked.c.observation_rank == 1)
@@ -427,6 +439,7 @@ def _build_observation(
         outcome: Mapping[str, Any],
         timing: Mapping[str, Any],
         provenance: Mapping[str, Any],
+        shadow_payload: Mapping[str, Any] | None,
         recorded_at: str,
 ) -> QualitySearchObservation:
     normalized_path = str(PurePosixPath(source_rel_path.strip().strip("/")))
@@ -475,6 +488,8 @@ def _build_observation(
         "timing": dict(timing),
         "provenance": dict(provenance),
     }
+    if shadow_payload is not None:
+        semantic_payload["shadow"] = dict(shadow_payload)
     payload_sha256 = stable_json_hash(semantic_payload)
     return QualitySearchObservation(
         observation_id=f"qso1_{payload_sha256[:32]}",
@@ -507,6 +522,7 @@ def _build_observation(
         outcome_json=_json(outcome),
         timing_json=_json(timing),
         provenance_json=_json(provenance),
+        shadow_json=_json(shadow_payload) if shadow_payload is not None else None,
         payload_sha256=payload_sha256,
         recorded_at=recorded_at,
     )

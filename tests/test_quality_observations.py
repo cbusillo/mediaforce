@@ -159,7 +159,7 @@ class QualityObservationTests(unittest.TestCase):
         self.assertNotIn("raw_stdout", stored_trace["final_output_attempts"][0])
 
     def test_correction_appends_and_becomes_current(self) -> None:
-        initial = self._selected_observation()
+        initial = self._selected_observation(recorded_at="2026-07-24T16:00:00+00:00")
         append_quality_search_observation(self.connection, initial)
         corrected = self._selected_observation(
             result=QualitySearchResult(31.0, "VMAF", 85.0, 87.0, ""),
@@ -167,15 +167,21 @@ class QualityObservationTests(unittest.TestCase):
             revision=1,
             supersedes_observation_id=initial.observation_id,
             supersession_reason="corrected selected score",
+            recorded_at="2026-07-24T18:00:00+00:00",
         )
 
         append_quality_search_observation(self.connection, corrected)
         rows = self.connection.execute(select(quality_search_observations)).mappings().all()
         current = load_current_quality_search_observations(self.connection)
+        current_before_correction = load_current_quality_search_observations(
+            self.connection,
+            recorded_before="2026-07-24T17:00:00+00:00",
+        )
 
         self.assertEqual(len(rows), 2)
         self.assertEqual(current[0]["observation_id"], corrected.observation_id)
         self.assertEqual(current[0]["selected_crf"], 31.0)
+        self.assertEqual(current_before_correction[0]["observation_id"], initial.observation_id)
 
     def test_database_rejects_update_and_delete(self) -> None:
         observation = self._selected_observation()
@@ -195,6 +201,22 @@ class QualityObservationTests(unittest.TestCase):
             )
         self.connection.rollback()
 
+    def test_shadow_payload_is_immutable_and_part_of_observation_identity(self) -> None:
+        plain = self._selected_observation()
+        shadowed = self._selected_observation(
+            shadow_payload={
+                "schema_version": 1,
+                "algorithm_version": "qsh1",
+                "production_search_changed": False,
+            }
+        )
+
+        self.assertNotEqual(plain.observation_id, shadowed.observation_id)
+        self.assertNotEqual(plain.payload_sha256, shadowed.payload_sha256)
+        self.assertTrue(append_quality_search_observation(self.connection, shadowed))
+        row = self.connection.execute(select(quality_search_observations)).mappings().one()
+        self.assertEqual(json.loads(row["shadow_json"])["algorithm_version"], "qsh1")
+
     def test_promoted_staged_success_backfill_is_lower_authority_and_idempotent(self) -> None:
         self._add_promoted_outcome()
 
@@ -207,6 +229,7 @@ class QualityObservationTests(unittest.TestCase):
         self.assertEqual(row["authority"], AUTHORITY_STAGED_BACKFILL)
         self.assertEqual(row["search_run_id"], "qsr1_historical")
         self.assertIsNone(row["policy_hash"])
+        self.assertIsNone(row["shadow_json"])
         self.assertEqual(row["learning_eligible"], 1)
         self.assertEqual(row["actual_output_bytes"], 500_000_000)
 
@@ -238,6 +261,25 @@ class QualityObservationTests(unittest.TestCase):
             result = backfill_quality_search_observations(connection, as_of=self.as_of)
             self.assertEqual(result.inserted, 1)
 
+    def test_schema_downgrade_refuses_to_discard_hashed_shadow_payloads(self) -> None:
+        db_path = Path(self.temp_dir.name) / "shadow-downgrade.sqlite3"
+        with open_db(db_path) as connection:
+            observation = self._selected_observation(
+                shadow_payload={
+                    "schema_version": 1,
+                    "algorithm_version": "qsh1",
+                    "production_search_changed": False,
+                }
+            )
+            append_quality_search_observation(connection, observation)
+            connection.commit()
+        reset_engine_cache()
+
+        with _alembic_script_location() as script_location:
+            config = _alembic_config(db_path, script_location)
+            with self.assertRaisesRegex(RuntimeError, "immutable observation hashes"):
+                command.downgrade(config, "20260724_0017")
+
     def _selected_observation(
             self,
             *,
@@ -246,6 +288,8 @@ class QualityObservationTests(unittest.TestCase):
             revision: int = 0,
             supersedes_observation_id: str | None = None,
             supersession_reason: str | None = None,
+            shadow_payload: dict[str, object] | None = None,
+            recorded_at: str = "2026-07-24T17:00:00+00:00",
     ) -> QualitySearchObservation:
         return build_selected_quality_observation(
             search_run_id="qsr1_success",
@@ -266,11 +310,12 @@ class QualityObservationTests(unittest.TestCase):
             actual_output_bytes=500_000_000,
             size_ratio=0.5,
             provenance={"source": "test"},
-            recorded_at="2026-07-24T17:00:00+00:00",
+            recorded_at=recorded_at,
             authority=authority,
             revision=revision,
             supersedes_observation_id=supersedes_observation_id,
             supersession_reason=supersession_reason,
+            shadow_payload=shadow_payload,
         )
 
     def _add_promoted_outcome(self, *, connection: DBClient | None = None) -> None:

@@ -378,6 +378,7 @@ quality_search_observations = Table(
     Column("outcome_json", Text, nullable=False),
     Column("timing_json", Text, nullable=False),
     Column("provenance_json", Text, nullable=False),
+    Column("shadow_json", Text),
     Column("payload_sha256", Text, nullable=False),
     Column("recorded_at", Text, nullable=False),
     CheckConstraint("revision >= 0", name="ck_quality_search_observations_revision"),
