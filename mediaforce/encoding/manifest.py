@@ -45,7 +45,8 @@ from mediaforce.tuning.quality_shadow import (
     recommend_quality_search,
     unavailable_quality_shadow_recommendation,
 )
-from mediaforce.tuning.quality_warm_start import QualityWarmStartPlan, plan_quality_warm_start
+from mediaforce.tuning.quality_warm_start import QUALITY_WARM_START_EXPERIMENT_VERSION, QualityWarmStartPlan, \
+    plan_quality_warm_start
 from mediaforce.tuning.target_size_search import (
     FinalSizeMissError,
     FinalSizeVerification,
@@ -452,6 +453,7 @@ def encode_one_item(
                 policy_hash=quality_policy_hash,
                 configured_min_crf=int(configured_min_crf),
                 configured_max_crf=int(configured_max_crf),
+                search_run_id=quality_search_run_id,
                 as_of=quality_search_started_at,
                 library_types=config.library_type_map,
             )
@@ -540,13 +542,32 @@ def encode_one_item(
         )
         observation = build_failed_quality_observation(
             **observation_common(partial_context),
-            context=None,
+            context=planned_quality_context,
             quality_metric=str(quality_floor.get("metric") or "UNKNOWN"),
             search_objective="target_size",
             exclusion_reason=f"target_size_{exc.status}",
             target_size_trace=trace,
             quality_search_trace=None,
             quality_error_text=None,
+            workflow_duration_seconds=quality_search_duration_seconds,
+            quality_memory_arm=(
+                warm_start_plan.experiment_arm if warm_start_plan is not None else "ineligible"
+            ),
+            quality_memory_experiment_version=(
+                QUALITY_WARM_START_EXPERIMENT_VERSION if warm_start_plan is not None else None
+            ),
+            quality_memory_scope=(
+                warm_start_plan.recommendation.scope if warm_start_plan is not None else None
+            ),
+            quality_memory_scope_prefix=(
+                warm_start_plan.scope_prefix if warm_start_plan is not None else None
+            ),
+            quality_memory_search_signature_id=(
+                warm_start_plan.recommendation.search_signature_id
+                if warm_start_plan is not None
+                else None
+            ),
+            quality_memory_attempted=object_dict(trace.get("warm_start")).get("attempted") is True,
             recorded_at=blocked_at,
         )
         for note in _persist_quality_observation_best_effort(connection, observation):
@@ -595,13 +616,34 @@ def encode_one_item(
             )
             observation = build_failed_quality_observation(
                 **observation_common(partial_context),
-                context=None,
+                context=planned_quality_context,
                 quality_metric=metric,
                 search_objective="quality",
                 exclusion_reason="quality_search_exhausted",
                 target_size_trace=None,
                 quality_search_trace=object_dict(exc.quality_search_trace),
                 quality_error_text=str(exc),
+                workflow_duration_seconds=quality_search_duration_seconds,
+                quality_memory_arm=(
+                    warm_start_plan.experiment_arm if warm_start_plan is not None else "ineligible"
+                ),
+                quality_memory_experiment_version=(
+                    QUALITY_WARM_START_EXPERIMENT_VERSION if warm_start_plan is not None else None
+                ),
+                quality_memory_scope=(
+                    warm_start_plan.recommendation.scope if warm_start_plan is not None else None
+                ),
+                quality_memory_scope_prefix=(
+                    warm_start_plan.scope_prefix if warm_start_plan is not None else None
+                ),
+                quality_memory_search_signature_id=(
+                    warm_start_plan.recommendation.search_signature_id
+                    if warm_start_plan is not None
+                    else None
+                ),
+                quality_memory_attempted=(
+                    object_dict(object_dict(exc.quality_search_trace).get("warm_start")).get("attempted") is True
+                ),
                 recorded_at=quality_search_completed_at,
             )
             for note in _persist_quality_observation_best_effort(connection, observation):
@@ -938,11 +980,32 @@ def encode_one_item(
                     LOGGER.warning("Quality warm-start failure telemetry failed: %s", shadow_error)
             observation = build_selected_quality_observation(
                 **observation_common(quality_observation_partial_context),
-                context=planned_quality_context if warm_start_attempted else None,
+                context=planned_quality_context,
                 quality_result=quality_result,
                 retry_measurement_seconds=quality_retry_measurement_seconds,
                 encode_completed_at=failed_at,
                 encode_duration_seconds=round(max(time.monotonic() - start_monotonic, 0.0), 3),
+                workflow_duration_seconds=round(
+                    max(time.monotonic() - quality_search_start_monotonic, 0.0),
+                    3,
+                ),
+                quality_memory_arm=(
+                    warm_start_plan.experiment_arm if warm_start_plan is not None else "ineligible"
+                ),
+                quality_memory_experiment_version=(
+                    QUALITY_WARM_START_EXPERIMENT_VERSION if warm_start_plan is not None else None
+                ),
+                quality_memory_scope=(
+                    warm_start_plan.recommendation.scope if warm_start_plan is not None else None
+                ),
+                quality_memory_scope_prefix=(
+                    warm_start_plan.scope_prefix if warm_start_plan is not None else None
+                ),
+                quality_memory_search_signature_id=(
+                    warm_start_plan.recommendation.search_signature_id
+                    if warm_start_plan is not None
+                    else None
+                ),
                 actual_output_bytes=actual_output_bytes,
                 size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
                 recorded_at=failed_at,
@@ -971,6 +1034,8 @@ def encode_one_item(
                 "target_size_verification": final_verification.to_payload() if final_verification is not None else None,
                 "target_size_trace": final_trace,
                 "quality_warm_start": _quality_result_warm_start_trace(quality_result) or None,
+                "quality_memory_plan": warm_start_plan.to_payload() if warm_start_plan is not None else None,
+                "quality_memory_policy_hash": quality_policy_hash,
                 "quality_search_run_id": quality_search_run_id,
             },
             exc,
@@ -994,6 +1059,10 @@ def encode_one_item(
     )
     now = timestamp()
     encode_duration_seconds = round(max(time.monotonic() - start_monotonic, 0.0), 3)
+    workflow_duration_seconds = round(
+        max(time.monotonic() - quality_search_start_monotonic, 0.0),
+        3,
+    )
     source_size_bytes = int(item["source_size_bytes"])
     bytes_saved = source_size_bytes - staged_stat.st_size
     size_ratio = (staged_stat.st_size / source_size_bytes) if source_size_bytes else None
@@ -1172,6 +1241,24 @@ def encode_one_item(
         retry_measurement_seconds=quality_retry_measurement_seconds,
         encode_completed_at=now,
         encode_duration_seconds=encode_duration_seconds,
+        workflow_duration_seconds=workflow_duration_seconds,
+        quality_memory_arm=(
+            warm_start_plan.experiment_arm if warm_start_plan is not None else "ineligible"
+        ),
+        quality_memory_experiment_version=(
+            QUALITY_WARM_START_EXPERIMENT_VERSION if warm_start_plan is not None else None
+        ),
+        quality_memory_scope=(
+            warm_start_plan.recommendation.scope if warm_start_plan is not None else None
+        ),
+        quality_memory_scope_prefix=(
+            warm_start_plan.scope_prefix if warm_start_plan is not None else None
+        ),
+        quality_memory_search_signature_id=(
+            warm_start_plan.recommendation.search_signature_id
+            if warm_start_plan is not None
+            else None
+        ),
         actual_output_bytes=staged_stat.st_size,
         size_ratio=round(size_ratio, 6) if size_ratio is not None else None,
         recorded_at=now,

@@ -256,9 +256,10 @@ Guidance:
   `mediaforce/tuning/quality_memory.py`; keep passive persistence under
   `mediaforce/tuning/quality_observations.py`; keep passive recommendation and
   evaluation under `mediaforce/tuning/quality_shadow.py`; keep active
-  qualification under `mediaforce/tuning/quality_warm_start.py`. Persisted
-  observations, shadow inference, active qualification, and search execution
-  remain separate explicit phases.
+  qualification under `mediaforce/tuning/quality_warm_start.py`; keep read-only
+  acceptance aggregation under `mediaforce/tuning/quality_acceptance.py`.
+  Persisted observations, shadow inference, active qualification, acceptance
+  reporting, and search execution remain separate explicit phases.
 - The stream budget ledger is the only non-video arithmetic authority. Search,
   manifests, queued jobs, production, and API payloads may project compatibility
   fields from it, but must not add audio, subtitle, attachment, or container

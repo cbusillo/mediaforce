@@ -147,12 +147,22 @@ class QualityShadowMetrics:
     fallback_need_rate: float
     median_candidate_savings_rate: float
     median_search_time_savings_rate: float
-    production_quality_floor_violations: int
-    production_final_size_misses: int
+    passive_quality_floor_violations: int
+    active_quality_floor_violations: int
+    baseline_final_size_misses: int
+    active_final_size_misses: int
     fallback_counts: tuple[tuple[str, int], ...]
     performance_thresholds_met: bool
     active_eligible: bool
     blocking_reasons: tuple[str, ...]
+
+    @property
+    def production_quality_floor_violations(self) -> int:
+        return self.passive_quality_floor_violations + self.active_quality_floor_violations
+
+    @property
+    def production_final_size_misses(self) -> int:
+        return self.active_final_size_misses
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -165,7 +175,13 @@ class QualityShadowMetrics:
             "fallback_need_rate": self.fallback_need_rate,
             "median_candidate_savings_rate": self.median_candidate_savings_rate,
             "median_search_time_savings_rate": self.median_search_time_savings_rate,
-            "production_quality_floor_violations": self.production_quality_floor_violations,
+            "passive_quality_floor_violations": self.passive_quality_floor_violations,
+            "active_quality_floor_violations": self.active_quality_floor_violations,
+            "baseline_final_size_misses": self.baseline_final_size_misses,
+            "active_final_size_misses": self.active_final_size_misses,
+            "production_quality_floor_violations": (
+                self.production_quality_floor_violations
+            ),
             "production_final_size_misses": self.production_final_size_misses,
             "fallback_counts": dict(self.fallback_counts),
             "performance_thresholds_met": self.performance_thresholds_met,
@@ -567,6 +583,12 @@ def _quality_warm_start_payload(
         "schema_version": 1,
         "eligible": plan_payload.get("eligible") is True,
         "block_reason": _optional_text(plan_payload.get("block_reason")),
+        "experiment_version": _optional_text(plan_payload.get("experiment_version")),
+        "experiment_arm": _optional_text(plan_payload.get("experiment_arm")),
+        "holdout_percent": int_value(plan_payload.get("holdout_percent")),
+        "scope": _optional_text(plan_payload.get("scope")),
+        "scope_prefix": _optional_text(plan_payload.get("scope_prefix")),
+        "search_signature_id": _optional_text(plan_payload.get("search_signature_id")),
         "requested_crf": _strict_number(plan_payload.get("requested_crf")),
         "candidate_crf": _strict_number(plan_payload.get("candidate_crf")),
         "adjusted": plan_payload.get("adjusted") is True,
@@ -739,20 +761,21 @@ def load_quality_shadow_metrics(connection: DBClient) -> QualityShadowMetrics:
 
 def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMetrics:
     row_list = list(rows)
-    payloads = [
-        payload
+    row_payloads = [
+        (row, payload)
         for row in row_list
         if (payload := _json_object(row.get("shadow_json")))
         and payload.get("algorithm_version") == QUALITY_SHADOW_ALGORITHM_VERSION
     ]
+    payloads = [payload for _, payload in row_payloads]
     passive_payloads = [payload for payload in payloads if payload.get("production_search_changed") is not True]
+    active_payloads = [payload for payload in payloads if payload.get("production_search_changed") is True]
     evaluated_runs = len(passive_payloads)
     recommendation_payloads = [
         payload for payload in passive_payloads if object_dict(payload.get("recommendation"))
     ]
     recommendation_runs = len(recommendation_payloads)
     comparisons = [object_dict(payload.get("comparison")) for payload in passive_payloads]
-    safety_comparisons = [object_dict(payload.get("comparison")) for payload in payloads]
     recommendation_comparisons = [object_dict(payload.get("comparison")) for payload in recommendation_payloads]
     within_one_count = sum(comparison.get("within_one_crf") is True for comparison in recommendation_comparisons)
     false_narrow_count = sum(comparison.get("false_narrow") is True for comparison in recommendation_comparisons)
@@ -772,23 +795,34 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         for payload in passive_payloads
         if payload.get("fallback_reason")
     )
-    production_quality_floor_violations = sum(
+    passive_quality_floor_violations = sum(
         comparison.get("production_quality_floor_violation") is True
-        for comparison in safety_comparisons
+        for comparison in (object_dict(payload.get("comparison")) for payload in passive_payloads)
     )
-    evidence_cutoffs = [
-        cutoff
-        for payload in payloads
-        if (cutoff := _parse_timestamp(payload.get("evidence_cutoff_at"))) is not None
-    ]
-    shadow_started_at = min((_as_utc(cutoff) for cutoff in evidence_cutoffs), default=None)
-    production_final_size_misses = sum(
-        object_dict(_json_object(row.get("shadow_json")).get("comparison")).get("final_size_miss") is True
-        or (
-            str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
-            and shadow_started_at is not None
-            and (completion_at := _observation_completion_at(row)) is not None
-            and completion_at >= shadow_started_at
+    active_quality_floor_violations = sum(
+        object_dict(payload.get("comparison")).get("production_quality_floor_violation") is True
+        for payload in active_payloads
+    )
+    active_final_size_misses = sum(
+        (
+            object_dict(payload.get("comparison")).get("final_size_miss") is True
+            or str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
+        )
+        and _quality_memory_arm(row, payload) == "warm_start"
+        and _quality_memory_attempted(row, payload)
+        for row, payload in row_payloads
+    ) + sum(
+        str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
+        and _quality_memory_arm(row, _json_object(row.get("shadow_json"))) == "warm_start"
+        and _quality_memory_attempted(row, _json_object(row.get("shadow_json")))
+        and not _json_object(row.get("shadow_json"))
+        for row in row_list
+    )
+    baseline_final_size_misses = sum(
+        str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
+        and not (
+            _quality_memory_arm(row, _json_object(row.get("shadow_json"))) == "warm_start"
+            and _quality_memory_attempted(row, _json_object(row.get("shadow_json")))
         )
         for row in row_list
     )
@@ -807,10 +841,10 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         performance_blocking_reasons.append("candidate_savings_below_threshold")
     if median_search_time_savings_rate < MIN_MEDIAN_SAVINGS_RATE:
         performance_blocking_reasons.append("search_time_savings_below_threshold")
-    if production_quality_floor_violations:
+    if passive_quality_floor_violations or active_quality_floor_violations:
         performance_blocking_reasons.append("production_quality_floor_violation")
-    if production_final_size_misses:
-        performance_blocking_reasons.append("production_final_size_miss")
+    if active_final_size_misses:
+        performance_blocking_reasons.append("active_final_size_miss")
     performance_thresholds_met = not performance_blocking_reasons
     return QualityShadowMetrics(
         evaluated_runs=evaluated_runs,
@@ -821,8 +855,10 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         fallback_need_rate=fallback_need_rate,
         median_candidate_savings_rate=median_candidate_savings_rate,
         median_search_time_savings_rate=median_search_time_savings_rate,
-        production_quality_floor_violations=production_quality_floor_violations,
-        production_final_size_misses=production_final_size_misses,
+        passive_quality_floor_violations=passive_quality_floor_violations,
+        active_quality_floor_violations=active_quality_floor_violations,
+        baseline_final_size_misses=baseline_final_size_misses,
+        active_final_size_misses=active_final_size_misses,
         fallback_counts=tuple(sorted(fallback_counts.items())),
         performance_thresholds_met=performance_thresholds_met,
         active_eligible=performance_thresholds_met,
@@ -872,6 +908,27 @@ def quality_result_target_changed(quality_result: Any) -> bool:
         and selected_target is not None
         and not math.isclose(initial_target, selected_target, abs_tol=1e-6)
     )
+
+
+def _quality_memory_arm(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> str | None:
+    warm_start = object_dict(shadow.get("warm_start"))
+    experiment_arm = str(warm_start.get("experiment_arm") or "")
+    if experiment_arm:
+        return experiment_arm
+    outcome = _json_object(row.get("outcome_json"))
+    outcome_arm = str(outcome.get("quality_memory_arm") or "")
+    if outcome_arm:
+        return outcome_arm
+    if shadow.get("production_search_changed") is True:
+        return "warm_start"
+    return None
+
+
+def _quality_memory_attempted(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> bool:
+    execution = object_dict(object_dict(shadow.get("warm_start")).get("execution"))
+    if execution.get("attempted") is True or shadow.get("production_search_changed") is True:
+        return True
+    return _json_object(row.get("outcome_json")).get("quality_memory_attempted") is True
 
 
 def quality_memory_scope_chain(

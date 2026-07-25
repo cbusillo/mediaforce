@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from typing import TypeAlias
 
-from sqlalchemy import event
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import RowMapping
@@ -69,6 +69,21 @@ def open_db(db_path: Path) -> Iterator[Connection]:
                 connection.commit()
         finally:
             connection.close()
+
+
+@contextmanager
+def open_readonly_db(db_path: Path) -> Iterator[Connection]:
+    resolved_path = db_path.expanduser().resolve()
+    if not resolved_path.is_file():
+        raise FileNotFoundError(f"Mediaforce database does not exist: {resolved_path}")
+    engine = create_engine(f"sqlite+pysqlite:///file:{resolved_path}?mode=ro&uri=true")
+    connection = engine.connect()
+    try:
+        connection.exec_driver_sql("PRAGMA query_only=ON")
+        yield connection
+    finally:
+        connection.close()
+        engine.dispose()
 
 
 def reset_engine_cache() -> None:
