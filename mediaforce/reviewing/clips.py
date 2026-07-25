@@ -223,35 +223,38 @@ def generate_compare_clips_for_pair(
     return generated
 
 
-def generate_compare_clips_from_previews(
+def generate_compare_clips_from_review_pairs(
         *,
-        source_path: Path,
-        source_codec: str | None = None,
+        source_clips: list[Any],
         previews: list[Any],
         output_dir: Path,
         process_controller: Any = None,
-        render_compare_clip_from_preview: Callable[..., None],
+        render_compare_clip_from_review_pair: Callable[..., None],
         slug_seconds: Callable[[float], str],
         compare_clip_factory: Callable[..., Any],
 ) -> list[Any]:
+    if len(source_clips) != len(previews):
+        raise ValueError("Source and preview review clip counts must match")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     generated: list[Any] = []
-    for clip_number, preview in enumerate(previews, start=1):
+    for clip_number, (source_clip, preview) in enumerate(zip(source_clips, previews, strict=True), start=1):
+        if abs(source_clip.timestamp_seconds - preview.timestamp_seconds) > 0.001:
+            raise ValueError("Source and preview review clip timestamps must match")
+        duration_seconds = min(source_clip.duration_seconds, preview.duration_seconds)
         output_path = output_dir / f"compare-{clip_number:02d}-{slug_seconds(preview.timestamp_seconds)}.mkv"
-        render_compare_clip_from_preview(
-            source_path=source_path,
-            source_codec=source_codec,
-            preview_path=preview.output_path,
+        render_compare_clip_from_review_pair(
+            source_clip_path=source_clip.output_path,
+            preview_clip_path=preview.output_path,
             output_path=output_path,
-            clip_time=preview.timestamp_seconds,
-            duration_seconds=preview.duration_seconds,
+            duration_seconds=duration_seconds,
             process_controller=process_controller,
         )
         generated.append(
             compare_clip_factory(
                 output_path=output_path,
                 timestamp_seconds=preview.timestamp_seconds,
-                duration_seconds=preview.duration_seconds,
+                duration_seconds=duration_seconds,
             )
         )
     return generated
@@ -265,12 +268,26 @@ def render_source_review_clips(
         timestamps: list[float],
         duration_seconds: float,
         audio_plan: dict[str, Any] | None = None,
+        host: dict[str, Any] | None = None,
         process_controller: Any = None,
+        execution_mode_for_host: Callable[[dict[str, Any] | None], str],
+        render_source_review_clips_remote_fn: Callable[..., list[Any]],
         render_source_review_clip: Callable[..., None],
         slug_seconds: Callable[[float], str],
         browser_review_clip_factory: Callable[..., Any],
 ) -> list[Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
+    if execution_mode_for_host(host) == "ssh":
+        return render_source_review_clips_remote_fn(
+            host=host,
+            source_path=source_path,
+            source_codec=source_codec,
+            output_dir=output_dir,
+            timestamps=timestamps,
+            duration_seconds=duration_seconds,
+            audio_plan=audio_plan,
+        )
+
     rendered: list[Any] = []
     for clip_number, clip_time in enumerate(timestamps, start=1):
         output_path = output_dir / f"source-{clip_number:02d}-{slug_seconds(clip_time)}.mp4"
@@ -291,4 +308,60 @@ def render_source_review_clips(
                 size_bytes=output_path.stat().st_size,
             )
         )
+    return rendered
+
+
+def render_source_review_clips_remote(
+        *,
+        host: dict[str, Any],
+        source_path: Path,
+        source_codec: str | None,
+        output_dir: Path,
+        timestamps: list[float],
+        duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
+        remote_preview_timeout_seconds: int,
+        uuid_factory: Callable[[], Any],
+        run_remote_command: Callable[..., Any],
+        render_source_review_clip_remote: Callable[..., None],
+        copy_remote_file_to_local: Callable[..., None],
+        slug_seconds: Callable[[float], str],
+        browser_review_clip_factory: Callable[..., Any],
+) -> list[Any]:
+    remote_root = Path("/tmp") / f"mediaforce-source-review-{uuid_factory().hex[:12]}"
+    run_remote_command(host, ["mkdir", "-p", str(remote_root)], 30)
+    rendered: list[Any] = []
+    try:
+        for clip_number, clip_time in enumerate(timestamps, start=1):
+            file_name = f"source-{clip_number:02d}-{slug_seconds(clip_time)}.mp4"
+            output_path = output_dir / file_name
+            remote_output_path = remote_root / file_name
+            render_source_review_clip_remote(
+                host=host,
+                source_path=source_path,
+                source_codec=source_codec,
+                remote_output_path=remote_output_path,
+                clip_time=clip_time,
+                duration_seconds=duration_seconds,
+                audio_plan=audio_plan,
+            )
+            output_path.unlink(missing_ok=True)
+            try:
+                copy_remote_file_to_local(host, remote_output_path, output_path, remote_preview_timeout_seconds)
+            except Exception:
+                output_path.unlink(missing_ok=True)
+                raise
+            rendered.append(
+                browser_review_clip_factory(
+                    output_path=output_path,
+                    timestamp_seconds=clip_time,
+                    duration_seconds=duration_seconds,
+                    size_bytes=output_path.stat().st_size,
+                )
+            )
+    finally:
+        try:
+            run_remote_command(host, ["rm", "-rf", str(remote_root)], 30)
+        except Exception:
+            pass
     return rendered

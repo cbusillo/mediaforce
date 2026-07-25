@@ -101,8 +101,10 @@ def recommend_review_moments(
         *,
         media_fingerprint: dict[str, Any] | None = None,
         media_fingerprint_decision: dict[str, Any] | None = None,
+        analyze_source: bool = True,
         process_controller: Any = None,
         auto_timestamps_fn: Callable[..., list[float]],
+        default_timestamps_fn: Callable[[float, float], list[float]],
 ) -> list[ReviewMoment]:
     fingerprint_moments = fingerprint_review_moments(
         total_duration,
@@ -113,11 +115,20 @@ def recommend_review_moments(
     if fingerprint_moments:
         return fingerprint_moments
 
-    timestamps = auto_timestamps_fn(
-        source_path,
-        total_duration,
-        clip_duration,
-        process_controller=process_controller,
+    timestamps = (
+        auto_timestamps_fn(
+            source_path,
+            total_duration,
+            clip_duration,
+            process_controller=process_controller,
+        )
+        if analyze_source
+        else default_timestamps_fn(total_duration, clip_duration)
+    )
+    rationale = (
+        "Selected by packet-size, scene-change, or default timestamp analysis."
+        if analyze_source
+        else "Selected from duration-based coverage because the controller cannot read the source directly."
     )
     return [
         ReviewMoment(
@@ -125,7 +136,7 @@ def recommend_review_moments(
             duration_seconds=clip_duration,
             role="typical" if index == 0 else "coverage",
             risk_tags=("fallback",),
-            rationale="Selected by the existing packet-size, scene-change, or default timestamp fallback.",
+            rationale=rationale,
             confidence=0.35,
             coverage=0.0,
         )

@@ -20,8 +20,9 @@ from mediaforce.reviewing.clips import encode_preview_clips as encode_preview_cl
     encode_preview_clips_remote as _encode_preview_clips_remote_impl, \
     generate_compare_clips as generate_compare_clips_impl, \
     generate_compare_clips_for_pair as generate_compare_clips_for_pair_impl, \
-    generate_compare_clips_from_previews as generate_compare_clips_from_previews_impl, \
-    render_source_review_clips as render_source_review_clips_impl
+    generate_compare_clips_from_review_pairs as generate_compare_clips_from_review_pairs_impl, \
+    render_source_review_clips as render_source_review_clips_impl, \
+    render_source_review_clips_remote as _render_source_review_clips_remote_impl
 from mediaforce.reviewing.helpers import auto_timestamps as _auto_timestamps_impl, \
     complexity_timestamps as _complexity_timestamps_impl, default_timestamps as _default_timestamps_impl, \
     format_crf as _format_crf_impl, planned_audio_action as _planned_audio_action_impl, \
@@ -30,10 +31,11 @@ from mediaforce.reviewing.helpers import auto_timestamps as _auto_timestamps_imp
     recommend_review_moments as _recommend_review_moments_impl, \
     review_moment_payload as _review_moment_payload_impl, slug_seconds as _slug_seconds_impl
 from mediaforce.reviewing.renderers import render_compare_clip as _render_compare_clip_impl, \
-    render_compare_clip_from_preview as _render_compare_clip_from_preview_impl, \
+    render_compare_clip_from_review_pair as _render_compare_clip_from_review_pair_impl, \
     render_encoded_preview_clip as _render_encoded_preview_clip_impl, \
     render_encoded_preview_clip_remote as _render_encoded_preview_clip_remote_impl, \
-    render_source_review_clip as _render_source_review_clip_impl
+    render_source_review_clip as _render_source_review_clip_impl, \
+    render_source_review_clip_remote as _render_source_review_clip_remote_impl
 
 PTS_TIME_RE = re.compile(r"pts_time:(?P<pts>[0-9]+(?:\.[0-9]+)?)")
 REMOTE_PREVIEW_TIMEOUT_SECONDS = 2 * 60 * 60
@@ -163,6 +165,10 @@ def recommend_review_timestamps(
     return _auto_timestamps(source_path, total_duration, clip_duration, process_controller=process_controller)
 
 
+def default_review_timestamps(total_duration: float, clip_duration: float) -> list[float]:
+    return _default_timestamps(total_duration, clip_duration)
+
+
 def recommend_review_moments(
         source_path: Path,
         total_duration: float,
@@ -170,6 +176,7 @@ def recommend_review_moments(
         *,
         media_fingerprint: dict[str, Any] | None = None,
         media_fingerprint_decision: dict[str, Any] | None = None,
+        analyze_source: bool = True,
         process_controller: ManagedProcessController | None = None,
 ) -> list[ReviewMoment]:
     return _recommend_review_moments_impl(
@@ -178,8 +185,10 @@ def recommend_review_moments(
         clip_duration,
         media_fingerprint=media_fingerprint,
         media_fingerprint_decision=media_fingerprint_decision,
+        analyze_source=analyze_source,
         process_controller=process_controller,
         auto_timestamps_fn=_auto_timestamps,
+        default_timestamps_fn=_default_timestamps,
     )
 
 
@@ -291,21 +300,19 @@ def generate_compare_clips_for_pair(
     )
 
 
-def generate_compare_clips_from_previews(
+def generate_compare_clips_from_review_pairs(
         *,
-        source_path: Path,
-        source_codec: str | None = None,
+        source_clips: list[BrowserReviewClip],
         previews: list[EncodedPreviewClip],
         output_dir: Path,
         process_controller: ManagedProcessController | None = None,
 ) -> list[CompareClip]:
-    return generate_compare_clips_from_previews_impl(
-        source_path=source_path,
-        source_codec=source_codec,
+    return generate_compare_clips_from_review_pairs_impl(
+        source_clips=source_clips,
         previews=previews,
         output_dir=output_dir,
         process_controller=process_controller,
-        render_compare_clip_from_preview=_render_compare_clip_from_preview,
+        render_compare_clip_from_review_pair=_render_compare_clip_from_review_pair,
         slug_seconds=_slug_seconds,
         compare_clip_factory=CompareClip,
     )
@@ -319,6 +326,7 @@ def render_source_review_clips(
         timestamps: list[float],
         duration_seconds: float,
         audio_plan: dict[str, Any] | None = None,
+        host: dict[str, Any] | None = None,
         process_controller: ManagedProcessController | None = None,
 ) -> list[BrowserReviewClip]:
     return render_source_review_clips_impl(
@@ -328,8 +336,39 @@ def render_source_review_clips(
         timestamps=timestamps,
         duration_seconds=duration_seconds,
         audio_plan=audio_plan,
+        host=host,
         process_controller=process_controller,
+        execution_mode_for_host=execution_mode_for_host,
+        render_source_review_clips_remote_fn=_render_source_review_clips_remote,
         render_source_review_clip=_render_source_review_clip,
+        slug_seconds=_slug_seconds,
+        browser_review_clip_factory=BrowserReviewClip,
+    )
+
+
+def _render_source_review_clips_remote(
+        *,
+        host: dict[str, Any],
+        source_path: Path,
+        source_codec: str | None,
+        output_dir: Path,
+        timestamps: list[float],
+        duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
+) -> list[BrowserReviewClip]:
+    return _render_source_review_clips_remote_impl(
+        host=host,
+        source_path=source_path,
+        source_codec=source_codec,
+        output_dir=output_dir,
+        timestamps=timestamps,
+        duration_seconds=duration_seconds,
+        audio_plan=audio_plan,
+        remote_preview_timeout_seconds=REMOTE_PREVIEW_TIMEOUT_SECONDS,
+        uuid_factory=uuid.uuid4,
+        run_remote_command=run_remote_command,
+        render_source_review_clip_remote=_render_source_review_clip_remote,
+        copy_remote_file_to_local=copy_remote_file_to_local,
         slug_seconds=_slug_seconds,
         browser_review_clip_factory=BrowserReviewClip,
     )
@@ -434,26 +473,21 @@ def _render_encoded_preview_clip_remote(
     )
 
 
-def _render_compare_clip_from_preview(
+def _render_compare_clip_from_review_pair(
         *,
-        source_path: Path,
-        source_codec: str | None = None,
-        preview_path: Path,
+        source_clip_path: Path,
+        preview_clip_path: Path,
         output_path: Path,
-        clip_time: float,
         duration_seconds: float,
         process_controller: ManagedProcessController | None = None,
 ) -> None:
-    return _render_compare_clip_from_preview_impl(
-        source_path=source_path,
-        source_codec=source_codec,
-        preview_path=preview_path,
+    return _render_compare_clip_from_review_pair_impl(
+        source_clip_path=source_clip_path,
+        preview_clip_path=preview_clip_path,
         output_path=output_path,
-        clip_time=clip_time,
         duration_seconds=duration_seconds,
         process_controller=process_controller,
         ffmpeg_binary=ffmpeg_binary,
-        ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
         run_command=run_command,
     )
 
@@ -479,6 +513,31 @@ def _render_source_review_clip(
         ffmpeg_binary=ffmpeg_binary,
         ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
         run_command=run_command,
+    )
+
+
+def _render_source_review_clip_remote(
+        *,
+        host: dict[str, Any],
+        source_path: Path,
+        source_codec: str | None = None,
+        remote_output_path: Path,
+        clip_time: float,
+        duration_seconds: float,
+        audio_plan: dict[str, Any] | None = None,
+) -> None:
+    return _render_source_review_clip_remote_impl(
+        host=host,
+        source_path=source_path,
+        source_codec=source_codec,
+        remote_output_path=remote_output_path,
+        clip_time=clip_time,
+        duration_seconds=duration_seconds,
+        audio_plan=audio_plan,
+        remote_preview_timeout_seconds=REMOTE_PREVIEW_TIMEOUT_SECONDS,
+        ffmpeg_binary=ffmpeg_binary,
+        ffmpeg_hwaccel_input_args=ffmpeg_hwaccel_input_args,
+        run_remote_command=run_remote_command,
     )
 
 

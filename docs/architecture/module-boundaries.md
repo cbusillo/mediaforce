@@ -271,16 +271,14 @@ Guidance:
 
 ### `mediaforce/reviewing/`
 
-- `previews.py`
-  - encoded preview and source clip rendering
-- `compare.py`
-  - compare clip generation
-- `audio.py`
-  - spectrogram and audio-review outputs
+- `clips.py`
+  - encoded preview, source review, compare orchestration, and remote artifact copies
+- `renderers.py`
+  - local and remote ffmpeg commands for browser-ready review media
+- `assets.py`
+  - contact sheets, timeline strips, spectrograms, and audio-review outputs
 - `helpers.py`
   - review timestamp and measured review-moment recommendation
-- `remote.py`
-  - remote preview helpers when needed
 
 `mediaforce.review` remains the stable compatibility wrapper surface.
 

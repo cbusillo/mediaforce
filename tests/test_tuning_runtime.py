@@ -8051,7 +8051,7 @@ class TuningRuntimeTests(unittest.TestCase):
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
-            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_review_pairs=lambda *_args, **_kwargs: [],
             resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: {},
             review_url=lambda *_args, **_kwargs: "",
@@ -8115,7 +8115,7 @@ class TuningRuntimeTests(unittest.TestCase):
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
-            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_review_pairs=lambda *_args, **_kwargs: [],
             resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: {},
             review_url=lambda *_args, **_kwargs: "",
@@ -8202,7 +8202,7 @@ class TuningRuntimeTests(unittest.TestCase):
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
-            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_review_pairs=lambda *_args, **_kwargs: [],
             resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: {},
             review_url=lambda *_args, **_kwargs: "",
@@ -8244,6 +8244,16 @@ class TuningRuntimeTests(unittest.TestCase):
 
     def test_run_calibration_job_uses_saved_job_sample_item_before_reselecting(self) -> None:
         saved_statuses: list[str] = []
+        quality_sources: list[Path] = []
+
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "cbusillo@m1-mini",
+                "label": "M1 mini",
+                "capabilities": ["sample_calibration"],
+                "source_roots": {"tv": "/srv/media/tv"},
+            }
+        ]
 
         def _save_job_state(_connection: object, _config: object, _prefix: str, payload: dict[str, object]) -> None:
             status = payload.get("status")
@@ -8262,6 +8272,10 @@ class TuningRuntimeTests(unittest.TestCase):
             "subtitle_summary": [],
         }
 
+        def cancel_search(source_path: Path, *_args: object, **_kwargs: object) -> None:
+            quality_sources.append(source_path)
+            raise ProcessCancelledError()
+
         deps = CalibrationRunDeps(
             now_iso=lambda: "2026-04-11T00:00:00+00:00",
             ensure_sample_host_ready=lambda _config, host_data: _ready_calibration_host(host_data),
@@ -8276,13 +8290,13 @@ class TuningRuntimeTests(unittest.TestCase):
             summarize_calibration_result=lambda payload: payload,
             calibration_mode_for_action=lambda _action: "sample",
             effective_video_preset=lambda *_args, **_kwargs: 4,
-            search_quality_for_source=lambda *_args, **_kwargs: (_ for _ in ()).throw(ProcessCancelledError()),
+            search_quality_for_source=cancel_search,
             run_sample_encode=lambda *_args, **_kwargs: None,
             detect_video_crop=lambda *_args, **_kwargs: None,
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
-            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_review_pairs=lambda *_args, **_kwargs: [],
             resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: {},
             review_url=lambda *_args, **_kwargs: "",
@@ -8302,7 +8316,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 config_path=self.config.paths.config_path,
                 prefix="tv/show/season-1",
                 action="ai_tune",
-                host_data={"key": "cbusillo@localhost", "label": "M4 Studio"},
+                host_data={"key": "cbusillo@m1-mini", "label": "M1 mini", "mode": "ssh"},
                 notes="retry later",
                 policy={"video": {"pixel_format": "yuv420p10le", "sample_every": "8m", "sample_duration": "20s", "encoder": "libsvtav1"}},
                 job_id="job-1",
@@ -8313,6 +8327,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIn("running", saved_statuses)
         self.assertIn("stopped", saved_statuses)
+        self.assertEqual(quality_sources, [Path("/srv/media/tv/show/season-1/saved-episode.mkv")])
 
     def test_run_calibration_job_releases_write_lock_before_media_work(self) -> None:
         prefix = "tv/show/Season 1"
@@ -8413,7 +8428,7 @@ class TuningRuntimeTests(unittest.TestCase):
             recommend_review_timestamps=lambda *_args, **_kwargs: [],
             encode_preview_clips=lambda *_args, **_kwargs: [],
             render_source_review_clips=lambda *_args, **_kwargs: [],
-            generate_compare_clips_from_previews=lambda *_args, **_kwargs: [],
+            generate_compare_clips_from_review_pairs=lambda *_args, **_kwargs: [],
             resolve_stream_budget_ledger=resolve_stream_budget_ledger,
             build_svt_params=lambda *_args, **_kwargs: [],
             review_url=lambda *_args, **_kwargs: "",
