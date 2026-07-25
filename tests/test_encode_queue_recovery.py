@@ -7079,7 +7079,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                             with patch.object(
                                     web_app, "render_source_review_clips", return_value=[source_clip]
                             ) as source_mock:
-                                with patch.object(web_app, "generate_compare_clips_from_previews",
+                                with patch.object(web_app, "generate_compare_clips_from_review_pairs",
                                                   return_value=[compare_clip]):
                                     payload, cleanup_path = web_app._run_sampled_calibration(
                                         config=self.config,
@@ -7699,7 +7699,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(exc_info.exception.status_code, 400)
         self.assertEqual(exc_info.exception.detail, "Unknown sampled calibration host")
 
-    @patch("mediaforce.web.app.generate_compare_clips_from_previews")
+    @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
     @patch("mediaforce.web.app.recommend_review_timestamps")
@@ -7841,11 +7841,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_preview_mock.call_args.kwargs["host"], quality_host)
         self.assertEqual(encode_preview_mock.call_args.kwargs["source_codec"], "h264")
         self.assertIsNone(encode_preview_mock.call_args.kwargs["video_filter"])
-        self.assertEqual(source_review_mock.call_args.kwargs["source_path"], source_path)
+        self.assertEqual(source_review_mock.call_args.kwargs["source_path"], remote_source_path)
+        self.assertEqual(source_review_mock.call_args.kwargs["host"], quality_host)
+        self.assertEqual(compare_preview_mock.call_args.kwargs["source_clips"], [source_review_mock.return_value[0]])
+        self.assertEqual(compare_preview_mock.call_args.kwargs["previews"], [encode_preview_mock.return_value[0]])
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
 
-    @patch("mediaforce.web.app.generate_compare_clips_from_previews")
+    @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
     @patch("mediaforce.web.app.recommend_review_timestamps")
@@ -7940,7 +7943,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(search_quality_mock.call_args.kwargs["quality_temp_dir"], expected_temp_dir)
         self.assertEqual(sample_encode_mock.call_args.kwargs["quality_temp_dir"], expected_temp_dir)
 
-    @patch("mediaforce.web.app.generate_compare_clips_from_previews")
+    @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
     @patch("mediaforce.web.app.recommend_review_timestamps")
@@ -13191,18 +13194,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertNotIn("scale=", filter_complex)
         self.assertNotIn("hstack", filter_complex)
 
-    def test_render_compare_clip_from_preview_preserves_native_resolution(self) -> None:
+    def test_render_compare_clip_from_review_pair_preserves_native_resolution(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
-                "mediaforce.review.ffmpeg_hwaccel_input_args", return_value=[]
-        ), patch(
             "mediaforce.review.run_command",
             return_value=subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr=""),
         ) as run_mock:
-            review._render_compare_clip_from_preview(
-                source_path=Path("/tmp/source.mkv"),
-                preview_path=Path("/tmp/preview.mp4"),
+            review._render_compare_clip_from_review_pair(
+                source_clip_path=Path("/tmp/source.mp4"),
+                preview_clip_path=Path("/tmp/preview.mp4"),
                 output_path=Path("/tmp/compare.mkv"),
-                clip_time=12.0,
                 duration_seconds=8.0,
             )
 
@@ -13212,6 +13212,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("pad=ceil(iw/2)*2:ceil(ih/2)*2", filter_complex)
         self.assertNotIn("scale=", filter_complex)
         self.assertNotIn("hstack", filter_complex)
+        self.assertNotIn("-ss", cmd)
 
     def test_encode_preview_clips_localhost_ssh_executes_locally(self) -> None:
         output_dir = self.root / "review"
@@ -13288,6 +13289,185 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(remote_calls[-1], ["rm", "-rf", "/tmp/mediaforce-preview-abcdef123456"])
         self.assertEqual(len(clips), 1)
         self.assertEqual(clips[0].size_bytes, len(b"preview"))
+
+    def test_render_source_review_clips_remote_copies_results_and_cleans_up(self) -> None:
+        output_dir = self.root / "source-review-remote"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        remote_calls: list[list[str]] = []
+
+        def remote_command_side_effect(
+                _host: dict[str, object],
+                cmd: list[str],
+                timeout: int,
+        ) -> subprocess.CompletedProcess[str]:
+            self.assertIn(timeout, (30, review.REMOTE_PREVIEW_TIMEOUT_SECONDS))
+            remote_calls.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        def copy_side_effect(
+                _host: dict[str, object],
+                _remote_path: Path,
+                local_path: Path,
+                timeout: int,
+        ) -> None:
+            self.assertEqual(timeout, review.REMOTE_PREVIEW_TIMEOUT_SECONDS)
+            local_path.write_bytes(b"source-review")
+
+        with patch("mediaforce.review.run_remote_command", side_effect=remote_command_side_effect), patch(
+                "mediaforce.review._render_source_review_clip_remote"
+        ) as render_remote_mock, patch(
+            "mediaforce.review.copy_remote_file_to_local", side_effect=copy_side_effect
+        ), patch("mediaforce.review.uuid.uuid4") as uuid_mock:
+            uuid_mock.return_value.hex = "123456abcdef7890"
+            clips = review.render_source_review_clips(
+                source_path=Path("/Volumes/media/tv/show/episode.mkv"),
+                source_codec="hevc",
+                output_dir=output_dir,
+                timestamps=[147.0],
+                duration_seconds=8.0,
+                audio_plan={"source_stream_index": 1},
+                host={"key": "cbusillo@studio", "mode": "ssh"},
+            )
+
+        render_remote_mock.assert_called_once()
+        self.assertEqual(remote_calls[0], ["mkdir", "-p", "/tmp/mediaforce-source-review-123456abcdef"])
+        self.assertEqual(remote_calls[-1], ["rm", "-rf", "/tmp/mediaforce-source-review-123456abcdef"])
+        self.assertEqual(len(clips), 1)
+        self.assertEqual(clips[0].size_bytes, len(b"source-review"))
+
+    def test_render_source_review_clips_remote_cleans_up_after_render_failure(self) -> None:
+        output_dir = self.root / "source-review-failed"
+        remote_calls: list[list[str]] = []
+
+        def remote_command_side_effect(
+                _host: dict[str, object],
+                cmd: list[str],
+                _timeout: int,
+        ) -> subprocess.CompletedProcess[str]:
+            remote_calls.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        with patch("mediaforce.review.run_remote_command", side_effect=remote_command_side_effect), patch(
+                "mediaforce.review._render_source_review_clip_remote", side_effect=RuntimeError("render failed")
+        ), patch("mediaforce.review.copy_remote_file_to_local") as copy_mock, patch(
+            "mediaforce.review.uuid.uuid4"
+        ) as uuid_mock:
+            uuid_mock.return_value.hex = "fedcba6543217890"
+            with self.assertRaisesRegex(RuntimeError, "render failed"):
+                review.render_source_review_clips(
+                    source_path=Path("/Volumes/media/tv/show/episode.mkv"),
+                    output_dir=output_dir,
+                    timestamps=[147.0],
+                    duration_seconds=8.0,
+                    host={"key": "cbusillo@studio", "mode": "ssh"},
+                )
+
+        copy_mock.assert_not_called()
+        self.assertEqual(remote_calls[-1], ["rm", "-rf", "/tmp/mediaforce-source-review-fedcba654321"])
+
+    def test_render_source_review_clips_remote_removes_partial_copy_and_cleans_up(self) -> None:
+        output_dir = self.root / "source-review-copy-failed"
+        output_path = output_dir / "source-01-00-02-27.mp4"
+        remote_calls: list[list[str]] = []
+
+        def remote_command_side_effect(
+                _host: dict[str, object],
+                cmd: list[str],
+                _timeout: int,
+        ) -> subprocess.CompletedProcess[str]:
+            remote_calls.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+        def copy_side_effect(
+                _host: dict[str, object],
+                _remote_path: Path,
+                local_path: Path,
+                _timeout: int,
+        ) -> None:
+            local_path.write_bytes(b"partial")
+            raise TimeoutError("copy timed out")
+
+        with patch("mediaforce.review.run_remote_command", side_effect=remote_command_side_effect), patch(
+                "mediaforce.review._render_source_review_clip_remote"
+        ), patch("mediaforce.review.copy_remote_file_to_local", side_effect=copy_side_effect), patch(
+            "mediaforce.review.uuid.uuid4"
+        ) as uuid_mock:
+            uuid_mock.return_value.hex = "abcdef6543217890"
+            with self.assertRaisesRegex(TimeoutError, "copy timed out"):
+                review.render_source_review_clips(
+                    source_path=Path("/Volumes/media/tv/show/episode.mkv"),
+                    output_dir=output_dir,
+                    timestamps=[147.0],
+                    duration_seconds=8.0,
+                    host={"key": "cbusillo@studio", "mode": "ssh"},
+                )
+
+        self.assertFalse(output_path.exists())
+        self.assertEqual(remote_calls[-1], ["rm", "-rf", "/tmp/mediaforce-source-review-abcdef654321"])
+
+    def test_render_source_review_clips_localhost_ssh_executes_locally(self) -> None:
+        output_dir = self.root / "source-review-localhost"
+
+        def create_source_clip(*_args: object, **kwargs: object) -> None:
+            Path(str(kwargs["output_path"])).write_bytes(b"source")
+
+        with patch("mediaforce.review._render_source_review_clip", side_effect=create_source_clip) as render_mock, patch(
+                "mediaforce.review._render_source_review_clips_remote"
+        ) as remote_mock:
+            clips = review.render_source_review_clips(
+                source_path=Path("/tmp/input.mkv"),
+                output_dir=output_dir,
+                timestamps=[12.0],
+                duration_seconds=8.0,
+                host={"key": "cbusillo@localhost", "mode": "ssh"},
+            )
+
+        render_mock.assert_called_once()
+        remote_mock.assert_not_called()
+        self.assertEqual(len(clips), 1)
+
+    def test_generate_compare_clips_from_review_pairs_uses_local_retained_clips(self) -> None:
+        output_dir = self.root / "review-pairs"
+        source_clip = BrowserReviewClip(
+            output_path=output_dir / "source-01.mp4",
+            timestamp_seconds=147.0,
+            duration_seconds=8.0,
+            size_bytes=123,
+        )
+        preview_clip = EncodedPreviewClip(
+            output_path=output_dir / "encoded-01.mp4",
+            timestamp_seconds=147.0,
+            duration_seconds=8.0,
+            size_bytes=456,
+        )
+
+        with patch("mediaforce.review._render_compare_clip_from_review_pair") as render_mock:
+            clips = review.generate_compare_clips_from_review_pairs(
+                source_clips=[source_clip],
+                previews=[preview_clip],
+                output_dir=output_dir,
+            )
+
+        render_mock.assert_called_once_with(
+            source_clip_path=source_clip.output_path,
+            preview_clip_path=preview_clip.output_path,
+            output_path=output_dir / "compare-01-00-02-27.mkv",
+            duration_seconds=8.0,
+            process_controller=None,
+        )
+        self.assertEqual(clips[0].timestamp_seconds, 147.0)
+
+    def test_recommend_review_moments_skips_source_analysis_when_controller_media_is_missing(self) -> None:
+        with patch("mediaforce.review._auto_timestamps", side_effect=AssertionError("source analysis ran")):
+            moments = review.recommend_review_moments(
+                Path("/Volumes/media/tv/show/missing.mkv"),
+                1500.0,
+                8.0,
+                analyze_source=False,
+            )
+
+        self.assertEqual([moment.timestamp_seconds for moment in moments], [298.4, 746.0, 1193.6])
+        self.assertTrue(all("controller cannot read" in moment.rationale for moment in moments))
 
     def test_render_review_contact_sheet_builds_expected_stack_command(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(

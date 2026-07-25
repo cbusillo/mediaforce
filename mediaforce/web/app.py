@@ -103,9 +103,10 @@ from mediaforce.remote import (
     run_host_lifecycle_command,
 )
 from mediaforce.review import (
+    default_review_timestamps,
     encode_preview_clips,
     generate_compare_clips,
-    generate_compare_clips_from_previews,
+    generate_compare_clips_from_review_pairs,
     recommend_review_moments,
     recommend_review_timestamps,
     review_moment_payload,
@@ -3470,9 +3471,10 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         recommend_review_timestamps=recommend_review_timestamps,
         recommend_review_moments=recommend_review_moments,
         review_moment_payload=review_moment_payload,
+        default_review_timestamps=default_review_timestamps,
         encode_preview_clips=encode_preview_clips,
         render_source_review_clips=render_source_review_clips,
-        generate_compare_clips_from_previews=generate_compare_clips_from_previews,
+        generate_compare_clips_from_review_pairs=generate_compare_clips_from_review_pairs,
         resolve_stream_budget_ledger=resolve_stream_budget_ledger,
         build_svt_params=build_svt_params,
         review_url=_review_url,

@@ -555,7 +555,11 @@ Sampled calibration and AI note tuning can now run on any configured host with
 the `sample_calibration` capability. The folder page uses one AI-guided sample
 note box instead of separate baseline/tuning actions, lets the operator choose
 the sample host, and still keeps `Queue Folder Encode` hostless so the encode
-queue can dispatch it automatically. Runtime settings now carry remote host
+queue can dispatch it automatically. For mounted-media remote sample hosts,
+source and encoded review excerpts are rendered where the selected host can
+read the media, then copied back as small browser-ready clips; the controller
+does not need the full source mount for that review path. Runtime settings now
+carry remote host
 priority, per-host queue capabilities, explicit schedule selections, and a
 per-job `Bypass scheduler` escape hatch for urgent runs.
 

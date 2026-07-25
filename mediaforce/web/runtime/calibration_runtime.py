@@ -48,7 +48,7 @@ class CalibrationRunDeps:
     recommend_review_timestamps: Any
     encode_preview_clips: Any
     render_source_review_clips: Any
-    generate_compare_clips_from_previews: Any
+    generate_compare_clips_from_review_pairs: Any
     resolve_stream_budget_ledger: Any
     build_svt_params: Any
     review_url: Any
@@ -58,6 +58,7 @@ class CalibrationRunDeps:
     staged_artifact_columns: tuple[str, ...]
     recommend_review_moments: Any | None = None
     review_moment_payload: Any | None = None
+    default_review_timestamps: Any | None = None
 
 
 class _CalibrationTelemetry:
@@ -154,6 +155,7 @@ class _CalibrationTelemetry:
 def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
     return {
         "library_item_id": sample_item.get("library_item_id"),
+        "media_root": sample_item.get("media_root"),
         "rel_path": sample_item.get("rel_path"),
         "source_path": sample_item.get("source_path"),
         "source_fingerprint": sample_item.get("source_fingerprint"),
@@ -187,7 +189,12 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
 
 def _job_sample_item(job: dict[str, Any]) -> dict[str, Any] | None:
     sample_item = object_dict(job.get("sample_item"))
-    required_keys = ("rel_path", "source_path", "source_size_bytes", "video_codec", "duration_seconds")
+    rel_path = str(sample_item.get("rel_path") or "").strip()
+    if not sample_item.get("media_root") and rel_path:
+        rel_parts = Path(rel_path).parts
+        if rel_parts:
+            sample_item["media_root"] = rel_parts[0]
+    required_keys = ("media_root", "rel_path", "source_path", "source_size_bytes", "video_codec", "duration_seconds")
     if not sample_item or any(sample_item.get(key) in {None, ""} for key in required_keys):
         return None
     return sample_item
@@ -599,16 +606,25 @@ def run_sampled_calibration(
             8.0,
             media_fingerprint=object_dict(sample_item.get("media_fingerprint")),
             media_fingerprint_decision=object_dict(sample_item.get("media_fingerprint_decision")),
+            analyze_source=controller_source_path.exists(),
             process_controller=process_controller,
         )
     timestamps = [moment.timestamp_seconds for moment in review_moments]
     if not timestamps:
-        timestamps = deps.recommend_review_timestamps(
-            controller_source_path,
-            float_value(sample_item.get("duration_seconds")),
-            8.0,
-            process_controller=process_controller,
-        )
+        if controller_source_path.exists():
+            timestamps = deps.recommend_review_timestamps(
+                controller_source_path,
+                float_value(sample_item.get("duration_seconds")),
+                8.0,
+                process_controller=process_controller,
+            )
+        elif deps.default_review_timestamps is not None:
+            timestamps = deps.default_review_timestamps(
+                float_value(sample_item.get("duration_seconds")),
+                8.0,
+            )
+        else:
+            timestamps = [0.0]
         review_moments = []
     output_dir = config.paths.review_dir / calibration_run_id / "item-00"
     if progress_callback is not None:
@@ -632,19 +648,19 @@ def run_sampled_calibration(
     if progress_callback is not None:
         progress_callback("building_review", completed=1, total=3)
     source_clips = deps.render_source_review_clips(
-        source_path=controller_source_path,
+        source_path=quality_source_path,
         source_codec=str(sample_item.get("video_codec") or ""),
         output_dir=output_dir,
         timestamps=timestamps,
         duration_seconds=8.0,
         audio_plan=review_audio_plan,
+        host=quality_host,
         process_controller=process_controller,
     )
     if progress_callback is not None:
         progress_callback("building_review", completed=2, total=3)
-    compare_clips = deps.generate_compare_clips_from_previews(
-        source_path=controller_source_path,
-        source_codec=str(sample_item.get("video_codec") or ""),
+    compare_clips = deps.generate_compare_clips_from_review_pairs(
+        source_clips=source_clips,
         previews=preview_clips,
         output_dir=output_dir,
         process_controller=process_controller,

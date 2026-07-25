@@ -216,13 +216,14 @@ class RepresentativeSelectionTests(unittest.TestCase):
 
     def test_selection_evidence_persists_with_sample_jobs_and_results(self) -> None:
         selection = select_representatives([self._item(1), self._item(2)], prefix="tv/Example/Season 1")
-        primary_item = selection.primary_item()
+        primary_item = {**selection.primary_item(), "media_root": "tv"}
 
         queued_item = _job_sample_item_payload(primary_item)
         stored_item = _stored_sample_item_payload(primary_item)
 
         for item in (queued_item, stored_item):
             persisted_selection = item["representative_selection"]
+            self.assertEqual(item["media_root"], "tv")
             self.assertEqual(persisted_selection["selection_id"], selection.payload["selection_id"])
             self.assertEqual(persisted_selection["coverage"]["represented_item_count"], 2)
             self.assertEqual(item["representative_source_id"], selection.payload["primary_source_id"])
