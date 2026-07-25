@@ -99,7 +99,10 @@ Runtime-native observations have higher authority than reconstructed staged
 history. Startup maintenance backfills only outcomes that already satisfy the
 strict accepted-history rules above, marks them `staged_backfill`, leaves
 unavailable policy and search-timing facts explicitly absent, and is safe to
-rerun. Schema migration remains independent of application extraction code; a
+rerun. Once a staged-backfill run identity exists, later reruns preserve that
+immutable projection even when extraction code adds optional fields, while
+continuing to append newly accepted run identities. Schema migration remains
+independent of application extraction code; a
 failed backfill is logged and retried at the next startup. A later native row
 for the same run wins during current-revision resolution without mutating the
 historical row.

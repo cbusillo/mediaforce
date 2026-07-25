@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import Any
+from unittest.mock import patch
 
 from alembic import command
 from sqlalchemy import select, text
@@ -25,6 +27,7 @@ from mediaforce.tuning.quality_observations import (
     AUTHORITY_STAGED_BACKFILL,
     MAX_QUALITY_OBSERVATION_CANDIDATES,
     MAX_QUALITY_OBSERVATION_FINAL_ATTEMPTS,
+    QualityObservationConflictError,
     QualitySearchObservation,
     append_quality_search_observation,
     backfill_quality_search_observations,
@@ -114,6 +117,17 @@ class QualityObservationTests(unittest.TestCase):
         self.assertNotIn("predicted video stream size", row["candidate_trace_json"])
         self.assertEqual(row["search_signature_id"], self._context().signature_id)
         self.assertEqual(row["learning_eligible"], 1)
+
+    def test_runtime_observation_payload_conflicts_remain_strict(self) -> None:
+        original = self._selected_observation()
+        conflicting = self._selected_observation(
+            result=QualitySearchResult(31.0, "VMAF", 85.0, 87.0, ""),
+        )
+
+        append_quality_search_observation(self.connection, original)
+
+        with self.assertRaises(QualityObservationConflictError):
+            append_quality_search_observation(self.connection, conflicting)
 
     def test_target_size_failure_is_diagnostic_only(self) -> None:
         trace = self._target_size_trace(status="quality_conflict", selected=False)
@@ -331,6 +345,46 @@ class QualityObservationTests(unittest.TestCase):
         self.assertEqual(row["learning_eligible"], 1)
         self.assertEqual(row["actual_output_bytes"], 500_000_000)
 
+    def test_backfill_projection_changes_do_not_block_new_outcomes(self) -> None:
+        self._add_promoted_outcome()
+        first = backfill_quality_search_observations(self.connection, as_of=self.as_of)
+        original_row = self.connection.execute(
+            select(quality_search_observations).where(
+                quality_search_observations.c.search_run_id == "qsr1_historical"
+            )
+        ).mappings().one()
+        self._add_promoted_outcome(
+            library_item_id=2,
+            search_run_id="qsr1_historical_2",
+            episode_name="Episode 02.mkv",
+        )
+        original_builder = build_selected_quality_observation
+        evolved_projection = self._selected_observation(
+            search_run_id="qsr1_historical",
+            authority=AUTHORITY_STAGED_BACKFILL,
+        )
+
+        def build_evolved_projection(**kwargs: Any) -> QualitySearchObservation:
+            if kwargs["search_run_id"] == "qsr1_historical":
+                return evolved_projection
+            return original_builder(**kwargs)
+
+        with patch(
+                "mediaforce.tuning.quality_observations.build_selected_quality_observation",
+                side_effect=build_evolved_projection,
+        ):
+            second = backfill_quality_search_observations(self.connection, as_of=self.as_of)
+        rows = self.connection.execute(select(quality_search_observations)).mappings().all()
+
+        self.assertEqual(first.inserted, 1)
+        self.assertEqual(second.inserted, 1)
+        self.assertEqual(second.existing, 1)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            next(row for row in rows if row["search_run_id"] == "qsr1_historical")["observation_id"],
+            original_row["observation_id"],
+        )
+
     def test_schema_upgrade_is_independent_from_restartable_backfill(self) -> None:
         db_path = Path(self.temp_dir.name) / "upgrade.sqlite3"
         with open_db(db_path) as connection:
@@ -429,18 +483,27 @@ class QualityObservationTests(unittest.TestCase):
             shadow_payload=shadow_payload,
         )
 
-    def _add_promoted_outcome(self, *, connection: DBClient | None = None) -> None:
+    def _add_promoted_outcome(
+            self,
+            *,
+            connection: DBClient | None = None,
+            library_item_id: int = 1,
+            search_run_id: str = "qsr1_historical",
+            episode_name: str = "Episode 01.mkv",
+    ) -> None:
         db_connection = connection or self.connection
         context = self._context()
-        rel_path = "tv/Example/Season 01/Episode 01.mkv"
-        source_path = "/media/Episode 01.mkv"
+        rel_path = f"tv/Example/Season 01/{episode_name}"
+        source_path = f"/media/{episode_name}"
+        staging_path = f"/staging/{episode_name}"
+        suffix = "" if library_item_id == 1 else f"-{library_item_id}"
         promoted_at = self.as_of - timedelta(days=1)
         validated_at = promoted_at - timedelta(minutes=1)
         staged_at = validated_at - timedelta(minutes=1)
         completed_at = staged_at - timedelta(minutes=1)
         db_connection.execute(
             library_items.insert().values(
-                id=1,
+                id=library_item_id,
                 source_path=source_path,
                 rel_path=rel_path,
                 media_root="tv",
@@ -484,17 +547,17 @@ class QualityObservationTests(unittest.TestCase):
             "30",
             "-svtav1-params",
             str(context.encoder_parameters),
-            "/staging/Episode 01.mkv",
+            staging_path,
         ]
         db_connection.execute(
             staged_artifacts.insert().values(
-                library_item_id=1,
-                manifest_run_id="manifest-run",
+                library_item_id=library_item_id,
+                manifest_run_id=f"manifest-run{suffix}",
                 item_index=0,
                 encode_origin="queue",
-                encode_job_id="job-id",
-                encode_worker_id="worker-id",
-                encode_host_key="host-id",
+                encode_job_id=f"job-id{suffix}",
+                encode_worker_id=f"worker-id{suffix}",
+                encode_host_key=f"host-id{suffix}",
                 source_path=source_path,
                 source_rel_path=rel_path,
                 source_size_bytes=1_000_000_000,
@@ -503,7 +566,7 @@ class QualityObservationTests(unittest.TestCase):
                 source_fingerprint="source-fingerprint",
                 encode_completed_at=completed_at.isoformat(),
                 encode_duration_seconds=3_600.0,
-                staging_path="/staging/Episode 01.mkv",
+                staging_path=staging_path,
                 staging_size_bytes=500_000_000,
                 size_ratio=0.5,
                 chosen_crf=30.0,
@@ -520,7 +583,7 @@ class QualityObservationTests(unittest.TestCase):
         )
         db_connection.execute(
             item_events.insert().values(
-                library_item_id=1,
+                library_item_id=library_item_id,
                 created_at=completed_at.isoformat(),
                 event_type="encoding_completed",
                 details_json=json.dumps(
@@ -528,7 +591,7 @@ class QualityObservationTests(unittest.TestCase):
                         "encode_completed_at": completed_at.isoformat(),
                         "source_rel_path": rel_path,
                         "chosen_crf": 30.0,
-                        "quality_search_run_id": "qsr1_historical",
+                        "quality_search_run_id": search_run_id,
                         "target_size_trace": None,
                     }
                 ),
