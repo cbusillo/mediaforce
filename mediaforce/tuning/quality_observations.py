@@ -445,7 +445,7 @@ def backfill_quality_search_observations(
             recorded_at=recorded_at,
             authority=AUTHORITY_STAGED_BACKFILL,
         )
-        if append_quality_search_observation(connection, observation):
+        if _append_staged_backfill_observation(connection, observation):
             inserted += 1
         else:
             existing += 1
@@ -454,6 +454,26 @@ def backfill_quality_search_observations(
         existing=existing,
         excluded=tuple(sorted(exclusions.items())),
     )
+
+
+def _append_staged_backfill_observation(
+        connection: DBClient,
+        observation: QualitySearchObservation,
+) -> bool:
+    if observation.authority != AUTHORITY_STAGED_BACKFILL or observation.revision != 0:
+        raise ValueError("Historical backfill requires staged_backfill revision 0")
+    result = connection.execute(
+        sqlite_insert(quality_search_observations)
+        .values(**observation.values())
+        .on_conflict_do_nothing(
+            index_elements=(
+                quality_search_observations.c.search_run_id,
+                quality_search_observations.c.authority,
+                quality_search_observations.c.revision,
+            )
+        )
+    )
+    return bool(result.rowcount)
 
 
 def _build_observation(
