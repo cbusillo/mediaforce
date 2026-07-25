@@ -392,8 +392,8 @@ class QualityShadowTests(unittest.TestCase):
         self.assertEqual(metrics.fallback_need_rate, 0.2)
         self.assertEqual(metrics.median_candidate_savings_rate, 0.8)
         self.assertTrue(metrics.performance_thresholds_met)
-        self.assertFalse(metrics.active_eligible)
-        self.assertEqual(metrics.blocking_reasons, ("hint_safety_unmeasured",))
+        self.assertTrue(metrics.active_eligible)
+        self.assertEqual(metrics.blocking_reasons, ())
 
         rows.append(
             {
@@ -419,6 +419,181 @@ class QualityShadowTests(unittest.TestCase):
         Result.quality_search_trace = None
         Result.target_size_trace = {"candidate_count": 3, "candidates": [{}, {}, {}, {}]}
         self.assertEqual(quality_result_candidate_count(Result()), 4)
+
+    def test_active_payload_reports_causal_probe_without_polluting_passive_projection(self) -> None:
+        recommendation = self._available_recommendation(first_crf=50.0)
+        payload = build_quality_shadow_payload(
+            recommendation,
+            selected_crf=50.0,
+            selected_score=85.0,
+            minimum_quality_score=84.0,
+            candidate_count=1,
+            search_duration_seconds=20.0,
+            actual_output_bytes=300_000_000,
+            size_target_bytes=300_000_000,
+            warm_start_plan={
+                "eligible": True,
+                "requested_crf": 50.0,
+                "candidate_crf": 50,
+                "adjusted": False,
+                "baseline_median_candidate_count": 5.0,
+                "baseline_median_search_seconds": 100.0,
+            },
+            warm_start_trace={
+                "status": "accepted",
+                "attempted": True,
+                "candidate_count": 1,
+                "baseline_candidate_count": 0,
+                "total_candidate_count": 1,
+                "duration_seconds": 20.0,
+                "fallback_used": False,
+            },
+        )
+
+        self.assertTrue(payload["production_search_changed"])
+        self.assertIsNone(payload["comparison"]["candidate_savings_rate"])
+        self.assertEqual(payload["warm_start"]["estimated_candidate_savings_rate"], 0.8)
+        self.assertEqual(payload["warm_start"]["estimated_search_time_savings_rate"], 0.8)
+        public = quality_shadow_public_view(
+            {
+                "observation_id": "qso1_active",
+                "source_rel_path": "tv/Show/Season 01/Episode 01.mkv",
+                "recorded_at": self.as_of.isoformat(),
+                "selected_crf": 50.0,
+                "selected_target": 85.0,
+                "selected_score": 85.0,
+                "quality_metric": "VMAF",
+                "actual_output_bytes": 300_000_000,
+                "candidate_count": 1,
+                "search_duration_seconds": 20.0,
+                "context_json": json.dumps({"search": {"minimum_quality_score": 84.0}}),
+                "shadow_json": json.dumps(payload),
+            }
+        )
+        assert public is not None
+        self.assertTrue(public["production_search_changed"])
+        self.assertEqual(public["warm_start"]["status"], "accepted")
+        self.assertEqual(public["warm_start"]["estimated_candidate_savings_rate"], 0.8)
+
+    def test_active_selected_observation_remains_visible_without_becoming_evidence(self) -> None:
+        payload = build_quality_shadow_payload(
+            self._available_recommendation(first_crf=50.0),
+            selected_crf=50.0,
+            selected_score=85.0,
+            minimum_quality_score=84.0,
+            candidate_count=1,
+            search_duration_seconds=20.0,
+            actual_output_bytes=None,
+            size_target_bytes=None,
+            warm_start_trace={"status": "accepted", "attempted": True},
+        )
+        row = {
+            "observation_id": "qso1_active",
+            "search_run_id": "qsr1_active",
+            "revision": 0,
+            "authority": "runtime_native",
+            "outcome_kind": "selected",
+            "learning_eligible": 0,
+            "exclusion_reason": "warm_start_selected",
+            "timing_json": json.dumps({"encode_completed_at": self.as_of.isoformat()}),
+            "shadow_json": json.dumps(payload),
+        }
+
+        self.assertIs(select_latest_quality_shadow_observation([row]), row)
+
+    def test_active_rows_do_not_rewrite_passive_readiness_metrics(self) -> None:
+        recommendation = self._available_recommendation(first_crf=50.0)
+        rows = [
+            {
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=50.0,
+                        selected_score=85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=5,
+                        search_duration_seconds=100.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                    )
+                )
+            }
+            for _ in range(MIN_SHADOW_RECOMMENDATIONS)
+        ]
+        rows.append(
+            {
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=50.0,
+                        selected_score=85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=1,
+                        search_duration_seconds=20.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                        warm_start_trace={"status": "accepted", "attempted": True},
+                    )
+                )
+            }
+        )
+
+        metrics = quality_shadow_metrics(rows)
+
+        self.assertEqual(metrics.evaluated_runs, MIN_SHADOW_RECOMMENDATIONS)
+        self.assertEqual(metrics.recommendation_runs, MIN_SHADOW_RECOMMENDATIONS)
+        self.assertEqual(metrics.median_candidate_savings_rate, 0.8)
+
+    def test_recovered_active_final_size_miss_blocks_future_warm_starts(self) -> None:
+        recommendation = self._available_recommendation(first_crf=50.0)
+        rows = [
+            {
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=50.0,
+                        selected_score=85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=5,
+                        search_duration_seconds=100.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                    )
+                )
+            }
+            for _ in range(MIN_SHADOW_RECOMMENDATIONS)
+        ]
+        rows.append(
+            {
+                "outcome_kind": "selected",
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=51.0,
+                        selected_score=85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=6,
+                        search_duration_seconds=120.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                        warm_start_trace={
+                            "status": "fallback",
+                            "attempted": True,
+                            "fallback_used": True,
+                            "fallback_reason": "final_size_miss",
+                        },
+                        final_size_miss=True,
+                    )
+                ),
+            }
+        )
+
+        metrics = quality_shadow_metrics(rows)
+
+        self.assertEqual(metrics.evaluated_runs, MIN_SHADOW_RECOMMENDATIONS)
+        self.assertEqual(metrics.production_final_size_misses, 1)
+        self.assertFalse(metrics.active_eligible)
+        self.assertIn("production_final_size_miss", metrics.blocking_reasons)
 
     def test_relaxed_quality_target_is_not_projected_as_a_one_probe_hit(self) -> None:
         class Result:

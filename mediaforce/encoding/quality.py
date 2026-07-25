@@ -40,6 +40,14 @@ class QualitySearchResult:
     quality_search_trace: dict[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class QualitySearchWarmStart:
+    requested_crf: float
+    candidate_crf: int
+    search_signature_id: str
+    cohort_id: str
+
+
 @dataclass(slots=True)
 class SampleEncodeResult:
     metric: str

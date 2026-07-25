@@ -118,9 +118,15 @@ def build_selected_quality_observation(
         supersedes_observation_id: str | None = None,
         supersession_reason: str | None = None,
 ) -> QualitySearchObservation:
-    resolved_learning_eligible = context is not None if learning_eligible is None else learning_eligible
+    warm_start_status = _quality_result_warm_start_status(quality_result)
+    warm_start_selected = warm_start_status == "accepted"
+    resolved_learning_eligible = (
+        False
+        if warm_start_selected
+        else context is not None if learning_eligible is None else learning_eligible
+    )
     resolved_exclusion_reason = (
-        exclusion_reason
+        ("warm_start_selected" if warm_start_selected else exclusion_reason)
         if not resolved_learning_eligible
         else None
     )
@@ -158,6 +164,11 @@ def build_selected_quality_observation(
         "final_size_error_percent": _size_error_percent(
             actual_output_bytes,
             context.size_target_bytes if context is not None else None,
+        ),
+        "exploration_kind": (
+            "warm_start_accepted"
+            if warm_start_selected
+            else "warm_start_fallback" if warm_start_status else "full_search"
         ),
     }
     timing = _timing_payload(
@@ -575,6 +586,13 @@ def _selected_candidate_trace(quality_result: QualitySearchResult) -> tuple[dict
     }, candidate_count
 
 
+def _quality_result_warm_start_status(quality_result: QualitySearchResult) -> str | None:
+    target_trace = object_dict(quality_result.target_size_trace)
+    quality_trace = object_dict(quality_result.quality_search_trace)
+    warm_start = object_dict(target_trace.get("warm_start") or quality_trace.get("warm_start"))
+    return str(warm_start.get("status") or "") or None
+
+
 def _failed_candidate_trace(
         *,
         target_size_trace: Mapping[str, Any] | None,
@@ -654,7 +672,7 @@ def _project_quality_search_trace(
                 "predicted_encode_size_bytes": None,
             }
             candidates.append(selected)
-    candidate_count = len(candidates)
+    candidate_count = max(int_value(trace.get("candidate_count")), len(candidates))
     stored = candidates[:MAX_QUALITY_OBSERVATION_CANDIDATES]
     return {
         "schema_version": QUALITY_OBSERVATION_TRACE_VERSION,
@@ -667,6 +685,7 @@ def _project_quality_search_trace(
         "candidates": stored,
         "selected_candidate": selected,
         "best_reachable_candidate": selected or (stored[-1] if stored else None),
+        "warm_start": _project_warm_start_trace(trace.get("warm_start")),
     }, candidate_count
 
 
@@ -675,7 +694,7 @@ def _project_target_size_trace(trace: Mapping[str, Any]) -> tuple[dict[str, Any]
         _target_candidate_payload(object_dict(candidate))
         for candidate in object_list(trace.get("candidates"))
     ]
-    candidate_count = len(candidates)
+    candidate_count = max(int_value(trace.get("candidate_count")), len(candidates))
     stored = candidates[:MAX_QUALITY_OBSERVATION_CANDIDATES]
     return {
         "schema_version": QUALITY_OBSERVATION_TRACE_VERSION,
@@ -695,7 +714,36 @@ def _project_target_size_trace(trace: Mapping[str, Any]) -> tuple[dict[str, Any]
             _final_output_payload(object_dict(attempt))
             for attempt in object_list(trace.get("final_output_attempts"))
         ][:MAX_QUALITY_OBSERVATION_FINAL_ATTEMPTS],
+        "warm_start": _project_warm_start_trace(trace.get("warm_start")),
     }, candidate_count
+
+
+def _project_warm_start_trace(value: object) -> dict[str, Any] | None:
+    trace = object_dict(value)
+    if not trace:
+        return None
+    candidate = object_dict(trace.get("candidate"))
+    return {
+        "schema_version": int_value(trace.get("schema_version")),
+        "status": str(trace.get("status") or "") or None,
+        "attempted": trace.get("attempted") is True,
+        "requested_crf": trace.get("requested_crf"),
+        "candidate_crf": trace.get("candidate_crf"),
+        "search_signature_id": str(trace.get("search_signature_id") or "") or None,
+        "cohort_id": str(trace.get("cohort_id") or "") or None,
+        "candidate_count": max(int_value(trace.get("candidate_count")), 0),
+        "baseline_candidate_count": max(int_value(trace.get("baseline_candidate_count")), 0),
+        "total_candidate_count": max(int_value(trace.get("total_candidate_count")), 0),
+        "duration_seconds": trace.get("duration_seconds"),
+        "fallback_used": trace.get("fallback_used") is True,
+        "fallback_reason": str(trace.get("fallback_reason") or "") or None,
+        "error_type": str(trace.get("error_type") or "") or None,
+        "candidate": (
+            _target_candidate_payload(candidate)
+            if "predicted_whole_episode_bytes" in candidate
+            else _quality_candidate_mapping(candidate)
+        ) if candidate else None,
+    }
 
 
 def _quality_candidate_payload(measurement: Any) -> dict[str, Any]:

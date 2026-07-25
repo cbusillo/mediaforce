@@ -566,6 +566,27 @@ function qualityMemorySizeDetail(value: number | null): string {
 	return `${percent}% ${value > 0 ? 'over' : 'under'} saved size target`;
 }
 
+function qualityMemorySavingsPercent(value: number | null | undefined): string {
+	if (value == null || !Number.isFinite(value)) return '';
+	return `${Math.round(value * 100).toLocaleString('en-US')}%`;
+}
+
+function qualityWarmStartFallbackCopy(reason: string | null | undefined): string {
+	const copy: Record<string, string> = {
+		candidate_rejected: 'the candidate did not satisfy the search',
+		quality_target_miss: 'the candidate missed the strict quality target',
+		size_cap_miss: 'the candidate exceeded the configured encoded-size cap',
+		metric_mismatch: 'the candidate returned a different quality metric',
+		invalid_measurement: 'the candidate measurement was invalid',
+		quality_floor_miss: 'the candidate missed the quality floor',
+		source_cap_miss: 'the candidate exceeded the source-size cap',
+		target_band_miss: 'the candidate missed the saved size band',
+		final_size_miss: 'the speculative final output missed the saved size band',
+		probe_error: 'the candidate probe could not be completed'
+	};
+	return copy[text(reason)] ?? 'the candidate did not satisfy every configured guard';
+}
+
 function qualityMemoryFallbackCopy(reason: string | null, storedReason: string): string {
 	const copy: Record<string, string> = {
 		no_history: 'No compatible prior runs were available for this search.',
@@ -601,7 +622,7 @@ function qualityMemoryState(reason: string | null, confidence: string | null): Q
 
 export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
 	const memory = folder.quality_memory;
-	const policyCopy =
+	const passivePolicyCopy =
 		'Quality floors and saved policy remain unchanged. Memory is observation-only; production search ran normally.';
 	if (!memory) {
 		return {
@@ -621,39 +642,56 @@ export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
 			comparison: '—',
 			reason:
 				'No completed quality search has been recorded for this folder yet. Quality floors and saved policy remain unchanged.',
-			policyCopy
+			policyCopy: passivePolicyCopy
 		};
 	}
 
 	const recommendation = memory.recommendation;
+	const warmStart = memory.warm_start;
+	const warmAttempted = memory.production_search_changed && Boolean(warmStart?.attempted);
+	const warmAccepted = warmAttempted && warmStart?.status === 'accepted';
+	const warmFallback = warmAttempted && Boolean(warmStart?.fallback_used);
+	const policyCopy = warmAccepted
+		? 'Quality floors, size targets, transforms, and saved policy stayed unchanged. Memory’s first candidate passed every guard, so the full baseline search was not needed.'
+		: warmFallback
+			? 'Memory’s first candidate was discarded after a guard miss. Quality floors, size targets, transforms, and saved policy stayed unchanged while the full baseline search ran normally.'
+			: passivePolicyCopy;
 	const state = qualityMemoryState(memory.fallback_reason, recommendation?.confidence ?? null);
 	const withinOne = memory.comparison.within_one_crf;
-	const tone: HumanSeasonTone = recommendation
-		? withinOne === false
-			? 'attention'
-			: state === 'high-confidence'
-				? 'success'
-				: 'ready'
-		: state === 'sparse'
-			? 'quiet'
-			: 'attention';
-	const badge = recommendation
-		? state === 'high-confidence'
-			? withinOne === false
-				? 'High confidence · differed'
-				: 'High confidence'
-			: withinOne === false
-				? 'Memory differed'
-				: withinOne
-					? 'Memory agreed'
-					: 'Recommendation recorded'
-		: state === 'sparse'
-			? 'Sparse memory'
-			: state === 'stale'
-				? 'Memory invalidated'
-				: state === 'unavailable'
-					? 'Memory unavailable'
-					: 'Evidence conflict';
+	const tone: HumanSeasonTone = warmAccepted
+		? 'success'
+		: warmFallback
+			? 'ready'
+			: recommendation
+				? withinOne === false
+					? 'attention'
+					: state === 'high-confidence'
+						? 'success'
+						: 'ready'
+				: state === 'sparse'
+					? 'quiet'
+					: 'attention';
+	const badge = warmAccepted
+		? 'Warm start accepted'
+		: warmFallback
+			? 'Warm start fell back'
+			: recommendation
+				? state === 'high-confidence'
+					? withinOne === false
+						? 'High confidence · differed'
+						: 'High confidence'
+					: withinOne === false
+						? 'Memory differed'
+						: withinOne
+							? 'Memory agreed'
+							: 'Recommendation recorded'
+				: state === 'sparse'
+					? 'Sparse memory'
+					: state === 'stale'
+						? 'Memory invalidated'
+						: state === 'unavailable'
+							? 'Memory unavailable'
+							: 'Evidence conflict';
 	const measured = memory.measured;
 	const metric = text(measured.quality_metric).toUpperCase() || 'Quality';
 	const qualityDetail = [
@@ -693,18 +731,44 @@ export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
 				.filter(Boolean)
 				.join(' · ') || 'Dispersion not recorded'
 		: '—';
-	const comparison = recommendation
-		? memory.comparison.crf_delta === null
-			? 'Production comparison unavailable'
-			: `${withinOne ? 'Within 1 CRF' : 'Outside 1 CRF'} · Δ ${formatSignedQualityMemoryNumber(memory.comparison.crf_delta)}`
-		: 'No recommendation to compare';
+	const estimatedCandidateSavings = qualityMemorySavingsPercent(
+		warmStart?.estimated_candidate_savings_rate
+	);
+	const displayedFirstCrf =
+		warmAttempted && warmStart?.candidate_crf !== null && warmStart?.candidate_crf !== undefined
+			? warmStart.candidate_crf
+			: recommendation?.first_crf;
+	const warmAdjustment =
+		warmAttempted && warmStart?.adjusted && warmStart.requested_crf !== null
+			? `adjusted from ${formatQualityMemoryNumber(warmStart.requested_crf)}`
+			: '';
+	const comparison = warmAccepted
+		? [
+				'Accepted first candidate',
+				estimatedCandidateSavings
+					? `estimated ${estimatedCandidateSavings} fewer candidate passes`
+					: ''
+			]
+				.filter(Boolean)
+				.join(' · ')
+		: warmFallback
+			? `Full baseline fallback · ${measured.candidate_count.toLocaleString('en-US')} candidate${measured.candidate_count === 1 ? '' : 's'} total`
+			: recommendation
+				? memory.comparison.crf_delta === null
+					? 'Production comparison unavailable'
+					: `${withinOne ? 'Within 1 CRF' : 'Outside 1 CRF'} · Δ ${formatSignedQualityMemoryNumber(memory.comparison.crf_delta)}`
+				: 'No recommendation to compare';
 	return {
 		state,
 		tone,
 		badge,
-		title: recommendation
-			? 'Measured run and shadow recommendation'
-			: 'Measured run; memory held back',
+		title: warmAccepted
+			? 'Measured run used trusted memory'
+			: warmFallback
+				? 'Memory tried first; baseline selected'
+				: recommendation
+					? 'Measured run and shadow recommendation'
+					: 'Measured run; memory held back',
 		source: memory.source_rel_path ? episodeLabel(memory.source_rel_path) : '',
 		measured: [
 			{
@@ -723,23 +787,47 @@ export function qualityMemoryView(folder: FolderPayload): QualityMemoryView {
 				detail: qualityMemorySizeDetail(measured.size_error_percent)
 			}
 		],
-		recommendation: recommendation
+		recommendation: warmAttempted
 			? {
-					label: 'Shadow first CRF',
-					value: formatQualityMemoryNumber(recommendation.first_crf),
-					detail: evidence
+					label: 'Tried first CRF',
+					value: formatQualityMemoryNumber(displayedFirstCrf),
+					detail: warmAccepted
+						? [
+								recommendation ? evidence : 'Measured memory candidate',
+								warmAdjustment,
+								'accepted by every guard'
+							]
+								.filter(Boolean)
+								.join(' · ')
+						: [
+								recommendation ? evidence : 'Measured memory candidate',
+								warmAdjustment,
+								'full fallback used'
+							]
+								.filter(Boolean)
+								.join(' · ')
 				}
-			: {
-					label: 'Shadow recommendation',
-					value: 'Held back',
-					detail: 'Production search still ran normally.'
-				},
+			: recommendation
+				? {
+						label: 'Shadow first CRF',
+						value: formatQualityMemoryNumber(recommendation.first_crf),
+						detail: evidence
+					}
+				: {
+						label: 'Shadow recommendation',
+						value: 'Held back',
+						detail: 'Production search still ran normally.'
+					},
 		evidence,
 		dispersion,
 		comparison,
-		reason: recommendation
-			? text(memory.reason) || 'The recommendation was recorded for comparison only.'
-			: qualityMemoryFallbackCopy(memory.fallback_reason, memory.reason),
+		reason: warmAccepted
+			? 'The remembered candidate passed the existing quality, size, transform, and selection checks on this source.'
+			: warmFallback
+				? `Mediaforce discarded the remembered candidate because ${qualityWarmStartFallbackCopy(warmStart?.fallback_reason)}, then ran the full baseline search unchanged.`
+				: recommendation
+					? text(memory.reason) || 'The recommendation was recorded for comparison only.'
+					: qualityMemoryFallbackCopy(memory.fallback_reason, memory.reason),
 		policyCopy
 	};
 }

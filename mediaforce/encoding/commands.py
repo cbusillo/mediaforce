@@ -5,6 +5,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import build_video_filter
+from mediaforce.encoding.helpers import build_svt_params
 
 
 def build_ffmpeg_command(
@@ -101,7 +102,7 @@ def build_ffmpeg_command(
             "-crf",
             format_crf(quality.crf),
             "-svtav1-params",
-            f"tune=0:film-grain={int(video_policy.get('default_grain', 0))}:film-grain-denoise={int(video_policy.get('grain_denoise', 0))}",
+            ":".join(build_svt_params(video_policy)),
         ]
     )
     video_filter = build_video_filter(

@@ -110,20 +110,20 @@ revision, a predecessor pointer, and a machine-readable reason. Library-item
 deletion does not cascade into this audit history; item identity and path are
 copied into every observation.
 
-This phase remains passive. `load_quality_memory` continues to use the existing
-accepted staged-outcome path, and observations do not alter search ordering,
-bounds, targets, policy, or fallback behavior until shadow evaluation is
-completed in a later phase.
+The append-only observation phase remains passive. Active warm-start behavior is
+separately qualified from prior passive shadow evidence and never mutates an
+observation, saved policy, or search bound.
 
 ## Shadow Recommendations
 
 Runtime-native selected observations now carry an immutable `shadow_json`
 payload. The payload records the first CRF that earlier compatible evidence
 would have suggested, its scope, confidence, sample count, dispersion, typed
-fallback reason, and a comparison with the search that actually ran. Shadow
-evaluation happens only after the production search is complete and uses an
-explicit evidence cutoff at that search's start time, so the current result
-cannot recommend itself.
+fallback reason, and a comparison with the search that actually ran. Passive
+shadow evaluation happens after the production search is complete. Active
+planning evaluates the same immutable history before search so it can authorize
+the isolated probe. Both paths use an explicit evidence cutoff at the current
+search's start time, so the current result cannot recommend itself.
 
 Shadow evidence comes from the highest-authority append-only revision that
 already existed at the search-start cutoff. It must be selected,
@@ -146,17 +146,70 @@ Aggregate shadow metrics report recommendation coverage, within-one hit rate,
 false-narrow rate, fallback need, median projected candidate/time savings, and
 safety outcomes. Performance thresholds require at least ten recommendations,
 at least 70% within-one accuracy, at least 20% median candidate and time savings,
-and zero measured production quality-floor or final-size violations. Meeting
-those thresholds still does not mark active behavior eligible: counterfactual
-hint safety remains explicitly unmeasured until the warm-start phase executes a
-real hint probe behind the unchanged fallback. The safety counters describe
-production outcomes during the shadow window, not an unexecuted hint's quality
-or size.
+and zero measured production quality-floor or final-size violations. Those
+thresholds authorize only the isolated measured probe described below; they do
+not authorize bound narrowing, target changes, or selector changes. The safety
+counters describe production outcomes during the shadow window, not an
+unexecuted hint's quality or size. Active rows do not replace that passive
+benchmark; their safety facts remain visible while passive recommendation
+projections continue to determine whether a cohort is eligible.
+
+## Active Warm Starts
+
+An active warm start is a single optimization probe in front of the existing
+search. It is available only when all of these conditions hold:
+
+- a pre-search context can be built from the same resolved metric, target,
+  quality floor, preset, encoder parameters, video filter, container, and
+  deterministic output dimensions used by the final command signature
+- configured minimum and maximum CRF bounds are available for deterministic
+  rounding and clamping
+- evidence is runtime-native or corrected history with the exact current video
+  policy hash; unhashed staged backfill cannot authorize active behavior
+- the current item, season, or series recommendation still passes sample-count
+  and dispersion checks at the search-start evidence cutoff
+- that exact media scope, search signature, and policy has at least ten passive
+  recommendations, at least 70% within-one accuracy, at least 20% median
+  candidate and search-time savings, and zero quality-floor or final-size
+  violations
+- at least ten compatible passive rows carry usable paired candidate-count and
+  search-duration benchmarks for honest median savings estimates
+- the median CRF can be rounded and clamped to the configured CRF range without
+  moving more than one CRF point
+
+Quality-only searches run one `ab-av1 sample-encode` at the remembered CRF with
+the original samples, preset, encoder settings, and transform. The candidate is
+accepted only when that measurement meets the original strict quality target
+and encoded-size cap. A failure or rejected measurement is discarded before the
+normal target-relaxation and CRF-bound sequence starts with fresh state.
+`ab-av1 crf-search` is not used for this probe because it rejects identical
+minimum and maximum CRF bounds; `sample-encode` is its native single-CRF
+measurement surface.
+
+Target-size searches measure the hint in isolation and accept it only through
+the existing target-band, quality-floor, and source-cap selector. A miss is not
+added to the six-candidate curve or retry brackets; the normal target-size
+search starts fresh. If a warm-selected final output misses its final size band,
+Mediaforce removes that speculative output, runs the full baseline search from
+fresh state, and then resumes the existing final verification and bounded retry
+path.
+
+Warm-selected observations remain append-only audit facts but are marked
+learning-ineligible and are excluded from historical staged backfill. This
+prevents recommendations from training on their own decisions. Outcomes selected
+by the unchanged full fallback remain eligible because the baseline search was
+still authoritative.
+
+The immutable shadow payload carries a separate active block with eligibility,
+requested and attempted CRF, probe status, fallback reason, total candidate
+work, and estimates against the pinned passive baseline. Passive projected
+savings are never mixed into active causal runs.
 
 ## Folder Studio Projection
 
-Folder Studio reads the newest current, learning-eligible selected observation
-inside the active media scope and projects its immutable shadow record. The
+Folder Studio reads the newest current selected observation inside the active
+media scope when it is either learning-eligible or an audited warm-start
+selection, then projects its immutable shadow record. The
 surface keeps the production result and the counterfactual recommendation
 separate: chosen CRF, measured quality, final size, candidate count, and search
 time describe what actually ran; the shadow first CRF, evidence scope, sample
@@ -168,7 +221,9 @@ as sparse, stale, or conflicting evidence instead of recomputing guidance in the
 web layer. A folder with no shadow-bearing observation gets a compact empty
 state. Every state says that the evidence is observation-only: quality floors,
 saved policy, production search order, bounds, and fallback behavior remain
-unchanged.
+unchanged. For active runs it instead says whether the first candidate passed or
+was discarded before the full baseline fallback, while keeping measured output
+facts separate from historical guidance.
 
 ## Cohorts And Confidence
 
@@ -192,11 +247,12 @@ aggregate metric evidence counts and never produces CRF guidance.
 ## Current Limitations
 
 - `load_quality_memory` still reads the latest accepted staged artifact per item;
-  the append-only log is used only for passive shadow inference.
+  active qualification and shadow inference use the append-only log.
 - full validation replaces the encode-time validation payload, so older staged
   rows may not retain target-size search traces.
 - historical backfill can reconstruct only accepted successes and cannot recover
-  unavailable policy hashes, search wall time, or ambiguous historical failures.
-
-Active warm starts remain a separate later phase. Passive evidence must prove
-useful before any encode behavior changes.
+  unavailable policy hashes, search wall time, or ambiguous historical failures;
+  those rows remain passive-only.
+- pre-search dimension identity is intentionally unavailable when FFmpeg must
+  resolve an aspect-ratio scale width, so those searches continue through the
+  full baseline path.

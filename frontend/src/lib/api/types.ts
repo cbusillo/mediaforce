@@ -1369,6 +1369,27 @@ export interface FolderQualityMemoryPayload {
 	fallback_reason: QualityMemoryFallbackReason | null;
 	reason: string;
 	production_search_changed: boolean;
+	warm_start: {
+		eligible: boolean;
+		block_reason: string | null;
+		requested_crf: number | null;
+		candidate_crf: number | null;
+		adjusted: boolean;
+		status: string | null;
+		attempted: boolean;
+		fallback_used: boolean;
+		fallback_reason: string | null;
+		candidate_count: number;
+		baseline_candidate_count: number;
+		total_candidate_count: number;
+		duration_seconds: number | null;
+		baseline_median_candidate_count: number | null;
+		baseline_median_search_seconds: number | null;
+		estimated_candidate_savings_count: number | null;
+		estimated_candidate_savings_rate: number | null;
+		estimated_search_time_savings_seconds: number | null;
+		estimated_search_time_savings_rate: number | null;
+	} | null;
 }
 
 export interface FolderPayload {

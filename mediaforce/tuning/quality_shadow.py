@@ -191,6 +191,7 @@ def recommend_quality_search(
         policy_hash: str | None,
         as_of: datetime | str,
         library_types: Mapping[str, str] | None = None,
+        allow_unhashed_backfill: bool = True,
 ) -> QualityShadowRecommendation:
     cutoff = _parse_timestamp(as_of)
     if cutoff is None:
@@ -207,6 +208,7 @@ def recommend_quality_search(
         policy_hash=policy_hash,
         as_of=cutoff,
         library_types=library_types,
+        allow_unhashed_backfill=allow_unhashed_backfill,
     )
 
 
@@ -219,12 +221,13 @@ def recommend_quality_search_from_rows(
         policy_hash: str | None,
         as_of: datetime | str,
         library_types: Mapping[str, str] | None = None,
+        allow_unhashed_backfill: bool = True,
 ) -> QualityShadowRecommendation:
     cutoff = _parse_timestamp(as_of)
     if cutoff is None:
         raise ValueError("Quality-shadow evidence cutoff must be a valid timestamp")
     cutoff = _as_utc(cutoff)
-    scope_chain = _scope_chain(source_rel_path, library_types=library_types)
+    scope_chain = quality_memory_scope_chain(source_rel_path, library_types=library_types)
     exclusion_counts: Counter[str] = Counter()
     if _optional_text(policy_hash) is None:
         return unavailable_quality_shadow_recommendation(
@@ -268,7 +271,9 @@ def recommend_quality_search_from_rows(
             continue
         historical_policy_hash = str(row.get("policy_hash") or "").strip() or None
         authority = str(row.get("authority") or "").strip()
-        if authority != AUTHORITY_STAGED_BACKFILL and historical_policy_hash is None:
+        if historical_policy_hash is None and (
+                authority != AUTHORITY_STAGED_BACKFILL or not allow_unhashed_backfill
+        ):
             exclusion_counts["stale_signature"] += 1
             continue
         if historical_policy_hash is not None and historical_policy_hash != policy_hash:
@@ -445,6 +450,9 @@ def build_quality_shadow_payload(
         search_duration_seconds: float | None,
         actual_output_bytes: int | None,
         size_target_bytes: int | None,
+        warm_start_plan: Mapping[str, Any] | None = None,
+        warm_start_trace: Mapping[str, Any] | None = None,
+        final_size_miss: bool = False,
 ) -> dict[str, Any]:
     normalized_candidate_count = max(int(candidate_count), 0)
     quality_margin = round(selected_score - minimum_quality_score, 3)
@@ -458,7 +466,9 @@ def build_quality_shadow_payload(
     projected_search_seconds: float | None = None
     search_time_savings_seconds: float | None = None
     search_time_savings_rate: float | None = None
-    if normalized_candidate_count > 0:
+    warm_trace = object_dict(warm_start_trace)
+    production_search_changed = warm_trace.get("attempted") is True
+    if normalized_candidate_count > 0 and not production_search_changed:
         if first_crf is None:
             projected_candidate_count = normalized_candidate_count
         elif within_one:
@@ -477,10 +487,17 @@ def build_quality_shadow_payload(
                 search_time_savings_seconds / search_duration_seconds,
                 6,
             ) if search_duration_seconds > 0 else 0.0
+    warm_payload = _quality_warm_start_payload(
+        warm_start_plan,
+        warm_trace,
+        candidate_count=normalized_candidate_count,
+        search_duration_seconds=search_duration_seconds,
+    )
     payload = recommendation.to_payload()
     payload.update(
         {
-            "production_search_changed": False,
+            "production_search_changed": production_search_changed,
+            "warm_start": warm_payload,
             "comparison": {
                 "selected_crf": selected_crf,
                 "crf_delta": delta,
@@ -496,13 +513,72 @@ def build_quality_shadow_payload(
                 "quality_margin": quality_margin,
                 "production_quality_floor_violation": quality_margin < 0,
                 "size_error_percent": size_error_percent,
-                "final_size_miss": False,
-                "fallback_needed": first_crf is None or not bool(within_one),
-                "false_narrow": first_crf is not None and not bool(within_one),
+                "final_size_miss": final_size_miss,
+                "fallback_needed": (
+                    warm_trace.get("fallback_used") is True
+                    if production_search_changed
+                    else first_crf is None or not bool(within_one)
+                ),
+                "false_narrow": (
+                    False
+                    if production_search_changed
+                    else first_crf is not None and not bool(within_one)
+                ),
             },
         }
     )
     return payload
+
+
+def _quality_warm_start_payload(
+        plan: Mapping[str, Any] | None,
+        trace: Mapping[str, Any],
+        *,
+        candidate_count: int,
+        search_duration_seconds: float | None,
+) -> dict[str, Any] | None:
+    plan_payload = object_dict(plan)
+    trace_payload = object_dict(trace)
+    if not plan_payload and not trace_payload:
+        return None
+    baseline_candidate_count = _strict_number(plan_payload.get("baseline_median_candidate_count"))
+    baseline_search_seconds = _strict_number(plan_payload.get("baseline_median_search_seconds"))
+    estimated_candidate_savings_count = (
+        round(baseline_candidate_count - candidate_count, 3)
+        if baseline_candidate_count is not None
+        else None
+    )
+    estimated_candidate_savings_rate = (
+        round(estimated_candidate_savings_count / baseline_candidate_count, 6)
+        if estimated_candidate_savings_count is not None and baseline_candidate_count > 0
+        else None
+    )
+    estimated_search_time_savings_seconds = (
+        round(baseline_search_seconds - search_duration_seconds, 3)
+        if baseline_search_seconds is not None and search_duration_seconds is not None
+        else None
+    )
+    estimated_search_time_savings_rate = (
+        round(estimated_search_time_savings_seconds / baseline_search_seconds, 6)
+        if estimated_search_time_savings_seconds is not None and baseline_search_seconds > 0
+        else None
+    )
+    return {
+        "schema_version": 1,
+        "eligible": plan_payload.get("eligible") is True,
+        "block_reason": _optional_text(plan_payload.get("block_reason")),
+        "requested_crf": _strict_number(plan_payload.get("requested_crf")),
+        "candidate_crf": _strict_number(plan_payload.get("candidate_crf")),
+        "adjusted": plan_payload.get("adjusted") is True,
+        "readiness": object_dict(plan_payload.get("readiness")) or None,
+        "execution": dict(trace_payload) if trace_payload else None,
+        "baseline_median_candidate_count": baseline_candidate_count,
+        "baseline_median_search_seconds": baseline_search_seconds,
+        "estimated_candidate_savings_count": estimated_candidate_savings_count,
+        "estimated_candidate_savings_rate": estimated_candidate_savings_rate,
+        "estimated_search_time_savings_seconds": estimated_search_time_savings_seconds,
+        "estimated_search_time_savings_rate": estimated_search_time_savings_rate,
+    }
 
 
 def select_latest_quality_shadow_observation(
@@ -512,12 +588,18 @@ def select_latest_quality_shadow_observation(
     for row in _resolve_current_rows(rows):
         if str(row.get("outcome_kind") or "") != OUTCOME_SELECTED:
             continue
-        if int_value(row.get("learning_eligible")) != 1:
-            continue
         shadow = _json_object(row.get("shadow_json"))
         if (
             int_value(shadow.get("schema_version")) != QUALITY_SHADOW_SCHEMA_VERSION
             or str(shadow.get("algorithm_version") or "") != QUALITY_SHADOW_ALGORITHM_VERSION
+        ):
+            continue
+        if (
+                int_value(row.get("learning_eligible")) != 1
+                and not (
+                    str(row.get("exclusion_reason") or "") == "warm_start_selected"
+                    and shadow.get("production_search_changed") is True
+                )
         ):
             continue
         completed_at = _observation_completion_at(row)
@@ -616,7 +698,38 @@ def quality_shadow_public_view(observation: Mapping[str, Any] | None) -> dict[st
         },
         "fallback_reason": fallback_reason,
         "reason": str(shadow.get("reason") or "").strip(),
-        "production_search_changed": False,
+        "production_search_changed": shadow.get("production_search_changed") is True,
+        "warm_start": _quality_warm_start_public_view(shadow.get("warm_start")),
+    }
+
+
+def _quality_warm_start_public_view(value: Any) -> dict[str, Any] | None:
+    payload = object_dict(value)
+    if not payload:
+        return None
+    execution = object_dict(payload.get("execution"))
+    return {
+        "eligible": payload.get("eligible") is True,
+        "block_reason": _optional_text(payload.get("block_reason")),
+        "requested_crf": _strict_number(payload.get("requested_crf")),
+        "candidate_crf": _strict_number(payload.get("candidate_crf")),
+        "adjusted": payload.get("adjusted") is True,
+        "status": _optional_text(execution.get("status")),
+        "attempted": execution.get("attempted") is True,
+        "fallback_used": execution.get("fallback_used") is True,
+        "fallback_reason": _optional_text(execution.get("fallback_reason")),
+        "candidate_count": max(int_value(execution.get("candidate_count")), 0),
+        "baseline_candidate_count": max(int_value(execution.get("baseline_candidate_count")), 0),
+        "total_candidate_count": max(int_value(execution.get("total_candidate_count")), 0),
+        "duration_seconds": _strict_number(execution.get("duration_seconds")),
+        "baseline_median_candidate_count": _strict_number(payload.get("baseline_median_candidate_count")),
+        "baseline_median_search_seconds": _strict_number(payload.get("baseline_median_search_seconds")),
+        "estimated_candidate_savings_count": _strict_number(payload.get("estimated_candidate_savings_count")),
+        "estimated_candidate_savings_rate": _strict_number(payload.get("estimated_candidate_savings_rate")),
+        "estimated_search_time_savings_seconds": _strict_number(
+            payload.get("estimated_search_time_savings_seconds")
+        ),
+        "estimated_search_time_savings_rate": _strict_number(payload.get("estimated_search_time_savings_rate")),
     }
 
 
@@ -632,10 +745,14 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         if (payload := _json_object(row.get("shadow_json")))
         and payload.get("algorithm_version") == QUALITY_SHADOW_ALGORITHM_VERSION
     ]
-    evaluated_runs = len(payloads)
-    recommendation_payloads = [payload for payload in payloads if object_dict(payload.get("recommendation"))]
+    passive_payloads = [payload for payload in payloads if payload.get("production_search_changed") is not True]
+    evaluated_runs = len(passive_payloads)
+    recommendation_payloads = [
+        payload for payload in passive_payloads if object_dict(payload.get("recommendation"))
+    ]
     recommendation_runs = len(recommendation_payloads)
-    comparisons = [object_dict(payload.get("comparison")) for payload in payloads]
+    comparisons = [object_dict(payload.get("comparison")) for payload in passive_payloads]
+    safety_comparisons = [object_dict(payload.get("comparison")) for payload in payloads]
     recommendation_comparisons = [object_dict(payload.get("comparison")) for payload in recommendation_payloads]
     within_one_count = sum(comparison.get("within_one_crf") is True for comparison in recommendation_comparisons)
     false_narrow_count = sum(comparison.get("false_narrow") is True for comparison in recommendation_comparisons)
@@ -652,12 +769,12 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
     ]
     fallback_counts = Counter(
         str(payload.get("fallback_reason"))
-        for payload in payloads
+        for payload in passive_payloads
         if payload.get("fallback_reason")
     )
     production_quality_floor_violations = sum(
         comparison.get("production_quality_floor_violation") is True
-        for comparison in comparisons
+        for comparison in safety_comparisons
     )
     evidence_cutoffs = [
         cutoff
@@ -666,10 +783,13 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
     ]
     shadow_started_at = min((_as_utc(cutoff) for cutoff in evidence_cutoffs), default=None)
     production_final_size_misses = sum(
-        str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
-        and shadow_started_at is not None
-        and (completion_at := _observation_completion_at(row)) is not None
-        and completion_at >= shadow_started_at
+        object_dict(_json_object(row.get("shadow_json")).get("comparison")).get("final_size_miss") is True
+        or (
+            str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
+            and shadow_started_at is not None
+            and (completion_at := _observation_completion_at(row)) is not None
+            and completion_at >= shadow_started_at
+        )
         for row in row_list
     )
     coverage_rate = _ratio(recommendation_runs, evaluated_runs)
@@ -692,7 +812,6 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
     if production_final_size_misses:
         performance_blocking_reasons.append("production_final_size_miss")
     performance_thresholds_met = not performance_blocking_reasons
-    blocking_reasons = [*performance_blocking_reasons, "hint_safety_unmeasured"]
     return QualityShadowMetrics(
         evaluated_runs=evaluated_runs,
         recommendation_runs=recommendation_runs,
@@ -706,8 +825,8 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         production_final_size_misses=production_final_size_misses,
         fallback_counts=tuple(sorted(fallback_counts.items())),
         performance_thresholds_met=performance_thresholds_met,
-        active_eligible=False,
-        blocking_reasons=tuple(blocking_reasons),
+        active_eligible=performance_thresholds_met,
+        blocking_reasons=tuple(performance_blocking_reasons),
     )
 
 
@@ -755,7 +874,7 @@ def quality_result_target_changed(quality_result: Any) -> bool:
     )
 
 
-def _scope_chain(
+def quality_memory_scope_chain(
         source_rel_path: str,
         *,
         library_types: Mapping[str, str] | None,

@@ -96,6 +96,23 @@ class QualityMemoryTests(unittest.TestCase):
         self.assertEqual(result.evidence_count, 6)
         self.assertEqual(result.central_crf, 31.5)
 
+    def test_warm_selected_completion_is_not_reintroduced_by_historical_loader(self) -> None:
+        context = self._context()
+        rel_path = "tv/Example Show/Season 01/Episode 01.mkv"
+        self._add_outcome(
+            1,
+            rel_path,
+            crf=30.0,
+            context=context,
+            warm_start_status="accepted",
+        )
+
+        result = self._load(rel_path, context)
+
+        self.assertEqual(result.evidence_count, 0)
+        self.assertEqual(result.global_metric_evidence_count, 0)
+        self.assertEqual(self._exclusions(result)["warm_start_selected"], 1)
+
     def test_global_history_is_metrics_only(self) -> None:
         context = self._context()
         for item_id in range(1, 5):
@@ -392,6 +409,7 @@ class QualityMemoryTests(unittest.TestCase):
             artifact_changed_after: bool = False,
             event_present: bool = True,
             legacy_event: bool = False,
+            warm_start_status: str | None = None,
     ) -> None:
         promoted_at = self.as_of - timedelta(days=promoted_days_ago)
         validated_at = promoted_at - timedelta(minutes=1)
@@ -487,6 +505,8 @@ class QualityMemoryTests(unittest.TestCase):
             }
             if not legacy_event:
                 event_details["target_size_trace"] = self._target_size_trace(context)
+            if warm_start_status is not None:
+                event_details["quality_warm_start"] = {"status": warm_start_status}
             self.connection.execute(
                 item_events.insert().values(
                     library_item_id=item_id,
