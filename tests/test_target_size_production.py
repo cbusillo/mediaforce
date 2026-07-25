@@ -15,6 +15,7 @@ from mediaforce import execution
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, quality_search_observations, staged_artifacts
+from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.encoding.quality import (
@@ -175,6 +176,48 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(shadow["fallback_reason"], "no_history")
             self.assertFalse(shadow["warm_start"]["eligible"])
             self.assertEqual(shadow["warm_start"]["block_reason"], "shadow_thresholds_not_met")
+
+    def test_holdout_plan_runs_full_search_and_remains_learning_evidence(self) -> None:
+        source_path = self._source_file("episode-warm-holdout.mkv")
+        staging_path = self._staging_path("episode-warm-holdout.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+            search_calls: list[dict[str, Any]] = []
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                warm_start_plan=self._warm_start_plan(
+                    first_crf=28.0,
+                    experiment_arm="baseline_holdout",
+                ),
+                search_call_kwargs=search_calls,
+            )
+
+            self.assertIsNone(search_calls[0]["warm_start"])
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            outcome = json.loads(cast(str, observation["outcome_json"]))
+            timing = json.loads(cast(str, observation["timing_json"]))
+            self.assertEqual(observation["learning_eligible"], 1)
+            self.assertEqual(outcome["quality_memory_arm"], "baseline_holdout")
+            self.assertEqual(outcome["quality_memory_experiment_version"], "qwa1")
+            self.assertEqual(outcome["exploration_kind"], "quality_memory_holdout")
+            self.assertTrue(shadow["warm_start"]["eligible"])
+            self.assertEqual(shadow["warm_start"]["experiment_arm"], "baseline_holdout")
+            self.assertGreater(timing["workflow_duration_seconds"], 0)
 
     def test_warm_selected_final_size_miss_runs_fresh_baseline_before_retry_path(self) -> None:
         source_path = self._source_file("episode-warm-final-miss.mkv")
@@ -669,10 +712,13 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(observation["outcome_kind"], "final_size_failure")
             self.assertEqual(observation["learning_eligible"], 0)
             self.assertEqual(observation["exclusion_reason"], "final_size_miss")
-            self.assertIsNone(observation["search_signature_id"])
+            self.assertIsNotNone(observation["search_signature_id"])
             self.assertIsNone(observation["shadow_json"])
             self.assertTrue(outcome["search_selected"])
             self.assertFalse(outcome["terminal_success"])
+            self.assertEqual(outcome["quality_memory_arm"], "ineligible")
+            timing = json.loads(cast(str, observation["timing_json"]))
+            self.assertGreater(timing["workflow_duration_seconds"], 0)
             self.assertFalse(staging_path.exists())
 
     def test_encode_persists_rejected_retry_measurement_reason(self) -> None:
@@ -782,6 +828,67 @@ class TargetSizeProductionTests(unittest.TestCase):
                 connection.execute(select(quality_search_observations.c.observation_id)).all(),
                 [],
             )
+
+    def test_warm_assigned_encode_failure_persists_acceptance_event_context(self) -> None:
+        source_path = self._source_file("episode-warm-encode-failure.mkv")
+        staging_path = self._staging_path("episode-warm-encode-failure.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="quality-search",
+                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
+            )
+            failed_process = subprocess.CompletedProcess(
+                args=["ffmpeg"],
+                returncode=1,
+                stdout="",
+                stderr="warm encode failure",
+            )
+
+            with patch(
+                "mediaforce.encoding.manifest.plan_quality_warm_start",
+                return_value=self._warm_start_plan(first_crf=28.0),
+            ), patch(
+                "mediaforce.execution.resolve_item_source_path",
+                return_value=source_path,
+            ), patch(
+                "mediaforce.execution.resolve_item_staging_path",
+                return_value=staging_path,
+            ), patch(
+                "mediaforce.execution._search_quality",
+                return_value=quality,
+            ), patch(
+                "mediaforce.execution._build_ffmpeg_command",
+                return_value=["ffmpeg", "-i", str(source_path), str(staging_path)],
+            ), patch(
+                "mediaforce.execution._run_encode_command",
+                return_value=failed_process,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "warm encode failure"):
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest.json",
+                        {"run_id": "warm-encode-failure-run", "items": [item]},
+                        0,
+                        item,
+                        overwrite=False,
+                    )
+
+            failed_event = next(
+                event for event in self._events(connection, item_id)
+                if event["event_type"] == "encoding_failed"
+            )
+            details = json.loads(cast(str, failed_event["details_json"]))
+            self.assertEqual(details["quality_memory_plan"]["experiment_version"], "qwa1")
+            self.assertEqual(details["quality_memory_plan"]["experiment_arm"], "warm_start")
+            self.assertEqual(details["quality_memory_policy_hash"], stable_json_hash(item["resolved_policy"]["video"]))
 
     def test_standalone_encode_allows_web_worker_write_during_media_work(self) -> None:
         source_path = self._source_file("episode-concurrent-writer.mkv")
@@ -1118,6 +1225,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             *,
             first_crf: float,
             block_reason: QualityWarmStartBlockReason | None = None,
+            experiment_arm: str | None = None,
     ) -> QualityWarmStartPlan:
         recommendation = QualityShadowRecommendation(
             search_signature_id="qms1_test",
@@ -1145,8 +1253,10 @@ class TargetSizeProductionTests(unittest.TestCase):
             fallback_need_rate=0.0,
             median_candidate_savings_rate=0.8,
             median_search_time_savings_rate=0.8,
-            production_quality_floor_violations=0,
-            production_final_size_misses=0,
+            passive_quality_floor_violations=0,
+            active_quality_floor_violations=0,
+            baseline_final_size_misses=0,
+            active_final_size_misses=0,
             fallback_counts=(),
             performance_thresholds_met=block_reason is None,
             active_eligible=block_reason is None,
@@ -1160,6 +1270,13 @@ class TargetSizeProductionTests(unittest.TestCase):
             block_reason=block_reason,
             baseline_median_candidate_count=5.0,
             baseline_median_search_seconds=100.0,
+            experiment_arm=(
+                experiment_arm
+                if experiment_arm is not None
+                else "ineligible" if block_reason is not None
+                else "warm_start"
+            ),
+            scope_prefix="tv/Example/Season 01",
         )
 
     @staticmethod

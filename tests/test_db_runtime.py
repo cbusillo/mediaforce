@@ -10,9 +10,11 @@ from alembic import command
 from sqlalchemy import create_engine
 from sqlalchemy import inspect
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from mediaforce.core.db import _load_sql_asset
 from mediaforce.core.db import open_db
+from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db import reset_engine_cache
 from mediaforce.core.db_tables import alembic_version
 from mediaforce.core.db_tables import background_work_state
@@ -104,6 +106,26 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     "library_item_id",
                 ),
             )
+
+    def test_open_readonly_db_never_creates_or_mutates_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_path = Path(temp_dir) / "missing.sqlite3"
+            with self.assertRaises(FileNotFoundError):
+                with open_readonly_db(missing_path):
+                    pass
+            self.assertFalse(missing_path.exists())
+
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            with open_readonly_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                with self.assertRaisesRegex(OperationalError, "readonly|read-only"):
+                    connection.exec_driver_sql("CREATE TABLE forbidden_write (id INTEGER)")
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            with open_readonly_db(db_path) as connection:
+                self.assertNotIn("forbidden_write", inspect(connection).get_table_names())
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

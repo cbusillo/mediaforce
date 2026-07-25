@@ -8,7 +8,7 @@ from mediaforce.encoding.quality_search import QualitySearchPlan
 from mediaforce.tuning.quality_memory import QualitySearchContext
 from mediaforce.tuning.quality_memory import quality_search_context_from_command
 from mediaforce.tuning.quality_shadow import QualityShadowRecommendation, build_quality_shadow_payload
-from mediaforce.tuning.quality_warm_start import plan_quality_warm_start
+from mediaforce.tuning.quality_warm_start import QualityWarmStartPlan, plan_quality_warm_start
 
 
 class QualityWarmStartPlanTests(unittest.TestCase):
@@ -42,6 +42,8 @@ class QualityWarmStartPlanTests(unittest.TestCase):
             plan = self._plan()
 
         self.assertTrue(plan.active)
+        self.assertTrue(plan.eligible)
+        self.assertEqual(plan.experiment_arm, "warm_start")
         self.assertEqual(plan.candidate_crf, 38)
         self.assertTrue(plan.adjusted)
         self.assertEqual(plan.baseline_median_candidate_count, 5.0)
@@ -52,6 +54,22 @@ class QualityWarmStartPlanTests(unittest.TestCase):
         self.assertEqual(hint.search_signature_id, self.context.signature_id)
         self.assertEqual(loader.call_args.kwargs["recorded_before"], self.as_of.isoformat())
         self.assertEqual(loader.call_args.kwargs["scope"].kind, "tv_series")
+
+    def test_qualified_holdout_keeps_full_search_authoritative(self) -> None:
+        with patch(
+            "mediaforce.tuning.quality_warm_start.load_current_quality_search_observations",
+            return_value=self._rows(selected_crf=30.0),
+        ):
+            plan = self._call_plan(search_run_id="qsr1_0")
+
+        self.assertTrue(plan.eligible)
+        self.assertFalse(plan.active)
+        self.assertEqual(plan.experiment_arm, "baseline_holdout")
+        self.assertIsNone(plan.search_hint())
+        payload = plan.to_payload()
+        self.assertTrue(payload["eligible"])
+        self.assertEqual(payload["experiment_arm"], "baseline_holdout")
+        self.assertEqual(payload["holdout_percent"], 20)
 
     def test_large_bound_adjustment_blocks_the_hint(self) -> None:
         plan = self._plan(self._rows(selected_crf=45.0))
@@ -195,7 +213,7 @@ class QualityWarmStartPlanTests(unittest.TestCase):
 
         self.assertIsNone(planned)
 
-    def _plan(self, rows: list[dict[str, object]] | None = None):
+    def _plan(self, rows: list[dict[str, object]] | None = None) -> QualityWarmStartPlan:
         if rows is None:
             return self._call_plan()
         with patch(
@@ -204,7 +222,7 @@ class QualityWarmStartPlanTests(unittest.TestCase):
         ):
             return self._call_plan()
 
-    def _call_plan(self):
+    def _call_plan(self, *, search_run_id: str = "qsr1_1") -> QualityWarmStartPlan:
         return plan_quality_warm_start(
             Mock(),
             source_rel_path="tv/Show/Season 01/Episode 99.mkv",
@@ -213,6 +231,7 @@ class QualityWarmStartPlanTests(unittest.TestCase):
             policy_hash="policy-1",
             configured_min_crf=18,
             configured_max_crf=38,
+            search_run_id=search_run_id,
             as_of=self.as_of,
             library_types={"tv": "tv"},
         )

@@ -175,6 +175,14 @@ You can run Mediaforce either directly with `python3` or through `uv`:
 uv run mediaforce report --limit 10
 ```
 
+Inspect read-only quality-memory readiness, active observations, concurrent
+holdouts, and safety evidence without starting media work:
+
+```bash
+uv run mediaforce quality-memory
+uv run mediaforce quality-memory --prefix "tv/Show/Season 1" --json
+```
+
 Run a sample scan:
 
 ```bash

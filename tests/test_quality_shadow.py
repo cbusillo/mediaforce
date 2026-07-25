@@ -394,6 +394,9 @@ class QualityShadowTests(unittest.TestCase):
         self.assertTrue(metrics.performance_thresholds_met)
         self.assertTrue(metrics.active_eligible)
         self.assertEqual(metrics.blocking_reasons, ())
+        payload = metrics.to_payload()
+        self.assertEqual(payload["production_quality_floor_violations"], 0)
+        self.assertEqual(payload["production_final_size_misses"], 0)
 
         rows.append(
             {
@@ -405,10 +408,97 @@ class QualityShadowTests(unittest.TestCase):
             }
         )
         metrics = quality_shadow_metrics(rows)
-        self.assertEqual(metrics.production_final_size_misses, 1)
-        self.assertFalse(metrics.performance_thresholds_met)
+        self.assertEqual(metrics.baseline_final_size_misses, 1)
+        self.assertEqual(metrics.active_final_size_misses, 0)
+        self.assertTrue(metrics.performance_thresholds_met)
+        self.assertTrue(metrics.active_eligible)
+        self.assertNotIn("active_final_size_miss", metrics.blocking_reasons)
+
+    def test_guard_rejected_warm_arm_final_miss_is_baseline_attributable(self) -> None:
+        recommendation = self._available_recommendation(first_crf=50.0)
+        rows = [
+            {
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=50.0,
+                        selected_score=85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=5,
+                        search_duration_seconds=100.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                    )
+                )
+            }
+            for _ in range(MIN_SHADOW_RECOMMENDATIONS)
+        ]
+        rows.append(
+            {
+                "outcome_kind": "final_size_failure",
+                "outcome_json": json.dumps(
+                    {
+                        "quality_memory_arm": "warm_start",
+                        "quality_memory_attempted": False,
+                    }
+                ),
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=50.0,
+                        selected_score=85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=5,
+                        search_duration_seconds=100.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                        warm_start_plan={
+                            "eligible": True,
+                            "experiment_version": "qwa1",
+                            "experiment_arm": "warm_start",
+                        },
+                        warm_start_trace={
+                            "status": "guard_rejected",
+                            "attempted": False,
+                            "fallback_used": False,
+                        },
+                    )
+                ),
+            }
+        )
+
+        metrics = quality_shadow_metrics(rows)
+
+        self.assertEqual(metrics.active_final_size_misses, 0)
+        self.assertEqual(metrics.baseline_final_size_misses, 1)
+        self.assertTrue(metrics.active_eligible)
+
+    def test_quality_floor_violation_blocks_active_eligibility(self) -> None:
+        recommendation = self._available_recommendation(first_crf=50.0)
+        rows = [
+            {
+                "shadow_json": json.dumps(
+                    build_quality_shadow_payload(
+                        recommendation,
+                        selected_crf=50.0,
+                        selected_score=83.0 if index == 0 else 85.0,
+                        minimum_quality_score=84.0,
+                        candidate_count=5,
+                        search_duration_seconds=100.0,
+                        actual_output_bytes=None,
+                        size_target_bytes=None,
+                    )
+                )
+            }
+            for index in range(MIN_SHADOW_RECOMMENDATIONS)
+        ]
+
+        metrics = quality_shadow_metrics(rows)
+
+        self.assertEqual(metrics.passive_quality_floor_violations, 1)
+        self.assertEqual(metrics.active_quality_floor_violations, 0)
         self.assertFalse(metrics.active_eligible)
-        self.assertIn("production_final_size_miss", metrics.blocking_reasons)
+        self.assertIn("production_quality_floor_violation", metrics.blocking_reasons)
 
     def test_candidate_count_reads_quality_and_target_size_traces(self) -> None:
         class Result:
@@ -420,7 +510,7 @@ class QualityShadowTests(unittest.TestCase):
         Result.target_size_trace = {"candidate_count": 3, "candidates": [{}, {}, {}, {}]}
         self.assertEqual(quality_result_candidate_count(Result()), 4)
 
-    def test_active_payload_reports_causal_probe_without_polluting_passive_projection(self) -> None:
+    def test_active_payload_reports_observed_probe_without_polluting_passive_projection(self) -> None:
         recommendation = self._available_recommendation(first_crf=50.0)
         payload = build_quality_shadow_payload(
             recommendation,
@@ -591,9 +681,10 @@ class QualityShadowTests(unittest.TestCase):
         metrics = quality_shadow_metrics(rows)
 
         self.assertEqual(metrics.evaluated_runs, MIN_SHADOW_RECOMMENDATIONS)
-        self.assertEqual(metrics.production_final_size_misses, 1)
+        self.assertEqual(metrics.active_final_size_misses, 1)
+        self.assertEqual(metrics.baseline_final_size_misses, 0)
         self.assertFalse(metrics.active_eligible)
-        self.assertIn("production_final_size_miss", metrics.blocking_reasons)
+        self.assertIn("active_final_size_miss", metrics.blocking_reasons)
 
     def test_relaxed_quality_target_is_not_projected_as_a_one_probe_hit(self) -> None:
         class Result:

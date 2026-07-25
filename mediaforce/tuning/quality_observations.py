@@ -105,6 +105,12 @@ def build_selected_quality_observation(
         retry_measurement_seconds: float | None = None,
         encode_completed_at: str | None,
         encode_duration_seconds: float | None,
+        workflow_duration_seconds: float | None = None,
+        quality_memory_arm: str | None = None,
+        quality_memory_experiment_version: str | None = None,
+        quality_memory_scope: str | None = None,
+        quality_memory_scope_prefix: str | None = None,
+        quality_memory_search_signature_id: str | None = None,
         actual_output_bytes: int | None,
         size_ratio: float | None,
         provenance: Mapping[str, Any],
@@ -118,7 +124,8 @@ def build_selected_quality_observation(
         supersedes_observation_id: str | None = None,
         supersession_reason: str | None = None,
 ) -> QualitySearchObservation:
-    warm_start_status = _quality_result_warm_start_status(quality_result)
+    warm_start_trace = _quality_result_warm_start_trace(quality_result)
+    warm_start_status = str(warm_start_trace.get("status") or "") or None
     warm_start_selected = warm_start_status == "accepted"
     resolved_learning_eligible = (
         False
@@ -165,10 +172,18 @@ def build_selected_quality_observation(
             actual_output_bytes,
             context.size_target_bytes if context is not None else None,
         ),
+        "quality_memory_arm": quality_memory_arm,
+        "quality_memory_experiment_version": quality_memory_experiment_version,
+        "quality_memory_scope": quality_memory_scope,
+        "quality_memory_scope_prefix": quality_memory_scope_prefix,
+        "quality_memory_search_signature_id": quality_memory_search_signature_id,
+        "quality_memory_attempted": warm_start_trace.get("attempted") is True,
         "exploration_kind": (
             "warm_start_accepted"
             if warm_start_selected
-            else "warm_start_fallback" if warm_start_status else "full_search"
+            else "warm_start_fallback" if warm_start_status
+            else "quality_memory_holdout" if quality_memory_arm == "baseline_holdout"
+            else "full_search"
         ),
     }
     timing = _timing_payload(
@@ -178,6 +193,7 @@ def build_selected_quality_observation(
         retry_measurement_seconds=retry_measurement_seconds,
         encode_completed_at=encode_completed_at,
         encode_duration_seconds=encode_duration_seconds,
+        workflow_duration_seconds=workflow_duration_seconds,
     )
     return _build_observation(
         search_run_id=search_run_id,
@@ -231,6 +247,13 @@ def build_failed_quality_observation(
         search_started_at: str | None,
         search_completed_at: str | None,
         search_duration_seconds: float | None,
+        workflow_duration_seconds: float | None = None,
+        quality_memory_arm: str | None = None,
+        quality_memory_experiment_version: str | None = None,
+        quality_memory_scope: str | None = None,
+        quality_memory_scope_prefix: str | None = None,
+        quality_memory_search_signature_id: str | None = None,
+        quality_memory_attempted: bool = False,
         provenance: Mapping[str, Any],
         recorded_at: str,
         shadow_payload: Mapping[str, Any] | None = None,
@@ -263,6 +286,12 @@ def build_failed_quality_observation(
         "status": str(object_dict(target_size_trace).get("status") or "") or None,
         "reason": str(object_dict(target_size_trace).get("selection_reason") or "") or exclusion_reason,
         "best_candidate": best_candidate or None,
+        "quality_memory_arm": quality_memory_arm,
+        "quality_memory_experiment_version": quality_memory_experiment_version,
+        "quality_memory_scope": quality_memory_scope,
+        "quality_memory_scope_prefix": quality_memory_scope_prefix,
+        "quality_memory_search_signature_id": quality_memory_search_signature_id,
+        "quality_memory_attempted": quality_memory_attempted,
     }
     timing = _timing_payload(
         search_started_at=search_started_at,
@@ -271,6 +300,7 @@ def build_failed_quality_observation(
         retry_measurement_seconds=None,
         encode_completed_at=None,
         encode_duration_seconds=None,
+        workflow_duration_seconds=workflow_duration_seconds,
     )
     return _build_observation(
         search_run_id=search_run_id,
@@ -586,11 +616,10 @@ def _selected_candidate_trace(quality_result: QualitySearchResult) -> tuple[dict
     }, candidate_count
 
 
-def _quality_result_warm_start_status(quality_result: QualitySearchResult) -> str | None:
+def _quality_result_warm_start_trace(quality_result: QualitySearchResult) -> dict[str, Any]:
     target_trace = object_dict(quality_result.target_size_trace)
     quality_trace = object_dict(quality_result.quality_search_trace)
-    warm_start = object_dict(target_trace.get("warm_start") or quality_trace.get("warm_start"))
-    return str(warm_start.get("status") or "") or None
+    return object_dict(target_trace.get("warm_start") or quality_trace.get("warm_start"))
 
 
 def _failed_candidate_trace(
@@ -730,6 +759,12 @@ def _project_warm_start_trace(value: object) -> dict[str, Any] | None:
         "requested_crf": trace.get("requested_crf"),
         "candidate_crf": trace.get("candidate_crf"),
         "search_signature_id": str(trace.get("search_signature_id") or "") or None,
+        "signature_match": (
+            trace.get("signature_match")
+            if isinstance(trace.get("signature_match"), bool)
+            else None
+        ),
+        "final_search_signature_id": str(trace.get("final_search_signature_id") or "") or None,
         "cohort_id": str(trace.get("cohort_id") or "") or None,
         "candidate_count": max(int_value(trace.get("candidate_count")), 0),
         "baseline_candidate_count": max(int_value(trace.get("baseline_candidate_count")), 0),
@@ -909,6 +944,7 @@ def _timing_payload(
         retry_measurement_seconds: float | None,
         encode_completed_at: str | None,
         encode_duration_seconds: float | None,
+        workflow_duration_seconds: float | None,
 ) -> dict[str, Any]:
     return {
         "schema_version": QUALITY_OBSERVATION_SCHEMA_VERSION,
@@ -918,6 +954,7 @@ def _timing_payload(
         "retry_measurement_seconds": retry_measurement_seconds,
         "encode_completed_at": encode_completed_at,
         "encode_duration_seconds": encode_duration_seconds,
+        "workflow_duration_seconds": workflow_duration_seconds,
     }
 
 

@@ -142,6 +142,8 @@ class QualityObservationTests(unittest.TestCase):
             search_started_at="2026-07-24T15:59:00+00:00",
             search_completed_at="2026-07-24T16:00:00+00:00",
             search_duration_seconds=60.0,
+            workflow_duration_seconds=60.0,
+            quality_memory_arm="warm_start",
             provenance={"source": "test"},
             recorded_at="2026-07-24T16:00:00+00:00",
         )
@@ -153,6 +155,8 @@ class QualityObservationTests(unittest.TestCase):
         self.assertEqual(row["learning_eligible"], 0)
         self.assertEqual(row["exclusion_reason"], "target_size_quality_conflict")
         self.assertEqual(row["candidate_count"], 1)
+        self.assertEqual(json.loads(row["outcome_json"])["quality_memory_arm"], "warm_start")
+        self.assertEqual(json.loads(row["timing_json"])["workflow_duration_seconds"], 60.0)
         self.assertEqual(json.loads(row["bounds_json"])["search_max_crf"], 63)
         stored_trace = json.loads(row["candidate_trace_json"])
         self.assertEqual(len(stored_trace["final_output_attempts"]), MAX_QUALITY_OBSERVATION_FINAL_ATTEMPTS)
@@ -204,6 +208,28 @@ class QualityObservationTests(unittest.TestCase):
         self.assertEqual(row["exclusion_reason"], "warm_start_selected")
         self.assertEqual(json.loads(row["outcome_json"])["exploration_kind"], "warm_start_accepted")
         self.assertEqual(json.loads(row["candidate_trace_json"])["warm_start"]["status"], "accepted")
+
+    def test_holdout_result_remains_learning_evidence_with_explicit_arm(self) -> None:
+        observation = self._selected_observation(
+            quality_memory_arm="baseline_holdout",
+            quality_memory_experiment_version="qwa1",
+            quality_memory_scope="season",
+            quality_memory_scope_prefix="tv/Example/Season 01",
+            workflow_duration_seconds=3_660.0,
+        )
+
+        append_quality_search_observation(self.connection, observation)
+        row = self.connection.execute(select(quality_search_observations)).mappings().one()
+        outcome = json.loads(row["outcome_json"])
+        timing = json.loads(row["timing_json"])
+
+        self.assertEqual(row["learning_eligible"], 1)
+        self.assertEqual(outcome["quality_memory_arm"], "baseline_holdout")
+        self.assertEqual(outcome["quality_memory_experiment_version"], "qwa1")
+        self.assertEqual(outcome["quality_memory_scope"], "season")
+        self.assertEqual(outcome["quality_memory_scope_prefix"], "tv/Example/Season 01")
+        self.assertEqual(outcome["exploration_kind"], "quality_memory_holdout")
+        self.assertEqual(timing["workflow_duration_seconds"], 3_660.0)
 
     def test_correction_appends_and_becomes_current(self) -> None:
         initial = self._selected_observation(recorded_at="2026-07-24T16:00:00+00:00")
@@ -364,6 +390,11 @@ class QualityObservationTests(unittest.TestCase):
             supersedes_observation_id: str | None = None,
             supersession_reason: str | None = None,
             shadow_payload: dict[str, object] | None = None,
+            quality_memory_arm: str | None = None,
+            quality_memory_experiment_version: str | None = None,
+            quality_memory_scope: str | None = None,
+            quality_memory_scope_prefix: str | None = None,
+            workflow_duration_seconds: float | None = None,
             recorded_at: str = "2026-07-24T17:00:00+00:00",
     ) -> QualitySearchObservation:
         return build_selected_quality_observation(
@@ -382,6 +413,11 @@ class QualityObservationTests(unittest.TestCase):
             search_duration_seconds=60.0,
             encode_completed_at="2026-07-24T17:00:00+00:00",
             encode_duration_seconds=3_600.0,
+            workflow_duration_seconds=workflow_duration_seconds,
+            quality_memory_arm=quality_memory_arm,
+            quality_memory_experiment_version=quality_memory_experiment_version,
+            quality_memory_scope=quality_memory_scope,
+            quality_memory_scope_prefix=quality_memory_scope_prefix,
             actual_output_bytes=500_000_000,
             size_ratio=0.5,
             provenance={"source": "test"},

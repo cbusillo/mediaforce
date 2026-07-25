@@ -146,13 +146,15 @@ Aggregate shadow metrics report recommendation coverage, within-one hit rate,
 false-narrow rate, fallback need, median projected candidate/time savings, and
 safety outcomes. Performance thresholds require at least ten recommendations,
 at least 70% within-one accuracy, at least 20% median candidate and time savings,
-and zero measured production quality-floor or final-size violations. Those
+and zero measured quality-floor or active-attributable final-size violations. Those
 thresholds authorize only the isolated measured probe described below; they do
 not authorize bound narrowing, target changes, or selector changes. The safety
-counters describe production outcomes during the shadow window, not an
-unexecuted hint's quality or size. Active rows do not replace that passive
-benchmark; their safety facts remain visible while passive recommendation
-projections continue to determine whether a cohort is eligible.
+counters keep baseline final-size health separate from failures after a warm
+probe actually ran. Signatureless legacy failures remain visible as
+unattributed data-quality facts but cannot be assigned to a current cohort by
+metric and objective alone. Active rows do not replace the passive benchmark;
+their safety facts remain visible while passive recommendation projections and
+concurrent holdouts continue to determine whether a cohort is eligible.
 
 ## Active Warm Starts
 
@@ -170,8 +172,8 @@ search. It is available only when all of these conditions hold:
   and dispersion checks at the search-start evidence cutoff
 - that exact media scope, search signature, and policy has at least ten passive
   recommendations, at least 70% within-one accuracy, at least 20% median
-  candidate and search-time savings, and zero quality-floor or final-size
-  violations
+  candidate and search-time savings, and zero quality-floor or prior active
+  final-size violations
 - at least ten compatible passive rows carry usable paired candidate-count and
   search-duration benchmarks for honest median savings estimates
 - the median CRF can be rounded and clamped to the configured CRF range without
@@ -198,12 +200,77 @@ Warm-selected observations remain append-only audit facts but are marked
 learning-ineligible and are excluded from historical staged backfill. This
 prevents recommendations from training on their own decisions. Outcomes selected
 by the unchanged full fallback remain eligible because the baseline search was
-still authoritative.
+still authoritative. Once a cohort qualifies, a versioned deterministic hash of
+the search-run identity assigns 20% of runs to an unchanged full-search holdout.
+Holdouts remain learning-eligible, preserve a current baseline, and prevent the
+post-activation evidence set from containing only warm-start failures.
 
 The immutable shadow payload carries a separate active block with eligibility,
-requested and attempted CRF, probe status, fallback reason, total candidate
-work, and estimates against the pinned passive baseline. Passive projected
-savings are never mixed into active causal runs.
+experiment arm, requested and attempted CRF, probe status, fallback reason,
+total candidate work, and estimates against the pinned passive baseline. The
+observation timing payload also records one end-to-end workflow duration from
+quality-search start through terminal encode outcome so nested fallback searches
+or retry measurements are not double-counted. Passive projected savings are
+never presented as observed active savings.
+
+## Acceptance Evidence
+
+`mediaforce quality-memory` is the read-only acceptance report. `--json`
+returns the same stable typed payload used by tests, and `--prefix` restricts
+the report to one library path. The stable group identity is scope kind, scope
+prefix, search signature, and policy hash. Cohort IDs are intentionally not
+group keys because their evidence-observation membership changes over time.
+
+Each group keeps three sections separate:
+
+- passive readiness: recommendation coverage, accuracy, projected savings,
+  benchmark completeness, and authorization blockers
+- active observed: assigned and attempted warm runs, accepted probes,
+  fallbacks, holdouts, and medians for candidate count, search duration, and
+  end-to-end workflow duration
+- safety and data quality: passive and active quality-floor violations,
+  baseline and active-attributable final-size misses, and report-level
+  signatureless failures
+
+The issue #256 completion protocol is fixed before active evidence is reviewed:
+
+- one exact scope, signature, and policy group must remain passively eligible
+- at least 20 warm-arm attempts on 20 distinct items and ten full-search
+  holdouts on ten distinct items must complete with candidate-count,
+  search-duration, and end-to-end workflow telemetry
+- observed median candidate-count, search-time, and end-to-end workflow savings
+  against the concurrent holdout must each be at least 20%
+- warm-arm medians include only attempted probes that either succeeded or
+  reached a confirmed full-search fallback, with complete telemetry
+- active quality-floor and final-size violations must remain zero
+- every rejected or failed probe must preserve the unchanged full-search
+  fallback; terminal, signature-mismatched, legacy-unlabeled, or unclassified
+  warm runs block completion, as do `encoding_failed` events carrying the
+  current warm-arm plan identity
+
+These are operational acceptance thresholds, not a claim of inferential
+statistical significance. Only rows carrying the exact current experiment
+version and arm enter observed treatment/control medians; older active rows
+remain visible as safety evidence.
+
+The report is production evidence, not a deterministic repository quality gate;
+it is not wired into CI and does not write an aggregate table or checked-in
+runtime artifact.
+
+## Narrowed-Window Decision
+
+Issue #262 remains an evidence-gated evaluation. Historical replay may report
+selected-CRF capture, in-window selectable candidates, edge hits, unknowns, and
+fallback rate, but it must not claim replayed wall-time savings because
+per-candidate sample durations are not persisted. Active narrowed bounds remain
+out of scope until at least 30 compatible comparisons show material incremental
+benefit over the single-candidate probe.
+
+On July 25, 2026, an isolated `ab-av1 0.11.3` smoke test found CRF 41 with a
+wide 10–55 range. Ranges 10–20 and 45–55 both exited nonzero with `Failed to find
+a suitable crf`, confirming that an unsatisfied constrained search fails rather
+than silently selecting a boundary. This verifies the tool contract only; it
+does not justify implementing narrowed bounds.
 
 ## Folder Studio Projection
 

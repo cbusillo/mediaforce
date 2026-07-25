@@ -8,7 +8,7 @@ from typing import Any, Sequence
 from sqlalchemy import select
 
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
@@ -31,6 +31,7 @@ from mediaforce.library.scanner import scan_library
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
+from mediaforce.tuning.quality_acceptance import format_quality_acceptance_report, load_quality_acceptance_report
 
 
 class TargetSizePreflightBlocked(RuntimeError):
@@ -103,6 +104,18 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--limit", type=int, default=20, help="Number of rows to show")
     report_parser.add_argument("--status", action="append", default=None, help="Statuses to include")
     report_parser.add_argument("--prefix", action="append", default=[], help="Restrict report to rel-path prefixes")
+
+    quality_memory_parser = subparsers.add_parser(
+        "quality-memory",
+        help="Report quality-memory acceptance evidence from SQLite state",
+    )
+    quality_memory_parser.add_argument("--prefix", help="Restrict evidence to one rel-path prefix")
+    quality_memory_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Print the stable JSON report",
+    )
 
     plan_parser = subparsers.add_parser("plan", help="Generate a run manifest from current state")
     plan_parser.add_argument("--limit", type=int, help="Maximum items in the run manifest")
@@ -199,6 +212,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = load_config(args.config)
+
+    if args.command == "quality-memory":
+        with open_readonly_db(config.paths.db_path) as connection:
+            report = load_quality_acceptance_report(
+                connection,
+                library_types=config.library_type_map,
+                prefix=args.prefix,
+            )
+        if args.json_output:
+            print(json.dumps(report.to_payload(), indent=2, sort_keys=True))
+        else:
+            print(format_quality_acceptance_report(report))
+        return 0
+
     purge_transient_artifacts(config)
     default_review_dir = config.paths.review_dir
 

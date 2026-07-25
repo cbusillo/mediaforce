@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import json
 import math
 from statistics import median
@@ -11,10 +12,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.quality import QualitySearchWarmStart
 from mediaforce.tuning.quality_memory import QualitySearchContext
-from mediaforce.tuning.quality_observations import (
-    OUTCOME_FINAL_SIZE_FAILURE,
-    load_current_quality_search_observations,
-)
+from mediaforce.tuning.quality_observations import load_current_quality_search_observations
 from mediaforce.tuning.quality_shadow import (
     MAX_EVIDENCE_OBSERVATION_IDS,
     MIN_SHADOW_RECOMMENDATIONS,
@@ -27,6 +25,10 @@ from mediaforce.tuning.quality_shadow import (
 )
 
 QUALITY_WARM_START_SCHEMA_VERSION = 1
+QUALITY_WARM_START_EXPERIMENT_VERSION = "qwa1"
+QUALITY_WARM_START_HOLDOUT_PERCENT = 20
+
+QualityWarmStartExperimentArm = Literal["ineligible", "baseline_holdout", "warm_start"]
 
 QualityWarmStartBlockReason = Literal[
     "recommendation_unavailable",
@@ -45,10 +47,16 @@ class QualityWarmStartPlan:
     block_reason: QualityWarmStartBlockReason | None
     baseline_median_candidate_count: float | None
     baseline_median_search_seconds: float | None
+    experiment_arm: QualityWarmStartExperimentArm = "warm_start"
+    scope_prefix: str | None = None
+
+    @property
+    def eligible(self) -> bool:
+        return self.candidate_crf is not None and self.block_reason is None
 
     @property
     def active(self) -> bool:
-        return self.candidate_crf is not None and self.block_reason is None
+        return self.eligible and self.experiment_arm == "warm_start"
 
     def search_hint(self) -> QualitySearchWarmStart | None:
         if not self.active or self.recommendation.first_crf is None or self.recommendation.cohort_id is None:
@@ -63,8 +71,14 @@ class QualityWarmStartPlan:
     def to_payload(self) -> dict[str, Any]:
         return {
             "schema_version": QUALITY_WARM_START_SCHEMA_VERSION,
-            "eligible": self.active,
+            "eligible": self.eligible,
             "block_reason": self.block_reason,
+            "experiment_version": QUALITY_WARM_START_EXPERIMENT_VERSION,
+            "experiment_arm": self.experiment_arm,
+            "holdout_percent": QUALITY_WARM_START_HOLDOUT_PERCENT,
+            "scope": self.recommendation.scope,
+            "scope_prefix": self.scope_prefix,
+            "search_signature_id": self.recommendation.search_signature_id,
             "requested_crf": self.recommendation.first_crf,
             "candidate_crf": self.candidate_crf,
             "adjusted": self.adjusted,
@@ -83,6 +97,7 @@ def plan_quality_warm_start(
         policy_hash: str,
         configured_min_crf: int,
         configured_max_crf: int,
+        search_run_id: str,
         as_of: datetime | str,
         library_types: Mapping[str, str] | None = None,
 ) -> QualityWarmStartPlan:
@@ -135,6 +150,8 @@ def plan_quality_warm_start(
             block_reason="recommendation_unavailable",
             baseline_median_candidate_count=baseline_candidate_count,
             baseline_median_search_seconds=baseline_search_seconds,
+            experiment_arm="ineligible",
+            scope_prefix=cohort_scope.prefix if recommendation.scope is not None else None,
         )
     assert recommendation.first_crf is not None
     candidate_crf = _normalized_candidate_crf(
@@ -151,6 +168,11 @@ def plan_quality_warm_start(
         block_reason = "baseline_benchmark_unavailable"
     else:
         block_reason = None
+    experiment_arm: QualityWarmStartExperimentArm = (
+        _quality_warm_start_experiment_arm(search_run_id)
+        if block_reason is None
+        else "ineligible"
+    )
     return QualityWarmStartPlan(
         recommendation=recommendation,
         readiness=readiness,
@@ -159,19 +181,21 @@ def plan_quality_warm_start(
         block_reason=block_reason,
         baseline_median_candidate_count=baseline_candidate_count,
         baseline_median_search_seconds=baseline_search_seconds,
+        experiment_arm=experiment_arm,
+        scope_prefix=cohort_scope.prefix,
     )
 
 
 def _row_matches_context(row: Mapping[str, Any], context: QualitySearchContext) -> bool:
-    signature_id = str(row.get("search_signature_id") or "")
-    if signature_id:
-        return signature_id == context.signature_id
-    if str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE:
-        return (
-            str(row.get("search_objective") or "") == context.search_objective
-            and str(row.get("quality_metric") or "").upper() == context.metric
-        )
     return str(row.get("search_signature_id") or "") == context.signature_id
+
+
+def _quality_warm_start_experiment_arm(search_run_id: str) -> QualityWarmStartExperimentArm:
+    digest = hashlib.sha256(
+        f"{QUALITY_WARM_START_EXPERIMENT_VERSION}:{search_run_id}".encode("utf-8")
+    ).digest()
+    bucket = int.from_bytes(digest[:8], byteorder="big") % 100
+    return "baseline_holdout" if bucket < QUALITY_WARM_START_HOLDOUT_PERCENT else "warm_start"
 
 
 def _baseline_benchmarks(rows: list[Mapping[str, Any]]) -> tuple[float | None, float | None]:
