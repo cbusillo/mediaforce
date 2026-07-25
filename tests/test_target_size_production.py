@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, cast
 from unittest.mock import patch
@@ -23,6 +24,9 @@ from mediaforce.encoding.quality import (
     SampleEncodeResult,
 )
 from mediaforce.tuning.quality_memory import quality_search_context_from_command, rounded_target_video_bitrate
+from mediaforce.tuning.quality_shadow import QualityShadowMetrics, QualityShadowRecommendation
+from mediaforce.tuning.quality_warm_start import QualityWarmStartBlockReason, QualityWarmStartPlan
+from mediaforce.tuning.target_size_search import FinalSizeMissError, TargetSizeSearchError
 
 
 class TargetSizeProductionTests(unittest.TestCase):
@@ -97,6 +101,226 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(trace["candidates"][0]["predicted_encode_size_bytes"], 5 * 1024 ** 2)
             self.assertNotIn("line", trace["candidates"][0])
 
+    def test_warm_selected_observation_is_recorded_but_cannot_train_itself(self) -> None:
+        source_path = self._source_file("episode-warm-selected.mkv")
+        staging_path = self._staging_path("episode-warm-selected.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
+            )
+            search_calls: list[dict[str, Any]] = []
+            policy_before = json.loads(json.dumps(item["resolved_policy"]))
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                warm_start_plan=self._warm_start_plan(first_crf=28.0),
+                search_call_kwargs=search_calls,
+            )
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            outcome = json.loads(cast(str, observation["outcome_json"]))
+            self.assertEqual(observation["learning_eligible"], 0)
+            self.assertEqual(observation["exclusion_reason"], "warm_start_selected")
+            self.assertEqual(outcome["exploration_kind"], "warm_start_accepted")
+            self.assertTrue(shadow["production_search_changed"])
+            self.assertEqual(shadow["warm_start"]["execution"]["status"], "accepted")
+            self.assertIsNotNone(search_calls[0]["warm_start"])
+            self.assertEqual(item["resolved_policy"], policy_before)
+
+    def test_blocked_plan_keeps_passive_search_authoritative(self) -> None:
+        source_path = self._source_file("episode-warm-blocked.mkv")
+        staging_path = self._staging_path("episode-warm-blocked.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+            search_calls: list[dict[str, Any]] = []
+
+            self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_100_000],
+                warm_start_plan=self._warm_start_plan(
+                    first_crf=28.0,
+                    block_reason="shadow_thresholds_not_met",
+                ),
+                search_call_kwargs=search_calls,
+            )
+
+            self.assertIsNone(search_calls[0]["warm_start"])
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            self.assertFalse(shadow["production_search_changed"])
+            self.assertEqual(shadow["fallback_reason"], "no_history")
+            self.assertFalse(shadow["warm_start"]["eligible"])
+            self.assertEqual(shadow["warm_start"]["block_reason"], "shadow_thresholds_not_met")
+
+    def test_warm_selected_final_size_miss_runs_fresh_baseline_before_retry_path(self) -> None:
+        source_path = self._source_file("episode-warm-final-miss.mkv")
+        staging_path = self._staging_path("episode-warm-final-miss.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            warm_quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
+            )
+            baseline_quality = QualitySearchResult(
+                crf=30.0,
+                metric="VMAF",
+                target=85.0,
+                score=85.5,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=30.0),
+            )
+            search_calls: list[dict[str, Any]] = []
+
+            build_calls, measure_calls = self._encode_with_output_sizes(
+                connection,
+                item,
+                warm_quality,
+                [5_500_000, 5_100_000],
+                warm_start_plan=self._warm_start_plan(first_crf=28.0),
+                search_results=[warm_quality, baseline_quality],
+                search_call_kwargs=search_calls,
+            )
+
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            outcome = json.loads(cast(str, observation["outcome_json"]))
+            self.assertEqual(len(search_calls), 2)
+            self.assertIsNotNone(search_calls[0]["warm_start"])
+            self.assertIsNone(search_calls[1]["warm_start"])
+            self.assertEqual(len(build_calls), 2)
+            self.assertEqual(measure_calls, [])
+            self.assertEqual(observation["selected_crf"], 30.0)
+            self.assertEqual(observation["learning_eligible"], 1)
+            self.assertEqual(outcome["exploration_kind"], "warm_start_fallback")
+            self.assertEqual(shadow["warm_start"]["execution"]["status"], "fallback")
+            self.assertEqual(shadow["warm_start"]["execution"]["fallback_reason"], "final_size_miss")
+            self.assertTrue(shadow["comparison"]["final_size_miss"])
+            self.assertEqual(shadow["warm_start"]["execution"]["baseline_candidate_count"], 2)
+            self.assertEqual(shadow["comparison"]["candidate_count"], 3)
+            event_types = connection.execute(select(item_events.c.event_type)).scalars().all()
+            self.assertIn("encoding_quality_warm_start_fallback", event_types)
+
+    def test_same_crf_fallback_still_runs_the_unchanged_full_encode(self) -> None:
+        source_path = self._source_file("episode-warm-same-crf.mkv")
+        staging_path = self._staging_path("episode-warm-same-crf.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            warm_quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
+            )
+            baseline_quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=28.0),
+            )
+            search_calls: list[dict[str, Any]] = []
+            encode_count = 0
+
+            def count_encode() -> None:
+                nonlocal encode_count
+                encode_count += 1
+
+            with self.assertRaises(FinalSizeMissError):
+                self._encode_with_output_sizes(
+                    connection,
+                    item,
+                    warm_quality,
+                    [5_500_000, 5_500_000],
+                    during_encode=count_encode,
+                    warm_start_plan=self._warm_start_plan(first_crf=28.0),
+                    search_results=[warm_quality, baseline_quality],
+                    search_call_kwargs=search_calls,
+                )
+
+            self.assertEqual(len(search_calls), 2)
+            self.assertEqual(encode_count, 2)
+            event_types = connection.execute(select(item_events.c.event_type)).scalars().all()
+            self.assertIn("encoding_needs_review", event_types)
+            self.assertNotIn("encoding_failed", event_types)
+
+    def test_failed_fresh_fallback_remains_a_needs_review_outcome(self) -> None:
+        source_path = self._source_file("episode-warm-fallback-failed.mkv")
+        staging_path = self._staging_path("episode-warm-fallback-failed.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            warm_quality = QualitySearchResult(
+                crf=28.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
+            )
+            baseline_error = TargetSizeSearchError(
+                "baseline search could not select a candidate",
+                status="needs_review",
+                trace={"candidate_count": 2, "candidates": [{"crf": 30.0}, {"crf": 32.0}]},
+            )
+
+            with self.assertRaisesRegex(FinalSizeMissError, "fresh baseline search also failed"):
+                self._encode_with_output_sizes(
+                    connection,
+                    item,
+                    warm_quality,
+                    [5_500_000],
+                    warm_start_plan=self._warm_start_plan(first_crf=28.0),
+                    search_results=[warm_quality, baseline_error],
+                )
+
+            event_types = connection.execute(select(item_events.c.event_type)).scalars().all()
+            self.assertIn("encoding_needs_review", event_types)
+            self.assertNotIn("encoding_failed", event_types)
+            observation = connection.execute(select(quality_search_observations)).mappings().one()
+            shadow = json.loads(cast(str, observation["shadow_json"]))
+            self.assertEqual(observation["outcome_kind"], "final_size_failure")
+            self.assertEqual(observation["learning_eligible"], 0)
+            self.assertEqual(observation["exclusion_reason"], "final_size_miss")
+            self.assertEqual(shadow["warm_start"]["execution"]["fallback_reason"], "baseline_search_failed")
+            self.assertEqual(shadow["warm_start"]["execution"]["baseline_candidate_count"], 2)
+            self.assertEqual(shadow["comparison"]["candidate_count"], 3)
+
     def test_shadow_evaluation_failure_never_masks_a_completed_encode(self) -> None:
         source_path = self._source_file("episode-shadow-failure.mkv")
         staging_path = self._staging_path("episode-shadow-failure.mkv")
@@ -112,6 +336,9 @@ class TargetSizeProductionTests(unittest.TestCase):
             )
 
             with self.assertLogs("mediaforce.encoding.manifest", level="WARNING"), patch(
+                "mediaforce.encoding.manifest.plan_quality_warm_start",
+                side_effect=RuntimeError("warm start unavailable"),
+            ), patch(
                 "mediaforce.encoding.manifest.recommend_quality_search",
                 side_effect=RuntimeError("shadow unavailable"),
             ):
@@ -442,6 +669,8 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(observation["outcome_kind"], "final_size_failure")
             self.assertEqual(observation["learning_eligible"], 0)
             self.assertEqual(observation["exclusion_reason"], "final_size_miss")
+            self.assertIsNone(observation["search_signature_id"])
+            self.assertIsNone(observation["shadow_json"])
             self.assertTrue(outcome["search_selected"])
             self.assertFalse(outcome["terminal_success"])
             self.assertFalse(staging_path.exists())
@@ -728,8 +957,12 @@ class TargetSizeProductionTests(unittest.TestCase):
             encode_command: list[str] | None = None,
             staged_width: int = 1920,
             staged_height: int = 1080,
+            warm_start_plan: QualityWarmStartPlan | None = None,
+            search_results: list[QualitySearchResult | Exception] | None = None,
+            search_call_kwargs: list[dict[str, Any]] | None = None,
     ) -> tuple[list[Any], list[Any]]:
         sizes = list(output_sizes)
+        queued_quality_results: list[QualitySearchResult | Exception] = list(search_results or [quality])
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
             if during_encode is not None:
@@ -761,10 +994,15 @@ class TargetSizeProductionTests(unittest.TestCase):
                 self.fail("Retry measurement was not expected")
             return retry_sample
 
-        def search_quality_side_effect(*_args: object, **_kwargs: object) -> QualitySearchResult:
+        def search_quality_side_effect(*_args: object, **kwargs: object) -> QualitySearchResult:
             if during_quality_search is not None:
                 during_quality_search()
-            return quality
+            if search_call_kwargs is not None:
+                search_call_kwargs.append(dict(kwargs))
+            result = queued_quality_results.pop(0) if len(queued_quality_results) > 1 else queued_quality_results[0]
+            if isinstance(result, Exception):
+                raise result
+            return result
 
         resolved_encode_command = encode_command or [
             "ffmpeg",
@@ -780,7 +1018,12 @@ class TargetSizeProductionTests(unittest.TestCase):
             "tune=0:film-grain=0:film-grain-denoise=0",
             item["staging_path"],
         ]
-        with patch("mediaforce.execution.resolve_item_source_path", return_value=Path(item["source_path"])), patch(
+        plan_context = (
+            patch("mediaforce.encoding.manifest.plan_quality_warm_start", return_value=warm_start_plan)
+            if warm_start_plan is not None
+            else nullcontext()
+        )
+        with plan_context, patch("mediaforce.execution.resolve_item_source_path", return_value=Path(item["source_path"])), patch(
             "mediaforce.execution.resolve_item_staging_path", return_value=Path(item["staging_path"])
         ), patch("mediaforce.execution._search_quality", side_effect=search_quality_side_effect), patch(
             "mediaforce.execution._measure_quality_candidate", side_effect=measure_retry_side_effect
@@ -846,6 +1089,78 @@ class TargetSizeProductionTests(unittest.TestCase):
             "candidates": candidates,
             "selected_candidate": selected,
         }
+
+    def _warm_trace(self, item: dict[str, Any], *, selected_crf: float, status: str) -> dict[str, Any]:
+        trace = self._trace(item, selected_crf=selected_crf)
+        selected = trace["selected_candidate"]
+        trace["candidates"] = [selected]
+        trace["candidate_count"] = 1
+        trace["warm_start"] = {
+            "schema_version": 1,
+            "status": status,
+            "attempted": True,
+            "requested_crf": selected_crf,
+            "candidate_crf": int(selected_crf),
+            "search_signature_id": "qms1_test",
+            "cohort_id": "qsc1_test",
+            "candidate_count": 1,
+            "baseline_candidate_count": 0,
+            "total_candidate_count": 1,
+            "duration_seconds": 10.0,
+            "fallback_used": status != "accepted",
+            "fallback_reason": None,
+            "candidate": selected,
+        }
+        return trace
+
+    @staticmethod
+    def _warm_start_plan(
+            *,
+            first_crf: float,
+            block_reason: QualityWarmStartBlockReason | None = None,
+    ) -> QualityWarmStartPlan:
+        recommendation = QualityShadowRecommendation(
+            search_signature_id="qms1_test",
+            evidence_cutoff_at="2026-07-25T12:00:00+00:00",
+            first_crf=first_crf,
+            scope="season",
+            confidence="high",
+            sample_count=10,
+            cohort_id="qsc1_test",
+            minimum_crf=first_crf,
+            maximum_crf=first_crf,
+            iqr=0.0,
+            median_absolute_deviation=0.0,
+            evidence_observation_ids=tuple(f"qso1_{index}" for index in range(10)),
+            fallback_reason=None,
+            reason="test",
+            exclusions=(),
+        )
+        readiness = QualityShadowMetrics(
+            evaluated_runs=10,
+            recommendation_runs=10,
+            coverage_rate=1.0,
+            within_one_rate=1.0,
+            false_narrow_rate=0.0,
+            fallback_need_rate=0.0,
+            median_candidate_savings_rate=0.8,
+            median_search_time_savings_rate=0.8,
+            production_quality_floor_violations=0,
+            production_final_size_misses=0,
+            fallback_counts=(),
+            performance_thresholds_met=block_reason is None,
+            active_eligible=block_reason is None,
+            blocking_reasons=(block_reason,) if block_reason is not None else (),
+        )
+        return QualityWarmStartPlan(
+            recommendation=recommendation,
+            readiness=readiness,
+            candidate_crf=int(first_crf),
+            adjusted=False,
+            block_reason=block_reason,
+            baseline_median_candidate_count=5.0,
+            baseline_median_search_seconds=100.0,
+        )
 
     @staticmethod
     def _candidate(crf: float, *, predicted_total: int) -> dict[str, Any]:

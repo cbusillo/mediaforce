@@ -69,6 +69,22 @@ def build_video_filter(
     return ",".join(filters)
 
 
+def planned_output_dimensions(
+        video_policy: dict[str, Any],
+        *,
+        width: int | None,
+        height: int | None,
+        detected_crop: str | None,
+) -> tuple[int, int] | None:
+    if width is None or height is None or width <= 0 or height <= 0:
+        return None
+    crop_filter = _crop_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
+    if _scale_filter(video_policy, source_height=_post_crop_height(crop_filter, height)) is not None:
+        return None
+    crop = CropSpec.parse(crop_filter or "")
+    return (crop.width, crop.height) if crop is not None else (width, height)
+
+
 def most_common_crop(stderr: str, *, source_width: int | None = None, source_height: int | None = None) -> str | None:
     candidates = [crop for crop in (CropSpec.parse(match.group(0)) for match in CROP_RE.finditer(stderr)) if crop]
     if not candidates:

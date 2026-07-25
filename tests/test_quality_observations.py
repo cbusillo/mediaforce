@@ -159,6 +159,52 @@ class QualityObservationTests(unittest.TestCase):
         self.assertNotIn("raw_detail", stored_trace["curve"])
         self.assertNotIn("raw_stdout", stored_trace["final_output_attempts"][0])
 
+    def test_warm_selected_result_is_audited_without_becoming_learning_evidence(self) -> None:
+        result = QualitySearchResult(
+            crf=30.0,
+            metric="VMAF",
+            target=85.0,
+            score=85.2,
+            stdout="crf 30 VMAF 85.2 predicted video stream size 500 MiB (50%)",
+            quality_search_trace={
+                "status": "selected",
+                "candidate_count": 1,
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "metric_target": 85.0,
+                        "max_crf": 30,
+                        "status": "selected",
+                        "candidates": [
+                            {
+                                "crf": 30.0,
+                                "metric": "VMAF",
+                                "metric_score": 85.2,
+                                "predicted_encode_percent": 50.0,
+                                "predicted_encode_size_bytes": 500 * 1024 ** 2,
+                            }
+                        ],
+                    }
+                ],
+                "warm_start": {
+                    "status": "accepted",
+                    "attempted": True,
+                    "candidate_count": 1,
+                    "baseline_candidate_count": 0,
+                    "total_candidate_count": 1,
+                },
+            },
+        )
+        observation = self._selected_observation(result=result)
+
+        append_quality_search_observation(self.connection, observation)
+        row = self.connection.execute(select(quality_search_observations)).mappings().one()
+
+        self.assertEqual(row["learning_eligible"], 0)
+        self.assertEqual(row["exclusion_reason"], "warm_start_selected")
+        self.assertEqual(json.loads(row["outcome_json"])["exploration_kind"], "warm_start_accepted")
+        self.assertEqual(json.loads(row["candidate_trace_json"])["warm_start"]["status"], "accepted")
+
     def test_correction_appends_and_becomes_current(self) -> None:
         initial = self._selected_observation(recorded_at="2026-07-24T16:00:00+00:00")
         append_quality_search_observation(self.connection, initial)

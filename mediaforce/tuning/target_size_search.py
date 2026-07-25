@@ -3,11 +3,19 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Any, Callable, Literal
 
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.encoding.quality import (
+    QualitySearchResult,
+    QualitySearchWarmStart,
+    QualityTempCleanupError,
+    QualityTempSetupError,
+    SampleEncodeError,
+    SampleEncodeResult,
+)
 from mediaforce.tuning.stream_budget import (
     StreamBudgetLedger,
     StreamBudgetProjectionBlocker,
@@ -132,6 +140,8 @@ def search_target_size(
         quality_temp_dir: Path | None,
         run_sample_encode: Callable[..., SampleEncodeResult],
         search_max_crf: int | None = None,
+        warm_start: QualitySearchWarmStart | None = None,
+        expected_search_signature_id: str | None = None,
 ) -> QualitySearchResult:
     _validate_search_inputs(stream_budget_ledger)
     normalized_min_crf, configured_max_crf = _normalized_crf_bounds(min_crf, max_crf)
@@ -179,20 +189,12 @@ def search_target_size(
             trace=trace,
         )
 
-    candidates: list[TargetSizeCandidate] = []
-    measured_crfs: set[int] = set()
-    seed_crf = _seed_crf(stream_budget_ledger, min_crf=normalized_min_crf, max_crf=configured_max_crf)
-
-    def measure(crf: int, role: str) -> None:
-        normalized_crf = _clamp_int(crf, normalized_min_crf, normalized_max_crf)
-        if normalized_crf in measured_crfs:
-            return
-        measured_crfs.add(normalized_crf)
-        sample = run_sample_encode(
+    def run_sample(crf: int) -> SampleEncodeResult:
+        return run_sample_encode(
             source_path,
             source_codec=source_codec,
             preferred_metric=metric_name,
-            crf=float(normalized_crf),
+            crf=float(crf),
             preset=preset,
             pixel_format=pixel_format,
             sample_every=sample_every,
@@ -203,6 +205,31 @@ def search_target_size(
             host=host,
             quality_temp_dir=quality_temp_dir,
         )
+
+    warm_result, warm_trace = _try_target_size_warm_start(
+        warm_start,
+        configured_min_crf=normalized_min_crf,
+        configured_max_crf=configured_max_crf,
+        metric_target=metric_target,
+        min_metric_score=min_metric_score,
+        ledger=stream_budget_ledger,
+        transform_plan=validated_transform_plan,
+        run_sample=run_sample,
+        expected_search_signature_id=expected_search_signature_id,
+    )
+    if warm_result is not None:
+        return warm_result
+
+    candidates: list[TargetSizeCandidate] = []
+    measured_crfs: set[int] = set()
+    seed_crf = _seed_crf(stream_budget_ledger, min_crf=normalized_min_crf, max_crf=configured_max_crf)
+
+    def measure(crf: int, role: str) -> None:
+        normalized_crf = _clamp_int(crf, normalized_min_crf, normalized_max_crf)
+        if normalized_crf in measured_crfs:
+            return
+        measured_crfs.add(normalized_crf)
+        sample = run_sample(normalized_crf)
         candidates.append(
             _candidate_from_sample(
                 sample,
@@ -241,6 +268,7 @@ def search_target_size(
             configured_max_crf=configured_max_crf,
             transform_plan=validated_transform_plan,
         )
+        trace = _trace_with_warm_start(trace, warm_trace)
         return QualitySearchResult(
             crf=selected.crf,
             metric=selected.metric,
@@ -270,7 +298,168 @@ def search_target_size(
         configured_max_crf=configured_max_crf,
         transform_plan=validated_transform_plan,
     )
+    trace = _trace_with_warm_start(trace, warm_trace)
     raise TargetSizeSearchError(_failure_message(status, reason, trace), status=status, trace=trace)
+
+
+def _try_target_size_warm_start(
+        warm_start: QualitySearchWarmStart | None,
+        *,
+        configured_min_crf: int,
+        configured_max_crf: int,
+        metric_target: float,
+        min_metric_score: float,
+        ledger: StreamBudgetLedger,
+        transform_plan: dict[str, Any],
+        run_sample: Callable[[int], SampleEncodeResult],
+        expected_search_signature_id: str | None,
+) -> tuple[QualitySearchResult | None, dict[str, Any] | None]:
+    if warm_start is None:
+        return None, None
+    candidate_crf = warm_start.candidate_crf
+    if (
+            isinstance(candidate_crf, bool)
+            or not isinstance(candidate_crf, int)
+            or not configured_min_crf <= candidate_crf <= configured_max_crf
+            or not math.isfinite(warm_start.requested_crf)
+            or not warm_start.search_signature_id
+            or warm_start.search_signature_id != expected_search_signature_id
+            or not warm_start.cohort_id
+    ):
+        return None, _target_warm_start_trace(
+            warm_start,
+            status="guard_rejected",
+            attempted=False,
+            duration_seconds=0.0,
+            candidate_count=0,
+            fallback_reason="invalid_hint_contract",
+        )
+    started = time.monotonic()
+    try:
+        sample = run_sample(candidate_crf)
+    except QualityTempSetupError as exc:
+        return None, _target_warm_start_trace(
+            warm_start,
+            status="probe_error_fallback",
+            attempted=True,
+            duration_seconds=max(time.monotonic() - started, 0.0),
+            candidate_count=0,
+            fallback_reason="probe_error",
+            error_type=type(exc).__name__,
+        )
+    except (QualityTempCleanupError, SampleEncodeError, ValueError) as exc:
+        return None, _target_warm_start_trace(
+            warm_start,
+            status="probe_error_fallback",
+            attempted=True,
+            duration_seconds=max(time.monotonic() - started, 0.0),
+            candidate_count=1,
+            fallback_reason="probe_error",
+            error_type=type(exc).__name__,
+        )
+    candidate = _candidate_from_sample(
+        sample,
+        attempt=1,
+        role="quality_memory_hint",
+        crf=float(candidate_crf),
+        metric_target=metric_target,
+        min_metric_score=min_metric_score,
+        ledger=ledger,
+    )
+    selected = _select_candidate([candidate])
+    warm_trace = _target_warm_start_trace(
+        warm_start,
+        status="accepted" if selected is not None else "rejected_fallback",
+        attempted=True,
+        duration_seconds=max(time.monotonic() - started, 0.0),
+        candidate_count=1,
+        fallback_reason=None if selected is not None else _warm_start_rejection_reason(candidate),
+        candidate=candidate.to_payload(),
+    )
+    if selected is None:
+        return None, warm_trace
+    trace = _trace_payload(
+        status="selected",
+        reason="quality_memory_candidate_inside_sample_projection_band",
+        ledger=ledger,
+        candidates=[candidate],
+        selected=candidate,
+        min_metric_score=min_metric_score,
+        metric_name=candidate.metric,
+        metric_target=metric_target,
+        min_crf=configured_min_crf,
+        max_crf=configured_max_crf,
+        configured_max_crf=configured_max_crf,
+        transform_plan=transform_plan,
+    )
+    trace = _trace_with_warm_start(trace, warm_trace)
+    return QualitySearchResult(
+        crf=candidate.crf,
+        metric=candidate.metric,
+        target=metric_target,
+        score=candidate.metric_score,
+        stdout=sample.stdout,
+        target_size_trace=trace,
+    ), warm_trace
+
+
+def _warm_start_rejection_reason(candidate: TargetSizeCandidate) -> str:
+    if not candidate.quality_floor_met:
+        return "quality_floor_miss"
+    if candidate.violates_source_cap:
+        return "source_cap_miss"
+    if not candidate.within_sample_band:
+        return "target_band_miss"
+    return "candidate_rejected"
+
+
+def _target_warm_start_trace(
+        warm_start: QualitySearchWarmStart,
+        *,
+        status: str,
+        attempted: bool,
+        duration_seconds: float,
+        candidate_count: int,
+        fallback_reason: str | None = None,
+        candidate: dict[str, Any] | None = None,
+        error_type: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "status": status,
+        "attempted": attempted,
+        "requested_crf": warm_start.requested_crf,
+        "candidate_crf": warm_start.candidate_crf,
+        "search_signature_id": warm_start.search_signature_id,
+        "cohort_id": warm_start.cohort_id,
+        "candidate_count": max(candidate_count, 0),
+        "duration_seconds": round(max(duration_seconds, 0.0), 3),
+        "fallback_used": status != "accepted",
+        "fallback_reason": fallback_reason,
+        "error_type": error_type,
+        "candidate": candidate,
+    }
+
+
+def _trace_with_warm_start(
+        trace: dict[str, Any],
+        warm_start: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if warm_start is None:
+        return trace
+    payload = dict(trace)
+    warm_payload = dict(warm_start)
+    baseline_candidate_count = len(payload.get("candidates", []))
+    candidate_count = baseline_candidate_count
+    if warm_payload.get("status") == "accepted":
+        warm_payload["baseline_candidate_count"] = 0
+    else:
+        warm_payload["baseline_candidate_count"] = baseline_candidate_count
+        candidate_count += int(warm_payload.get("candidate_count") or 0)
+    warm_payload["total_candidate_count"] = candidate_count
+    payload["candidate_count"] = candidate_count
+    payload["warm_start"] = warm_payload
+    return payload
 
 
 def build_target_size_transform_plan(
@@ -521,6 +710,7 @@ def retry_quality_result_for_final_miss(
     retry_trace_candidates.append(candidate)
     retry_trace = dict(trace)
     retry_trace["candidates"] = retry_trace_candidates
+    _increment_retry_candidate_count(trace, retry_trace)
     _refresh_retry_curve(retry_trace)
     return _final_retry_quality_result(
         quality,
@@ -613,6 +803,7 @@ def _final_retry_rejection_trace(
         *[dict(existing) for existing in trace.get("candidates", []) if isinstance(existing, dict)],
         candidate,
     ]
+    _increment_retry_candidate_count(trace, retry_trace)
     _refresh_retry_curve(retry_trace)
     retry_trace["status"] = "needs_review"
     retry_trace["selection_reason"] = rejection_reason
@@ -630,6 +821,23 @@ def _final_retry_rejection_trace(
         "rejection_reason": rejection_reason,
     }
     return retry_trace
+
+
+def _increment_retry_candidate_count(previous_trace: dict[str, Any], retry_trace: dict[str, Any]) -> None:
+    previous_candidates = [
+        candidate for candidate in previous_trace.get("candidates", []) if isinstance(candidate, dict)
+    ]
+    retry_trace["candidate_count"] = max(
+        int_value(previous_trace.get("candidate_count")),
+        len(previous_candidates),
+    ) + 1
+    warm_start = object_dict(previous_trace.get("warm_start"))
+    if not warm_start:
+        return
+    warm_payload = dict(warm_start)
+    warm_payload["baseline_candidate_count"] = int_value(warm_payload.get("baseline_candidate_count")) + 1
+    warm_payload["total_candidate_count"] = int_value(warm_payload.get("total_candidate_count")) + 1
+    retry_trace["warm_start"] = warm_payload
 
 
 def _refresh_retry_curve(trace: dict[str, Any]) -> None:

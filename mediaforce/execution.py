@@ -17,8 +17,9 @@ from mediaforce.encoding.manifest import describe_item_plan as describe_item_pla
 from mediaforce.encoding.progress import _ffmpeg_command_with_progress as _ffmpeg_command_with_progress_impl, \
     _progress_float as _progress_float_impl, _progress_out_time_seconds as _progress_out_time_seconds_impl, \
     _progress_speed as _progress_speed_impl, _update_ffmpeg_progress_state as _update_ffmpeg_progress_state_impl
-from mediaforce.encoding.quality_search import measure_quality_candidate as _measure_quality_candidate_impl, \
-    search_quality as _search_quality_impl
+from mediaforce.encoding.quality_search import QualitySearchPlan, \
+    measure_quality_candidate as _measure_quality_candidate_impl, \
+    resolve_quality_search_plan as _resolve_quality_search_plan_impl, search_quality as _search_quality_impl
 from mediaforce.encoding.runner import run_encode_command as _run_encode_command_impl, \
     run_streamed_remote_encode_command as _run_streamed_remote_encode_command_impl, \
     run_tracked_process as _run_tracked_process_impl
@@ -39,8 +40,8 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError, guard_command_for_schedule_deadline, \
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict
-from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult, run_crf_search, run_sample_encode, \
-    select_quality_metric
+from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeResult, \
+    run_crf_search, run_sample_encode, select_quality_metric
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
     run_remote_command, ssh_client_options
 from mediaforce.core.utils import file_fingerprint, timestamp
@@ -218,7 +219,7 @@ def encode_one_item(
         resolve_item_source_path=resolve_item_source_path,
         resolve_item_quality_source_path=resolve_item_quality_source_path,
         resolve_item_staging_path=resolve_item_staging_path,
-        effective_video_preset=effective_video_preset,
+        resolve_quality_search_plan=_resolve_quality_search_plan,
         search_quality=_search_quality,
         measure_quality_candidate=_measure_quality_candidate,
         select_streams=_select_streams,
@@ -249,6 +250,9 @@ def search_quality_for_source(
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
         stream_budget_ledger: StreamBudgetLedger | None = None,
+        resolved_plan: QualitySearchPlan | None = None,
+        warm_start: QualitySearchWarmStart | None = None,
+        expected_search_signature_id: str | None = None,
 ) -> QualitySearchResult:
     return _search_quality(
         source_path,
@@ -264,6 +268,9 @@ def search_quality_for_source(
         host=host,
         quality_temp_dir=quality_temp_dir,
         stream_budget_ledger=stream_budget_ledger,
+        resolved_plan=resolved_plan,
+        warm_start=warm_start,
+        expected_search_signature_id=expected_search_signature_id,
     )
 
 
@@ -339,6 +346,9 @@ def _search_quality(
         host: dict[str, Any] | None = None,
         quality_temp_dir: Path | None = None,
         stream_budget_ledger: StreamBudgetLedger | None = None,
+        resolved_plan: QualitySearchPlan | None = None,
+        warm_start: QualitySearchWarmStart | None = None,
+        expected_search_signature_id: str | None = None,
 ) -> QualitySearchResult:
     return _search_quality_impl(
         source_path,
@@ -354,12 +364,42 @@ def _search_quality(
         host=host,
         quality_temp_dir=quality_temp_dir,
         stream_budget_ledger=stream_budget_ledger,
+        resolved_plan=resolved_plan,
+        warm_start=warm_start,
+        expected_search_signature_id=expected_search_signature_id,
         host_media_access_for_host=host_media_access_for_host,
         select_quality_metric=select_quality_metric,
         build_svt_params=build_svt_params,
         effective_video_preset=effective_video_preset,
         run_crf_search=run_crf_search,
         run_sample_encode=run_sample_encode,
+    )
+
+
+def _resolve_quality_search_plan(
+        video_policy: dict[str, Any],
+        *,
+        width: int | None = None,
+        height: int | None = None,
+        detected_crop: str | None = None,
+        cadence_decision: dict[str, Any] | None = None,
+        cadence_evidence: dict[str, Any] | None = None,
+        cadence_source_fingerprint: str | None = None,
+        host: dict[str, Any] | None = None,
+) -> QualitySearchPlan:
+    return _resolve_quality_search_plan_impl(
+        video_policy,
+        host=host,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
+        cadence_decision=cadence_decision,
+        cadence_evidence=cadence_evidence,
+        cadence_source_fingerprint=cadence_source_fingerprint,
+        host_media_access_for_host=host_media_access_for_host,
+        select_quality_metric=select_quality_metric,
+        build_svt_params=build_svt_params,
+        effective_video_preset=effective_video_preset,
     )
 
 

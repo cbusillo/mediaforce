@@ -1,8 +1,9 @@
 import unittest
 from pathlib import Path
+from statistics import median
 from typing import Any
 
-from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
+from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeError, SampleEncodeResult
 from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
 from mediaforce.tuning.target_size_search import (
@@ -15,6 +16,280 @@ from mediaforce.tuning.target_size_search import (
 
 
 class TargetSizeSearchTests(unittest.TestCase):
+    def test_trusted_hint_can_satisfy_the_existing_selector_in_one_probe(self) -> None:
+        ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+        seen: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            seen.append(crf_int)
+            predicted_video_bytes = 1_000_000_000 - 28_000_000 * crf_int
+            return SampleEncodeResult(
+                "VMAF",
+                88.0 - (crf_int - 18) * 0.2,
+                predicted_video_bytes / 10_000_000,
+                30.0,
+                predicted_video_bytes,
+                f"crf {crf_int}",
+                crf_int * 100_000,
+            )
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            self._policy(),
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            svt_params=[],
+            video_filter="scale=-2:1080:flags=lanczos",
+            stream_budget_ledger=ledger,
+            transform_plan=self._transform_plan(video_filter="scale=-2:1080:flags=lanczos"),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+            warm_start=QualitySearchWarmStart(26.0, 26, "qms1_test", "qsc1_test"),
+            expected_search_signature_id="qms1_test",
+        )
+
+        self.assertEqual(result.crf, 26.0)
+        self.assertEqual(seen, [26])
+        trace = result.target_size_trace or {}
+        self.assertEqual(trace["candidate_count"], 1)
+        self.assertEqual(trace["warm_start"]["status"], "accepted")
+        self.assertEqual(trace["candidates"][0]["role"], "quality_memory_hint")
+
+    def test_rejected_hint_is_discarded_before_the_full_baseline_search(self) -> None:
+        ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+
+        def run(warm_start: QualitySearchWarmStart | None) -> tuple[QualitySearchResult, list[int]]:
+            seen: list[int] = []
+
+            def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+                crf_int = int(crf)
+                seen.append(crf_int)
+                predicted_video_bytes = 1_000_000_000 - 28_000_000 * crf_int
+                return SampleEncodeResult(
+                    "VMAF",
+                    88.0 - (crf_int - 18) * 0.2,
+                    predicted_video_bytes / 10_000_000,
+                    30.0,
+                    predicted_video_bytes,
+                    f"crf {crf_int}",
+                    crf_int * 100_000,
+                )
+
+            return search_target_size(
+                Path("/tmp/source.mkv"),
+                self._policy(),
+                source_codec="h264",
+                metric_name="vmaf",
+                metric_target=85.0,
+                min_metric_score=80.0,
+                preset=4,
+                pixel_format="yuv420p10le",
+                sample_every="8m",
+                sample_duration="20s",
+                min_crf=18,
+                max_crf=38,
+                svt_params=[],
+                video_filter=None,
+                stream_budget_ledger=ledger,
+                transform_plan=self._transform_plan(),
+                process_controller=None,
+                host=None,
+                quality_temp_dir=None,
+                run_sample_encode=run_sample,
+                warm_start=warm_start,
+                expected_search_signature_id="qms1_test" if warm_start is not None else None,
+            ), seen
+
+        baseline, baseline_seen = run(None)
+        warmed, warmed_seen = run(QualitySearchWarmStart(20.0, 20, "qms1_test", "qsc1_test"))
+
+        self.assertEqual(warmed.crf, baseline.crf)
+        self.assertEqual(baseline_seen, [31, 18, 24, 28, 26])
+        self.assertEqual(warmed_seen, [20, *baseline_seen])
+        trace = warmed.target_size_trace or {}
+        self.assertEqual(
+            [candidate["crf"] for candidate in trace["candidates"]],
+            [candidate["crf"] for candidate in (baseline.target_size_trace or {})["candidates"]],
+        )
+        self.assertEqual(trace["warm_start"]["status"], "rejected_fallback")
+        self.assertEqual(trace["warm_start"]["baseline_candidate_count"], len(baseline_seen))
+        self.assertEqual(trace["candidate_count"], len(warmed_seen))
+
+    def test_failed_launched_hint_probe_counts_as_work_before_baseline_search(self) -> None:
+        ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+        seen: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            seen.append(crf_int)
+            if len(seen) == 1:
+                raise SampleEncodeError("probe failed")
+            predicted_video_bytes = 1_000_000_000 - 28_000_000 * crf_int
+            return SampleEncodeResult(
+                "VMAF",
+                88.0 - (crf_int - 18) * 0.2,
+                predicted_video_bytes / 10_000_000,
+                30.0,
+                predicted_video_bytes,
+                f"crf {crf_int}",
+                crf_int * 100_000,
+            )
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            self._policy(),
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            svt_params=[],
+            video_filter=None,
+            stream_budget_ledger=ledger,
+            transform_plan=self._transform_plan(),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+            warm_start=QualitySearchWarmStart(20.0, 20, "qms1_test", "qsc1_test"),
+            expected_search_signature_id="qms1_test",
+        )
+
+        trace = result.target_size_trace or {}
+        self.assertEqual(seen, [20, 31, 18, 24, 28, 26])
+        self.assertEqual(trace["candidate_count"], len(seen))
+        self.assertEqual(trace["warm_start"]["candidate_count"], 1)
+        self.assertEqual(trace["warm_start"]["status"], "probe_error_fallback")
+
+    def test_stale_target_size_signature_is_rejected_before_measurement(self) -> None:
+        ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+        seen: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            seen.append(crf_int)
+            predicted_video_bytes = 1_000_000_000 - 28_000_000 * crf_int
+            return SampleEncodeResult(
+                "VMAF",
+                88.0 - (crf_int - 18) * 0.2,
+                predicted_video_bytes / 10_000_000,
+                30.0,
+                predicted_video_bytes,
+                f"crf {crf_int}",
+                crf_int * 100_000,
+            )
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            self._policy(),
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            svt_params=[],
+            video_filter=None,
+            stream_budget_ledger=ledger,
+            transform_plan=self._transform_plan(),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+            warm_start=QualitySearchWarmStart(20.0, 20, "qms1_stale", "qsc1_test"),
+            expected_search_signature_id="qms1_test",
+        )
+
+        trace = result.target_size_trace or {}
+        self.assertEqual(seen, [31, 18, 24, 28, 26])
+        self.assertEqual(trace["warm_start"]["status"], "guard_rejected")
+        self.assertEqual(trace["warm_start"]["candidate_count"], 0)
+        self.assertEqual(trace["candidate_count"], len(seen))
+
+    def test_qualified_repeat_corpus_reduces_median_candidate_work_and_search_time(self) -> None:
+        candidate_savings: list[float] = []
+        time_savings: list[float] = []
+        for item_index in range(30):
+            ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+
+            def run(warm_start: QualitySearchWarmStart | None) -> tuple[QualitySearchResult, int, float]:
+                calls = 0
+                elapsed_seconds = 0.0
+
+                def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+                    nonlocal calls, elapsed_seconds
+                    calls += 1
+                    elapsed_seconds += 10.0 + item_index / 100
+                    crf_int = int(crf)
+                    predicted_video_bytes = 1_000_000_000 - 28_000_000 * crf_int
+                    return SampleEncodeResult(
+                        "VMAF",
+                        88.0 - (crf_int - 18) * 0.2,
+                        predicted_video_bytes / 10_000_000,
+                        10.0 + item_index / 100,
+                        predicted_video_bytes,
+                        f"crf {crf_int}",
+                        crf_int * 100_000,
+                    )
+
+                result = search_target_size(
+                    Path(f"/tmp/source-{item_index}.mkv"),
+                    self._policy(),
+                    source_codec="h264",
+                    metric_name="vmaf",
+                    metric_target=85.0,
+                    min_metric_score=80.0,
+                    preset=4,
+                    pixel_format="yuv420p10le",
+                    sample_every="8m",
+                    sample_duration="20s",
+                    min_crf=18,
+                    max_crf=38,
+                    svt_params=[],
+                    video_filter=None,
+                    stream_budget_ledger=ledger,
+                    transform_plan=self._transform_plan(),
+                    process_controller=None,
+                    host=None,
+                    quality_temp_dir=None,
+                    run_sample_encode=run_sample,
+                    warm_start=warm_start,
+                    expected_search_signature_id="qms1_test" if warm_start is not None else None,
+                )
+                return result, calls, elapsed_seconds
+
+            baseline, baseline_calls, baseline_seconds = run(None)
+            warmed, warmed_calls, warmed_seconds = run(
+                QualitySearchWarmStart(26.0, 26, "qms1_test", "qsc1_test")
+            )
+            self.assertEqual(warmed.crf, baseline.crf)
+            self.assertGreaterEqual(warmed.score, 80.0)
+            candidate_savings.append((baseline_calls - warmed_calls) / baseline_calls)
+            time_savings.append((baseline_seconds - warmed_seconds) / baseline_seconds)
+
+        self.assertGreaterEqual(median(candidate_savings), 0.20)
+        self.assertGreaterEqual(median(time_savings), 0.20)
+
     def test_monotonic_curve_selects_candidate_inside_sample_target_band(self) -> None:
         ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
         seen: list[int] = []
@@ -137,6 +412,8 @@ class TargetSizeSearchTests(unittest.TestCase):
                 host=None,
                 quality_temp_dir=None,
                 run_sample_encode=run_sample,
+                warm_start=QualitySearchWarmStart(26.0, 26, "qms1_test", "qsc1_test"),
+                expected_search_signature_id="qms1_test",
             )
 
         self.assertEqual(calls, 0)
@@ -363,10 +640,43 @@ class TargetSizeSearchTests(unittest.TestCase):
         retry_curve = retry_quality.target_size_trace["curve"]
         self.assertEqual(retry_curve["candidate_count"], retry_curve["search_candidate_count"] + 1)
         self.assertEqual(retry_curve["final_retry_measurement_count"], 1)
+
+        baseline_trace = dict(quality.target_size_trace or {})
+        baseline_candidate_count = max(
+            int(baseline_trace.get("candidate_count", 0)),
+            len(baseline_trace.get("candidates", [])),
+        )
+        baseline_trace["candidate_count"] = baseline_candidate_count + 1
+        baseline_trace["warm_start"] = {
+            "status": "rejected_fallback",
+            "attempted": True,
+            "candidate_count": 1,
+            "baseline_candidate_count": baseline_candidate_count,
+            "total_candidate_count": baseline_candidate_count + 1,
+        }
+        warm_quality = QualitySearchResult(
+            crf=quality.crf,
+            metric=quality.metric,
+            target=quality.target,
+            score=quality.score,
+            stdout=quality.stdout,
+            target_size_trace=baseline_trace,
+        )
+        warm_retry = retry_quality_result_for_final_miss(
+            warm_quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        assert warm_retry is not None
+        warm_retry_trace = warm_retry.target_size_trace or {}
+        self.assertEqual(warm_retry_trace["candidate_count"], baseline_candidate_count + 2)
+        self.assertEqual(warm_retry_trace["warm_start"]["baseline_candidate_count"], baseline_candidate_count + 1)
+        self.assertEqual(warm_retry_trace["warm_start"]["total_candidate_count"], baseline_candidate_count + 2)
         exhausted = verify_final_output_size(ledger, 330_000_000, retry_count=1)
         self.assertFalse(exhausted.retry_allowed)
         self.assertIsNone(retry_quality_result_for_final_miss(quality, exhausted, measure_candidate=measure_candidate))
-        self.assertEqual(measured_crfs, [27.0])
+        self.assertEqual(measured_crfs, [27.0, 27.0])
 
     def test_final_output_retry_measures_interpolated_crf_from_actual_output(self) -> None:
         target_size_bytes = 374_403_556

@@ -436,6 +436,9 @@ def _accepted_observation(row: Any, *, as_of: datetime) -> tuple[AcceptedQuality
     completion_event = _json_object(row["completion_event_json"])
     if completion_event is None:
         return None, "completion_event_missing"
+    warm_start = completion_event.get("quality_warm_start")
+    if isinstance(warm_start, dict) and str(warm_start.get("status") or "") == "accepted":
+        return None, "warm_start_selected"
     event_completed_at = _parse_timestamp(completion_event.get("encode_completed_at"))
     event_crf = _strict_number(completion_event.get("chosen_crf"))
     if (
