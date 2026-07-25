@@ -315,7 +315,8 @@ function qualityMemoryPayload(): FolderQualityMemoryPayload {
 		comparison: { crf_delta: 1, within_one_crf: true },
 		fallback_reason: null,
 		reason: 'Season memory stayed within one CRF of the production result.',
-		production_search_changed: false
+		production_search_changed: false,
+		warm_start: null
 	};
 }
 
@@ -369,6 +370,148 @@ describe('quality memory explanation', () => {
 		expect(view.tone).toBe('attention');
 		expect(view.badge).toBe('High confidence · differed');
 		expect(view.comparison).toBe('Outside 1 CRF · Δ +3.0');
+	});
+
+	it('explains an accepted warm start without claiming observation-only behavior', () => {
+		const payload = qualityMemoryPayload();
+		payload.production_search_changed = true;
+		payload.measured.candidate_count = 1;
+		payload.measured.search_duration_seconds = 20;
+		payload.warm_start = {
+			eligible: true,
+			block_reason: null,
+			requested_crf: 50,
+			candidate_crf: 50,
+			adjusted: false,
+			status: 'accepted',
+			attempted: true,
+			fallback_used: false,
+			fallback_reason: null,
+			candidate_count: 1,
+			baseline_candidate_count: 0,
+			total_candidate_count: 1,
+			duration_seconds: 20,
+			baseline_median_candidate_count: 5,
+			baseline_median_search_seconds: 100,
+			estimated_candidate_savings_count: 4,
+			estimated_candidate_savings_rate: 0.8,
+			estimated_search_time_savings_seconds: 80,
+			estimated_search_time_savings_rate: 0.8
+		};
+
+		const view = qualityMemoryView(folder({ quality_memory: payload }));
+
+		expect(view.badge).toBe('Warm start accepted');
+		expect(view.title).toBe('Measured run used trusted memory');
+		expect(view.recommendation.label).toBe('Tried first CRF');
+		expect(view.comparison).toBe('Accepted first candidate · estimated 80% fewer candidate passes');
+		expect(view.policyCopy).toContain('full baseline search was not needed');
+		expect(view.policyCopy).not.toContain('observation-only');
+	});
+
+	it('shows the rounded or clamped CRF that was actually tried', () => {
+		const payload = qualityMemoryPayload();
+		payload.production_search_changed = true;
+		payload.warm_start = {
+			eligible: true,
+			block_reason: null,
+			requested_crf: 50,
+			candidate_crf: 49,
+			adjusted: true,
+			status: 'accepted',
+			attempted: true,
+			fallback_used: false,
+			fallback_reason: null,
+			candidate_count: 1,
+			baseline_candidate_count: 0,
+			total_candidate_count: 1,
+			duration_seconds: 20,
+			baseline_median_candidate_count: 5,
+			baseline_median_search_seconds: 100,
+			estimated_candidate_savings_count: 4,
+			estimated_candidate_savings_rate: 0.8,
+			estimated_search_time_savings_seconds: 80,
+			estimated_search_time_savings_rate: 0.8
+		};
+
+		const view = qualityMemoryView(folder({ quality_memory: payload }));
+
+		expect(view.recommendation.value).toBe('49.0');
+		expect(view.recommendation.detail).toContain('adjusted from 50.0');
+	});
+
+	it('keeps attempted CRF facts visible when baseline relaxation invalidates the passive recommendation', () => {
+		const payload = qualityMemoryPayload();
+		payload.production_search_changed = true;
+		payload.recommendation = null;
+		payload.fallback_reason = 'search_target_changed';
+		payload.warm_start = {
+			eligible: true,
+			block_reason: null,
+			requested_crf: 50,
+			candidate_crf: 49,
+			adjusted: true,
+			status: 'rejected_fallback',
+			attempted: true,
+			fallback_used: true,
+			fallback_reason: 'quality_target_miss',
+			candidate_count: 1,
+			baseline_candidate_count: 3,
+			total_candidate_count: 4,
+			duration_seconds: 20,
+			baseline_median_candidate_count: 5,
+			baseline_median_search_seconds: 100,
+			estimated_candidate_savings_count: 1,
+			estimated_candidate_savings_rate: 0.2,
+			estimated_search_time_savings_seconds: 20,
+			estimated_search_time_savings_rate: 0.2
+		};
+
+		const view = qualityMemoryView(folder({ quality_memory: payload }));
+
+		expect(view.title).toBe('Memory tried first; baseline selected');
+		expect(view.recommendation).toMatchObject({
+			label: 'Tried first CRF',
+			value: '49.0'
+		});
+		expect(view.recommendation.detail).toContain('Measured memory candidate');
+		expect(view.recommendation.detail).toContain('adjusted from 50.0');
+		expect(view.reason).toContain('missed the strict quality target');
+	});
+
+	it('explains a guard miss and unchanged full baseline fallback', () => {
+		const payload = qualityMemoryPayload();
+		payload.production_search_changed = true;
+		payload.measured.candidate_count = 6;
+		payload.warm_start = {
+			eligible: true,
+			block_reason: null,
+			requested_crf: 50,
+			candidate_crf: 50,
+			adjusted: false,
+			status: 'rejected_fallback',
+			attempted: true,
+			fallback_used: true,
+			fallback_reason: 'target_band_miss',
+			candidate_count: 1,
+			baseline_candidate_count: 5,
+			total_candidate_count: 6,
+			duration_seconds: 20,
+			baseline_median_candidate_count: 5,
+			baseline_median_search_seconds: 100,
+			estimated_candidate_savings_count: -1,
+			estimated_candidate_savings_rate: -0.2,
+			estimated_search_time_savings_seconds: -20,
+			estimated_search_time_savings_rate: -0.2
+		};
+
+		const view = qualityMemoryView(folder({ quality_memory: payload }));
+
+		expect(view.badge).toBe('Warm start fell back');
+		expect(view.title).toBe('Memory tried first; baseline selected');
+		expect(view.comparison).toBe('Full baseline fallback · 6 candidates total');
+		expect(view.reason).toContain('missed the saved size band');
+		expect(view.policyCopy).toContain('full baseline search ran normally');
 	});
 
 	it.each([
