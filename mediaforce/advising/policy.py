@@ -17,6 +17,25 @@ _VIDEO_TRANSFORM_DEFAULTS: dict[str, JSONValue] = {
     "black_bar_detect_start_seconds": 0,
     "crop": "",
 }
+ADVISOR_PROTECTED_VIDEO_KEYS = frozenset(
+    {
+        "compression_intent_schema_version",
+        "compression_intent",
+        "compression_intent_source",
+        "compression_intent_confirmed",
+        "target_size_mb",
+        "target_size_bytes",
+        "target_runtime_minutes",
+        "size_goal_schema_version",
+        "size_goal_mode",
+        "size_goal_source",
+        "sample_projection_tolerance_percent",
+        "final_output_tolerance_percent",
+        "min_target_vmaf",
+        "min_target_xpsnr",
+        "max_encoded_percent",
+    }
+)
 
 
 def tune_response_schema(current_policy: dict[str, Any], *, request_dispositions: tuple[str, ...]) -> dict[str, Any]:
@@ -115,7 +134,7 @@ def operator_note_parse_schema() -> dict[str, Any]:
             "measured_size_followup": {"type": "boolean"},
             "evidence_authority": {
                 "type": "string",
-                "enum": ["none", "operator_observed", "approved_visual_result", "rejected_visual_result"],
+                "enum": ["none"],
             },
             "metric": {"type": ["string", "null"], "enum": ["vmaf", "xpsnr", None]},
             "metric_target": {"type": ["number", "null"]},
@@ -226,6 +245,15 @@ def compact_policy_payload(policy: dict[str, Any] | None) -> dict[str, Any] | No
     return compacted
 
 
+def advisor_protected_policy_paths(policy: dict[str, Any] | None) -> list[str]:
+    video = object_dict(object_dict(policy).get("video"))
+    return sorted(
+        f"video.{key}"
+        for key in ADVISOR_PROTECTED_VIDEO_KEYS
+        if key in video and video.get(key) is not None
+    )
+
+
 def merge_policy_fragments(*fragments: dict[str, Any] | None) -> dict[str, Any]:
     merged: dict[str, Any] = {}
     for fragment in fragments:
@@ -295,7 +323,7 @@ def normalize_policy_section(section: str, raw: JSONValue, base_section: JSONObj
     if not isinstance(raw, dict):
         return {}
     updates: dict[str, Any] = {}
-    normalized_base_section = _policy_section_with_implicit_keys(section, base_section)
+    normalized_base_section = _policy_section_with_implicit_keys(section, base_section, include_protected=True)
     if not isinstance(normalized_base_section, dict):
         return {}
     for key, base_value in normalized_base_section.items():
@@ -309,12 +337,20 @@ def normalize_policy_section(section: str, raw: JSONValue, base_section: JSONObj
     return updates
 
 
-def _policy_section_with_implicit_keys(section: str, raw_section: JSONValue) -> dict[str, JSONValue] | JSONValue:
+def _policy_section_with_implicit_keys(
+        section: str,
+        raw_section: JSONValue,
+        *,
+        include_protected: bool = False,
+) -> dict[str, JSONValue] | JSONValue:
     if not isinstance(raw_section, dict):
         return raw_section
     if section != "video":
         return raw_section
-    return {**_VIDEO_TRANSFORM_DEFAULTS, **raw_section}
+    merged = {**_VIDEO_TRANSFORM_DEFAULTS, **raw_section}
+    if include_protected:
+        return merged
+    return {key: value for key, value in merged.items() if key not in ADVISOR_PROTECTED_VIDEO_KEYS}
 
 
 def normalize_policy_value(section: str, key: str, value: JSONValue, base_value: JSONValue, *, mode: str) -> JSONValue | object:

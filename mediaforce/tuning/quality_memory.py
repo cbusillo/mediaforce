@@ -15,8 +15,9 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.library.media_scopes import MediaScope
+from mediaforce.tuning.compression_intent import LEGACY_COMPRESSION_INTENT_ID
 
-QUALITY_MEMORY_SIGNATURE_VERSION = 1
+QUALITY_MEMORY_SIGNATURE_VERSION = 2
 QUALITY_MEMORY_MAX_AGE_DAYS = 180
 MAX_HINT_IQR = 4.0
 MAX_HINT_MAD = 2.0
@@ -58,6 +59,7 @@ class QualitySearchContext:
     encoder_parameters: str | None
     video_filter: str | None
     output_container: str
+    compression_intent_id: str = LEGACY_COMPRESSION_INTENT_ID
 
     def __post_init__(self) -> None:
         target = _strict_number(self.target)
@@ -97,10 +99,15 @@ class QualitySearchContext:
             "output_container",
             _required_text(self.output_container, "output container").removeprefix(".").casefold(),
         )
+        object.__setattr__(
+            self,
+            "compression_intent_id",
+            _required_text(self.compression_intent_id, "compression intent identity"),
+        )
 
     @property
     def signature_id(self) -> str:
-        return f"qms1_{stable_json_hash(self.to_payload())[:32]}"
+        return f"qms2_{stable_json_hash(self.to_payload())[:32]}"
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -120,6 +127,7 @@ class QualitySearchContext:
             "encoder_parameters": self.encoder_parameters,
             "video_filter": self.video_filter,
             "output_container": self.output_container,
+            "compression_intent_id": self.compression_intent_id,
         }
 
 
@@ -472,6 +480,9 @@ def _accepted_observation(row: Any, *, as_of: datetime) -> tuple[AcceptedQuality
             source_codec=source_codec,
             output_width=output_width,
             output_height=output_height,
+            compression_intent_id=str(
+                completion_event.get("compression_intent_id") or LEGACY_COMPRESSION_INTENT_ID
+            ),
         )
     except ValueError:
         return None, "encode_context_invalid"
@@ -525,6 +536,7 @@ def quality_search_context_from_command(
         source_codec: str,
         output_width: int,
         output_height: int,
+        compression_intent_id: str = LEGACY_COMPRESSION_INTENT_ID,
 ) -> QualitySearchContext:
     output_container = PurePosixPath(command[-1]).suffix.removeprefix(".") if command else ""
     encoder = _command_option(command, "-c:v", "-codec:v")
@@ -544,6 +556,7 @@ def quality_search_context_from_command(
         encoder_parameters=_encoder_parameters(command, encoder=encoder),
         video_filter=_optional_command_option(command, "-vf", "-filter:v"),
         output_container=output_container,
+        compression_intent_id=compression_intent_id,
     )
 
 

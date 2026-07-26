@@ -217,6 +217,9 @@ Guidance:
   - calibration job persistence and queue helpers
 - `size_goals.py`
   - canonical decimal-byte target intent and per-item runtime resolution
+- `compression_intent.py`
+  - versioned compression strategy identity, typed evidence references,
+    deterministic size-change authorization, and acceptable-candidate ordering
 - `stream_budget.py`
   - versioned deterministic whole-item budget and feasibility ledger
   - non-video estimates, provenance, uncertainty, source-relative video caps,
@@ -249,6 +252,10 @@ Guidance:
 - Keep calibration queue state, canonical size contracts, deterministic budget
   arithmetic, target-size candidate search, and learned-memory helpers under
   `mediaforce/tuning/`.
+- Keep compression direction and contrary-movement authorization under
+  `mediaforce/tuning/compression_intent.py`; routes, recovery, prompts, and the
+  frontend consume its typed snapshots and decisions rather than deriving
+  authority independently.
 - Keep quality-risk facts, deterministic gates, typed risk normalization, and
   current review authority under `mediaforce/tuning/quality_risk.py` instead of
   re-deriving them independently in routes, prompts, or the frontend.

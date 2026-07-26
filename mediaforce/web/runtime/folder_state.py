@@ -287,6 +287,7 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "applied_policy": deps.tuning_policy_focus(object_dict(payload.get("applied_policy"))),
         "preview_policy": deps.tuning_policy_focus(object_dict(payload.get("preview_policy"))),
         "current_policy": deps.tuning_policy_focus(object_dict(payload.get("current_policy"))),
+        "compression_intent": object_dict(payload.get("compression_intent")) or None,
         "host": object_dict(payload.get("host")),
         "latest_failed_sample_job": object_dict(payload.get("latest_failed_sample_job")) or None,
         "self_check": {

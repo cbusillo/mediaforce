@@ -1,13 +1,20 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Literal
 
 from mediaforce.core.type_defs import float_value, int_value, object_dict
+from mediaforce.tuning.compression_intent import (
+    CompressionIntentV1,
+    compression_intent_from_policy,
+    compression_intent_from_request,
+    legacy_compression_intent,
+)
 
 
 DECIMAL_MEGABYTE_BYTES = 1_000_000
 SIZE_GOAL_SCHEMA_VERSION = 1
+OPERATOR_INTENT_SCHEMA_VERSION = 2
 DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT = 10.0
 DEFAULT_FINAL_OUTPUT_TOLERANCE_PERCENT = 5.0
 
@@ -300,16 +307,22 @@ class StreamIntent:
 class OperatorIntent:
     size_goal: SizeGoalIntent
     resolution: ResolutionIntent
+    compression_intent: CompressionIntentV1 = field(default_factory=legacy_compression_intent)
     quality: QualityIntent | None = None
     streams: StreamIntent | None = None
 
     @property
     def requires_confirmation(self) -> bool:
-        return self.size_goal.requires_confirmation or self.resolution.requires_confirmation
+        return (
+            self.size_goal.requires_confirmation
+            or self.resolution.requires_confirmation
+            or self.compression_intent.requires_confirmation
+        )
 
     def policy_fragment(self, *, item_runtime_seconds: float | None = None) -> dict[str, Any]:
         video = dict(self.size_goal.policy_fragment(item_runtime_seconds=item_runtime_seconds)["video"])
         video.update(self.resolution.policy_fragment()["video"])
+        video.update(self.compression_intent.policy_fragment()["video"])
         if self.quality is not None:
             video.update(self.quality.policy_fragment()["video"])
         fragment: dict[str, Any] = {"video": video}
@@ -319,9 +332,10 @@ class OperatorIntent:
 
     def request_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "schema_version": SIZE_GOAL_SCHEMA_VERSION,
+            "schema_version": OPERATOR_INTENT_SCHEMA_VERSION,
             "size_goal": self.size_goal.request_payload(),
             "resolution": self.resolution.request_payload(),
+            "compression_intent": self.compression_intent.request_payload(),
         }
         if self.quality is not None:
             payload["quality"] = self.quality.request_payload()
@@ -332,10 +346,11 @@ class OperatorIntent:
     def to_payload(self, *, item_runtime_seconds: float | None) -> dict[str, Any]:
         size_goal = self.size_goal.resolve(item_runtime_seconds)
         payload: dict[str, Any] = {
-            "schema_version": SIZE_GOAL_SCHEMA_VERSION,
+            "schema_version": OPERATOR_INTENT_SCHEMA_VERSION,
             "requires_confirmation": self.requires_confirmation or size_goal.requires_confirmation,
             "size_goal": size_goal.to_payload(),
             "resolution": self.resolution.to_payload(),
+            "compression_intent": self.compression_intent.to_payload(),
             "request": (
                 None
                 if self.requires_confirmation or size_goal.requires_confirmation
@@ -466,6 +481,10 @@ def operator_intent_from_policy(
     return OperatorIntent(
         size_goal=size_goal_from_policy(video_policy, default_video_policy=default_video_policy),
         resolution=resolution_intent_from_policy(video_policy),
+        compression_intent=compression_intent_from_policy(
+            video_policy,
+            default_video_policy=default_video_policy,
+        ),
         quality=quality_intent_from_policy(video_policy),
         streams=stream_intent_from_policy(audio_policy, subtitle_policy),
     )
@@ -473,7 +492,12 @@ def operator_intent_from_policy(
 
 def operator_intent_from_request(payload: dict[str, Any]) -> OperatorIntent:
     request = object_dict(payload)
-    if int_value(request.get("schema_version")) != SIZE_GOAL_SCHEMA_VERSION:
+    schema_version = int_value(request.get("schema_version"))
+    if schema_version == SIZE_GOAL_SCHEMA_VERSION:
+        raise ValueError(
+            "This size request predates compression goals. Refresh and choose the size and compression goal again."
+        )
+    if schema_version != OPERATOR_INTENT_SCHEMA_VERSION:
         raise ValueError("The size request uses an unsupported schema version. Refresh and choose the size again.")
     size_payload = object_dict(request.get("size_goal"))
     mode = str(size_payload.get("mode") or "").strip().lower()
@@ -526,7 +550,14 @@ def operator_intent_from_request(payload: dict[str, Any]) -> OperatorIntent:
         if streams_payload
         else None
     )
-    return OperatorIntent(size_goal=size_goal, resolution=resolution, quality=quality, streams=streams)
+    compression_intent = compression_intent_from_request(object_dict(request.get("compression_intent")))
+    return OperatorIntent(
+        size_goal=size_goal,
+        resolution=resolution,
+        compression_intent=compression_intent,
+        quality=quality,
+        streams=streams,
+    )
 
 
 def guided_size_goal_options(
@@ -543,6 +574,7 @@ def guided_size_goal_options(
         return _legacy_confirmation_options(
             intent,
             video_policy=video_policy,
+            default_video_policy=default_video_policy,
             item_runtime_seconds=item_runtime_seconds,
             audio_policy=audio_policy,
             subtitle_policy=subtitle_policy,
@@ -574,6 +606,7 @@ def guided_size_goal_options(
         operator_intent = OperatorIntent(
             size_goal=option_intent,
             resolution=ResolutionIntent("source", None, "guided_preset"),
+            compression_intent=context_intent.compression_intent,
             quality=context_intent.quality,
             streams=context_intent.streams,
         )
@@ -595,6 +628,7 @@ def _legacy_confirmation_options(
         intent: SizeGoalIntent,
         *,
         video_policy: dict[str, Any],
+        default_video_policy: dict[str, Any],
         item_runtime_seconds: float | None,
         audio_policy: dict[str, Any] | None,
         subtitle_policy: dict[str, Any] | None,
@@ -604,6 +638,10 @@ def _legacy_confirmation_options(
     context_intent = OperatorIntent(
         size_goal=intent,
         resolution=resolution_intent_from_policy(video_policy),
+        compression_intent=compression_intent_from_policy(
+            video_policy,
+            default_video_policy=default_video_policy,
+        ),
         quality=quality_intent_from_policy(video_policy),
         streams=stream_intent_from_policy(audio_policy, subtitle_policy),
     )
@@ -642,6 +680,7 @@ def _legacy_confirmation_options(
         operator_intent = OperatorIntent(
             size_goal=confirmed_goal,
             resolution=ResolutionIntent("source", None, "legacy_confirmation"),
+            compression_intent=context_intent.compression_intent,
             quality=context_intent.quality,
             streams=context_intent.streams,
         )

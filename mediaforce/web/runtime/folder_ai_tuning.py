@@ -5,11 +5,15 @@ from typing import Any
 from fastapi import HTTPException
 
 from mediaforce.advisor import apply_seed_policy, request_note_tuning, request_review_artifact_critique
-from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments
+from mediaforce.advising.policy import (
+    advisor_protected_policy_paths,
+    has_nonpositive_video_budget,
+    merge_policy_fragments,
+)
 from mediaforce.advising.routing import AdvisorRouting
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.tuning.quality_risk import (
     append_quality_risk_record,
@@ -100,6 +104,8 @@ def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         ),
         "output_container": sample_item.get("output_container"),
         "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+        "resolved_operator_intent": object_dict(sample_item.get("resolved_operator_intent")),
+        "compression_intent": object_dict(sample_item.get("compression_intent")),
         "stream_budget_ledger": object_dict(sample_item.get("stream_budget_ledger")),
         "representative_source_id": sample_item.get("representative_source_id"),
         "representative_selection": object_dict(sample_item.get("representative_selection")),
@@ -123,6 +129,16 @@ def _prepare_sample_item(
     prepared["resolved_policy"] = policy
     output_container = _output_container(config, prepared)
     prepared["output_container"] = output_container
+    operator_intent = operator_intent_from_policy(
+        object_dict(policy.get("video")),
+        default_video_policy=object_dict(config.raw.get("video")),
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    )
+    prepared["resolved_operator_intent"] = operator_intent.to_payload(
+        item_runtime_seconds=float_value(prepared.get("duration_seconds")) or None
+    )
+    prepared["compression_intent"] = operator_intent.compression_intent.to_payload()
     ledger = resolve_stream_budget_ledger(
         prepared,
         default_video_policy=object_dict(config.raw.get("video")),
@@ -131,6 +147,21 @@ def _prepare_sample_item(
     )
     prepared["stream_budget_ledger"] = ledger.to_payload()
     return prepared, stream_budget_projection_blocker(ledger)
+
+
+def _compression_intent_snapshot(config: MediaforceConfig, policy: dict[str, Any]) -> dict[str, Any]:
+    return operator_intent_from_policy(
+        object_dict(policy.get("video")),
+        default_video_policy=object_dict(config.raw.get("video")),
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    ).compression_intent.to_payload()
+
+
+def _compression_intent_matches(expected: dict[str, Any], current: dict[str, Any]) -> bool:
+    expected_id = str(expected.get("semantic_id") or "").strip()
+    current_id = str(current.get("semantic_id") or "").strip()
+    return bool(expected_id and current_id and expected_id == current_id)
 
 
 def _target_size_blocker_response(blocker: StreamBudgetProjectionBlocker) -> dict[str, Any]:
@@ -215,29 +246,6 @@ def _measured_budget_fragment_preserving_stricter_cap(
     )
 
 
-def _operator_forbids_hard_budget_cap(operator_request: dict[str, Any] | None) -> bool:
-    request = object_dict(operator_request)
-    text = str(request.get("request_text") or "").strip().lower()
-    if not text:
-        return False
-    hard_cap_terms = ("hard cap", "hard size", "ceiling", "max_encoded_percent", "must hit")
-    priority_terms = (
-        "prioritize preserving",
-        "prioritize resolution",
-        "prioritize 1080",
-        "preserve 1080",
-        "preserve source",
-        "source resolution",
-        "do not downscale",
-        "don't downscale",
-        "dont downscale",
-    )
-    conditional_terms = ("only if", "if it does not require", "if it doesn't require", "if it doesnt require")
-    return any(term in text for term in hard_cap_terms) and any(
-        term in text for term in priority_terms
-    ) and any(term in text for term in conditional_terms)
-
-
 def _honor_operator_source_resolution(
         *,
         operator_request: dict[str, Any] | None,
@@ -257,17 +265,24 @@ def _honor_operator_source_resolution(
     )
 
 
-def _unconfirmed_legacy_size_issue(config: MediaforceConfig, policy: dict[str, Any]) -> str | None:
+def _unconfirmed_legacy_size_issue(
+        config: MediaforceConfig,
+        policy: dict[str, Any],
+        *,
+        allow_workstation_default: bool = False,
+) -> str | None:
     video_policy = object_dict(policy.get("video"))
     if not {"target_size_mb", "target_size_bytes"} & video_policy.keys():
         return None
     intent = operator_intent_from_policy(
         video_policy,
-        default_video_policy=object_dict(config.raw.get("video")),
+        default_video_policy=(object_dict(config.raw.get("video")) if allow_workstation_default else None),
         audio_policy=object_dict(policy.get("audio")),
         subtitle_policy=object_dict(policy.get("subtitle")),
     )
     if not intent.size_goal.requires_confirmation:
+        if intent.compression_intent.requires_confirmation:
+            return "Choose and confirm a compression goal before queueing another sample."
         return None
     return (
         "Confirm whether the saved legacy size is runtime-normalized or an absolute per-episode target before "
@@ -751,8 +766,28 @@ def folder_ai_tune_confirm_action(
             if calibration
             else resolved_policy
         )
+        if not _compression_intent_matches(
+                object_dict(pending_proposal.get("base_compression_intent")),
+                _compression_intent_snapshot(config, policy_source),
+        ):
+            return {
+                "ok": False,
+                "message": "This bench draft uses an older compression goal. Refresh it before queueing a sample.",
+            }
         final_policy = deps.apply_policy_fragment(policy_source, applied_policy)
-        legacy_size_issue = _unconfirmed_legacy_size_issue(config, final_policy)
+        if not _compression_intent_matches(
+                object_dict(pending_proposal.get("compression_intent")),
+                _compression_intent_snapshot(config, final_policy),
+        ):
+            return {
+                "ok": False,
+                "message": "This bench draft no longer matches its saved compression goal. Refresh it before queueing.",
+            }
+        legacy_size_issue = _unconfirmed_legacy_size_issue(
+            config,
+            final_policy,
+            allow_workstation_default=True,
+        )
         if legacy_size_issue is not None:
             return {"ok": False, "message": legacy_size_issue}
         queued_sample_item, target_size_blocker = _prepare_sample_item(config, sample_item, final_policy)
@@ -1160,6 +1195,8 @@ def _seed_preview_action(
         "applied_policy": combined_fragment,
         "preview_policy": seeded_policy,
         "current_policy": base_policy,
+        "base_compression_intent": _compression_intent_snapshot(config, base_policy),
+        "compression_intent": _compression_intent_snapshot(config, seeded_policy),
         "host": asdict(host),
         "self_check": None,
         "evidence_checked": [],
@@ -1345,7 +1382,9 @@ def _tuned_preview_action(
         payload=tuning_payload,
         **({"routing": deps.advisor_routing} if deps.advisor_routing is not None else {}),
     )
-    tuned_policy, applied_fragment = apply_seed_policy(current_policy, object_dict(tuning.proposed_policy), mode="tune")
+    proposed_policy = object_dict(tuning.proposed_policy)
+    protected_policy_paths = advisor_protected_policy_paths(tuning.model_proposed_policy)
+    tuned_policy, applied_fragment = apply_seed_policy(current_policy, proposed_policy, mode="tune")
     measurement_fragment = _size_budget_measurement_fragment(operator_request, sample_item)
     combined_fragment = _honor_operator_source_resolution(
         operator_request=operator_request,
@@ -1385,13 +1424,6 @@ def _tuned_preview_action(
         size_target_analysis=size_target_analysis,
     )
     deterministic_measurement_fragment = object_dict(measurement_fragment)
-    if measured_budget_fragment and _operator_forbids_hard_budget_cap(operator_request):
-        measured_budget_fragment = {}
-        advice_payload["budget_enforcement"] = {
-            "status": "skipped_operator_priority",
-            "size_target_analysis": size_target_analysis,
-            "reason": "The operator prioritized source resolution over a conditional hard size ceiling.",
-        }
     if measured_budget_fragment:
         measured_budget_fragment = _measured_budget_fragment_preserving_stricter_cap(
             combined_fragment, measured_budget_fragment
@@ -1460,13 +1492,24 @@ def _tuned_preview_action(
         current_policy=current_policy,
         preview_policy=tuned_policy,
     )
+    if protected_policy_paths:
+        alignment_issue = (
+            "The advisor attempted to change operator-owned compression fields: "
+            + ", ".join(protected_policy_paths)
+            + ". Choose those values through the operator controls instead."
+        )
     if alignment_issue is None:
         alignment_issue = blocking_evidence_issue
     measurement_override_needed = (
         alignment_issue is not None
         or str(request_disposition or "").strip().lower() in NONQUEUEABLE_DISPOSITIONS
     )
-    if blocking_evidence_issue is None and measurement_override_needed and measurement_fragment is not None:
+    if (
+            not protected_policy_paths
+            and blocking_evidence_issue is None
+            and measurement_override_needed
+            and measurement_fragment is not None
+    ):
         combined_fragment = _honor_operator_source_resolution(
             operator_request=operator_request,
             combined_fragment=deterministic_measurement_fragment,
@@ -1561,6 +1604,8 @@ def _tuned_preview_action(
         "applied_policy": combined_fragment,
         "preview_policy": tuned_policy,
         "current_policy": current_policy,
+        "base_compression_intent": _compression_intent_snapshot(config, current_policy),
+        "compression_intent": _compression_intent_snapshot(config, tuned_policy),
         "host": asdict(host),
         "self_check": tuning.self_check,
         "evidence_checked": tuning.evidence_checked,

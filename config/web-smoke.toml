@@ -75,6 +75,10 @@ target_runtime_minutes = 45
 size_goal_schema_version = 1
 size_goal_mode = "normalized"
 size_goal_source = "config_default"
+compression_intent_schema_version = 1
+compression_intent = "balanced"
+compression_intent_source = "config_default"
+compression_intent_confirmed = true
 sample_projection_tolerance_percent = 10
 final_output_tolerance_percent = 5
 decision_model = "size_first_review"
@@ -141,6 +145,16 @@ default = 18
 [planning.bucket_thresholds]
 priority_encode = 70
 review_encode = 35
+
+[[overrides]]
+path_prefix = "tv/Undershoot Show/Season 1"
+note = "Exercise the accepted under-target compression-intent state in browser smoke."
+
+[overrides.video]
+compression_intent_schema_version = 1
+compression_intent = "perceptual_floor"
+compression_intent_source = "browser_fixture"
+compression_intent_confirmed = true
 
 [[remote_hosts]]
 key = "web-smoke-worker"

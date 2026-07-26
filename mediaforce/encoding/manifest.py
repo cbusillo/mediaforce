@@ -12,7 +12,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
-from mediaforce.core.evidence import stable_json_hash
+from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
@@ -26,6 +26,13 @@ from mediaforce.encoding.quality_search import QualitySearchPlan
 from mediaforce.encoding.staging import safe_unlink
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import planned_output_dimensions
+from mediaforce.tuning.compression_intent import (
+    CompressionAuthorizationDecision,
+    CompressionEvidenceRef,
+    CompressionIntentV1,
+    authorize_compression_change,
+    compression_intent_from_item,
+)
 from mediaforce.tuning.quality_observations import (
     OUTCOME_FINAL_SIZE_FAILURE,
     append_quality_search_observation,
@@ -329,6 +336,7 @@ def encode_one_item(
         raise FileExistsError(f"Staging file already exists: {staging_path}")
 
     policy = item["resolved_policy"]
+    compression_intent = compression_intent_from_item(item)
     cadence_decision = (
         object_dict(item.get("cadence_decision"))
         if "cadence_decision" in item
@@ -740,7 +748,23 @@ def encode_one_item(
             if stream_budget is None or stream_budget.total_target_bytes is None:
                 final_verification = None
                 break
-            final_verification = verify_final_output_size(stream_budget, staging_path.stat().st_size, retry_count=retry_count)
+            actual_output_bytes = staging_path.stat().st_size
+            compression_evidence, compression_authorization = _final_size_growth_authorization(
+                item,
+                policy=policy,
+                compression_intent=compression_intent,
+                stream_budget=stream_budget,
+                actual_output_bytes=actual_output_bytes,
+                encode_context=encode_context,
+            )
+            final_verification = verify_final_output_size(
+                stream_budget,
+                actual_output_bytes,
+                retry_count=retry_count,
+                compression_intent=compression_intent,
+                compression_evidence=compression_evidence,
+                compression_authorization=compression_authorization,
+            )
             final_trace = target_trace_with_actual_output(
                 object_dict(getattr(quality_result, "target_size_trace", None)) or None,
                 final_verification,
@@ -752,7 +776,8 @@ def encode_one_item(
             quality_result.target_size_trace = final_trace
             warm_trace = _quality_result_warm_start_trace(quality_result)
             if (
-                    not warm_start_final_fallback_used
+                    final_verification.retry_allowed
+                    and not warm_start_final_fallback_used
                     and str(warm_trace.get("status") or "") == "accepted"
             ):
                 warm_start_final_fallback_used = True
@@ -886,6 +911,7 @@ def encode_one_item(
                 quality_result,
                 final_verification,
                 measure_candidate=measure_retry_candidate,
+                compression_intent=compression_intent,
             )
             final_trace = object_dict(quality_result.target_size_trace) or final_trace
             retry_payload = final_verification.to_payload()
@@ -1142,6 +1168,7 @@ def encode_one_item(
             "target_size_trace": final_trace,
             "quality_warm_start": _quality_result_warm_start_trace(quality_result) or None,
             "quality_search_run_id": quality_search_run_id,
+            "compression_intent_id": compression_intent.semantic_id,
         },
         record_event,
     )
@@ -1364,6 +1391,7 @@ def _planned_quality_observation_context(
             encoder_parameters=":".join(search_plan.svt_params) or None,
             video_filter=search_plan.video_filter,
             output_container=output_container.removeprefix("."),
+            compression_intent_id=compression_intent_from_item(item).semantic_id,
         )
     except ValueError:
         return None
@@ -1488,6 +1516,7 @@ def _completed_quality_observation_context(
             source_codec=_item_text(item, "video_codec"),
             output_width=normalized_width,
             output_height=normalized_height,
+            compression_intent_id=compression_intent_from_item(item).semantic_id,
         ), partial_context
     except ValueError:
         return None, partial_context
@@ -1589,6 +1618,59 @@ def _encode_context_text(encode_context: dict[str, Any] | None, key: str) -> str
     payload = object_dict(encode_context)
     value = str(payload.get(key) or "").strip()
     return value or None
+
+
+def _final_size_growth_authorization(
+        item: dict[str, Any],
+        *,
+        policy: dict[str, Any],
+        compression_intent: CompressionIntentV1,
+        stream_budget: StreamBudgetLedger,
+        actual_output_bytes: int,
+        encode_context: dict[str, Any] | None,
+) -> tuple[CompressionEvidenceRef | None, CompressionAuthorizationDecision | None]:
+    target_size_bytes = stream_budget.total_target_bytes
+    if (
+            compression_intent.requires_confirmation
+            or compression_intent.level not in {"balanced", "reference"}
+            or target_size_bytes is None
+            or actual_output_bytes <= 0
+            or actual_output_bytes >= target_size_bytes
+    ):
+        return None, None
+    source_id = stable_source_id(item)
+    policy_hash = stable_policy_hash(policy)
+    job_id = _encode_context_text(encode_context, "encode_job_id")
+    if not source_id or not policy_hash or not job_id:
+        return None, None
+    evidence_identity = {
+        "kind": "measured_item_variance",
+        "source_id": source_id,
+        "policy_hash": policy_hash,
+        "intent_id": compression_intent.semantic_id,
+        "job_id": job_id,
+        "observed_bytes": actual_output_bytes,
+        "candidate_bytes": target_size_bytes,
+    }
+    evidence = CompressionEvidenceRef(
+        kind="measured_item_variance",
+        evidence_id=f"ce1_{stable_json_hash(evidence_identity)[:32]}",
+        intent_id=compression_intent.semantic_id,
+        observed_bytes=actual_output_bytes,
+        source_id=source_id,
+        policy_hash=policy_hash,
+        job_id=job_id,
+    )
+    decision = authorize_compression_change(
+        compression_intent,
+        authoritative_anchor_bytes=actual_output_bytes,
+        candidate_bytes=target_size_bytes,
+        evidence=(evidence,),
+        source_id=source_id,
+        policy_hash=policy_hash,
+        job_id=job_id,
+    )
+    return evidence, decision
 
 
 def _encode_context_int(encode_context: dict[str, Any] | None, key: str) -> int | None:

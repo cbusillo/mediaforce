@@ -2025,7 +2025,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio under-target fixture",
                 "route": "/folders/tv/Undershoot%20Show/Season%201",
                 "marker": "Undershoot Show",
-                "stageMarker": "Below the representative band",
+                "stageMarker": "Mediaforce will not spend the unused size automatically.",
             },
             {
                 "label": "Folder Studio infeasible fixture",

@@ -131,6 +131,7 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         "resolved_operator_intent": operator_intent.to_payload(
             item_runtime_seconds=float_value(row.get("duration_seconds")) or None
         ),
+        "compression_intent": operator_intent.compression_intent.to_payload(),
         "audio_summary": audio_summary,
         "subtitle_summary": subtitle_summary,
         "attachment_summary": attachment_summary,

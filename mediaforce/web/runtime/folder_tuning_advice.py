@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.advisor import apply_seed_policy, request_operator_note_parse, request_run_verdict, request_seed_policy
-from mediaforce.advising.policy import has_nonpositive_video_budget, merge_policy_fragments, policy_key_paths
+from mediaforce.advising.policy import (
+    advisor_protected_policy_paths,
+    has_nonpositive_video_budget,
+    merge_policy_fragments,
+    policy_key_paths,
+)
 from mediaforce.advising.routing import AdvisorRouting, advisor_routing_from_config
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
@@ -132,9 +137,7 @@ def _normalize_operator_note_parse(parsed: dict[str, Any] | None) -> dict[str, A
     intent_type = str(parsed_object.get("intent_type") or "").strip().lower()
     if intent_type not in _NOTE_PARSE_INTENT_TYPES:
         intent_type = "unclear"
-    evidence_authority = str(parsed_object.get("evidence_authority") or "none").strip().lower()
-    if evidence_authority not in _EVIDENCE_AUTHORITY_VALUES:
-        evidence_authority = "none"
+    evidence_authority = "none"
     metric = str(parsed_object.get("metric") or "").strip().lower() or None
     metric_target = None
     size_budget_value = None
@@ -214,15 +217,12 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
     if not trimmed:
         return None
     lowered = trimmed.lower()
-    evidence_authority = "none"
-    if _VISUAL_REJECTION_RE.search(trimmed):
-        evidence_authority = "rejected_visual_result"
-    elif _VISUAL_APPROVAL_RE.search(trimmed):
-        evidence_authority = "approved_visual_result"
-    elif _NEGATIVE_VISUAL_OBSERVATION_RE.search(trimmed):
-        evidence_authority = "rejected_visual_result"
-    elif _OPERATOR_OBSERVED_RE.search(trimmed):
-        evidence_authority = "operator_observed"
+    visual_feedback_detected = bool(
+        _VISUAL_REJECTION_RE.search(trimmed)
+        or _VISUAL_APPROVAL_RE.search(trimmed)
+        or _NEGATIVE_VISUAL_OBSERVATION_RE.search(trimmed)
+        or _OPERATOR_OBSERVED_RE.search(trimmed)
+    )
 
     size_budget_match = _positive_size_budget_match(trimmed)
     metric_match = _METRIC_TARGET_RE.search(trimmed) or _REVERSED_METRIC_TARGET_RE.search(trimmed)
@@ -254,7 +254,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
     explicit_parts = sum(
         part is not None for part in (metric, size_budget_value, scale_height, black_bar_handling, crop)
     )
-    if explicit_parts == 0 and evidence_authority == "none":
+    if explicit_parts == 0 and not visual_feedback_detected:
         return None
 
     if explicit_parts >= 2:
@@ -277,7 +277,7 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         "what do you think",
     )
     operator_confirmed = request_type != "none"
-    intent_type = "approval_feedback" if request_type == "none" and evidence_authority != "none" else "direct_request"
+    intent_type = "approval_feedback" if request_type == "none" and visual_feedback_detected else "direct_request"
     if any(marker in lowered for marker in exploratory_markers):
         operator_confirmed = False
         intent_type = "exploratory_question"
@@ -298,11 +298,15 @@ def _heuristic_operator_note_parse(note: str) -> dict[str, Any] | None:
         summary_parts.append(f"apply crop {crop}")
 
     return {
-        "summary": "Direct request: " + ", ".join(summary_parts),
+        "summary": (
+            "Direct request: " + ", ".join(summary_parts)
+            if summary_parts
+            else "Operator feedback recorded for typed review."
+        ),
         "intent_type": intent_type,
         "request_type": request_type,
         "operator_confirmed": operator_confirmed,
-        "evidence_authority": evidence_authority,
+        "evidence_authority": "none",
         "metric": metric,
         "metric_target": metric_target,
         "size_budget_value": size_budget_value,
@@ -742,6 +746,8 @@ def operator_request_from_intent(
     intent = operator_intent_from_request(intent_payload)
     duration_seconds = _positive_float_value(sample_item.get("duration_seconds"))
     resolved_size_goal = intent.size_goal.resolve(duration_seconds)
+    if intent.compression_intent.requires_confirmation:
+        raise ValueError("Choose and confirm a compression goal before starting the test.")
     if resolved_size_goal.requires_confirmation or resolved_size_goal.target_size_bytes is None:
         raise ValueError(resolved_size_goal.rationale)
 
@@ -974,19 +980,19 @@ def maybe_force_repeated_seed_experiment(
         requested_experiment: dict[str, Any] | None,
         repeat_signal: dict[str, Any] | None,
         latest_failed_sample_job: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
     repeat_payload = object_dict(repeat_signal)
     if int_value(repeat_payload.get("repeat_count")) < 2:
-        return
+        return False
     request = object_dict(requested_experiment)
     if (
             has_nonpositive_video_budget(request)
             or str(request.get("evidence_authority") or "none").strip().lower() == "rejected_visual_result"
             or bool(object_dict(latest_failed_sample_job))
     ):
-        return
+        return False
     if str(seed_response.request_disposition or "").strip().lower() not in {"softened", "rejected"}:
-        return
+        return False
     requested_policy = object_dict(request.get("applied_policy"))
     previous_softened = int_value(repeat_payload.get("previous_softened_count"))
     seed_response.request_disposition = "honored"
@@ -1003,12 +1009,13 @@ def maybe_force_repeated_seed_experiment(
     if not seed_response.feasibility_note:
         seed_response.feasibility_note = "The repeated operator-confirmed target is queueable for a measured sample."
     if not requested_policy:
-        return
+        return False
     _, applied_fragment = apply_seed_policy(base_policy, requested_policy)
     if not applied_fragment:
-        return
+        return False
     seed_response.ok = True
     seed_response.proposed_policy = applied_fragment
+    return True
 
 
 def build_run_verdict_payload(
@@ -1255,7 +1262,10 @@ def build_seed_policy_payload(
     )
     return {
         "folder": prefix,
-        "goal": "Target source-resolution 1080p AV1 around 200-300 MiB per 40 minutes and let measured samples plus operator visual review decide quality.",
+        "goal": (
+            "Honor the resolved size goal and confirmed compression intent, then let measured samples and typed "
+            "operator review decide whether a smaller result remains acceptable."
+        ),
         "seed_principles": [
             "The operator has already observed strong 1080p AV1 results in this size range across conventional and dark or stylized TV.",
             "Do not infer a minimum acceptable bitrate from source size, resolution, or content-class folklore.",
@@ -1435,7 +1445,7 @@ def maybe_seed_baseline_policy(
         payload=payload,
         routing=advisor_routing,
     )
-    maybe_force_repeated_seed_experiment(
+    forced_operator_policy = maybe_force_repeated_seed_experiment(
         base_policy=base_policy,
         seed_response=seed_response,
         requested_experiment=object_dict(payload.get("requested_experiment")),
@@ -1459,6 +1469,31 @@ def maybe_seed_baseline_policy(
                 "seed_raw_response": seed_response.raw,
                 "seed_proposed_policy": None,
                 "seed_applied_policy": None,
+                "seed_context_payload": payload,
+            },
+        }
+    protected_paths = advisor_protected_policy_paths(seed_response.model_proposed_policy)
+    if protected_paths and not forced_operator_policy:
+        return {
+            "policy": base_policy,
+            "job_fields": {
+                "seed_source": "default",
+                "seed_summary": seed_response.summary,
+                "seed_diagnosis": (
+                    "The advisor attempted to change operator-owned compression fields, so Mediaforce rejected "
+                    "the proposal."
+                ),
+                "seed_confidence": seed_response.confidence,
+                "seed_evidence_checked": seed_response.evidence_checked,
+                "seed_suggested_follow_up": "Choose the compression goal or size target through the operator controls.",
+                "seed_request_disposition": "rejected",
+                "seed_request_response": "I kept the operator-owned compression contract unchanged.",
+                "seed_feasibility_note": seed_response.feasibility_note,
+                "seed_prompt_version": seed_response.prompt_version,
+                "seed_raw_response": seed_response.raw,
+                "seed_proposed_policy": seed_response.proposed_policy,
+                "seed_applied_policy": None,
+                "seed_protected_policy_paths": protected_paths,
                 "seed_context_payload": payload,
             },
         }

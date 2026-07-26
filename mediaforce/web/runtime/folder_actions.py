@@ -13,7 +13,8 @@ from sqlalchemy import delete, or_, select, update
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
-from mediaforce.core.type_defs import float_value, object_dict, object_list
+from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
+from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
@@ -29,10 +30,13 @@ from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection,
     workflow_eligibility
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
+from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authorize_compression_change, \
+    compression_intent_from_item, compression_intent_from_policy
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_evidence_blocker, \
     cadence_safety_partition, older_season_cadence_payload
 from mediaforce.web.runtime.folder_tuning_helpers import (
+    allows_measured_size_quality_tradeoff,
     proposal_alignment_issue,
     size_budget_sample_analysis,
     size_budget_sample_issue,
@@ -301,13 +305,13 @@ def queue_folder_encode_action(
         calibration_payload = object_dict(calibration)
         calibration_policy = object_dict(calibration_payload.get("policy"))
         calibration_video = object_dict(calibration_policy.get("video"))
+        calibration_intent = operator_intent_from_policy(
+            calibration_video,
+            default_video_policy=object_dict(config.raw.get("video")),
+            audio_policy=object_dict(calibration_policy.get("audio")),
+            subtitle_policy=object_dict(calibration_policy.get("subtitle")),
+        )
         if {"target_size_mb", "target_size_bytes", "size_goal_mode"} & calibration_video.keys():
-            calibration_intent = operator_intent_from_policy(
-                calibration_video,
-                default_video_policy=object_dict(config.raw.get("video")),
-                audio_policy=object_dict(calibration_policy.get("audio")),
-                subtitle_policy=object_dict(calibration_policy.get("subtitle")),
-            )
             if calibration_intent.size_goal.requires_confirmation:
                 raise HTTPException(
                     status_code=400,
@@ -316,6 +320,17 @@ def queue_folder_encode_action(
                         "target before queueing production."
                     ),
                 )
+        calibration_sample_item = object_dict(calibration_payload.get("sample_item"))
+        frozen_compression_intent = (
+            compression_intent_from_item(calibration_sample_item)
+            if calibration_sample_item
+            else compression_intent_from_policy(calibration_video)
+        )
+        if frozen_compression_intent.requires_confirmation:
+            raise HTTPException(
+                status_code=400,
+                detail="Choose and confirm a compression goal before queueing production.",
+            )
         preflight_config = with_folder_policy_override(config, normalized_prefix, calibration_policy)
         target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
         if target_size_blocker is not None:
@@ -736,17 +751,33 @@ def approve_measured_encode_recovery_action(
         raise HTTPException(status_code=400, detail="The latest folder encode is not waiting for recovery.")
 
     failure_analysis = object_dict(object_dict(latest_encode_job.get("progress")).get("failure_analysis"))
-    recovery = _measured_recovery_policy(calibration_payload, failure_analysis)
-    if recovery is None:
+    manifest_items = _manifest_items(latest_encode_job)
+    legacy_recovery_paths = _legacy_measured_recovery_paths(failure_analysis, manifest_items)
+    if legacy_recovery_paths:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This failed encode predates the compression-goal contract. Choose and confirm a compression goal, "
+                "then run a fresh representative test before approving a larger item-local recovery."
+            ),
+        )
+    item_recoveries = _measured_item_recovery_policies(
+        failure_analysis,
+        manifest_items=manifest_items,
+        job_id=str(latest_encode_job.get("job_id") or "").strip() or None,
+    )
+    if not item_recoveries:
         raise HTTPException(
             status_code=400,
             detail="This failure does not have enough measured quality data for one-click recovery.",
         )
-    preflight_config = with_folder_policy_override(
-        config,
-        normalized_prefix,
-        object_dict(recovery.get("policy")),
-    )
+    preflight_config = config
+    for item_recovery in item_recoveries:
+        preflight_config = with_folder_policy_override(
+            preflight_config,
+            str(item_recovery["rel_path"]),
+            object_dict(item_recovery.get("policy")),
+        )
     with open_db(config.paths.db_path) as connection:
         target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
     if target_size_blocker is not None:
@@ -783,25 +814,179 @@ def approve_measured_encode_recovery_action(
         if cadence_blocker is not None:
             return cadence_blocker
 
-    calibration_payload["policy"] = recovery["policy"]
     calibration_payload["accepted_at"] = now_iso()
     calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
     calibration_payload["accepted_draft_hash"] = calibration_draft_hash(calibration_payload)
-    calibration_payload["accepted_recovery_note"] = recovery["summary"]
+    recovery_summary = (
+        f"Measured item-local recovery for {len(item_recoveries)} failed "
+        f"file{'s' if len(item_recoveries) != 1 else ''}. Preserve completed staged encodes."
+    )
+    calibration_payload["accepted_recovery_note"] = recovery_summary
+    calibration_payload["accepted_item_recoveries"] = [
+        {
+            "rel_path": item_recovery["rel_path"],
+            "summary": item_recovery["summary"],
+            "policy": item_recovery["policy"],
+            "compression_escalation": item_recovery["compression_escalation"],
+        }
+        for item_recovery in item_recoveries
+    ]
     save_calibration_state(config, normalized_prefix, calibration_payload)
-    upsert_override(config.paths.runtime_settings_path, normalized_prefix, object_dict(calibration_payload["policy"]))
+    for item_recovery in item_recoveries:
+        upsert_override(
+            config.paths.runtime_settings_path,
+            str(item_recovery["rel_path"]),
+            object_dict(item_recovery["policy"]),
+        )
 
-    queue_result = queue_folder_encode_action(normalized_prefix, recovery["summary"], False)
+    queue_result = queue_folder_encode_action(normalized_prefix, recovery_summary, False)
     return {
         **queue_result,
         "action": "approved_measured_recovery",
         "message": str(queue_result.get("message") or "Measured recovery was approved and queued."),
-        "recovery": recovery["public"],
+        "recovery": {
+            "scope": "item",
+            "file_count": len(item_recoveries),
+            "items": [
+                {"rel_path": item_recovery["rel_path"], **object_dict(item_recovery["public"])}
+                for item_recovery in item_recoveries
+            ],
+        },
+    }
+
+
+def _measured_item_recovery_policies(
+        failure_analysis: ActionPayload,
+        *,
+        manifest_items: list[ActionPayload],
+        job_id: str | None,
+) -> list[ActionPayload]:
+    analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
+    if not analyses and failure_analysis:
+        analyses = [failure_analysis]
+    recoveries: list[ActionPayload] = []
+    for analysis in analyses:
+        analysis_rel_path = str(analysis.get("item_rel_path") or "").strip().strip("/")
+        if not analysis_rel_path:
+            return []
+        if "manifest_index" not in analysis:
+            return []
+        manifest_index = int_value(analysis.get("manifest_index"))
+        if manifest_index < 0 or manifest_index >= len(manifest_items):
+            return []
+        manifest_item = manifest_items[manifest_index]
+        manifest_rel_path = str(manifest_item.get("rel_path") or "").strip().strip("/")
+        if not manifest_rel_path or manifest_rel_path != analysis_rel_path:
+            return []
+        recovery = _measured_recovery_policy(
+            object_dict(manifest_item.get("resolved_policy")),
+            analysis,
+        )
+        if recovery is None:
+            return []
+        compression_escalation = _measured_recovery_authorization(
+            manifest_item,
+            analysis=analysis,
+            recovery_policy=object_dict(recovery.get("policy")),
+            job_id=job_id,
+        )
+        if compression_escalation is None:
+            return []
+        recoveries.append({
+            "rel_path": manifest_rel_path,
+            **recovery,
+            "compression_escalation": compression_escalation,
+        })
+    return recoveries
+
+
+def _legacy_measured_recovery_paths(
+        failure_analysis: ActionPayload,
+        manifest_items: list[ActionPayload],
+) -> list[str]:
+    analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
+    if not analyses and failure_analysis:
+        analyses = [failure_analysis]
+    paths: list[str] = []
+    for analysis in analyses:
+        if "manifest_index" not in analysis:
+            continue
+        manifest_index = int_value(analysis.get("manifest_index"))
+        if manifest_index < 0 or manifest_index >= len(manifest_items):
+            continue
+        if compression_intent_from_item(manifest_items[manifest_index]).requires_confirmation:
+            paths.append(str(analysis.get("item_rel_path") or "").strip())
+    return [path for path in paths if path]
+
+
+def _measured_recovery_authorization(
+        manifest_item: ActionPayload,
+        *,
+        analysis: ActionPayload,
+        recovery_policy: ActionPayload,
+        job_id: str | None,
+) -> ActionPayload | None:
+    intent = compression_intent_from_item(manifest_item)
+    source_size_bytes = int_value(
+        manifest_item.get("source_size_bytes", manifest_item.get("size_bytes"))
+    )
+    if intent.requires_confirmation or source_size_bytes <= 0:
+        return None
+    base_policy = object_dict(manifest_item.get("resolved_policy"))
+    if not base_policy:
+        return None
+    current_cap = float_value(object_dict(base_policy.get("video")).get("max_encoded_percent"))
+    proposed_cap = float_value(object_dict(recovery_policy.get("video")).get("max_encoded_percent"))
+    if current_cap <= 0 or proposed_cap <= 0:
+        return None
+    source_id = stable_source_id(manifest_item)
+    policy_hash = stable_policy_hash(base_policy)
+    anchor_bytes = round(source_size_bytes * current_cap / 100.0)
+    candidate_bytes = round(source_size_bytes * proposed_cap / 100.0)
+    evidence_identity = {
+        "kind": "operator_override",
+        "source_id": source_id,
+        "policy_hash": policy_hash,
+        "intent_id": intent.semantic_id,
+        "job_id": job_id,
+        "analysis": analysis,
+        "anchor_bytes": anchor_bytes,
+        "candidate_bytes": candidate_bytes,
+    }
+    evidence = CompressionEvidenceRef(
+        kind="operator_override",
+        evidence_id=f"ce1_{stable_json_hash(evidence_identity)[:32]}",
+        intent_id=intent.semantic_id,
+        observed_bytes=candidate_bytes,
+        source_id=source_id,
+        policy_hash=policy_hash,
+        job_id=job_id,
+    )
+    decision = authorize_compression_change(
+        intent,
+        authoritative_anchor_bytes=anchor_bytes,
+        candidate_bytes=candidate_bytes,
+        evidence=(evidence,),
+        source_id=source_id,
+        policy_hash=policy_hash,
+        job_id=job_id,
+    )
+    if decision.outcome != "authorized":
+        return None
+    return {
+        "schema_version": 1,
+        "scope": "item",
+        "source_id": source_id,
+        "policy_hash": policy_hash,
+        "intent_id": intent.semantic_id,
+        "job_id": job_id,
+        "evidence": evidence.to_payload(),
+        "decision": decision.to_payload(),
     }
 
 
 def _measured_recovery_policy(
-        calibration_payload: ActionPayload,
+        base_policy: ActionPayload,
         failure_analysis: ActionPayload,
 ) -> ActionPayload | None:
     analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
@@ -811,7 +996,7 @@ def _measured_recovery_policy(
     if not analyses:
         return None
 
-    policy = object_dict(calibration_payload.get("policy"))
+    policy = object_dict(base_policy)
     video = object_dict(policy.get("video"))
     metric = str(analyses[0].get("requested_metric") or video.get("quality_metric") or "vmaf").strip().lower()
     if metric not in {"vmaf", "xpsnr"}:
@@ -863,13 +1048,12 @@ def _measured_recovery_policy(
         measured_cap = max(measured_cap, float(math.ceil(max(percents))))
     measured_max_crf = max(current_max_crf, float(math.ceil(max(crfs))))
 
-    updated_video = dict(video)
-    updated_video[target_key] = measured_target
-    updated_video["max_encoded_percent"] = int(measured_cap) if measured_cap.is_integer() else measured_cap
-    updated_video["max_crf"] = int(measured_max_crf) if measured_max_crf.is_integer() else measured_max_crf
-    updated_video["quality_metric"] = metric
-    updated_policy = dict(policy)
-    updated_policy["video"] = updated_video
+    updated_video = {
+        target_key: measured_target,
+        "max_encoded_percent": int(measured_cap) if measured_cap.is_integer() else measured_cap,
+        "max_crf": int(measured_max_crf) if measured_max_crf.is_integer() else measured_max_crf,
+        "quality_metric": metric,
+    }
 
     file_count = len(analyses)
     metric_label = metric.upper()
@@ -879,7 +1063,7 @@ def _measured_recovery_policy(
         f"and CRF {updated_video['max_crf']}. Preserve completed staged encodes."
     )
     return {
-        "policy": updated_policy,
+        "policy": {"video": updated_video},
         "summary": summary,
         "public": {
             "file_count": file_count,
@@ -1195,7 +1379,7 @@ def _folder_recovery_plan(
     return recoverable_children, unique_indexes
 
 
-def _manifest_library_item_ids(job: JobPayload, manifest_indexes: list[int]) -> list[int]:
+def _manifest_items(job: JobPayload) -> list[ActionPayload]:
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     if not str(manifest_path):
         return []
@@ -1203,7 +1387,11 @@ def _manifest_library_item_ids(job: JobPayload, manifest_indexes: list[int]) -> 
         manifest = object_dict(json.loads(manifest_path.read_text()))
     except (OSError, json.JSONDecodeError):
         return []
-    items = [object_dict(item) for item in object_list(manifest.get("items"))]
+    return [object_dict(item) for item in object_list(manifest.get("items"))]
+
+
+def _manifest_library_item_ids(job: JobPayload, manifest_indexes: list[int]) -> list[int]:
+    items = _manifest_items(job)
     item_ids: list[int] = []
     for manifest_index in manifest_indexes:
         if manifest_index < 0 or manifest_index >= len(items):
@@ -1451,7 +1639,11 @@ def save_profile_action(
     )
     allow_measured_size_quality_increase = (
             str(calibration_payload.get("action") or "").strip() == "ai_tune"
-            and str(size_target_analysis.get("status") or "").strip() == "under_target"
+            and allows_measured_size_quality_tradeoff(
+                operator_request=operator_request or None,
+                size_target_analysis=size_target_analysis,
+                direction="larger",
+            )
     )
     alignment_issue = proposal_alignment_issue(
         operator_request=operator_request or None,

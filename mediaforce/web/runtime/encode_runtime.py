@@ -26,6 +26,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
     load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
@@ -36,6 +37,12 @@ from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, Encode
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import safe_unlink
+from mediaforce.tuning.compression_intent import (
+    CompressionEvidenceRef,
+    authorize_compression_change,
+    compression_intent_from_item,
+)
+from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
     SCHEDULE_CLOSE_WAITING_REASON
@@ -1059,7 +1066,12 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
         cap_by_index = _quality_policy_retry_caps_by_index(job, analysis, manifest_items)
         if not cap_by_index:
             return False
-        changed = False
+        analysis_by_index = {
+            int_value(item_analysis.get("manifest_index")): item_analysis
+            for item_analysis in (object_dict(value) for value in object_list(analysis.get("item_analyses")))
+            if "manifest_index" in item_analysis and int_value(item_analysis.get("manifest_index")) >= 0
+        }
+        authorized_updates: list[tuple[int, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
         for index, proposed_cap in cap_by_index.items():
             if index < 0 or index >= len(manifest_items):
                 continue
@@ -1069,18 +1081,137 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
             current_cap = int_value(video_policy.get("max_encoded_percent"))
             if proposed_cap <= current_cap:
                 continue
+            item_analysis = analysis_by_index.get(index, analysis)
+            authorization = _quality_policy_cap_authorization(
+                job,
+                item,
+                policy=policy,
+                current_cap=current_cap,
+                proposed_cap=proposed_cap,
+                analysis=item_analysis,
+            )
+            if authorization is None:
+                _mark_quality_policy_retry_unauthorized(
+                    analysis,
+                    item_analysis,
+                    reason_code="compression_authorization_unavailable",
+                )
+                return False
+            evidence_payload, decision_payload = authorization
+            if (
+                    str(decision_payload.get("outcome") or "") != "authorized"
+                    or str(decision_payload.get("escalation_scope") or "") != "item"
+            ):
+                item_analysis["compression_evidence"] = evidence_payload
+                item_analysis["compression_authorization"] = decision_payload
+                _mark_quality_policy_retry_unauthorized(
+                    analysis,
+                    item_analysis,
+                    reason_code=str(decision_payload.get("reason_code") or "compression_authorization_denied"),
+                )
+                return False
+            authorized_updates.append((index, item, evidence_payload, decision_payload))
+        if not authorized_updates:
+            return False
+        for index, item, evidence_payload, decision_payload in authorized_updates:
+            policy = object_dict(item.get("resolved_policy"))
+            video_policy = dict(object_dict(policy.get("video")))
+            proposed_cap = cap_by_index[index]
             video_policy["max_encoded_percent"] = proposed_cap
             policy["video"] = video_policy
             item["resolved_policy"] = policy
+            item["compression_escalation"] = {
+                "schema_version": 1,
+                "scope": "item",
+                "evidence": evidence_payload,
+                "decision": decision_payload,
+            }
+            try:
+                item["stream_budget_ledger"] = resolve_stream_budget_ledger(
+                    item,
+                    output_container=str(item.get("output_container") or "") or None,
+                    prefer_persisted=False,
+                ).to_payload()
+            except (TypeError, ValueError):
+                return False
             manifest["items"][index] = item
-            changed = True
-        if not changed:
-            return False
         try:
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         except OSError:
             return False
     return True
+
+
+def _quality_policy_cap_authorization(
+        job: dict[str, Any],
+        item: dict[str, Any],
+        *,
+        policy: dict[str, Any],
+        current_cap: int,
+        proposed_cap: int,
+        analysis: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    analysis_kind = str(analysis.get("kind") or "").strip()
+    if analysis_kind != "size_cap_too_strict":
+        return None
+    evidence_kind = "measured_item_variance"
+    intent = compression_intent_from_item(item)
+    source_size_bytes = int_value(item.get("source_size_bytes", item.get("size_bytes")))
+    if source_size_bytes <= 0 or current_cap <= 0 or proposed_cap <= current_cap:
+        return None
+    source_id = stable_source_id(item)
+    policy_hash = stable_policy_hash(policy)
+    job_id = str(job.get("id") or job.get("job_id") or "").strip() or None
+    current_cap_bytes = round(source_size_bytes * current_cap / 100.0)
+    proposed_cap_bytes = round(source_size_bytes * proposed_cap / 100.0)
+    evidence_identity = {
+        "kind": evidence_kind,
+        "source_id": source_id,
+        "policy_hash": policy_hash,
+        "intent_id": intent.semantic_id,
+        "job_id": job_id,
+        "current_cap": current_cap,
+        "proposed_cap": proposed_cap,
+        "analysis_kind": analysis_kind,
+        "best_candidate": object_dict(analysis.get("best_candidate")),
+    }
+    evidence = CompressionEvidenceRef(
+        kind=evidence_kind,
+        evidence_id=f"ce1_{stable_json_hash(evidence_identity)[:32]}",
+        intent_id=intent.semantic_id,
+        observed_bytes=proposed_cap_bytes,
+        source_id=source_id,
+        policy_hash=policy_hash,
+        job_id=job_id,
+    )
+    decision = authorize_compression_change(
+        intent,
+        authoritative_anchor_bytes=current_cap_bytes,
+        candidate_bytes=proposed_cap_bytes,
+        evidence=(evidence,),
+        source_id=source_id,
+        policy_hash=policy_hash,
+        job_id=job_id,
+    )
+    return evidence.to_payload(), decision.to_payload()
+
+
+def _mark_quality_policy_retry_unauthorized(
+        aggregate_analysis: dict[str, Any],
+        item_analysis: dict[str, Any],
+        *,
+        reason_code: str,
+) -> None:
+    item_analysis["auto_retry_allowed"] = False
+    item_analysis["retry_strategy"] = "needs_operator_approval"
+    item_analysis["compression_authorization_reason"] = reason_code
+    aggregate_analysis["auto_retry_allowed"] = False
+    aggregate_analysis["retry_strategy"] = "needs_operator_approval"
+    aggregate_analysis["compression_authorization_reason"] = reason_code
+    aggregate_analysis["summary"] = (
+        "Measured quality evidence found a possible item-specific cap change, but the saved compression goal "
+        "does not authorize it automatically. Review this item before retrying."
+    )
 
 
 def _quality_policy_retry_caps_by_index(

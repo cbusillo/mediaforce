@@ -130,7 +130,25 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             _config: MediaforceConfig,
             _prefix: str,
     ) -> folder_actions_runtime.ActionPayload | None:
-        return {"policy": {}, "accepted_at": web_app._now_iso()}
+        video_policy = {
+            "compression_intent_schema_version": 1,
+            "compression_intent": "balanced",
+            "compression_intent_source": "test",
+            "compression_intent_confirmed": True,
+        }
+        return {
+            "policy": {"video": video_policy},
+            "sample_item": {
+                "compression_intent": {
+                    "schema_version": 1,
+                    "level": "balanced",
+                    "source": "test",
+                    "confirmed": True,
+                },
+                "resolved_policy": {"video": video_policy},
+            },
+            "accepted_at": web_app._now_iso(),
+        }
 
     @staticmethod
     def _accepted_review_gate(
@@ -1492,7 +1510,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     {
                         "library_item_id": item_id,
                         "rel_path": "tv/show/episode-near-miss.mkv",
+                        "source_size_bytes": 1_000_000_000,
                         "staging_path": str(staging_path),
+                        "compression_intent": self._compression_intent_snapshot(),
                         "resolved_policy": {
                             "video": {
                                 "quality_metric": "vmaf",
@@ -1539,6 +1559,129 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
             17,
         )
+        self.assertEqual(
+            manifest["items"][0]["compression_escalation"]["evidence"]["kind"],
+            "measured_item_variance",
+        )
+
+    def test_quality_policy_legacy_near_miss_does_not_raise_size_cap(self) -> None:
+        source_path = self._create_source_file("episode-legacy-near-miss.mkv")
+        staging_path = self._staging_path("episode-legacy-near-miss.mkv")
+        error_message = "\n".join(
+            [
+                "[INFO ab_av1::command::sample_encode] crf 48 VMAF 89.20 predicted video stream size 130.00 MiB (18%) taking 40 minutes",
+                "[INFO ab_av1::command::sample_encode] crf 51 VMAF 86.93 predicted video stream size 108.70 MiB (16%) taking 25 minutes",
+                "Error: Failed to find a suitable crf",
+            ]
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            manifest_path = self._write_manifest(
+                "manifest-quality-legacy-near-miss.json",
+                [
+                    {
+                        "library_item_id": item_id,
+                        "rel_path": "tv/show/episode-legacy-near-miss.mkv",
+                        "source_size_bytes": 1_000_000_000,
+                        "staging_path": str(staging_path),
+                        "resolved_policy": {
+                            "video": {
+                                "quality_metric": "vmaf",
+                                "target_vmaf": 88.0,
+                                "min_target_vmaf": 86.5,
+                                "max_encoded_percent": 15,
+                            }
+                        },
+                    }
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="job-quality-legacy-near-miss",
+                manifest_name="manifest-quality-legacy-near-miss.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-quality-legacy-near-miss")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="deterministic",
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-quality-legacy-near-miss")
+            manifest = json.loads(manifest_path.read_text())
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        failure_analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertFalse(failure_analysis["auto_retry_allowed"])
+        self.assertEqual(failure_analysis["retry_strategy"], "needs_operator_approval")
+        self.assertEqual(
+            failure_analysis["compression_authorization_reason"],
+            "compression_intent_unconfirmed",
+        )
+        self.assertEqual(
+            manifest["items"][0]["resolved_policy"]["video"]["max_encoded_percent"],
+            15,
+        )
+
+    def test_legacy_measured_recovery_requires_a_fresh_confirmed_intent(self) -> None:
+        rel_path = "tv/show/legacy-recovery.mkv"
+        failure_analysis = {
+            "item_analyses": [{"manifest_index": 0, "item_rel_path": rel_path}],
+        }
+        manifest_items = [{"rel_path": rel_path, "resolved_policy": {"video": {}}}]
+
+        paths = folder_actions_runtime._legacy_measured_recovery_paths(
+            failure_analysis,
+            manifest_items,
+        )
+
+        self.assertEqual(paths, [rel_path])
+
+    def test_queue_quality_only_calibration_blocks_unconfirmed_compression_intent(self) -> None:
+        source = self._create_source_file("quality-only-legacy.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(
+                connection,
+                source,
+                rel_path="tv/show/Season 1/quality-only-legacy.mkv",
+            )
+        calibration = {
+            "policy": {"video": {"target_vmaf": 90.0}},
+            "sample_item": {
+                "rel_path": "tv/show/Season 1/quality-only-legacy.mkv",
+                "resolved_policy": {"video": {"target_vmaf": 90.0}},
+            },
+            "accepted_at": web_app._now_iso(),
+        }
+
+        with self.assertRaises(HTTPException) as raised:
+            folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show/Season 1",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda *_args, **_kwargs: None,
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertIn("compression goal", str(raised.exception.detail))
 
     def test_quality_policy_large_size_miss_stays_attention_with_analysis(self) -> None:
         source_path = self._create_source_file("episode-large-miss.mkv")
@@ -1663,7 +1806,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     {
                         "library_item_id": first_item_id,
                         "rel_path": "tv/show/episode-multi-a.mkv",
+                        "source_size_bytes": 1_000_000_000,
                         "staging_path": str(first_staging_path),
+                        "compression_intent": self._compression_intent_snapshot(),
                         "resolved_policy": {
                             "video": {
                                 "quality_metric": "vmaf",
@@ -1676,7 +1821,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     {
                         "library_item_id": second_item_id,
                         "rel_path": "tv/show/episode-multi-b.mkv",
+                        "source_size_bytes": 1_000_000_000,
                         "staging_path": str(second_staging_path),
+                        "compression_intent": self._compression_intent_snapshot(),
                         "resolved_policy": {
                             "video": {
                                 "quality_metric": "vmaf",
@@ -6834,7 +6981,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "request_type": "size_budget",
                     "budget_bytes": 300 * 1024 * 1024,
                     "budget_label": "300 MB per episode",
-                    "applied_policy": None,
+                    "applied_policy": {
+                        "video": {
+                            "compression_intent_schema_version": 1,
+                            "compression_intent": "balanced",
+                            "compression_intent_source": "operator",
+                            "compression_intent_confirmed": True,
+                        }
+                    },
                 },
             },
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
@@ -6972,7 +7126,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "request_type": "size_budget",
                     "budget_bytes": 300 * 1024 * 1024,
                     "budget_label": "300 MB per episode",
-                    "applied_policy": None,
+                    "applied_policy": {
+                        "video": {
+                            "compression_intent_schema_version": 1,
+                            "compression_intent": "balanced",
+                            "compression_intent_source": "operator",
+                            "compression_intent_confirmed": True,
+                        }
+                    },
                 },
             },
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
@@ -7018,7 +7179,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "request_type": "size_budget",
                     "budget_bytes": 300 * 1024 * 1024,
                     "budget_label": "300 MB per episode",
-                    "applied_policy": None,
+                    "applied_policy": {
+                        "video": {
+                            "compression_intent_schema_version": 1,
+                            "compression_intent": "balanced",
+                            "compression_intent_source": "operator",
+                            "compression_intent_confirmed": True,
+                        }
+                    },
                 },
             },
             record_visual_approval_artifact=lambda *_args, **_kwargs: {"artifact_id": "approval-1"},
@@ -16279,8 +16447,38 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         manifest_path = self._write_manifest(
             "manifest-recovery-approval.json",
             [
-                {"library_item_id": 1, "source_path": "tv/show/e09.mkv"},
-                {"library_item_id": 2, "source_path": "tv/show/e10.mkv"},
+                {
+                    "library_item_id": 1,
+                    "rel_path": "tv/show/e09.mkv",
+                    "source_path": "tv/show/e09.mkv",
+                    "source_size_bytes": 1_000_000_000,
+                    "compression_intent": self._compression_intent_snapshot(),
+                    "resolved_policy": {
+                        "video": {
+                            "quality_metric": "vmaf",
+                            "target_vmaf": 88.0,
+                            "min_target_vmaf": 86.5,
+                            "max_encoded_percent": 15,
+                            "max_crf": 46,
+                        }
+                    },
+                },
+                {
+                    "library_item_id": 2,
+                    "rel_path": "tv/show/e10.mkv",
+                    "source_path": "tv/show/e10.mkv",
+                    "source_size_bytes": 1_000_000_000,
+                    "compression_intent": self._compression_intent_snapshot(),
+                    "resolved_policy": {
+                        "video": {
+                            "quality_metric": "vmaf",
+                            "target_vmaf": 88.0,
+                            "min_target_vmaf": 86.5,
+                            "max_encoded_percent": 15,
+                            "max_crf": 46,
+                        }
+                    },
+                },
             ],
         )
         now = web_app._now_iso()
@@ -16416,11 +16614,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertFalse(queue_calls[0][2])
         self.assertIn("Preserve completed staged encodes", queue_calls[0][1])
         saved_video = object_dict(object_dict(saved_calibrations[0]["policy"]).get("video"))
-        self.assertEqual(saved_video["target_vmaf"], 87.0)
+        self.assertEqual(saved_video["target_vmaf"], 88.0)
         self.assertEqual(saved_video["min_target_vmaf"], 86.5)
-        self.assertEqual(saved_video["max_encoded_percent"], 18)
-        self.assertEqual(saved_video["max_crf"], 50)
-        self.assertEqual(object_dict(saved_overrides[0]).get("video"), saved_video)
+        self.assertEqual(saved_video["max_encoded_percent"], 15)
+        self.assertEqual(saved_video["max_crf"], 46)
+        self.assertEqual(len(saved_overrides), 2)
+        first_override = object_dict(object_dict(saved_overrides[0]).get("video"))
+        second_override = object_dict(object_dict(saved_overrides[1]).get("video"))
+        self.assertEqual(first_override["target_vmaf"], 87.0)
+        self.assertEqual(first_override["max_encoded_percent"], 15)
+        self.assertEqual(first_override["max_crf"], 50)
+        self.assertEqual(second_override["target_vmaf"], 87.0)
+        self.assertEqual(second_override["max_encoded_percent"], 18)
+        self.assertEqual(second_override["max_crf"], 48)
+        saved_recoveries = object_list(saved_calibrations[0]["accepted_item_recoveries"])
+        self.assertEqual(len(saved_recoveries), 2)
+        first_escalation = object_dict(object_dict(saved_recoveries[0]).get("compression_escalation"))
+        second_escalation = object_dict(object_dict(saved_recoveries[1]).get("compression_escalation"))
+        self.assertEqual(first_escalation["scope"], "item")
+        self.assertEqual(second_escalation["scope"], "item")
+        self.assertEqual(first_escalation["job_id"], "terminal-recovery-parent")
+        self.assertEqual(
+            object_dict(second_escalation["decision"])["reason_code"],
+            "authorized_by_operator_override",
+        )
 
     def test_queue_folder_encode_rejects_existing_active_encode_for_prefix(self) -> None:
         manifest_path = self._write_manifest("manifest-existing-active.json", [{"library_item_id": 1}])
@@ -16536,7 +16753,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
 
     def test_queue_folder_encode_rejects_current_review_rejection(self) -> None:
-        policy = {"video": {"target_vmaf": 95.0}}
+        policy = {
+            "video": {
+                "target_vmaf": 95.0,
+                "compression_intent_schema_version": 1,
+                "compression_intent": "balanced",
+                "compression_intent_source": "test",
+                "compression_intent_confirmed": True,
+            }
+        }
         sample_item = {
             "rel_path": "tv/show/Season 1/Episode 01.mkv",
             "source_size_bytes": 8_000_000_000,
@@ -16610,7 +16835,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_queue_folder_encode_rejects_newer_failed_target_search(self) -> None:
         calibration = {
-            "policy": {"video": {"target_size_mb": 300, "target_size_bytes": 300_000_000, "size_goal_mode": "absolute"}},
+            "policy": {
+                "video": {
+                    "target_size_mb": 300,
+                    "target_size_bytes": 300_000_000,
+                    "size_goal_mode": "absolute",
+                    "compression_intent_schema_version": 1,
+                    "compression_intent": "balanced",
+                    "compression_intent_source": "test",
+                    "compression_intent_confirmed": True,
+                }
+            },
             "accepted_at": "2026-07-12T00:00:00+00:00",
         }
         failed_job = {
@@ -17276,11 +17511,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self._insert_library_item(connection, source, rel_path=rel_path)
 
         saved_jobs: list[dict[str, Any]] = []
-        calibration = {
-            "policy": {},
-            "accepted_at": web_app._now_iso(),
-            "draft_hash": "approved-draft",
-        }
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
+        calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             result = folder_actions_runtime.queue_folder_encode_action(
                 queue_config,
@@ -17365,11 +17597,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
         saved_jobs: list[dict[str, Any]] = []
-        calibration = {
-            "policy": {},
-            "accepted_at": web_app._now_iso(),
-            "draft_hash": "approved-draft",
-        }
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
+        calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             result = folder_actions_runtime.queue_folder_encode_action(
                 queue_config,
@@ -17463,11 +17692,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
         saved_jobs: list[dict[str, Any]] = []
-        calibration = {
-            "policy": {},
-            "accepted_at": web_app._now_iso(),
-            "draft_hash": "approved-draft",
-        }
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
+        calibration["draft_hash"] = "approved-draft"
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             result = folder_actions_runtime.queue_folder_encode_action(
                 queue_config,
@@ -20272,6 +20498,12 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     "timezone": "local",
                 }
             },
+            "video": {
+                "compression_intent_schema_version": 1,
+                "compression_intent": "balanced",
+                "compression_intent_source": "config_default",
+                "compression_intent_confirmed": True,
+            },
         }
         return MediaforceConfig(raw=raw, paths=paths)
 
@@ -20445,6 +20677,15 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 .order_by(item_events.c.id.asc())
             ).mappings().fetchall()
         ]
+
+    @staticmethod
+    def _compression_intent_snapshot(level: str = "balanced") -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "level": level,
+            "source": "operator",
+            "confirmed": True,
+        }
 
     def _write_manifest(self, name: str, items: list[dict[str, object]]) -> Path:
         path = self.root / "runs" / name

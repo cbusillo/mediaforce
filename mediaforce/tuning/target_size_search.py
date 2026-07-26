@@ -16,6 +16,14 @@ from mediaforce.encoding.quality import (
     SampleEncodeError,
     SampleEncodeResult,
 )
+from mediaforce.tuning.compression_intent import (
+    CompressionAuthorizationDecision,
+    CompressionEvidenceRef,
+    CompressionIntentV1,
+    compression_candidate_rank,
+    compression_intent_from_policy,
+    legacy_compression_intent,
+)
 from mediaforce.tuning.stream_budget import (
     StreamBudgetLedger,
     StreamBudgetProjectionBlocker,
@@ -97,10 +105,13 @@ class FinalSizeVerification:
     tolerance_percent: float | None
     retry_allowed: bool
     retry_reason: str | None
+    accepted: bool = False
+    compression_evidence: dict[str, Any] | None = None
+    compression_authorization: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
-        return self.status == "inside_target_band"
+        return self.status == "inside_target_band" or self.accepted
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -114,6 +125,9 @@ class FinalSizeVerification:
             "tolerance_percent": self.tolerance_percent,
             "retry_allowed": self.retry_allowed,
             "retry_reason": self.retry_reason,
+            "accepted": self.accepted,
+            "compression_evidence": self.compression_evidence,
+            "compression_authorization": self.compression_authorization,
         }
 
 
@@ -144,6 +158,7 @@ def search_target_size(
         expected_search_signature_id: str | None = None,
 ) -> QualitySearchResult:
     _validate_search_inputs(stream_budget_ledger)
+    compression_intent = compression_intent_from_policy(video_policy)
     normalized_min_crf, configured_max_crf = _normalized_crf_bounds(min_crf, max_crf)
     normalized_max_crf = _normalized_search_max_crf(configured_max_crf, search_max_crf)
     if not target_size_transform_plan_valid(transform_plan):
@@ -216,6 +231,7 @@ def search_target_size(
         transform_plan=validated_transform_plan,
         run_sample=run_sample,
         expected_search_signature_id=expected_search_signature_id,
+        compression_intent=compression_intent,
     )
     if warm_result is not None:
         return warm_result
@@ -244,15 +260,29 @@ def search_target_size(
 
     measure(seed_crf, "target_seed")
     while len(candidates) < MAX_TARGET_SIZE_CANDIDATES:
-        selected = _select_candidate(candidates)
+        selected = _select_candidate(candidates, compression_intent)
         if selected is not None:
-            break
+            next_floor_crf = _next_intent_probe_crf(
+                candidates,
+                selected=selected,
+                measured_crfs=measured_crfs,
+                min_crf=normalized_min_crf,
+                max_crf=normalized_max_crf,
+                compression_intent=compression_intent,
+            )
+            if next_floor_crf is None:
+                break
+            try:
+                measure(next_floor_crf, "compression_floor")
+            except SampleEncodeError:
+                break
+            continue
         next_crf = _next_crf(candidates, measured_crfs, normalized_min_crf, normalized_max_crf, stream_budget_ledger)
         if next_crf is None:
             break
         measure(next_crf, "expanded_bound" if next_crf > configured_max_crf else "refine")
 
-    selected = _select_candidate(candidates)
+    selected = _select_candidate(candidates, compression_intent)
     if selected is not None:
         trace = _trace_payload(
             status="selected",
@@ -313,6 +343,7 @@ def _try_target_size_warm_start(
         transform_plan: dict[str, Any],
         run_sample: Callable[[int], SampleEncodeResult],
         expected_search_signature_id: str | None,
+        compression_intent: CompressionIntentV1,
 ) -> tuple[QualitySearchResult | None, dict[str, Any] | None]:
     if warm_start is None:
         return None, None
@@ -333,6 +364,18 @@ def _try_target_size_warm_start(
             duration_seconds=0.0,
             candidate_count=0,
             fallback_reason="invalid_hint_contract",
+        )
+    if (
+            not compression_intent.requires_confirmation
+            and compression_intent.level in {"reference", "transparent", "perceptual_floor"}
+    ):
+        return None, _target_warm_start_trace(
+            warm_start,
+            status="guard_rejected",
+            attempted=False,
+            duration_seconds=0.0,
+            candidate_count=0,
+            fallback_reason="compression_intent_requires_directional_search",
         )
     started = time.monotonic()
     try:
@@ -366,7 +409,7 @@ def _try_target_size_warm_start(
         min_metric_score=min_metric_score,
         ledger=ledger,
     )
-    selected = _select_candidate([candidate])
+    selected = _select_candidate([candidate], compression_intent)
     warm_trace = _target_warm_start_trace(
         warm_start,
         status="accepted" if selected is not None else "rejected_fallback",
@@ -496,6 +539,9 @@ def verify_final_output_size(
         actual_output_bytes: int | None,
         *,
         retry_count: int = 0,
+        compression_intent: CompressionIntentV1 | None = None,
+        compression_evidence: CompressionEvidenceRef | None = None,
+        compression_authorization: CompressionAuthorizationDecision | None = None,
 ) -> FinalSizeVerification:
     if ledger is None or ledger.total_target_bytes is None:
         return FinalSizeVerification(
@@ -518,7 +564,21 @@ def verify_final_output_size(
         status = "over_target"
     else:
         status = "inside_target_band"
-    retry_allowed = status in {"over_target", "under_target"} and retry_count < MAX_FINAL_OUTPUT_RETRIES
+    intent = compression_intent or legacy_compression_intent()
+    under_target_accepted = status == "under_target" and intent.accepts_under_target_result
+    under_target_growth_authorized = bool(
+        status == "under_target"
+        and not intent.requires_confirmation
+        and intent.level in {"balanced", "reference"}
+        and compression_authorization is not None
+        and compression_authorization.intent_id == intent.semantic_id
+        and compression_authorization.direction == "larger"
+        and compression_authorization.outcome == "authorized"
+    )
+    retry_allowed = (
+        (status == "over_target" or under_target_growth_authorized)
+        and retry_count < MAX_FINAL_OUTPUT_RETRIES
+    )
     return FinalSizeVerification(
         status=status,
         target_size_bytes=ledger.total_target_bytes,
@@ -530,7 +590,22 @@ def verify_final_output_size(
         retry_reason=(
             "A bounded measured retry is allowed for this final-size miss."
             if retry_allowed
-            else None if status == "inside_target_band" else "The final-size retry budget is exhausted."
+            else (
+                (
+                    "The active compression goal accepts this smaller result without spending unused bytes."
+                    if under_target_accepted
+                    else "Choose a compression goal before Mediaforce spends unused bytes."
+                    if intent.requires_confirmation
+                    else "A larger retry requires typed current-run evidence bound to this item."
+                )
+                if status == "under_target"
+                else None if status == "inside_target_band" else "The final-size retry budget is exhausted."
+            )
+        ),
+        accepted=under_target_accepted,
+        compression_evidence=compression_evidence.to_payload() if compression_evidence is not None else None,
+        compression_authorization=(
+            compression_authorization.to_payload() if compression_authorization is not None else None
         ),
     )
 
@@ -540,12 +615,15 @@ def retry_quality_result_for_final_miss(
         verification: FinalSizeVerification,
         *,
         measure_candidate: Callable[[float], SampleEncodeResult] | None = None,
+        compression_intent: CompressionIntentV1 | None = None,
 ) -> QualitySearchResult | None:
     trace = object_dict(quality.target_size_trace)
     if not trace or not verification.retry_allowed:
         return None
     selected = object_dict(trace.get("selected_candidate"))
     selected_crf = float_value(selected.get("crf"))
+    selected_metric = str(selected.get("metric") or quality.metric).strip()
+    selected_metric_score = float_value(selected.get("metric_score"))
     target = object_dict(trace.get("target"))
     non_video_bytes = int_value(target.get("non_video_bytes"))
     selected_predicted_video_bytes = int_value(selected.get("predicted_video_bytes"))
@@ -583,12 +661,17 @@ def retry_quality_result_for_final_miss(
         ]
         eligible.sort(key=lambda candidate: float_value(candidate.get("crf")))
     elif verification.status == "under_target":
+        intent = compression_intent or legacy_compression_intent()
+        if intent.requires_confirmation or intent.level not in {"balanced", "reference"}:
+            return None
         eligible = [
             candidate for candidate in candidates
             if candidate.get("crf") is not None
             and 0 <= float_value(candidate.get("crf")) < selected_crf
             and bool(candidate.get("quality_floor_met"))
             and int_value(candidate.get("predicted_video_bytes")) > 0
+            and str(candidate.get("metric") or "").strip().casefold() == selected_metric.casefold()
+            and float_value(candidate.get("metric_score")) > selected_metric_score
         ]
         eligible.sort(key=lambda candidate: -float_value(candidate.get("crf")))
     else:
@@ -690,6 +773,11 @@ def retry_quality_result_for_final_miss(
         rejection_reason = "final_retry_measurement_metric_mismatch"
     elif sample.score < minimum_quality_score:
         rejection_reason = "final_retry_measurement_below_quality_floor"
+    elif (
+            verification.status == "under_target"
+            and sample.score <= selected_metric_score
+    ):
+        rejection_reason = "final_retry_measurement_no_quality_benefit"
     elif bool(candidate.get("violates_source_cap")):
         rejection_reason = "final_retry_measurement_exceeds_source_cap"
     elif not bool(candidate.get("within_calibrated_final_band")):
@@ -1128,7 +1216,10 @@ def _candidate_from_sample(
     )
 
 
-def _select_candidate(candidates: list[TargetSizeCandidate]) -> TargetSizeCandidate | None:
+def _select_candidate(
+        candidates: list[TargetSizeCandidate],
+        compression_intent: CompressionIntentV1,
+) -> TargetSizeCandidate | None:
     eligible = [
         candidate for candidate in candidates
         if candidate.within_sample_band and candidate.quality_floor_met and not candidate.violates_source_cap
@@ -1137,10 +1228,18 @@ def _select_candidate(candidates: list[TargetSizeCandidate]) -> TargetSizeCandid
         return None
     return min(
         eligible,
-        key=lambda candidate: (
-            candidate.target_distance_bytes if candidate.target_distance_bytes is not None else 10 ** 30,
-            -candidate.metric_score,
-            candidate.crf,
+        key=lambda candidate: compression_candidate_rank(
+            compression_intent,
+            target_distance_bytes=(
+                candidate.target_distance_bytes if candidate.target_distance_bytes is not None else 10 ** 30
+            ),
+            predicted_bytes=(
+                candidate.predicted_whole_episode_bytes
+                if candidate.predicted_whole_episode_bytes is not None
+                else 10 ** 30
+            ),
+            metric_score=candidate.metric_score,
+            crf=candidate.crf,
         ),
     )
 
@@ -1187,6 +1286,39 @@ def _next_crf(
     if closest is None:
         return None
     return _nearest_unmeasured(int(round(closest.crf)), measured_crfs, min_crf, max_crf)
+
+
+def _next_intent_probe_crf(
+        candidates: list[TargetSizeCandidate],
+        *,
+        selected: TargetSizeCandidate,
+        measured_crfs: set[int],
+        min_crf: int,
+        max_crf: int,
+        compression_intent: CompressionIntentV1,
+) -> int | None:
+    selected_crf = int(round(selected.crf))
+    if not compression_intent.requires_confirmation and compression_intent.level == "reference":
+        lower_crf_candidates = [candidate for candidate in candidates if candidate.crf < selected.crf]
+        if any(
+                not candidate.within_sample_band
+                or not candidate.quality_floor_met
+                or candidate.violates_source_cap
+                for candidate in lower_crf_candidates
+        ):
+            return None
+        return _nearest_unmeasured(selected_crf - 1, measured_crfs, min_crf, selected_crf - 1)
+    if not compression_intent.accepts_under_target_result:
+        return None
+    higher_crf_candidates = [candidate for candidate in candidates if candidate.crf > selected.crf]
+    if any(
+            not candidate.within_sample_band
+            or not candidate.quality_floor_met
+            or candidate.violates_source_cap
+            for candidate in higher_crf_candidates
+    ):
+        return None
+    return _nearest_unmeasured(selected_crf + 1, measured_crfs, selected_crf + 1, max_crf)
 
 
 def _nearest_unmeasured(seed: int, measured: set[int], min_crf: int, max_crf: int) -> int | None:
