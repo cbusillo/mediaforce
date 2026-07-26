@@ -8,6 +8,7 @@ import type {
 	FolderCard,
 	FolderPayload,
 	FolderStatusPayload,
+	CompressionIntentRequestPayload,
 	OperatorIntentRequestPayload,
 	QualityRiskPayload,
 	QualityRiskTag,
@@ -1205,9 +1206,29 @@ export function isSizeGoalSelectionConfirmed(
 
 export function currentOperatorIntent(folder: FolderPayload): OperatorIntentRequestPayload | null {
 	const request = folder.resolved_operator_intent?.request;
-	if (!request || request.schema_version !== 1) return null;
+	if (!request || (request.schema_version !== 1 && request.schema_version !== 2)) return null;
 	if (request.size_goal.mode !== 'normalized' && request.size_goal.mode !== 'absolute') return null;
 	return request;
+}
+
+export function withCompressionIntent(
+	intent: OperatorIntentRequestPayload,
+	compressionIntent: CompressionIntentRequestPayload
+): OperatorIntentRequestPayload {
+	return {
+		...intent,
+		schema_version: 2,
+		compression_intent: { ...compressionIntent, confirmed: true }
+	};
+}
+
+export function calibrationAcceptsUnderTargetResult(folder: FolderPayload): boolean | null {
+	const calibration = record(folder.calibration);
+	const sampleItem = record(calibration.sample_item);
+	const compressionIntent = record(sampleItem.compression_intent);
+	if (compressionIntent.schema_version !== 1 || compressionIntent.confirmed !== true) return null;
+	if (typeof compressionIntent.accepts_under_target_result !== 'boolean') return null;
+	return compressionIntent.accepts_under_target_result;
 }
 
 export function technicalVideoPolicy(folder: FolderPayload): Record<string, unknown> {
@@ -1237,13 +1258,19 @@ export function goalRequest(goal: SizeGoal): string {
 	return `Use an absolute ${size.value_mb} MB per-episode target. ${resolution} Make a representative test so I can judge the picture and sound.`;
 }
 
-export function measuredFollowupRequest(analysis: SizeTargetAnalysis): string {
+export function measuredFollowupRequest(
+	analysis: SizeTargetAnalysis,
+	acceptsUnderTarget = false
+): string {
 	const targetMegabytes = Math.round(analysis.budgetBytes / 1_000_000);
 	if (targetMegabytes <= 0) return '';
 	if (analysis.status === 'over_target' && analysis.predictedBytes > 0) {
 		return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test was ${analysis.predictedToBudgetRatio.toFixed(1)} times over that goal. Keep the current resolution and make the next representative test materially smaller toward the goal while preserving as much picture and sound quality as possible.`;
 	}
 	if (analysis.status === 'under_target' && analysis.predictedBytes > 0) {
+		if (acceptsUnderTarget) {
+			return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test landed below that goal, which is acceptable for this compression goal. Preserve the smaller result unless the operator's picture or sound review requires another measured change; do not spend unused size automatically.`;
+		}
 		return `Measured follow-up: keep the ${targetMegabytes} MB per episode goal. The last representative test landed below that goal. Keep the current resolution and make the next representative test spend more of the available size on picture and sound quality.`;
 	}
 	if (analysis.status === 'inside_target_band' && analysis.predictedBytes > 0) {

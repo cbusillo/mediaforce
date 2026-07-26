@@ -17,6 +17,7 @@ import {
 	activeSeasonCards,
 	approvalGuardFromMessage,
 	calibrationEtaSummary,
+	calibrationAcceptsUnderTargetResult,
 	calibrationJobTargetContract,
 	calibrationLivenessLabel,
 	calibrationStageLabel,
@@ -48,7 +49,8 @@ import {
 	sizeGoals,
 	targetConstraintSummary,
 	testRequestWithInstructions,
-	technicalVideoPolicy
+	technicalVideoPolicy,
+	withCompressionIntent
 } from './experience';
 
 const card: FolderCard = {
@@ -553,7 +555,7 @@ function sizeOption(
 		detail: rationale,
 		requires_explicit_selection: requiresExplicitSelection,
 		operator_intent: {
-			schema_version: 1,
+			schema_version: 2,
 			size_goal: {
 				mode,
 				value_mb: valueMegabytes,
@@ -561,7 +563,12 @@ function sizeOption(
 				sample_projection_tolerance_percent: 10,
 				final_output_tolerance_percent: 5
 			},
-			resolution: { mode: 'source', max_height: null }
+			resolution: { mode: 'source', max_height: null },
+			compression_intent: {
+				schema_version: 1,
+				level: 'balanced',
+				confirmed: true
+			}
 		},
 		resolved_size_goal: {
 			schema_version: 1,
@@ -873,6 +880,74 @@ describe('season experience translation', () => {
 
 		expect(request).toContain('keep the 225 MB per episode goal');
 		expect(request).toContain('spend more of the available size');
+	});
+
+	it('does not spend unused size automatically at the perceptual floor', () => {
+		const request = measuredFollowupRequest(
+			{
+				status: 'under_target',
+				budgetBytes: 225_000_000,
+				predictedBytes: 150_000_000,
+				lowerBoundBytes: 202_500_000,
+				upperBoundBytes: 247_500_000,
+				predictedToBudgetRatio: 0.667
+			},
+			true
+		);
+
+		expect(request).toContain('acceptable for this compression goal');
+		expect(request).toContain('do not spend unused size automatically');
+		expect(request).not.toContain('spend more of the available size');
+	});
+
+	it('treats transparent as an acceptable under-target result', () => {
+		const request = measuredFollowupRequest(
+			{
+				status: 'under_target',
+				budgetBytes: 225_000_000,
+				predictedBytes: 150_000_000,
+				lowerBoundBytes: 202_500_000,
+				upperBoundBytes: 247_500_000,
+				predictedToBudgetRatio: 0.667
+			},
+			true
+		);
+
+		expect(request).toContain('do not spend unused size automatically');
+	});
+
+	it('keeps a typed unaccepted under-target result actionable', () => {
+		const request = measuredFollowupRequest(
+			{
+				status: 'under_target',
+				budgetBytes: 225_000_000,
+				predictedBytes: 150_000_000,
+				lowerBoundBytes: 202_500_000,
+				upperBoundBytes: 247_500_000,
+				predictedToBudgetRatio: 0.667
+			},
+			false
+		);
+
+		expect(request).toContain('spend more of the available size');
+	});
+
+	it('attaches a confirmed compression goal to a size request', () => {
+		const request = withCompressionIntent(
+			sizeOption('recommended', 'absolute', 225, 225).operator_intent,
+			{
+				schema_version: 1,
+				level: 'transparent',
+				confirmed: false
+			}
+		);
+
+		expect(request.schema_version).toBe(2);
+		expect(request.compression_intent).toEqual({
+			schema_version: 1,
+			level: 'transparent',
+			confirmed: true
+		});
 	});
 
 	it('repeats the preserved target when the episode estimate is missing', () => {
@@ -1331,6 +1406,79 @@ describe('season experience translation', () => {
 				})
 			)
 		).toEqual(request);
+	});
+
+	it('returns a schema-two resolved request with compression intent', () => {
+		const option = sizeOption('recommended', 'absolute', 225, 225);
+		const request = withCompressionIntent(option.operator_intent, {
+			schema_version: 1,
+			level: 'transparent',
+			confirmed: true
+		});
+
+		expect(
+			currentOperatorIntent(
+				folder({
+					resolved_operator_intent: {
+						schema_version: 2,
+						requires_confirmation: false,
+						size_goal: option.resolved_size_goal,
+						resolution: { mode: 'source' },
+						compression_intent: {
+							schema_version: 1,
+							level: 'transparent',
+							confirmed: true,
+							source: 'operator',
+							requires_confirmation: false,
+							accepts_under_target_result: true,
+							semantic_id: 'ci1_test',
+							snapshot_id: 'cis1_test',
+							title: 'No visible difference',
+							detail: 'Smallest transparent result'
+						},
+						request
+					}
+				})
+			)
+		).toEqual(request);
+	});
+
+	it('uses the frozen calibration intent for completed test interpretation', () => {
+		expect(
+			calibrationAcceptsUnderTargetResult(
+				folder({
+					calibration: {
+						sample_item: {
+							compression_intent: {
+								schema_version: 1,
+								level: 'perceptual_floor',
+								confirmed: true,
+								accepts_under_target_result: true
+							}
+						}
+					}
+				})
+			)
+		).toBe(true);
+	});
+
+	it('does not infer acceptance from an unconfirmed frozen snapshot', () => {
+		expect(
+			calibrationAcceptsUnderTargetResult(
+				folder({
+					calibration: {
+						sample_item: {
+							compression_intent: {
+								schema_version: 1,
+								level: 'perceptual_floor',
+								confirmed: false,
+								accepts_under_target_result: true
+							}
+						}
+					}
+				})
+			)
+		).toBeNull();
 	});
 
 	it('normalizes actual source and preview clips', () => {

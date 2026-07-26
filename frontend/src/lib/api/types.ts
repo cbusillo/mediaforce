@@ -1039,10 +1039,41 @@ export interface ResolutionIntentRequestPayload {
 	max_height?: number | null;
 }
 
-export interface OperatorIntentRequestPayload {
+export type CompressionIntentLevel = 'reference' | 'transparent' | 'balanced' | 'perceptual_floor';
+
+export interface CompressionIntentRequestPayload {
 	schema_version: 1;
+	level: CompressionIntentLevel;
+	confirmed: boolean;
+}
+
+export interface ResolvedCompressionIntentPayload {
+	schema_version: 1;
+	level: CompressionIntentLevel | 'legacy_unconfirmed';
+	confirmed: boolean;
+	source: string;
+	requires_confirmation: boolean;
+	accepts_under_target_result: boolean;
+	semantic_id: string;
+	snapshot_id: string;
+	title: string;
+	detail: string;
+}
+
+export interface CompressionIntentOptionPayload {
+	key: CompressionIntentLevel;
+	title: string;
+	detail: string;
+	selected: boolean;
+	accepts_under_target_result: boolean;
+	compression_intent: CompressionIntentRequestPayload;
+}
+
+export interface OperatorIntentRequestPayload {
+	schema_version: 1 | 2;
 	size_goal: SizeGoalRequestPayload;
 	resolution: ResolutionIntentRequestPayload;
+	compression_intent?: CompressionIntentRequestPayload;
 	quality?: Record<string, unknown>;
 	streams?: {
 		audio?: Record<string, unknown>;
@@ -1075,10 +1106,11 @@ export interface ResolvedSizeGoalPayload {
 }
 
 export interface ResolvedOperatorIntentPayload {
-	schema_version: 1;
+	schema_version: 1 | 2;
 	requires_confirmation: boolean;
 	size_goal: ResolvedSizeGoalPayload;
 	resolution: Record<string, unknown>;
+	compression_intent?: ResolvedCompressionIntentPayload;
 	request: OperatorIntentRequestPayload | null;
 	quality?: Record<string, unknown>;
 	streams?: Record<string, unknown>;
@@ -1405,6 +1437,7 @@ export interface FolderPayload {
 	advice?: Record<string, unknown> | null;
 	size_target_analysis?: Record<string, unknown> | null;
 	resolved_operator_intent?: ResolvedOperatorIntentPayload;
+	compression_intent_options?: CompressionIntentOptionPayload[];
 	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];
 	quality_risk?: QualityRiskPayload | null;

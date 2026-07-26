@@ -5,6 +5,7 @@
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import ComparisonWorkspace from '$lib/components/season/ComparisonWorkspace.svelte';
 	import type {
+		CompressionIntentLevel,
 		FolderPayload,
 		FolderStatusPayload,
 		OperatorIntentRequestPayload,
@@ -16,6 +17,7 @@
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
 		calibrationEtaSummary,
+		calibrationAcceptsUnderTargetResult,
 		calibrationJobTargetContract,
 		calibrationLivenessLabel,
 		calibrationResolutionLabel,
@@ -48,6 +50,7 @@
 		targetConstraintSummary,
 		technicalVideoPolicy,
 		testRequestWithInstructions,
+		withCompressionIntent,
 		type SizeGoal
 	} from '$lib/season/experience';
 
@@ -102,6 +105,8 @@
 
 	let selectedGoalKey = $state<SizeGoal['key']>('recommended');
 	let selectedGoalPrefix = $state('');
+	let selectedCompressionIntentLevel = $state<CompressionIntentLevel | null>(null);
+	let selectedCompressionIntentPrefix = $state('');
 	let selectedHostKey = $state('');
 	let retryMode = $state(false);
 	let selectedMoment = $state(0);
@@ -117,6 +122,7 @@
 	let selectedConcerns = $state<QualityRiskTag[]>([]);
 	let reviewFeedback = $state('');
 	let goalButtons = $state<HTMLButtonElement[]>([]);
+	let compressionIntentButtons = $state<HTMLButtonElement[]>([]);
 	let safetyDialog = $state<SafetyDialog | null>(null);
 	let safetyDialogReturnFocus = $state<HTMLElement | null>(null);
 
@@ -169,6 +175,24 @@
 	const humanState = $derived(detailSeasonState(folder, status));
 	const goals = $derived(sizeGoals(folder));
 	const selectedGoal = $derived(goals.find((goal) => goal.key === selectedGoalKey) ?? goals[0]);
+	const compressionIntentOptions = $derived(folder.compression_intent_options ?? []);
+	const activeCompressionIntentLevel = $derived(
+		selectedCompressionIntentPrefix === folder.prefix
+			? selectedCompressionIntentLevel
+			: (compressionIntentOptions.find((option) => option.selected)?.key ?? null)
+	);
+	const selectedCompressionIntent = $derived(
+		compressionIntentOptions.find((option) => option.key === activeCompressionIntentLevel) ?? null
+	);
+	const compressionIntentConfirmed = $derived(Boolean(selectedCompressionIntent));
+	const selectedOperatorIntent = $derived(
+		selectedGoal && selectedCompressionIntent
+			? withCompressionIntent(
+					selectedGoal.operatorIntent,
+					selectedCompressionIntent.compression_intent
+				)
+			: null
+	);
 	const requiresExplicitGoalSelection = $derived(
 		goals.some((goal) => goal.requiresExplicitSelection)
 	);
@@ -229,8 +253,12 @@
 	const sizeTargetLabel = $derived(
 		currentTargetBytes > 0 ? formatDecimalFileSize(currentTargetBytes) : 'the requested size'
 	);
+	const underTargetIsAcceptable = $derived(
+		sizeTarget.status === 'under_target' && calibrationAcceptsUnderTargetResult(folder) === true
+	);
 	const sizeTargetMissed = $derived(
-		['over_target', 'under_target', 'missing_prediction'].includes(sizeTarget.status)
+		['over_target', 'missing_prediction'].includes(sizeTarget.status) ||
+			(sizeTarget.status === 'under_target' && !underTargetIsAcceptable)
 	);
 	const riskSummary = $derived(compareRiskSummary(folder));
 	const qualityMemory = $derived(qualityMemoryView(folder));
@@ -420,14 +448,18 @@
 			actionError = 'Choose how this legacy size should behave before making a test.';
 			return;
 		}
+		if (!selectedOperatorIntent || !compressionIntentConfirmed) {
+			actionError = 'Choose how Mediaforce should balance size and quality before making a test.';
+			return;
+		}
 		await startTest(
 			testRequestWithInstructions(goalRequest(selectedGoal), operatorInstructions),
-			selectedGoal.operatorIntent
+			selectedOperatorIntent
 		);
 	}
 
 	async function retryMeasuredTarget() {
-		const measuredRequest = measuredFollowupRequest(sizeTarget);
+		const measuredRequest = measuredFollowupRequest(sizeTarget, underTargetIsAcceptable);
 		const baseRequest =
 			measuredRequest ||
 			`Keep the ${sizeTargetLabel} whole-episode goal and current resolution. Make another representative test that addresses the operator's review concerns without changing the size target.`;
@@ -917,6 +949,11 @@
 		selectedGoalPrefix = folder.prefix;
 	}
 
+	function selectCompressionIntent(level: CompressionIntentLevel) {
+		selectedCompressionIntentLevel = level;
+		selectedCompressionIntentPrefix = folder.prefix;
+	}
+
 	function isGoalSelected(goal: SizeGoal): boolean {
 		if (requiresExplicitGoalSelection && selectedGoalPrefix !== folder.prefix) return false;
 		return selectedGoal === goal;
@@ -938,6 +975,20 @@
 		selectGoal(goals[nextIndex].key);
 		await tick();
 		goalButtons[nextIndex]?.focus();
+	}
+
+	async function handleCompressionIntentKeydown(event: KeyboardEvent, index: number) {
+		let nextIndex: number;
+		if (event.key === 'ArrowRight' || event.key === 'ArrowDown') nextIndex = index + 1;
+		else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') nextIndex = index - 1;
+		else if (event.key === 'Home') nextIndex = 0;
+		else if (event.key === 'End') nextIndex = compressionIntentOptions.length - 1;
+		else return;
+		event.preventDefault();
+		nextIndex = (nextIndex + compressionIntentOptions.length) % compressionIntentOptions.length;
+		selectCompressionIntent(compressionIntentOptions[nextIndex].key);
+		await tick();
+		compressionIntentButtons[nextIndex]?.focus();
 	}
 
 	function chooseMoment(index: number) {
@@ -1196,6 +1247,41 @@
 					{/each}
 				</div>
 
+				<div class="compression-intent">
+					<div class="compression-intent__heading" aria-live="polite" aria-atomic="true">
+						<div>
+							<span>Compression goal</span>
+							<strong>{selectedCompressionIntent?.title ?? 'Choose a goal'}</strong>
+						</div>
+						<p>
+							{selectedCompressionIntent?.detail ??
+								folder.resolved_operator_intent?.compression_intent?.detail ??
+								'Choose a compression goal before Mediaforce can make a test.'}
+						</p>
+					</div>
+					<div class="compression-intent__options" role="radiogroup" aria-label="Compression goal">
+						{#each compressionIntentOptions as option, intentIndex (option.key)}
+							<button
+								bind:this={compressionIntentButtons[intentIndex]}
+								type="button"
+								class:selected={option.key === activeCompressionIntentLevel}
+								onclick={() => selectCompressionIntent(option.key)}
+								onkeydown={(event) => handleCompressionIntentKeydown(event, intentIndex)}
+								role="radio"
+								aria-checked={option.key === activeCompressionIntentLevel}
+								aria-label={`${option.title}. ${option.detail}`}
+								tabindex={option.key === activeCompressionIntentLevel ||
+								(!compressionIntentConfirmed && intentIndex === 0)
+									? 0
+									: -1}
+							>
+								<span>{option.title}</span>
+							</button>
+						{/each}
+					</div>
+					<small>Saved when you make the test so retries keep the same compression goal.</small>
+				</div>
+
 				{#if selectedGoal}
 					<div class="goal-contract" aria-live="polite">
 						<div>
@@ -1273,6 +1359,10 @@
 							<p class="host-unavailable" role="status">
 								Choose whether the saved legacy size scales with runtime or stays fixed per episode.
 							</p>
+						{:else if !compressionIntentConfirmed}
+							<p class="host-unavailable" role="status">
+								Choose a compression goal before making the test.
+							</p>
 						{/if}
 					</div>
 					<div class="goal-action__button">
@@ -1281,13 +1371,18 @@
 								? 'No computers available · Open Details'
 								: requiresExplicitGoalSelection && !goalSelectionConfirmed
 									? 'Choose one size behavior first'
-									: 'One short test · Nothing is replaced'}
+									: !compressionIntentConfirmed
+										? 'Choose a compression goal first'
+										: 'One short test · Nothing is replaced'}
 						</span>
 						<button
 							class="primary-button"
 							type="button"
 							onclick={makeTest}
-							disabled={noAvailableHosts || !selectedGoal || !goalSelectionConfirmed}
+							disabled={noAvailableHosts ||
+								!selectedGoal ||
+								!goalSelectionConfirmed ||
+								!compressionIntentConfirmed}
 						>
 							Make a test
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
@@ -1391,6 +1486,19 @@
 								? 'The test reached its smallest practical setting before it reached your size goal.'
 								: 'The measured result stayed above your size goal.'}
 							Review this as a {reviewSubject} checkpoint, then make a smaller test.
+						</p>
+					</div>
+				{:else if underTargetIsAcceptable}
+					<div class="target-warning target-warning--acceptable" role="status">
+						<div>
+							<span>Compression goal</span>
+							<strong
+								>This test estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, below
+								your {formatDecimalFileSize(sizeTarget.budgetBytes)} goal.</strong
+							>
+						</div>
+						<p>
+							Review the {reviewSubject}. Mediaforce will not spend the unused size automatically.
 						</p>
 					</div>
 				{:else if sizeTarget.status === 'under_target'}
@@ -1622,7 +1730,7 @@
 						{:else if sizeTarget.status === 'over_target'}
 							<h2>This is a quality checkpoint, not your requested-size result.</h2>
 							<p>Compare it now, then make a smaller test that moves toward your goal.</p>
-						{:else if sizeTarget.status === 'under_target'}
+						{:else if sizeTarget.status === 'under_target' && !underTargetIsAcceptable}
 							<h2>This result is smaller than requested.</h2>
 							<p>
 								Make another test that uses the available size for more {reviewSubject} quality.
@@ -4186,6 +4294,77 @@
 		padding: 0;
 	}
 
+	.compression-intent {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 12px;
+		padding: 14px 15px;
+	}
+
+	.compression-intent__heading {
+		align-items: start;
+		display: grid;
+		gap: 18px;
+		grid-template-columns: minmax(180px, 0.45fr) minmax(0, 1fr);
+	}
+
+	.compression-intent__heading > div {
+		display: grid;
+		gap: 3px;
+	}
+
+	.compression-intent__heading span {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+	}
+
+	.compression-intent__heading strong {
+		color: var(--mf-fg-primary);
+		font-size: 15px;
+	}
+
+	.compression-intent__heading p,
+	.compression-intent > small {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		line-height: 1.45;
+		margin: 0;
+	}
+
+	.compression-intent__options {
+		display: grid;
+		gap: 7px;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.compression-intent__options button {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		font-weight: 650;
+		min-height: 38px;
+		padding: 8px 10px;
+		text-align: center;
+	}
+
+	.compression-intent__options button:hover {
+		background: var(--mf-bg-raised);
+		border-color: var(--mf-active-line);
+	}
+
+	.compression-intent__options button.selected {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-fg);
+		color: var(--mf-active-fg);
+	}
+
 	.goal-action {
 		align-items: center;
 		background: var(--mf-bg-panel-2);
@@ -4420,6 +4599,16 @@
 	.target-warning--under span,
 	.target-warning--under p {
 		color: var(--mf-wait-fg);
+	}
+
+	.target-warning--acceptable {
+		background: var(--mf-ready-bg);
+		border-color: var(--mf-ready-line);
+	}
+
+	.target-warning--acceptable span,
+	.target-warning--acceptable p {
+		color: var(--mf-ready-fg);
 	}
 
 	.missing-media {
@@ -5354,6 +5543,15 @@
 
 		.goal-options button {
 			min-height: 0;
+		}
+
+		.compression-intent__heading {
+			gap: 7px;
+			grid-template-columns: 1fr;
+		}
+
+		.compression-intent__options {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 
 		.active-facts,
