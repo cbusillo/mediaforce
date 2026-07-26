@@ -91,7 +91,7 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
-from mediaforce.encoding.quality import run_sample_encode, select_quality_metric
+from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
     DEFAULT_HOST_CAPABILITIES,
     HostStatus,
@@ -1459,6 +1459,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             sample_item=_sample_item,
             operator_requested_experiment=_operator_requested_experiment_for_config,
             load_calibration_state=_load_calibration_state,
+            load_boundary_calibration_state=_load_calibration_state_for_boundary,
             recent_tuning_sessions=_recent_tuning_sessions,
             matching_request_history=runtime_matching_request_history,
             metric_support=_metric_support,
@@ -1704,7 +1705,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             normalized_prefix,
             now_iso=_now_iso,
             load_sample_item=_sample_item,
-            load_calibration_state=_load_calibration_state,
+            load_calibration_state=_load_calibration_state_for_boundary,
             calibration_draft_hash=_calibration_draft_hash,
             save_calibration_state=_save_calibration_state,
             load_advice_state=_load_advice_state,
@@ -3320,6 +3321,16 @@ def _load_calibration_state(config: MediaforceConfig, prefix: str) -> ActionPayl
     return load_calibration_state(_folder_state_deps(), config, prefix, _calibration_file(config, prefix))
 
 
+def _load_calibration_state_for_boundary(config: MediaforceConfig, prefix: str) -> ActionPayload | None:
+    return load_calibration_state(
+        _folder_state_deps(),
+        config,
+        prefix,
+        _calibration_file(config, prefix),
+        verify_boundary_artifact=True,
+    )
+
+
 def _save_calibration_state(config: MediaforceConfig, prefix: str, payload: ActionPayload) -> None:
     save_calibration_state(_calibration_file(config, prefix), payload, calibration_draft_hash=_calibration_draft_hash)
 
@@ -3486,6 +3497,7 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         validate_manifest_items=validate_manifest_items,
         generate_compare_clips=generate_compare_clips,
         staged_artifact_columns=CALIBRATION_STAGED_ARTIFACT_COLUMNS,
+        quality_toolchain_identity=quality_toolchain_identity,
     )
 
 

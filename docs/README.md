@@ -33,6 +33,9 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/architecture/compression-intent-authority.md`: versioned compression
   strategy, deterministic size direction, evidence authorization, and
   item-local escalation
+- `docs/architecture/content-intent-boundary-evidence.md`: append-only visual
+  size boundaries, compatibility, correction-safe replay, and private local
+  content-by-intent personalization
 - `docs/architecture/quality-search-memory.md`: read-only accepted-outcome
   cohorts, signature invalidation, robust CRF summaries, and authority limits
 - `docs/architecture/advisor-routing.md`: evaluated task routing, Codex Lab

@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping
+from dataclasses import asdict
 from datetime import UTC, datetime
 import uuid
 from pathlib import Path
@@ -32,6 +33,7 @@ from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authorize_compression_change, \
     compression_intent_from_item, compression_intent_from_policy
+from mediaforce.tuning.content_intent_observations import record_visual_content_intent_observation
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_evidence_blocker, \
     cadence_safety_partition, older_season_cadence_payload
@@ -1719,15 +1721,23 @@ def save_profile_action(
         calibration_payload["accepted_draft_hash"] = current_draft_hash
         calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
         calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
-        save_calibration_state(config, normalized_prefix, calibration_payload)
+        source_scope = object_dict(quality_risk_contract.get("source_scope"))
+        contract_policy = object_dict(quality_risk_contract.get("policy"))
+        review_tags = [
+            str(object_dict(risk).get("tag") or "")
+            for risk in object_list(quality_risk_contract.get("typed_risks"))
+            if str(object_dict(risk).get("tag") or "").strip()
+        ]
+        review_evidence_ids = [str(value) for value in object_list(source_scope.get("evidence_ids"))]
+        review_moment_indexes = list(range(1, len(object_list(calibration_payload.get("review_moments"))) + 1))
         existing_approval = object_dict(advice_state.get("approval_artifact"))
         approval_artifact = (
             existing_approval
             if str(existing_approval.get("sample_job_id") or "") == str(calibration_payload.get("job_id") or "")
             else None
         )
-        if str(existing_approval.get("sample_job_id") or "") != str(calibration_payload.get("job_id") or ""):
-            with open_db(config.paths.db_path) as connection:
+        with open_db(config.paths.db_path) as connection:
+            if str(existing_approval.get("sample_job_id") or "") != str(calibration_payload.get("job_id") or ""):
                 approval_artifact = record_visual_approval_artifact(
                     connection,
                     config,
@@ -1738,15 +1748,20 @@ def save_profile_action(
                     run_verdict=object_dict(advice_state.get("run_verdict")),
                     created_at=str(calibration_payload["accepted_at"]),
                 )
+            boundary_observation = record_visual_content_intent_observation(
+                connection,
+                prefix=normalized_prefix,
+                sample_item=object_dict(calibration_payload.get("sample_item")),
+                calibration=calibration_payload,
+                verdict="approved",
+                concern_tags=review_tags or ["other"],
+                evidence_ids=review_evidence_ids,
+                moment_indexes=review_moment_indexes,
+                recorded_at=str(calibration_payload["accepted_at"]),
+            )
+        save_calibration_state(config, normalized_prefix, calibration_payload)
         if approval_artifact is not None:
             approval_artifact["sample_job_id"] = str(calibration_payload.get("job_id") or "")
-        source_scope = object_dict(quality_risk_contract.get("source_scope"))
-        contract_policy = object_dict(quality_risk_contract.get("policy"))
-        review_tags = [
-            str(object_dict(risk).get("tag") or "")
-            for risk in object_list(quality_risk_contract.get("typed_risks"))
-            if str(object_dict(risk).get("tag") or "").strip()
-        ]
         quality_risk_state = append_quality_risk_record(
             advice_state,
             prefix=normalized_prefix,
@@ -1761,13 +1776,14 @@ def save_profile_action(
                 or "Operator approved this sample after reviewing the current evidence."
             ),
             created_at=str(calibration_payload["accepted_at"]),
-            evidence_ids=[str(value) for value in object_list(source_scope.get("evidence_ids"))],
-            moment_indexes=list(range(1, len(object_list(calibration_payload.get("review_moments"))) + 1)),
+            evidence_ids=review_evidence_ids,
+            moment_indexes=review_moment_indexes,
         )
         advice_patch: ActionPayload = {
             "operator_approved_at": calibration_payload["accepted_at"],
             "operator_approved_size_tradeoff": bool(size_issue),
             "quality_risk_records": object_list(quality_risk_state.get("quality_risk_records")),
+            "content_intent_boundary_observation": asdict(boundary_observation),
         }
         if approval_artifact is not None:
             advice_patch["approval_artifact"] = approval_artifact

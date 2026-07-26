@@ -19,9 +19,15 @@ from mediaforce.core.process_control import ManagedProcessController, ProcessCan
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
 from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
-from mediaforce.encoding.video_filters import build_video_filter
+from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.hosts.config import host_media_access_for_host
+from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.state_cleanup import purge_transient_artifacts
+from mediaforce.tuning.content_intent_observations import (
+    build_content_intent_boundary_compatibility,
+    content_intent_frame_rate,
+    content_intent_stream_plan_id,
+)
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 
 LOGGER = logging.getLogger(__name__)
@@ -59,6 +65,7 @@ class CalibrationRunDeps:
     recommend_review_moments: Any | None = None
     review_moment_payload: Any | None = None
     default_review_timestamps: Any | None = None
+    quality_toolchain_identity: Any | None = None
 
 
 class _CalibrationTelemetry:
@@ -159,6 +166,7 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "rel_path": sample_item.get("rel_path"),
         "source_path": sample_item.get("source_path"),
         "source_fingerprint": sample_item.get("source_fingerprint"),
+        "content_version_fingerprint": sample_item.get("content_version_fingerprint"),
         "source_size_bytes": sample_item.get("source_size_bytes"),
         "video_codec": sample_item.get("video_codec"),
         "video_bitrate": sample_item.get("video_bitrate"),
@@ -181,6 +189,8 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         ),
         "output_container": sample_item.get("output_container"),
         "resolved_policy": object_dict(sample_item.get("resolved_policy")),
+        "resolved_operator_intent": object_dict(sample_item.get("resolved_operator_intent")),
+        "compression_intent": object_dict(sample_item.get("compression_intent")),
         "stream_budget_ledger": object_dict(sample_item.get("stream_budget_ledger")),
         "representative_source_id": sample_item.get("representative_source_id"),
         "representative_selection": object_dict(sample_item.get("representative_selection")),
@@ -209,6 +219,120 @@ def _output_container(config: MediaforceConfig, sample_item: dict[str, Any]) -> 
         return item_container.removeprefix(".")
     source_suffix = Path(str(sample_item.get("source_path") or "")).suffix
     return source_suffix.removeprefix(".") or "mkv"
+
+
+def _content_intent_compatibility_payload(
+        *,
+        sample_item: dict[str, Any],
+        video_policy: dict[str, Any],
+        stream_budget: dict[str, Any],
+        output_dimensions: tuple[int, int] | None,
+        effective_preset: int,
+        video_filter: str | None,
+        encoder_parameters: list[str],
+        toolchain_identity: dict[str, Any],
+        quality_metric: str,
+        quality_target: float,
+        target_size_trace: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if output_dimensions is None:
+        LOGGER.info("Content-intent compatibility unavailable: output dimensions are unresolved")
+        return None
+    if str(toolchain_identity.get("status") or "") != "available":
+        LOGGER.info(
+            "Content-intent compatibility unavailable: toolchain identity %s",
+            str(toolchain_identity.get("reason") or "is unavailable"),
+        )
+        return None
+    frame_rate = content_intent_frame_rate(sample_item)
+    stream_plan_id = content_intent_stream_plan_id(stream_budget)
+    if frame_rate is None:
+        LOGGER.info("Content-intent compatibility unavailable: frame rate evidence is missing")
+        return None
+    if stream_plan_id is None:
+        LOGGER.info("Content-intent compatibility unavailable: stream plan identity is missing")
+        return None
+    quality_floor = object_dict(object_dict(target_size_trace).get("quality_floor"))
+    minimum_quality_score = float_value(quality_floor.get("minimum"))
+    if minimum_quality_score <= 0:
+        minimum_quality_score = float_value(
+            video_policy.get(f"min_target_{str(quality_metric).casefold()}")
+        ) or quality_target
+    try:
+        compatibility = build_content_intent_boundary_compatibility(
+            encoder=str(toolchain_identity.get("encoder") or video_policy.get("encoder") or ""),
+            encoder_version=str(toolchain_identity.get("encoder_version") or ""),
+            encoder_runtime_version=str(toolchain_identity.get("encoder_runtime_version") or ""),
+            encoder_runtime_signature_id=str(toolchain_identity.get("encoder_runtime_signature_id") or ""),
+            quality_tool=str(toolchain_identity.get("quality_tool") or ""),
+            quality_tool_version=str(toolchain_identity.get("quality_tool_version") or ""),
+            metric_runtime_signature_id=str(toolchain_identity.get("metric_runtime_signature_id") or ""),
+            preset=effective_preset,
+            pixel_format=str(video_policy.get("pixel_format") or ""),
+            encoder_parameters=encoder_parameters,
+            output_width=output_dimensions[0],
+            output_height=output_dimensions[1],
+            frame_rate=frame_rate,
+            cadence_transform=str(object_dict(sample_item.get("cadence_decision")).get("transform") or "none"),
+            video_filter=video_filter,
+            output_container=str(sample_item.get("output_container") or ""),
+            stream_plan_id=stream_plan_id,
+            measurement_basis="sample_projection",
+            quality_metric=quality_metric,
+            quality_target=quality_target,
+            minimum_quality_score=minimum_quality_score,
+        )
+    except ValueError as exc:
+        LOGGER.info("Content-intent compatibility unavailable: %s", exc)
+        return None
+    return compatibility.to_payload()
+
+
+def _review_artifact_fingerprint(
+        preview_clips: list[Any],
+        source_clips: list[Any] | None = None,
+) -> str | None:
+    fingerprint = reviewed_artifact_fingerprint(
+        [
+            (
+                role,
+                Path(getattr(clip, "output_path", "")),
+                float_value(getattr(clip, "timestamp_seconds", None)),
+                float_value(getattr(clip, "duration_seconds", None)),
+            )
+            for role, clips in (("preview", preview_clips), ("source", source_clips or []))
+            for clip in clips
+        ]
+    )
+    if fingerprint is None:
+        LOGGER.info("Review artifact fingerprint unavailable: no preview clips were produced")
+    return fingerprint
+
+
+def _stable_quality_toolchain_identity(
+        before: dict[str, Any],
+        after: dict[str, Any],
+) -> dict[str, Any]:
+    if str(before.get("status") or "") != "available":
+        return before
+    if str(after.get("status") or "") != "available":
+        return after
+    stable_fields = (
+        "schema_version",
+        "encoder",
+        "encoder_version",
+        "encoder_runtime_version",
+        "encoder_runtime_signature_id",
+        "quality_tool",
+        "quality_tool_version",
+    )
+    if any(before.get(field) != after.get(field) for field in stable_fields):
+        return {
+            "schema_version": 1,
+            "status": "unavailable",
+            "reason": "toolchain_changed_during_measurement",
+        }
+    return after
 
 
 def _review_audio_plan(stream_budget: Any) -> dict[str, Any] | None:
@@ -559,6 +683,13 @@ def run_sampled_calibration(
         cadence_evidence=cadence_evidence,
         cadence_source_fingerprint=str(sample_item.get("source_fingerprint") or "") or None,
     )
+    output_dimensions = planned_output_dimensions(
+        video_policy,
+        width=width,
+        height=height,
+        detected_crop=detected_crop,
+    )
+    encoder_parameters = deps.build_svt_params(video_policy)
     quality_kwargs: dict[str, Any] = {
         "source_codec": str(sample_item.get("video_codec") or ""),
         "width": width,
@@ -575,6 +706,22 @@ def run_sampled_calibration(
         quality_kwargs["cadence_source_fingerprint"] = (
             str(sample_item.get("source_fingerprint") or "") or None
         )
+    preferred_quality_metric = str(video_policy.get("quality_metric") or "auto").strip().casefold()
+    toolchain_identity_before = (
+        object_dict(
+            deps.quality_toolchain_identity(
+                quality_metric=(
+                    preferred_quality_metric
+                    if preferred_quality_metric in {"vmaf", "xpsnr"}
+                    else "xpsnr"
+                ),
+                host=quality_host,
+                process_controller=process_controller,
+            )
+        )
+        if deps.quality_toolchain_identity is not None
+        else {}
+    )
     if progress_callback is not None:
         progress_callback("searching_target")
     quality_result = deps.search_quality_for_source(quality_source_path, video_policy, **quality_kwargs)
@@ -589,11 +736,26 @@ def run_sampled_calibration(
         pixel_format=str(video_policy["pixel_format"]),
         sample_every=str(video_policy["sample_every"]),
         sample_duration=str(video_policy["sample_duration"]),
-        svt_params=deps.build_svt_params(video_policy),
+        svt_params=encoder_parameters,
         video_filter=video_filter,
         process_controller=process_controller,
         host=quality_host,
         quality_temp_dir=quality_temp_dir,
+    )
+    toolchain_identity_after = (
+        object_dict(
+            deps.quality_toolchain_identity(
+                quality_metric=sample_result.metric,
+                host=quality_host,
+                process_controller=process_controller,
+            )
+        )
+        if deps.quality_toolchain_identity is not None
+        else {}
+    )
+    toolchain_identity = _stable_quality_toolchain_identity(
+        toolchain_identity_before,
+        toolchain_identity_after,
     )
 
     review_moments = []
@@ -639,7 +801,7 @@ def run_sampled_calibration(
         pixel_format=str(video_policy["pixel_format"]),
         preset=preset,
         crf=quality_result.crf,
-        svt_params=deps.build_svt_params(video_policy),
+        svt_params=encoder_parameters,
         audio_plan=review_audio_plan,
         video_filter=video_filter,
         host=quality_host,
@@ -665,6 +827,8 @@ def run_sampled_calibration(
         output_dir=output_dir,
         process_controller=process_controller,
     )
+    review_artifact_fingerprint = _review_artifact_fingerprint(preview_clips, source_clips)
+    review_artifact_size_bytes = sum(max(0, int_value(getattr(clip, "size_bytes", None))) for clip in preview_clips)
     if progress_callback is not None:
         progress_callback("building_review", completed=3, total=3)
     estimated_total_size_bytes = (
@@ -673,6 +837,19 @@ def run_sampled_calibration(
         else None
     )
     target_size_trace = object_dict(getattr(quality_result, "target_size_trace", None)) or None
+    compatibility_payload = _content_intent_compatibility_payload(
+        sample_item=sample_item,
+        video_policy=video_policy,
+        stream_budget=stream_budget.to_payload(),
+        output_dimensions=output_dimensions,
+        effective_preset=preset,
+        video_filter=video_filter,
+        encoder_parameters=encoder_parameters,
+        toolchain_identity=toolchain_identity,
+        quality_metric=sample_result.metric,
+        quality_target=quality_result.target,
+        target_size_trace=target_size_trace,
+    )
 
     payload = {
         "mode": "sample",
@@ -682,6 +859,7 @@ def run_sampled_calibration(
         "policy": policy,
         "policy_seed": seed_metadata,
         "sample_item": _stored_sample_item_payload(sample_item),
+        "review_artifact_fingerprint": review_artifact_fingerprint,
         "sample_result": {
             "chosen_crf": quality_result.crf,
             "quality_metric": sample_result.metric,
@@ -696,6 +874,8 @@ def run_sampled_calibration(
             ),
             "predicted_encode_seconds": sample_result.predicted_encode_seconds,
             "sampled_clip_bytes": sample_result.sampled_clip_size_bytes,
+            "review_artifact_size_bytes": review_artifact_size_bytes or None,
+            "content_intent_compatibility": compatibility_payload,
             "estimated_audio_bytes": stream_budget.audio_bytes,
             "estimated_subtitle_bytes": stream_budget.subtitle_bytes,
             "estimated_attachment_bytes": stream_budget.attachment_bytes,

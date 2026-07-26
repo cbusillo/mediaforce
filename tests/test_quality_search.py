@@ -1,15 +1,81 @@
+import subprocess
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from mediaforce.core.process_control import ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.encoding.quality import (
     QualitySearchResult,
     QualitySearchWarmStart,
     QualityTempSetupError,
     SampleEncodeError,
     SampleEncodeResult,
+    quality_toolchain_identity,
 )
 from mediaforce.encoding.quality_search import search_quality
+
+
+class QualityToolchainIdentityTests(unittest.TestCase):
+    def test_identity_is_stable_and_uses_version_output(self) -> None:
+        results = [
+            subprocess.CompletedProcess(
+                args=["ab-av1", "--version"],
+                returncode=0,
+                stdout="ab-av1 0.11.3\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["ffmpeg", "-version"],
+                returncode=0,
+                stdout="ffmpeg version 8.0\nbuilt with Apple clang\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                args=["ffmpeg", "-f", "lavfi"],
+                returncode=0,
+                stdout="",
+                stderr="Svt[info]: SVT [version]: SVT-AV1 Encoder Lib v4.2.0\n",
+            ),
+            subprocess.CompletedProcess(
+                args=["ffmpeg", "-h", "filter=libvmaf"],
+                returncode=0,
+                stdout="Filter libvmaf\nmodel option\n",
+                stderr="",
+            ),
+        ]
+        with patch("mediaforce.encoding.quality._run_quality_command", side_effect=results):
+            identity = quality_toolchain_identity(quality_metric="VMAF")
+
+        self.assertEqual(identity["status"], "available")
+        self.assertEqual(identity["quality_tool_version"], "ab-av1 0.11.3")
+        self.assertEqual(identity["encoder_version"], "SVT-AV1 Encoder Lib v4.2.0")
+        self.assertEqual(identity["encoder_runtime_version"], "ffmpeg version 8.0")
+        self.assertTrue(str(identity["encoder_runtime_signature_id"]).startswith("erti1_"))
+        self.assertTrue(str(identity["metric_runtime_signature_id"]).startswith("qmri1_"))
+        self.assertTrue(str(identity["signature_id"]).startswith("qti1_"))
+
+    def test_failed_version_command_returns_unavailable_identity(self) -> None:
+        with patch(
+                "mediaforce.encoding.quality._run_quality_command",
+                side_effect=[
+                    subprocess.CompletedProcess(["ab-av1"], 0, "ab-av1 0.11.3\n", ""),
+                    subprocess.CompletedProcess(["ffmpeg"], 1, "", "failed"),
+                ],
+        ):
+            identity = quality_toolchain_identity(quality_metric="VMAF")
+
+        self.assertEqual(identity, {
+            "schema_version": 1,
+            "status": "unavailable",
+            "reason": "version_command_failed",
+        })
+
+    def test_cancellation_and_schedule_close_are_not_downgraded_to_unavailable(self) -> None:
+        for error in (ProcessCancelledError("cancelled"), ScheduleWindowClosedError("closed")):
+            with self.subTest(error=type(error).__name__):
+                with patch("mediaforce.encoding.quality._run_quality_command", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        quality_toolchain_identity(quality_metric="VMAF")
 
 
 class QualitySearchWarmStartTests(unittest.TestCase):

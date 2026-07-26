@@ -324,6 +324,10 @@ class QualityRiskContractTests(unittest.TestCase):
         self.assertEqual(record["sample_job_id"], "job-123")
         self.assertEqual(record["evidence_ids"], ["ev1_cadence", "ev1_fingerprint"])
         self.assertEqual(record["moment_indexes"], [1])
+        self.assertEqual(
+            state["content_intent_boundary_observation"]["exclusion_reason"],
+            "frozen_sample_item_missing",
+        )
 
     def _contract(
             self,

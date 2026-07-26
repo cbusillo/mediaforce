@@ -443,6 +443,177 @@ Index(
     quality_search_observations.c.recorded_at.desc(),
 )
 
+content_intent_boundary_observations = Table(
+    "content_intent_boundary_observations",
+    metadata,
+    Column("observation_id", Text, primary_key=True),
+    Column("series_id", Text, nullable=False),
+    Column("boundary_group_id", Text, nullable=False),
+    Column("schema_version", Integer, nullable=False, server_default="1"),
+    Column("revision", Integer, nullable=False, server_default="0"),
+    Column(
+        "supersedes_observation_id",
+        Text,
+        ForeignKey("content_intent_boundary_observations.observation_id", ondelete="RESTRICT"),
+    ),
+    Column("supersession_reason", Text),
+    Column("authority", Text, nullable=False),
+    Column("disposition", Text, nullable=False, server_default="active"),
+    Column("personalization_eligible", Integer, nullable=False),
+    Column("exclusion_reason", Text),
+    Column("library_item_id", Integer, nullable=False),
+    Column("prefix", Text, nullable=False),
+    Column("source_rel_path", Text, nullable=False),
+    Column("source_id", Text, nullable=False),
+    Column("source_fingerprint", Text),
+    Column("content_fingerprint_kind", Text, nullable=False),
+    Column("content_fingerprint", Text, nullable=False),
+    Column("content_id", Text, nullable=False),
+    Column("content_profile_id", Text, nullable=False),
+    Column("content_traits_json", Text, nullable=False),
+    Column("intent_semantic_id", Text, nullable=False),
+    Column("intent_snapshot_id", Text, nullable=False),
+    Column("intent_level", Text, nullable=False),
+    Column("compatibility_key", Text, nullable=False),
+    Column("compatibility_json", Text, nullable=False),
+    Column("policy_hash", Text, nullable=False),
+    Column("source_event_kind", Text, nullable=False),
+    Column("source_event_id", Text, nullable=False),
+    Column("job_id", Text, nullable=False),
+    Column("artifact_fingerprint", Text, nullable=False),
+    Column("source_evidence_ids_json", Text, nullable=False),
+    Column("observation_kind", Text, nullable=False),
+    Column("verdict", Text, nullable=False),
+    Column("boundary_kind", Text, nullable=False),
+    Column("authoritative_anchor_bytes", Integer, nullable=False),
+    Column("boundary_size_bytes", Integer, nullable=False),
+    Column("actual_output_bytes", Integer),
+    Column("sampled_clip_bytes", Integer),
+    Column("duration_seconds", REAL, nullable=False),
+    Column("boundary_bitrate_bps", Integer, nullable=False),
+    Column("direction", Text, nullable=False),
+    Column("quality_metric", Text, nullable=False),
+    Column("quality_target", REAL, nullable=False),
+    Column("minimum_quality_score", REAL, nullable=False),
+    Column("measured_quality_score", REAL, nullable=False),
+    Column("quality_floor_met", Integer, nullable=False),
+    Column("assessment_json", Text, nullable=False),
+    Column("provenance_json", Text, nullable=False),
+    Column("payload_sha256", Text, nullable=False),
+    Column("recorded_at", Text, nullable=False),
+    CheckConstraint(
+        "schema_version = 1",
+        name="ck_content_intent_boundary_schema_version",
+    ),
+    CheckConstraint("revision >= 0", name="ck_content_intent_boundary_revision"),
+    CheckConstraint(
+        "(revision = 0 AND supersedes_observation_id IS NULL AND supersession_reason IS NULL "
+        "AND authority = 'runtime_native') OR "
+        "(revision > 0 AND supersedes_observation_id IS NOT NULL "
+        "AND length(trim(supersession_reason)) > 0 AND authority = 'correction')",
+        name="ck_content_intent_boundary_revision_chain",
+    ),
+    CheckConstraint(
+        "disposition IN ('active', 'withdrawn')",
+        name="ck_content_intent_boundary_disposition",
+    ),
+    CheckConstraint(
+        "personalization_eligible IN (0, 1)",
+        name="ck_content_intent_boundary_eligible",
+    ),
+    CheckConstraint(
+        "(personalization_eligible = 1 AND disposition = 'active' AND exclusion_reason IS NULL) "
+        "OR (personalization_eligible = 0 AND exclusion_reason IS NOT NULL)",
+        name="ck_content_intent_boundary_exclusion",
+    ),
+    CheckConstraint(
+        "disposition != 'withdrawn' OR (revision > 0 AND personalization_eligible = 0)",
+        name="ck_content_intent_boundary_withdrawal",
+    ),
+    CheckConstraint(
+        "intent_level IN ('reference', 'transparent', 'balanced', 'perceptual_floor')",
+        name="ck_content_intent_boundary_intent",
+    ),
+    CheckConstraint(
+        "content_fingerprint_kind = 'mediaforce_content_version_v1'",
+        name="ck_content_intent_boundary_fingerprint_kind",
+    ),
+    CheckConstraint(
+        "source_event_kind IN ('post_test_review')",
+        name="ck_content_intent_boundary_event",
+    ),
+    CheckConstraint(
+        "(observation_kind = 'visual_approval' AND verdict = 'acceptable' AND boundary_kind = 'upper_bound') "
+        "OR (observation_kind = 'visual_rejection' AND verdict = 'unacceptable' "
+        "AND boundary_kind = 'lower_bound')",
+        name="ck_content_intent_boundary_verdict",
+    ),
+    CheckConstraint(
+        "authoritative_anchor_bytes > 0 AND boundary_size_bytes > 0 "
+        "AND (actual_output_bytes IS NULL OR actual_output_bytes > 0) "
+        "AND (sampled_clip_bytes IS NULL OR sampled_clip_bytes > 0) "
+        "AND duration_seconds > 0 AND boundary_bitrate_bps > 0",
+        name="ck_content_intent_boundary_measurements",
+    ),
+    CheckConstraint(
+        "(direction = 'smaller' AND boundary_size_bytes < authoritative_anchor_bytes) "
+        "OR (direction = 'same' AND boundary_size_bytes = authoritative_anchor_bytes) "
+        "OR (direction = 'larger' AND boundary_size_bytes > authoritative_anchor_bytes)",
+        name="ck_content_intent_boundary_direction",
+    ),
+    CheckConstraint(
+        "quality_target >= 0 AND minimum_quality_score >= 0 "
+        "AND minimum_quality_score <= quality_target AND measured_quality_score >= 0",
+        name="ck_content_intent_boundary_quality",
+    ),
+    CheckConstraint(
+        "quality_floor_met IN (0, 1) AND "
+        "((quality_floor_met = 1 AND measured_quality_score >= minimum_quality_score) "
+        "OR (quality_floor_met = 0 AND measured_quality_score < minimum_quality_score))",
+        name="ck_content_intent_boundary_quality_floor",
+    ),
+)
+Index(
+    "uq_content_intent_boundary_series_revision",
+    content_intent_boundary_observations.c.series_id,
+    content_intent_boundary_observations.c.revision,
+    unique=True,
+)
+Index(
+    "uq_content_intent_boundary_supersedes",
+    content_intent_boundary_observations.c.supersedes_observation_id,
+    unique=True,
+    sqlite_where=content_intent_boundary_observations.c.supersedes_observation_id.is_not(None),
+)
+Index(
+    "idx_content_intent_boundary_group_time",
+    content_intent_boundary_observations.c.boundary_group_id,
+    content_intent_boundary_observations.c.recorded_at.desc(),
+)
+Index(
+    "idx_content_intent_boundary_compatibility_time",
+    content_intent_boundary_observations.c.intent_semantic_id,
+    content_intent_boundary_observations.c.compatibility_key,
+    content_intent_boundary_observations.c.recorded_at.desc(),
+)
+Index(
+    "idx_content_intent_boundary_model_time",
+    content_intent_boundary_observations.c.content_profile_id,
+    content_intent_boundary_observations.c.intent_semantic_id,
+    content_intent_boundary_observations.c.compatibility_key,
+    content_intent_boundary_observations.c.recorded_at.desc(),
+)
+Index(
+    "idx_content_intent_boundary_item_time",
+    content_intent_boundary_observations.c.library_item_id,
+    content_intent_boundary_observations.c.recorded_at.desc(),
+)
+Index(
+    "idx_content_intent_boundary_job_time",
+    content_intent_boundary_observations.c.job_id,
+    content_intent_boundary_observations.c.recorded_at.desc(),
+)
+
 staged_artifacts = Table(
     "staged_artifacts",
     metadata,

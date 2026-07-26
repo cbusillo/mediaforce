@@ -79,10 +79,19 @@ def planned_output_dimensions(
     if width is None or height is None or width <= 0 or height <= 0:
         return None
     crop_filter = _crop_filter(video_policy, width=width, height=height, detected_crop=detected_crop)
-    if _scale_filter(video_policy, source_height=_post_crop_height(crop_filter, height)) is not None:
-        return None
     crop = CropSpec.parse(crop_filter or "")
-    return (crop.width, crop.height) if crop is not None else (width, height)
+    output_width, output_height = (crop.width, crop.height) if crop is not None else (width, height)
+    scale_filter = _scale_filter(video_policy, source_height=output_height)
+    if scale_filter is None:
+        return output_width, output_height
+    max_height = int_value(video_policy.get("max_height")) or int_value(video_policy.get("target_height"))
+    if max_height <= 0:
+        return None
+    scaled_width = max(
+        2,
+        ((output_width * max_height + output_height) // (2 * output_height)) * 2,
+    )
+    return scaled_width, max_height
 
 
 def most_common_crop(stderr: str, *, source_width: int | None = None, source_height: int | None = None) -> str | None:

@@ -234,6 +234,10 @@ Guidance:
     contract
   - allow-listed transform compilation checks, typed risk shaping, and
     evidence-bound review-record precedence
+- `content_intent_observations.py`
+  - append-only approved/rejected content-by-intent size boundaries,
+    correction-safe persistence, compatibility identities, and deterministic
+    local item/folder/content-class/operator replay
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
@@ -259,6 +263,10 @@ Guidance:
 - Keep quality-risk facts, deterministic gates, typed risk normalization, and
   current review authority under `mediaforce/tuning/quality_risk.py` instead of
   re-deriving them independently in routes, prompts, or the frontend.
+- Keep content-by-intent boundary identity, eligibility, append-only correction,
+  and replay under `mediaforce/tuning/content_intent_observations.py`. Runtime
+  review actions may emit explicit events, but they must not independently
+  infer compatibility, relabel history, or mutate derived personalization.
 - Keep quality-memory retrieval read-only and under
   `mediaforce/tuning/quality_memory.py`; keep passive persistence under
   `mediaforce/tuning/quality_observations.py`; keep passive recommendation and
@@ -286,6 +294,9 @@ Guidance:
   - contact sheets, timeline strips, spectrograms, and audio-review outputs
 - `helpers.py`
   - review timestamp and measured review-moment recommendation
+- `artifact_identity.py`
+  - exact SHA-256 identity for the source and encoded clips bound to an
+    operator review decision
 
 `mediaforce.review` remains the stable compatibility wrapper surface.
 

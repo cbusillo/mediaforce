@@ -186,7 +186,7 @@ class QualityWarmStartPlanTests(unittest.TestCase):
         assert planned is not None
         self.assertEqual(planned.signature_id, final.signature_id)
 
-    def test_presearch_signature_is_unavailable_when_ffmpeg_must_resolve_scale_width(self) -> None:
+    def test_presearch_signature_resolves_ffmpeg_scale_width(self) -> None:
         planned = _planned_quality_observation_context(
             search_plan=QualitySearchPlan(
                 host=None,
@@ -211,7 +211,9 @@ class QualityWarmStartPlanTests(unittest.TestCase):
             detected_crop=None,
         )
 
-        self.assertIsNone(planned)
+        assert planned is not None
+        self.assertEqual(planned.output_width, 1280)
+        self.assertEqual(planned.output_height, 720)
 
     def _plan(self, rows: list[dict[str, object]] | None = None) -> QualityWarmStartPlan:
         if rows is None:
