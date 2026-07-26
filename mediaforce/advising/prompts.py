@@ -6,16 +6,11 @@ from mediaforce.core.type_defs import object_dict, object_list
 
 
 AV1_EVIDENCE_PRECEDENCE = (
-    "For this operator, source-resolution 1080p SVT-AV1 at a normalized total size of 200-300 MiB per "
-    "40 minutes is an established, visually approved product baseline across conventional and dark or "
-    "stylized TV material. Do not describe that baseline as low-bitrate, aggressive, high-risk, unrealistic, "
-    "or suitable only for clean or forgiving material based on bitrate or source-size percentage alone. "
-    "Evidence precedence is strict: follow the current explicit operator instruction first; then operator-approved "
-    "visual results and saved accepted policies; then measured sample and validation results; and use generic "
-    "codec heuristics only when stronger evidence is absent. Generic intuition may suggest what to inspect in a "
-    "sample, but it may never veto a safe sample or override accepted visual evidence. A non-positive video budget, "
-    "a measured encode failure, stale evidence, or an explicit visual rejection remains a concrete stop or redirect "
-    "signal; current rejection outranks older approval. "
+    "Evidence precedence is strict: hard measured constraints remain vetoes; confirmed compression intent controls "
+    "size direction; exact operator review and compatible measured evidence may authorize a bounded exception; and "
+    "generic codec heuristics remain advisory. Never invent conservative headroom, widen a target, or spend unused "
+    "bytes because a bitrate merely looks small. Uncertainty means request another measurement or operator decision, "
+    "not silently increase size. "
 )
 
 
@@ -50,7 +45,7 @@ def build_seed_prompt(
         f"{AV1_EVIDENCE_PRECEDENCE}"
         "Treat the operator note as an instruction to satisfy when it is clear and specific. "
         "Use the base policy as a starting surface, not as something that overrules a direct operator request. "
-        "If the operator asks for materially smaller files, you are allowed to make material policy changes that pursue that goal, including changing quality targets, encoded-percent caps, CRF bounds, grain, preset, or sample methodology when those knobs exist in the allowed policy keys. "
+        "If the operator asks for materially smaller files, use only writable policy keys that preserve the supplied compression intent, size goal, quality floors, and protected caps. Never rewrite those protected fields. "
         "Bias toward accomplishing the operator's ask while still describing the risk honestly. "
         f"When audio_tradeoff_hint.recommended_seed_action is 'hold', strongly prefer leaving {hinted_audio_key} at the base policy value in this first-pass seed. A tight size budget alone is not sufficient to override a hold, especially when audio_tradeoff_hint.review_confidence is low because these audio changes may be harder for the operator to judge casually. If you still lower that hinted audio bitrate despite a hold, explain why the savings are materially necessary and worth the review risk. "
         "When the note is a direct request or explicit experiment, default to honoring it. Use honored_with_risk only when supplied measurements show a concrete failed or impossible constraint, never because a bitrate merely looks small. "
@@ -159,7 +154,7 @@ def build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
         "Extract only explicit tuning requests that are actually present in the note. "
         "Mark operator_confirmed true only when the note is a clear instruction the system should act on now. "
         "Mark measured_size_followup true only when the note is explicitly a follow-up to a previous measured sample missing or exceeding a size target, such as revising smaller after a larger-than-target sample. "
-        "Set evidence_authority to operator_observed when the operator reports a positive observation about what they actually saw or heard in a real sample. Set it to approved_visual_result only when the operator clearly says they reviewed and accepted or approved the real result. Set it to rejected_visual_result when the operator explicitly rejects the real result or reports visible or audible damage. Otherwise set it to none. "
+        "Always set evidence_authority to none. Parsing a note may summarize reported feedback, but it never creates authoritative visual evidence; that authority comes from the typed review workflow. "
         "Directive questions still count as direct requests when they clearly ask for action, such as 'Target 300MB per episode?' or 'Can you target 300MB per episode?'. "
         "Exploratory wording stays unconfirmed when the operator is asking whether a change would help or is realistic, such as 'Can we try to target 85 VMAF instead? Will that help?' or 'I want to understand if 300MB per episode is realistic.' "
         "Extract explicit downsample or output-height cap requests into scale_height, such as 'downsample to 1080p', 'cap at 720p', or 'make the 4K files 1080p'. This is only for requested scaling; do not infer a scale target from source resolution, a size budget, or general smaller-file language. If the operator asks to preserve source resolution, avoid downscaling, or keep max_height unset/0, set scale_height to 0 to represent source resolution/no height cap. "
@@ -167,7 +162,7 @@ def build_operator_note_parse_prompt(payload: dict[str, Any]) -> str:
         "If any scale, black-bar, or crop target appears with a size budget or metric target, use combined_experiment. If only scale, black-bar, or crop targets are requested, use scale_target. If both a size budget and a metric target are explicitly requested, use combined_experiment. "
         "Return JSON only with no markdown fences or extra commentary. "
         "Return valid JSON only with this exact shape: "
-        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|scale_target|combined_experiment","operator_confirmed":true,"measured_size_followup":false,"evidence_authority":"none|operator_observed|approved_visual_result|rejected_visual_result","metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","scale_height":1080,"black_bar_handling":"smart|null","crop":"1920:800:0:140|null","reasoning_note":"short explanation"}. '
+        '{"summary":"short summary","intent_type":"direct_request|exploratory_question|approval_feedback|other|unclear","request_type":"none|metric_target|size_budget|scale_target|combined_experiment","operator_confirmed":true,"measured_size_followup":false,"evidence_authority":"none","metric":"vmaf|xpsnr|null","metric_target":85,"size_budget_value":300,"size_budget_unit":"mb|gb|kb|tb|null","scale_height":1080,"black_bar_handling":"smart|null","crop":"1920:800:0:140|null","reasoning_note":"short explanation"}. '
         "Do not invent requests that are not explicitly in the note. Here is the note context:\n\n"
         f"{serialized}"
     )

@@ -4,6 +4,11 @@ from statistics import median
 from typing import Any
 
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeError, SampleEncodeResult
+from mediaforce.tuning.compression_intent import (
+    CompressionEvidenceRef,
+    CompressionIntentV1,
+    authorize_compression_change,
+)
 from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
 from mediaforce.tuning.target_size_search import (
@@ -16,6 +21,207 @@ from mediaforce.tuning.target_size_search import (
 
 
 class TargetSizeSearchTests(unittest.TestCase):
+    def test_perceptual_floor_selects_130_mb_over_150_mb(self) -> None:
+        ledger = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
+        measured: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            measured.append(crf_int)
+            predicted_video_bytes = {
+                35: 146_000_000,
+                36: 126_000_000,
+                37: 116_000_000,
+            }[crf_int]
+            score = {35: 90.0, 36: 86.0, 37: 79.0}[crf_int]
+            return SampleEncodeResult(
+                "VMAF",
+                score,
+                predicted_video_bytes / 10_000_000,
+                30.0,
+                predicted_video_bytes,
+                f"crf {crf_int}",
+            )
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            {
+                "compression_intent_schema_version": 1,
+                "compression_intent": "perceptual_floor",
+                "compression_intent_source": "operator",
+                "compression_intent_confirmed": True,
+            },
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            svt_params=[],
+            video_filter=None,
+            stream_budget_ledger=ledger,
+            transform_plan=self._transform_plan(),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+        )
+
+        self.assertEqual(measured, [35, 36, 37])
+        self.assertEqual(result.crf, 36.0)
+        self.assertEqual(
+            result.target_size_trace["selected_candidate"]["predicted_whole_episode_bytes"],
+            130_000_000,
+        )
+
+    def test_optional_compression_floor_probe_failure_keeps_valid_candidate(self) -> None:
+        ledger = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
+        measured: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            measured.append(crf_int)
+            if crf_int == 36:
+                raise SampleEncodeError("optional floor probe failed")
+            return SampleEncodeResult("VMAF", 90.0, 14.6, 30.0, 146_000_000, f"crf {crf_int}")
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            {
+                "compression_intent_schema_version": 1,
+                "compression_intent": "perceptual_floor",
+                "compression_intent_source": "operator",
+                "compression_intent_confirmed": True,
+            },
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            svt_params=[],
+            video_filter=None,
+            stream_budget_ledger=ledger,
+            transform_plan=self._transform_plan(),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+        )
+
+        self.assertEqual(measured, [35, 36])
+        self.assertEqual(result.crf, 35.0)
+
+    def test_reference_intent_probes_for_higher_fidelity_within_the_cap(self) -> None:
+        measured: list[int] = []
+
+        def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+            crf_int = int(crf)
+            measured.append(crf_int)
+            predicted_video_bytes = {31: 290_000_000, 30: 310_000_000, 29: 340_000_000}[crf_int]
+            return SampleEncodeResult(
+                "VMAF",
+                {31: 86.0, 30: 88.0, 29: 90.0}[crf_int],
+                predicted_video_bytes / 10_000_000,
+                30.0,
+                predicted_video_bytes,
+                f"crf {crf_int}",
+            )
+
+        result = search_target_size(
+            Path("/tmp/source.mkv"),
+            {
+                "compression_intent_schema_version": 1,
+                "compression_intent": "reference",
+                "compression_intent_source": "operator",
+                "compression_intent_confirmed": True,
+            },
+            source_codec="h264",
+            metric_name="vmaf",
+            metric_target=85.0,
+            min_metric_score=80.0,
+            preset=4,
+            pixel_format="yuv420p10le",
+            sample_every="8m",
+            sample_duration="20s",
+            min_crf=18,
+            max_crf=38,
+            svt_params=[],
+            video_filter=None,
+            stream_budget_ledger=self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000),
+            transform_plan=self._transform_plan(),
+            process_controller=None,
+            host=None,
+            quality_temp_dir=None,
+            run_sample_encode=run_sample,
+        )
+
+        self.assertEqual(measured, [31, 30, 29])
+        self.assertEqual(result.crf, 30.0)
+
+    def test_directional_intents_skip_warm_start_probe(self) -> None:
+        for level in ("reference", "transparent", "perceptual_floor"):
+            with self.subTest(level=level):
+                seen: list[int] = []
+
+                def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
+                    crf_int = int(crf)
+                    seen.append(crf_int)
+                    predicted_video_bytes = 1_000_000_000 - 24_000_000 * crf_int
+                    return SampleEncodeResult(
+                        "VMAF",
+                        90.0 - (crf_int - 20) * 0.2,
+                        predicted_video_bytes / 10_000_000,
+                        30.0,
+                        predicted_video_bytes,
+                        f"crf {crf_int}",
+                    )
+
+                result = search_target_size(
+                    Path("/tmp/source.mkv"),
+                    {
+                        "compression_intent_schema_version": 1,
+                        "compression_intent": level,
+                        "compression_intent_source": "operator",
+                        "compression_intent_confirmed": True,
+                    },
+                    source_codec="h264",
+                    metric_name="vmaf",
+                    metric_target=85.0,
+                    min_metric_score=80.0,
+                    preset=4,
+                    pixel_format="yuv420p10le",
+                    sample_every="8m",
+                    sample_duration="20s",
+                    min_crf=18,
+                    max_crf=38,
+                    svt_params=[],
+                    video_filter=None,
+                    stream_budget_ledger=self._ledger(
+                        target_bytes=300_000_000,
+                        source_size_bytes=1_000_000_000,
+                    ),
+                    transform_plan=self._transform_plan(),
+                    process_controller=None,
+                    host=None,
+                    quality_temp_dir=None,
+                    run_sample_encode=run_sample,
+                    warm_start=QualitySearchWarmStart(20.0, 20, "qms1_test", "qsc1_test"),
+                    expected_search_signature_id="qms1_test",
+                )
+
+                self.assertNotIn(20, seen)
+                self.assertEqual(result.target_size_trace["warm_start"]["status"], "guard_rejected")
+                self.assertFalse(result.target_size_trace["warm_start"]["attempted"])
+
     def test_trusted_hint_can_satisfy_the_existing_selector_in_one_probe(self) -> None:
         ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
         seen: list[int] = []
@@ -820,6 +1026,24 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertEqual(rejection_trace["candidates"][-1]["role"], "final_retry_measurement")
 
     def test_final_output_retry_interpolates_lower_crf_for_under_target_output(self) -> None:
+        intent = CompressionIntentV1("balanced", "test", True)
+        evidence = CompressionEvidenceRef(
+            kind="measured_item_variance",
+            evidence_id="ev1",
+            intent_id=intent.semantic_id,
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+        authorization = authorize_compression_change(
+            intent,
+            authoritative_anchor_bytes=4_600_000,
+            candidate_bytes=5_000_000,
+            evidence=(evidence,),
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
         selected = {
             "crf": 34.0,
             "metric": "VMAF",
@@ -862,6 +1086,9 @@ class TargetSizeSearchTests(unittest.TestCase):
             self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
             4_600_000,
             retry_count=0,
+            compression_intent=intent,
+            compression_evidence=evidence,
+            compression_authorization=authorization,
         )
         measured_crfs: list[float] = []
 
@@ -873,6 +1100,7 @@ class TargetSizeSearchTests(unittest.TestCase):
             quality,
             verification,
             measure_candidate=measure_candidate,
+            compression_intent=intent,
         )
 
         self.assertIsNotNone(retry_quality)
@@ -888,6 +1116,157 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertTrue(retry_quality.target_size_trace["selected_candidate"]["sample_projection_violates_source_cap"])
         self.assertFalse(retry_quality.target_size_trace["selected_candidate"]["violates_source_cap"])
         self.assertTrue(retry_quality.target_size_trace["selected_candidate"]["within_calibrated_final_band"])
+
+    def test_balanced_under_target_retry_rejects_a_larger_lower_quality_candidate(self) -> None:
+        intent = CompressionIntentV1("balanced", "operator", True)
+        evidence = CompressionEvidenceRef(
+            kind="measured_item_variance",
+            evidence_id="ev1",
+            intent_id=intent.semantic_id,
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+        authorization = authorize_compression_change(
+            intent,
+            authoritative_anchor_bytes=4_600_000,
+            candidate_bytes=5_000_000,
+            evidence=(evidence,),
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+        selected = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 90.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_000_000,
+            "predicted_whole_episode_bytes": 5_000_000,
+            "violates_source_cap": False,
+        }
+        lower_quality_larger = {
+            "crf": 33.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 81.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_700_000,
+            "predicted_whole_episode_bytes": 5_700_000,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=34.0,
+            metric="VMAF",
+            target=85.0,
+            score=90.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": 10_000_000},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": [selected, lower_quality_larger],
+                "selected_candidate": selected,
+            },
+        )
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
+            4_600_000,
+            compression_intent=intent,
+            compression_evidence=evidence,
+            compression_authorization=authorization,
+        )
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            compression_intent=intent,
+        )
+
+        self.assertIsNone(retry)
+
+    def test_perceptual_floor_does_not_retry_an_under_target_result_upward(self) -> None:
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000),
+            280_000_000,
+            retry_count=0,
+            compression_intent=CompressionIntentV1("perceptual_floor", "operator", True),
+        )
+
+        self.assertEqual(verification.status, "under_target")
+        self.assertFalse(verification.retry_allowed)
+        self.assertIn("accepts this smaller result", verification.retry_reason or "")
+        self.assertTrue(verification.passed)
+
+    def test_transparent_intent_does_not_retry_an_under_target_result_upward(self) -> None:
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000),
+            280_000_000,
+            retry_count=0,
+            compression_intent=CompressionIntentV1("transparent", "operator", True),
+        )
+
+        self.assertEqual(verification.status, "under_target")
+        self.assertFalse(verification.retry_allowed)
+        self.assertIn("accepts this smaller result", verification.retry_reason or "")
+        self.assertTrue(verification.passed)
+
+    def test_balanced_under_target_retry_requires_typed_authorization(self) -> None:
+        intent = CompressionIntentV1("balanced", "operator", True)
+        ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+
+        blocked = verify_final_output_size(
+            ledger,
+            280_000_000,
+            retry_count=0,
+            compression_intent=intent,
+        )
+        evidence = CompressionEvidenceRef(
+            kind="measured_item_variance",
+            evidence_id="ev1",
+            intent_id=intent.semantic_id,
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+        authorization = authorize_compression_change(
+            intent,
+            authoritative_anchor_bytes=280_000_000,
+            candidate_bytes=300_000_000,
+            evidence=(evidence,),
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+        allowed = verify_final_output_size(
+            ledger,
+            280_000_000,
+            retry_count=0,
+            compression_intent=intent,
+            compression_evidence=evidence,
+            compression_authorization=authorization,
+        )
+
+        self.assertFalse(blocked.retry_allowed)
+        self.assertIn("requires typed current-run evidence", blocked.retry_reason or "")
+        self.assertTrue(allowed.retry_allowed)
+        self.assertEqual(allowed.compression_authorization["outcome"], "authorized")
+
+    def test_legacy_intent_requires_confirmation_before_upward_retry(self) -> None:
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000),
+            280_000_000,
+            retry_count=0,
+        )
+
+        self.assertEqual(verification.status, "under_target")
+        self.assertFalse(verification.retry_allowed)
+        self.assertIn("Choose a compression goal", verification.retry_reason or "")
 
     def test_final_output_retry_requires_a_bracket_with_an_intermediate_integer_crf(self) -> None:
         selected = {

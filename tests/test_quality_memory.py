@@ -57,8 +57,38 @@ class QualityMemoryTests(unittest.TestCase):
             replace(baseline, encoder="libx265"),
             replace(baseline, preset="5"),
             replace(baseline, video_filter="scale=-2:720"),
+            replace(baseline, compression_intent_id="ci1_transparent"),
         ):
             self.assertNotEqual(baseline.signature_id, changed.signature_id)
+
+    def test_compression_intent_isolates_named_and_legacy_cohorts(self) -> None:
+        named = replace(self._context(), compression_intent_id="ci1_perceptual_floor")
+        legacy = self._context()
+        for item_id in range(1, 5):
+            self._add_outcome(
+                item_id,
+                f"tv/Example Show/Season 01/Named {item_id:02d}.mkv",
+                crf=40.0,
+                context=named,
+            )
+        for item_id in range(5, 9):
+            self._add_outcome(
+                item_id,
+                f"tv/Example Show/Season 01/Legacy {item_id:02d}.mkv",
+                crf=30.0,
+                context=legacy,
+            )
+
+        named_result = self._load("tv/Example Show/Season 01/New Named.mkv", named)
+        other_named_result = self._load(
+            "tv/Example Show/Season 01/New Transparent.mkv",
+            replace(named, compression_intent_id="ci1_transparent"),
+        )
+
+        self.assertEqual(named_result.central_crf, 40.0)
+        self.assertEqual(self._exclusions(named_result)["search_signature_changed"], 4)
+        self.assertIsNone(other_named_result.selected)
+        self.assertEqual(self._exclusions(other_named_result)["search_signature_changed"], 8)
 
     def test_season_baseline_is_selected_after_sparse_exact_item(self) -> None:
         context = self._context()
@@ -505,6 +535,7 @@ class QualityMemoryTests(unittest.TestCase):
             }
             if not legacy_event:
                 event_details["target_size_trace"] = self._target_size_trace(context)
+                event_details["compression_intent_id"] = context.compression_intent_id
             if warm_start_status is not None:
                 event_details["quality_warm_start"] = {"status": warm_start_status}
             self.connection.execute(

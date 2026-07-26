@@ -62,6 +62,7 @@ from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_
     with_quality_risk_intent
 from mediaforce.tuning.calibration_jobs import load_job, load_latest_failed_target_size_sample_job, save_job, \
     update_job_telemetry
+from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
     _advice_file,
@@ -115,6 +116,7 @@ from mediaforce.web.runtime.folder_tuning_advice import (
     operator_request_signature,
 )
 from mediaforce.web.runtime.folder_tuning_helpers import (
+    allows_measured_size_quality_tradeoff,
     measured_size_budget_policy_fragment,
     proposal_alignment_issue,
     size_budget_sample_issue,
@@ -315,6 +317,52 @@ def _ready_calibration_host(host_data: dict[str, Any]) -> HostStatus:
 
 
 class TuningRuntimeTests(unittest.TestCase):
+    def test_under_target_quality_increase_respects_compression_intent(self) -> None:
+        analysis = {"status": "under_target"}
+
+        def request(level: str, confirmed: bool = True) -> dict[str, Any]:
+            return {
+                "request_type": "size_budget",
+                "operator_confirmed": True,
+                "applied_policy": {
+                    "video": {
+                        "compression_intent_schema_version": 1,
+                        "compression_intent": level,
+                        "compression_intent_source": "operator",
+                        "compression_intent_confirmed": confirmed,
+                    }
+                },
+            }
+
+        self.assertTrue(
+            allows_measured_size_quality_tradeoff(
+                operator_request=request("balanced"),
+                size_target_analysis=analysis,
+                direction="larger",
+            )
+        )
+        self.assertFalse(
+            allows_measured_size_quality_tradeoff(
+                operator_request=request("perceptual_floor"),
+                size_target_analysis=analysis,
+                direction="larger",
+            )
+        )
+        self.assertFalse(
+            allows_measured_size_quality_tradeoff(
+                operator_request=request("transparent"),
+                size_target_analysis=analysis,
+                direction="larger",
+            )
+        )
+        self.assertFalse(
+            allows_measured_size_quality_tradeoff(
+                operator_request=request("balanced", confirmed=False),
+                size_target_analysis=analysis,
+                direction="larger",
+            )
+        )
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
@@ -325,6 +373,12 @@ class TuningRuntimeTests(unittest.TestCase):
                     "source_roots": {"tv": str(self.root / "source" / "tv")},
                     "staging_root": str(self.root / "staging"),
                     "archive_root": str(self.root / "archive"),
+                },
+                "video": {
+                    "compression_intent_schema_version": 1,
+                    "compression_intent": "balanced",
+                    "compression_intent_source": "config_default",
+                    "compression_intent_confirmed": True,
                 },
                 "remote_hosts": [],
             },
@@ -671,19 +725,18 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIsNotNone(issue)
         self.assertIn("runtime-normalized or an absolute", str(issue))
-        self.assertIsNone(
-            _unconfirmed_legacy_size_issue(
-                self.config,
-                {
-                    "video": {
-                        "size_goal_mode": "absolute",
-                        "target_size_bytes": 225_000_000,
-                        "target_size_mb": 225,
-                        "target_runtime_minutes": 88,
-                    }
-                },
-            )
+        compression_issue = _unconfirmed_legacy_size_issue(
+            self.config,
+            {
+                "video": {
+                    "size_goal_mode": "absolute",
+                    "target_size_bytes": 225_000_000,
+                    "target_size_mb": 225,
+                    "target_runtime_minutes": 88,
+                }
+            },
         )
+        self.assertIn("compression goal", str(compression_issue))
     def test_folder_ai_tune_confirm_fails_closed_when_stale_proposal_id_has_no_pending_proposal(self) -> None:
         host = HostStatus(
             key="cbusillo@localhost",
@@ -1708,6 +1761,12 @@ class TuningRuntimeTests(unittest.TestCase):
                 }
             },
             "advice_payload": {},
+            "base_compression_intent": CompressionIntentV1(
+                "balanced", "config_default", True
+            ).to_payload(),
+            "compression_intent": CompressionIntentV1(
+                "balanced", "config_default", True
+            ).to_payload(),
         }
         sample_item = {
             "rel_path": "movies/Small Target/Feature.mkv",
@@ -4096,7 +4155,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertIsNone(request)
 
-    def test_operator_requested_experiment_preserves_observed_av1_quality_authority(self) -> None:
+    def test_operator_requested_experiment_does_not_mint_observed_av1_quality_authority(self) -> None:
         request = _operator_requested_experiment(
             "The 1080p AV1 sample looked excellent. Keep source resolution and target 250MB per episode.",
             {
@@ -4115,11 +4174,11 @@ class TuningRuntimeTests(unittest.TestCase):
 
         assert request is not None
         self.assertEqual(request["request_type"], "combined_experiment")
-        self.assertEqual(request["evidence_authority"], "operator_observed")
+        self.assertEqual(request["evidence_authority"], "none")
         self.assertEqual(request["feasibility"], "feasible")
         self.assertEqual(request["scale_height"], 0)
 
-    def test_operator_requested_experiment_preserves_visual_rejection(self) -> None:
+    def test_operator_requested_experiment_does_not_mint_visual_rejection(self) -> None:
         request = _operator_requested_experiment(
             "I reject this sample because it looked blocky. Keep source resolution and target 250MB per episode.",
             {
@@ -4137,7 +4196,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         assert request is not None
-        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
+        self.assertEqual(request["evidence_authority"], "none")
         issue = proposal_alignment_issue(
             operator_request=request,
             request_disposition="honored",
@@ -4146,13 +4205,10 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         self.assertIsNotNone(issue)
 
-    def test_operator_requested_experiment_preserves_standalone_visual_rejection(self) -> None:
+    def test_operator_requested_experiment_ignores_standalone_prose_rejection(self) -> None:
         request = _operator_requested_experiment("I reject this sample because it looked blocky.")
 
-        assert request is not None
-        self.assertEqual(request["request_type"], "none")
-        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
-        self.assertIsNone(request["applied_policy"])
+        self.assertIsNone(request)
 
     def test_operator_requested_experiment_mixed_review_is_not_positive_authority(self) -> None:
         with patch(
@@ -4191,7 +4247,7 @@ class TuningRuntimeTests(unittest.TestCase):
             )
 
         assert request is not None
-        self.assertEqual(request["evidence_authority"], "rejected_visual_result")
+        self.assertEqual(request["evidence_authority"], "none")
 
     def test_operator_requested_experiment_detects_explicit_hard_size_cap(self) -> None:
         request = _operator_requested_experiment(
@@ -4686,7 +4742,22 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(proposal["job_fields"]["seed_applied_policy"], expected_fragment)
         self.assertEqual(proposal["request_disposition"], "honored")
 
+        retained_base_intent = proposal["base_compression_intent"]
+        proposal["base_compression_intent"] = CompressionIntentV1(
+            "reference", "folder_override", True
+        ).to_payload()
         deps.load_pending_proposal = lambda *_args, **_kwargs: proposal
+        stale_result = folder_ai_tune_confirm_action(
+            self.config,
+            deps,
+            "tv/show",
+            str(proposal["proposal_id"]),
+        )
+
+        self.assertFalse(stale_result["ok"])
+        self.assertIn("older compression goal", stale_result["message"])
+
+        proposal["base_compression_intent"] = retained_base_intent
         confirm_result = folder_ai_tune_confirm_action(
             self.config,
             deps,
@@ -7866,7 +7937,7 @@ class TuningRuntimeTests(unittest.TestCase):
     def test_guided_review_feedback_preserves_target_and_current_rejection(self) -> None:
         request = operator_request_from_intent(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "size_goal": {
                     "mode": "normalized",
                     "value_mb": 300,
@@ -7875,6 +7946,11 @@ class TuningRuntimeTests(unittest.TestCase):
                     "final_output_tolerance_percent": 5,
                 },
                 "resolution": {"mode": "source", "max_height": None},
+                "compression_intent": {
+                    "schema_version": 1,
+                    "level": "perceptual_floor",
+                    "confirmed": True,
+                },
                 "quality_risk_tags": ["motion_breakup", "audio_quality_layout"],
                 "quality_risk_details": "Moment 2 loses texture and the center channel sounds thin.",
                 "evidence_authority": "rejected_visual_result",
@@ -7902,6 +7978,10 @@ class TuningRuntimeTests(unittest.TestCase):
             ["motion_breakup", "audio_quality_layout"],
         )
         self.assertEqual(request["evidence_authority"], "rejected_visual_result")
+        self.assertEqual(
+            object_dict(request["applied_policy"])["video"]["compression_intent"],
+            "perceptual_floor",
+        )
         self.assertEqual(
             request["quality_risk_details"],
             "Moment 2 loses texture and the center channel sounds thin.",
@@ -8584,8 +8664,10 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertIn("Use softened only when the operator note is exploratory", prompt)
         self.assertIn("closest faithful experiment", prompt)
         self.assertIn("operator_repeat_signal", prompt)
-        self.assertIn("established, visually approved product baseline", prompt)
+        self.assertNotIn("established, visually approved product baseline", prompt)
         self.assertIn("Evidence precedence is strict", prompt)
+        self.assertIn("Never invent conservative headroom", prompt)
+        self.assertIn("Uncertainty means request another measurement", prompt)
         self.assertIn("legacy H.264 or HEVC bitrate intuition", prompt)
         self.assertIn("High-80s VMAF", prompt)
         self.assertIn("non-positive video budget", prompt)

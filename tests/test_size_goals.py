@@ -28,6 +28,10 @@ class SizeGoalTests(unittest.TestCase):
             "target_runtime_minutes": 45,
             "sample_projection_tolerance_percent": 10,
             "final_output_tolerance_percent": 5,
+            "compression_intent_schema_version": 1,
+            "compression_intent": "balanced",
+            "compression_intent_source": "config_default",
+            "compression_intent_confirmed": True,
             "resolution_intent_mode": "max_height",
             "max_height": 1080,
         }
@@ -41,6 +45,7 @@ class SizeGoalTests(unittest.TestCase):
         ]
 
         self.assertEqual(resolved_megabytes, [150.0, 300.0, 586.667, 600.0])
+        self.assertEqual(intent.compression_intent.level, "balanced")
 
     def test_absolute_goal_does_not_scale_with_runtime(self) -> None:
         size_goal = SizeGoalIntent(
@@ -112,39 +117,20 @@ class SizeGoalTests(unittest.TestCase):
         )
         self.assertEqual(intent.size_goal.resolve(45 * 60).target_size_bytes, 225_000_000)
 
-    def test_typed_request_preserves_absolute_size_and_source_resolution(self) -> None:
-        intent = operator_intent_from_request(
-            {
-                "schema_version": 1,
-                "size_goal": {
-                    "mode": "absolute",
-                    "value_mb": 225,
-                    "sample_projection_tolerance_percent": 10,
-                    "final_output_tolerance_percent": 5,
-                },
-                "resolution": {"mode": "source"},
-            }
-        )
-
-        self.assertEqual(intent.size_goal.resolve(88 * 60).target_size_bytes, 225_000_000)
-        self.assertEqual(
-            intent.policy_fragment(item_runtime_seconds=88 * 60),
-            {
-                "video": {
-                    "size_goal_schema_version": 1,
-                    "size_goal_mode": "absolute",
-                    "size_goal_source": "operator",
-                    "sample_projection_tolerance_percent": 10.0,
-                    "final_output_tolerance_percent": 5.0,
-                    "target_size_bytes": 225_000_000,
-                    "target_size_mb": 225.0,
-                    "target_runtime_minutes": 88.0,
-                    "resolution_intent_mode": "source",
-                    "resolution_intent_source": "operator",
-                    "max_height": 0,
+    def test_stale_schema_one_request_requires_a_refresh(self) -> None:
+        with self.assertRaisesRegex(ValueError, "predates compression goals"):
+            operator_intent_from_request(
+                {
+                    "schema_version": 1,
+                    "size_goal": {
+                        "mode": "absolute",
+                        "value_mb": 225,
+                        "sample_projection_tolerance_percent": 10,
+                        "final_output_tolerance_percent": 5,
+                    },
+                    "resolution": {"mode": "source"},
                 }
-            },
-        )
+            )
 
     def test_guided_options_keep_normalized_reference_semantics(self) -> None:
         options = guided_size_goal_options(
@@ -218,6 +204,7 @@ class SizeGoalTests(unittest.TestCase):
         self.assertEqual(fragment["video"]["min_target_vmaf"], 80.0)
         self.assertEqual(fragment["audio"]["keep_languages"], ["eng"])
         self.assertEqual(fragment["subtitle"]["keep_forced"], True)
+        self.assertEqual(fragment["video"]["compression_intent"], "balanced")
 
     def test_manifest_persists_the_per_item_resolved_contract(self) -> None:
         config = self._config_with_override({})

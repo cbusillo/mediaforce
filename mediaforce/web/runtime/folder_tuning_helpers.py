@@ -7,6 +7,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import JSONValue
+from mediaforce.tuning.compression_intent import compression_intent_from_policy
 from mediaforce.tuning.size_goals import DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT
 
 
@@ -174,6 +175,11 @@ def allows_measured_size_quality_tradeoff(
     tradeoff_direction = str(direction or "smaller").strip().lower()
     if tradeoff_direction == "larger":
         if status != "under_target":
+            return False
+        compression_intent = compression_intent_from_policy(
+            object_dict(object_dict(request.get("applied_policy")).get("video"))
+        )
+        if compression_intent.requires_confirmation or compression_intent.accepts_under_target_result:
             return False
         return bool(request.get("operator_confirmed"))
     elif status != "over_target":

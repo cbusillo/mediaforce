@@ -121,6 +121,7 @@ from mediaforce.tuning.tuning_memory import (
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     target_size_search_public_view
+from mediaforce.tuning.compression_intent import compression_intent_options
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
@@ -1227,9 +1228,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         )
         video_policy = object_dict(policy.get("video"))
         item_runtime_seconds = float_value(sample_item.get("duration_seconds")) or None
+        persisted_policy_default = {} if calibration or pending_proposal_raw else config.video
         operator_intent = operator_intent_from_policy(
             video_policy,
-            default_video_policy=config.video,
+            default_video_policy=persisted_policy_default,
             audio_policy=object_dict(policy.get("audio")),
             subtitle_policy=object_dict(policy.get("subtitle")),
         )
@@ -1249,7 +1251,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         size_goal_options = guided_size_goal_options(
             video_policy,
             item_runtime_seconds=item_runtime_seconds,
-            default_video_policy=config.video,
+            default_video_policy=persisted_policy_default,
             audio_policy=object_dict(policy.get("audio")),
             subtitle_policy=object_dict(policy.get("subtitle")),
         )
@@ -1306,6 +1308,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 "advice": advice_state,
                 "size_target_analysis": size_target_analysis or None,
                 "resolved_operator_intent": resolved_operator_intent,
+                "compression_intent_options": compression_intent_options(operator_intent.compression_intent),
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
                 "quality_risk": quality_risk_public_view(quality_risk_contract),
@@ -1554,8 +1557,9 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             older_seasons_confirmed: bool = False,
             scope_membership_token: str = "",
     ) -> ActionPayload:
+        current_config = load_config(config.paths.config_path)
         return queue_folder_encode_action(
-            config,
+            current_config,
             normalized_prefix,
             notes,
             bypass_schedule,
@@ -1579,7 +1583,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             load_latest_failed_target_size_job_state=_load_latest_failed_target_size_job_state,
             validate_scope_action=lambda connection, prefix: other_scope_action_blocker(
                 connection,
-                config,
+                current_config,
                 prefix,
                 membership_token=scope_membership_token,
             ),

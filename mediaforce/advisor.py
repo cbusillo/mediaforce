@@ -1,3 +1,4 @@
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -230,6 +231,7 @@ class SeedPolicyResponse:
     request_response: str
     feasibility_note: str | None
     proposed_policy: dict[str, Any] | None
+    model_proposed_policy: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -248,6 +250,7 @@ class TuningPolicyResponse:
     proposed_policy: dict[str, Any] | None
     toolbelt_used: list[str]
     self_check: dict[str, Any] | None
+    model_proposed_policy: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -315,6 +318,7 @@ def request_seed_policy(
         )
     proposed_policy = object_dict(parsed.get("policy")) or None
     proposed_policy = _compact_policy_payload(proposed_policy)
+    model_proposed_policy = copy.deepcopy(proposed_policy)
     evidence_checked_raw = parsed.get("evidence_checked")
     evidence_checked = evidence_checked_raw if isinstance(evidence_checked_raw, list) else []
     request_disposition = str(parsed.get("request_disposition") or "unclear")
@@ -359,6 +363,7 @@ def request_seed_policy(
             request_response=request_response,
             feasibility_note=(str(parsed.get("feasibility_note")) if parsed.get("feasibility_note") else None),
             proposed_policy=None,
+            model_proposed_policy=model_proposed_policy,
         )
     return SeedPolicyResponse(
         ok=True,
@@ -373,6 +378,7 @@ def request_seed_policy(
         request_response=request_response,
         feasibility_note=(str(parsed.get("feasibility_note")) if parsed.get("feasibility_note") else None),
         proposed_policy=proposed_policy,
+        model_proposed_policy=model_proposed_policy,
     )
 
 
@@ -441,6 +447,7 @@ def request_note_tuning(
         )
     proposed_policy = object_dict(parsed.get("policy")) or None
     proposed_policy = _compact_policy_payload(proposed_policy)
+    model_proposed_policy = copy.deepcopy(proposed_policy)
     evidence_checked_raw = parsed.get("evidence_checked")
     evidence_checked = evidence_checked_raw if isinstance(evidence_checked_raw, list) else []
     request_disposition = str(parsed.get("request_disposition") or "unclear")
@@ -563,6 +570,7 @@ def request_note_tuning(
         proposed_policy=proposed_policy,
         toolbelt_used=sorted(object_dict(payload.get("runtime_toolbelt")).keys()),
         self_check=self_check,
+        model_proposed_policy=model_proposed_policy,
     )
 
 

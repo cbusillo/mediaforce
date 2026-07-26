@@ -662,7 +662,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: {"policy": {}},
+                load_calibration_state=lambda *_args: self._accepted_calibration(self.config),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: persisted.append("persisted"),
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -696,7 +696,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: {"policy": {}},
+                load_calibration_state=lambda *_args: self._accepted_calibration(config),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: persisted.append("persisted"),
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -839,7 +839,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: {"policy": {}},
+                load_calibration_state=lambda *_args: self._accepted_calibration(self.config),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: None,
                 load_active_encode_job_for_prefix_fn=lambda *_args: active_job,
@@ -882,7 +882,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 False,
                 now_iso=lambda: "2026-07-13T00:00:00+00:00",
                 load_job_state=lambda *_args: None,
-                load_calibration_state=lambda *_args: {"policy": {}},
+                load_calibration_state=lambda *_args: self._accepted_calibration(self.config),
                 review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
                 upsert_override=lambda *_args: None,
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
@@ -1010,9 +1010,35 @@ class MovieWorkflowTests(unittest.TestCase):
             "size_goal_schema_version": 1,
             "size_goal_mode": "normalized",
             "size_goal_source": "config_default",
+            "compression_intent_schema_version": 1,
+            "compression_intent": "balanced",
+            "compression_intent_source": "config_default",
+            "compression_intent_confirmed": True,
             "sample_projection_tolerance_percent": 10,
             "final_output_tolerance_percent": 5,
             "max_encoded_percent": 80,
+        }
+
+    @staticmethod
+    def _accepted_calibration(config: MediaforceConfig) -> dict[str, object]:
+        video_policy = dict(config.raw.get("video") or {})
+        video_policy.update({
+            "compression_intent_schema_version": 1,
+            "compression_intent": video_policy.get("compression_intent", "balanced"),
+            "compression_intent_source": video_policy.get("compression_intent_source", "test"),
+            "compression_intent_confirmed": True,
+        })
+        return {
+            "policy": {"video": video_policy},
+            "sample_item": {
+                "compression_intent": {
+                    "schema_version": 1,
+                    "level": video_policy["compression_intent"],
+                    "source": video_policy["compression_intent_source"],
+                    "confirmed": True,
+                },
+                "resolved_policy": {"video": video_policy},
+            },
         }
 
     @staticmethod
@@ -1024,6 +1050,10 @@ class MovieWorkflowTests(unittest.TestCase):
             "size_goal_schema_version": 1,
             "size_goal_mode": "absolute",
             "size_goal_source": "operator_request",
+            "compression_intent_schema_version": 1,
+            "compression_intent": "balanced",
+            "compression_intent_source": "operator",
+            "compression_intent_confirmed": True,
             "sample_projection_tolerance_percent": 10,
             "final_output_tolerance_percent": 5,
             "max_encoded_percent": 80,
