@@ -23,6 +23,10 @@ from mediaforce.tuning.quality_risk import (
     quality_risk_public_view,
     with_quality_risk_intent,
 )
+from mediaforce.tuning.content_intent_observations import (
+    ContentIntentObservationRecordResult,
+    record_visual_content_intent_observation,
+)
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.tuning.stream_budget import StreamBudgetProjectionBlocker, stream_budget_projection_blocker
 from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_source_resolution, operator_request_from_intent
@@ -73,6 +77,7 @@ class FolderAiTuneDeps:
     load_latest_failed_sample_job_state: Any | None = None
     load_advice_state: Any | None = None
     advisor_routing: AdvisorRouting | None = None
+    load_boundary_calibration_state: Any | None = None
 
 
 def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
@@ -82,6 +87,7 @@ def _job_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "rel_path": sample_item.get("rel_path"),
         "source_path": sample_item.get("source_path"),
         "source_fingerprint": sample_item.get("source_fingerprint"),
+        "content_version_fingerprint": sample_item.get("content_version_fingerprint"),
         "source_size_bytes": sample_item.get("source_size_bytes"),
         "video_codec": sample_item.get("video_codec"),
         "video_bitrate": sample_item.get("video_bitrate"),
@@ -389,19 +395,33 @@ def _persist_quality_risk_feedback(
         if deps.load_advice_state is not None
         else {}
     )
+    reviewed_calibration = calibration
+    load_boundary_calibration_state = getattr(
+        deps,
+        "load_boundary_calibration_state",
+        None,
+    )
+    if authority == "rejected_visual_result" and load_boundary_calibration_state is not None:
+        reviewed_calibration = object_dict(
+            load_boundary_calibration_state(config, prefix)
+        ) or calibration
+    frozen_sample_item = object_dict(reviewed_calibration.get("sample_item"))
+    reviewed_sample_item = frozen_sample_item or sample_item
+    reviewed_policy = object_dict(reviewed_calibration.get("policy")) or current_policy
     contract = build_quality_risk_contract(
         prefix=prefix,
-        sample_item=sample_item,
-        current_policy=current_policy,
-        preview_policy=current_policy,
+        sample_item=reviewed_sample_item,
+        current_policy=reviewed_policy,
+        preview_policy=reviewed_policy,
         operator_request=request,
-        calibration=calibration,
+        calibration=reviewed_calibration,
         advice_state=existing_state,
         latest_failed_sample_job=latest_failed_sample_job,
     )
     source_scope = object_dict(contract.get("source_scope"))
     policy = object_dict(contract.get("policy"))
-    moment_indexes = quality_risk_feedback_moment_indexes(tags, calibration.get("review_moments"))
+    moment_indexes = quality_risk_feedback_moment_indexes(tags, reviewed_calibration.get("review_moments"))
+    created_at = deps.now_iso()
     feedback_state = append_quality_risk_record(
         existing_state,
         prefix=prefix,
@@ -412,10 +432,30 @@ def _persist_quality_risk_feedback(
         verdict="rejected" if authority == "rejected_visual_result" else "needs_operator_review",
         tags=tags,
         details=str(request.get("quality_risk_details") or note).strip(),
-        created_at=deps.now_iso(),
+        created_at=created_at,
         evidence_ids=[str(value) for value in object_list(source_scope.get("evidence_ids"))],
         moment_indexes=moment_indexes,
     )
+    if authority == "rejected_visual_result":
+        boundary_observation = ContentIntentObservationRecordResult(
+            status="excluded",
+            observation_id=None,
+            exclusion_reason="frozen_sample_item_missing",
+        )
+        if frozen_sample_item:
+            with open_db(config.paths.db_path) as connection:
+                boundary_observation = record_visual_content_intent_observation(
+                    connection,
+                    prefix=prefix,
+                    sample_item=frozen_sample_item,
+                    calibration=reviewed_calibration,
+                    verdict="rejected",
+                    concern_tags=tags,
+                    evidence_ids=[str(value) for value in object_list(source_scope.get("evidence_ids"))],
+                    moment_indexes=moment_indexes,
+                    recorded_at=created_at,
+                )
+        feedback_state["content_intent_boundary_observation"] = asdict(boundary_observation)
     feedback_state["operator_note"] = note
     feedback_state["operator_request"] = request
     deps.save_advice_state(config, prefix, feedback_state)

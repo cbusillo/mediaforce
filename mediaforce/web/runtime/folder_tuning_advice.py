@@ -43,6 +43,8 @@ CALIBRATION_REVIEW_FIELDS = {
     "accepted_draft_hash",
     "accepted_policy_hash",
     "accepted_sample_job_id",
+    "boundary_review_media_ready",
+    "current_review_artifact_fingerprint",
     "draft_hash",
 }
 _SIZE_BUDGET_UNIT_BYTES = {

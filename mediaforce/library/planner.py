@@ -114,6 +114,7 @@ def build_manifest_item(row: dict[str, Any], config: MediaforceConfig) -> dict[s
         "rel_path": row["rel_path"],
         "media_root": row["media_root"],
         "source_fingerprint": row["fingerprint"],
+        "content_version_fingerprint": row.get("content_version_fingerprint"),
         "source_size_bytes": row["size_bytes"],
         "video_codec": row["video_codec"],
         "video_bitrate": row.get("video_bitrate"),

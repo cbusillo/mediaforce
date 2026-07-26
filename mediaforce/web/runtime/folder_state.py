@@ -7,6 +7,7 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, object_dict, object_list
+from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.tuning.quality_risk import quality_risk_public_view
 
 
@@ -19,7 +20,14 @@ class FolderStateDeps:
     pending_proposal_trace_public_view: Any
 
 
-def load_calibration_state(deps: FolderStateDeps, config: MediaforceConfig, prefix: str, calibration_file: Path) -> dict[str, Any] | None:
+def load_calibration_state(
+        deps: FolderStateDeps,
+        config: MediaforceConfig,
+        prefix: str,
+        calibration_file: Path,
+        *,
+        verify_boundary_artifact: bool = False,
+) -> dict[str, Any] | None:
     path = calibration_file
     if not path.exists():
         return None
@@ -64,12 +72,51 @@ def load_calibration_state(deps: FolderStateDeps, config: MediaforceConfig, pref
     )
     payload["browser_review_ready"] = bool(payload["review_pairs"])
     payload["review_media_ready"] = bool(compare_clips or preview_clips or source_clips or payload["review_pairs"])
+    current_review_artifact_fingerprint = (
+        _current_review_artifact_fingerprint(deps, config, preview_clips, source_clips)
+        if verify_boundary_artifact
+        else None
+    )
+    stored_review_artifact_fingerprint = str(payload.get("review_artifact_fingerprint") or "").strip()
+    payload["current_review_artifact_fingerprint"] = current_review_artifact_fingerprint
+    payload["boundary_review_media_ready"] = bool(
+        preview_clips
+        and source_clips
+        and verify_boundary_artifact
+        and not preview_clips_purged
+        and not source_clips_purged
+        and current_review_artifact_fingerprint
+        and current_review_artifact_fingerprint == stored_review_artifact_fingerprint
+    )
     payload.setdefault("mode", "full" if payload.get("encode_result") else "sample")
     advice_payload = deps.load_advice_state(config, prefix)
     if advice_payload is not None:
         payload["advice"] = advice_payload
     payload["draft_hash"] = deps.calibration_draft_hash(payload)
     return payload
+
+
+def _current_review_artifact_fingerprint(
+        deps: FolderStateDeps,
+        config: MediaforceConfig,
+        preview_clips: list[dict[str, Any]],
+        source_clips: list[dict[str, Any]],
+) -> str | None:
+    clips: list[tuple[str, Path, float, float]] = []
+    for role, review_clips in (("preview", preview_clips), ("source", source_clips)):
+        for clip in review_clips:
+            review_file = deps.review_file_from_url(config, str(clip.get("path") or ""))
+            if review_file is None or not review_file.exists():
+                return None
+            clips.append(
+                (
+                    role,
+                    review_file,
+                    float_value(clip.get("timestamp_seconds")),
+                    float_value(clip.get("duration_seconds")),
+                )
+            )
+    return reviewed_artifact_fingerprint(clips)
 
 
 def _merge_review_pairs(

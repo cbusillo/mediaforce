@@ -56,6 +56,7 @@ class PlannerEvidenceTests(unittest.TestCase):
                     "rel_path": "tv/Show/Episode.mkv",
                     "media_root": "tv",
                     "fingerprint": "file-1",
+                    "content_version_fingerprint": "content-1",
                     "size_bytes": 1_000_000,
                     "duration_seconds": 60.0,
                     "video_codec": "h264",
@@ -81,6 +82,7 @@ class PlannerEvidenceTests(unittest.TestCase):
         self.assertEqual(item["cadence_decision"]["classification"], "unknown")
         self.assertIsNone(item["media_fingerprint"])
         self.assertEqual(item["media_fingerprint_decision"]["status"], "unknown")
+        self.assertEqual(item["content_version_fingerprint"], "content-1")
 
 
 if __name__ == "__main__":

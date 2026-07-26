@@ -11,7 +11,13 @@ from functools import lru_cache
 from pathlib import Path
 
 from mediaforce.encoding.ffmpeg import ab_av1_hwaccel_input_args
-from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError, run_command
+from mediaforce.core.evidence import stable_json_hash
+from mediaforce.core.process_control import (
+    ManagedProcessController,
+    ProcessCancelledError,
+    ScheduleWindowClosedError,
+    run_command,
+)
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, guard_command_for_schedule_deadline, \
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import object_dict
@@ -110,6 +116,100 @@ PREVIOUS_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality"
 QUALITY_CLEANUP_NOTE_PREFIX = "Cleanup warning: "
 QUALITY_SIZE_NEAR_MISS_PERCENT = 2.0
 QUALITY_MAX_AUTO_PERCENT = 25
+QUALITY_TOOLCHAIN_SCHEMA_VERSION = 1
+SVT_ENCODER_VERSION_RE = re.compile(r"SVT-AV1 Encoder Lib v[^\s]+", re.IGNORECASE)
+
+
+def quality_toolchain_identity(
+        *,
+        quality_metric: str,
+        host: dict[str, object] | None = None,
+        process_controller: ManagedProcessController | None = None,
+) -> dict[str, object]:
+    normalized_metric = quality_metric.strip().casefold()
+    metric_filter = {"vmaf": "libvmaf", "xpsnr": "xpsnr"}.get(normalized_metric)
+    if metric_filter is None:
+        return _unavailable_toolchain("unsupported_quality_metric")
+    try:
+        ab_av1_result = _run_quality_command(
+            ["ab-av1", "--version"],
+            process_controller=process_controller,
+            host=host,
+        )
+        if ab_av1_result.returncode != 0:
+            return _unavailable_toolchain("version_command_failed")
+        ffmpeg_result = _run_quality_command(
+            ["ffmpeg", "-version"],
+            process_controller=process_controller,
+            host=host,
+        )
+        if ffmpeg_result.returncode != 0:
+            return _unavailable_toolchain("version_command_failed")
+        encoder_result = _run_quality_command(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=black:s=64x64:d=0.04",
+                "-frames:v",
+                "1",
+                "-c:v",
+                "libsvtav1",
+                "-preset",
+                "13",
+                "-svtav1-params",
+                "lp=1",
+                "-f",
+                "null",
+                "-",
+            ],
+            process_controller=process_controller,
+            host=host,
+        )
+        if encoder_result.returncode != 0:
+            return _unavailable_toolchain("encoder_version_probe_failed")
+        metric_result = _run_quality_command(
+            ["ffmpeg", "-hide_banner", "-h", f"filter={metric_filter}"],
+            process_controller=process_controller,
+            host=host,
+        )
+    except (ProcessCancelledError, ScheduleWindowClosedError):
+        raise
+    except Exception as exc:
+        return _unavailable_toolchain(type(exc).__name__)
+    if metric_result.returncode != 0:
+        return _unavailable_toolchain("metric_runtime_probe_failed")
+    quality_tool_version = _first_nonempty_line(ab_av1_result.stdout, ab_av1_result.stderr)
+    encoder_runtime_version = _first_nonempty_line(ffmpeg_result.stdout, ffmpeg_result.stderr)
+    encoder_version = _svt_encoder_version(encoder_result.stdout, encoder_result.stderr)
+    if not quality_tool_version or not encoder_runtime_version or not encoder_version:
+        return _unavailable_toolchain("version_output_missing")
+    encoder_runtime_signature_id = f"erti1_{stable_json_hash({
+        'ffmpeg_version_output': _normalized_command_output(ffmpeg_result),
+        'encoder_build_identity': _svt_encoder_build_identity(encoder_result),
+    })[:32]}"
+    metric_runtime_signature_id = f"qmri1_{stable_json_hash({
+        'metric': normalized_metric,
+        'filter': metric_filter,
+        'filter_help_output': _normalized_command_output(metric_result),
+    })[:32]}"
+    payload = {
+        "schema_version": QUALITY_TOOLCHAIN_SCHEMA_VERSION,
+        "status": "available",
+        "encoder": "libsvtav1",
+        "encoder_version": encoder_version,
+        "encoder_runtime_version": encoder_runtime_version,
+        "encoder_runtime_signature_id": encoder_runtime_signature_id,
+        "quality_tool": "ab-av1",
+        "quality_tool_version": quality_tool_version,
+        "metric_runtime_signature_id": metric_runtime_signature_id,
+    }
+    payload["signature_id"] = f"qti1_{stable_json_hash(payload)[:32]}"
+    return payload
 
 
 def parse_quality_search_measurements(stdout: str) -> list[QualitySearchMeasurement]:
@@ -530,6 +630,47 @@ def _sampled_clip_size_bytes(payload: dict[str, object]) -> int | None:
         if parsed > 0:
             return parsed
     return None
+
+
+def _first_nonempty_line(*values: str) -> str | None:
+    for value in values:
+        for line in value.splitlines():
+            normalized = line.strip()
+            if normalized:
+                return normalized
+    return None
+
+
+def _svt_encoder_version(*values: str) -> str | None:
+    match = SVT_ENCODER_VERSION_RE.search("\n".join(values))
+    return match.group(0) if match is not None else None
+
+
+def _normalized_command_output(result: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(
+        line.rstrip()
+        for line in f"{result.stdout}\n{result.stderr}".splitlines()
+        if line.strip()
+    )
+
+
+def _svt_encoder_build_identity(result: subprocess.CompletedProcess[str]) -> tuple[str, ...]:
+    return tuple(
+        line.strip()
+        for line in f"{result.stdout}\n{result.stderr}".splitlines()
+        if any(
+            marker in line
+            for marker in ("SVT [version]", "SVT [build]", "LIB Build date")
+        )
+    )
+
+
+def _unavailable_toolchain(reason: str) -> dict[str, object]:
+    return {
+        "schema_version": QUALITY_TOOLCHAIN_SCHEMA_VERSION,
+        "status": "unavailable",
+        "reason": reason,
+    }
 
 
 def _format_crf(value: float) -> str:

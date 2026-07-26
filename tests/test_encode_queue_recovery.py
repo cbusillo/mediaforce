@@ -30,6 +30,7 @@ from mediaforce.core import binaries, config as config_runtime
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
+from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
@@ -61,6 +62,10 @@ from mediaforce.tuning.calibration_jobs import list_queue_summary, \
     load_latest_job as load_latest_calibration_job, \
     load_latest_overlapping_job as load_latest_overlapping_calibration_job, \
     save_job as save_calibration_job, update_job_telemetry as update_calibration_job_telemetry
+from mediaforce.tuning.compression_intent import CompressionIntentV1
+from mediaforce.tuning.content_intent_observations import build_content_intent_boundary_compatibility, \
+    content_intent_stream_plan_id
+from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
@@ -6527,6 +6532,137 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(queued_count, 0)
 
+    def test_save_profile_action_records_frozen_content_intent_boundary(self) -> None:
+        intent = CompressionIntentV1(level="perceptual_floor", source="operator", confirmed=True)
+        policy: dict[str, Any] = {
+            "video": {
+                "encoder": "libsvtav1",
+                "pixel_format": "yuv420p10le",
+                "preset": 4,
+                "default_grain": 8,
+                "grain_denoise": 0,
+                "quality_metric": "vmaf",
+                "target_vmaf": 95.0,
+                "min_target_vmaf": 92.0,
+                "compression_intent_schema_version": 1,
+                "compression_intent": "perceptual_floor",
+                "compression_intent_source": "operator",
+                "compression_intent_confirmed": True,
+            },
+            "audio": {"mode": "copy"},
+            "subtitle": {"mode": "copy"},
+        }
+        sample_item: dict[str, Any] = {
+            "library_item_id": 1,
+            "rel_path": "tv/Futurama/Season 8/Episode 01.mkv",
+            "source_fingerprint": "source-1",
+            "content_version_fingerprint": "content-1",
+            "source_size_bytes": 800_000_000,
+            "video_bitrate": 2_000_000,
+            "duration_seconds": 2_700.0,
+            "output_container": "mkv",
+            "resolved_policy": policy,
+            "compression_intent": intent.to_payload(),
+            "cadence_summary": {"probe": {"average_frame_rate": "24000/1001"}},
+            "cadence_decision": {
+                "classification": "progressive",
+                "transform": "none",
+                "evidence_id": "ev1_cadence",
+            },
+            "media_fingerprint_decision": {
+                "status": "measured",
+                "traits": ["animation_cues", "dark_luma"],
+                "evidence_id": "ev1_fingerprint",
+            },
+            "audio_summary": [],
+            "subtitle_summary": [],
+            "attachment_summary": [],
+        }
+        sample_item["representative_source_id"] = stable_source_id(sample_item)
+        stream_budget = execution.resolve_stream_budget_ledger(
+            sample_item,
+            resolved_size_goal=SizeGoalIntent(
+                mode="absolute",
+                value_bytes=150_000_000,
+                reference_runtime_seconds=None,
+                sample_projection_tolerance_percent=10.0,
+                final_output_tolerance_percent=5.0,
+                source="test",
+            ).resolve(2_700.0),
+            prefer_persisted=False,
+        ).to_payload()
+        sample_item["stream_budget_ledger"] = stream_budget
+        stream_plan_id = content_intent_stream_plan_id(stream_budget)
+        assert stream_plan_id is not None
+        compatibility = build_content_intent_boundary_compatibility(
+            encoder="libsvtav1",
+            encoder_version="SVT-AV1 Encoder Lib v4.2.0",
+            encoder_runtime_version="ffmpeg version 8.0",
+            encoder_runtime_signature_id="erti1_test",
+            quality_tool="ab-av1",
+            quality_tool_version="ab-av1 0.11.3",
+            metric_runtime_signature_id="qmri1_test",
+            preset=4,
+            pixel_format="yuv420p10le",
+            encoder_parameters=["tune=0", "film-grain=8", "film-grain-denoise=0"],
+            output_width=1920,
+            output_height=1080,
+            frame_rate="24000/1001",
+            cadence_transform="none",
+            video_filter=None,
+            output_container="mkv",
+            stream_plan_id=stream_plan_id,
+            measurement_basis="sample_projection",
+            quality_metric="VMAF",
+            quality_target=95.0,
+            minimum_quality_score=92.0,
+        )
+        calibration_payload: folder_actions_runtime.ActionPayload = {
+            "mode": "sample",
+            "job_id": "sample-boundary",
+            "review_media_ready": True,
+            "boundary_review_media_ready": True,
+            "review_artifact_fingerprint": "cira1_review",
+            "current_review_artifact_fingerprint": "cira1_review",
+            "policy": policy,
+            "sample_item": sample_item,
+            "sample_result": {
+                "chosen_crf": 31.0,
+                "quality_metric": "VMAF",
+                "quality_target": 95.0,
+                "quality_score": 95.4,
+                "predicted_video_size_bytes": 122_000_000,
+                "predicted_total_size_bytes": 130_000_000,
+                "sampled_clip_bytes": 12_000_000,
+                "content_intent_compatibility": compatibility.to_payload(),
+            },
+            "review_moments": [
+                {"timestamp_seconds": 90.0, "risk_tags": ["softness_detail_loss"]}
+            ],
+        }
+
+        result = folder_actions_runtime.save_profile_action(
+            self.config,
+            "tv/Futurama/Season 8",
+            now_iso=lambda: "2026-07-26T21:00:00+00:00",
+            load_sample_item=lambda *_args, **_kwargs: None,
+            load_calibration_state=lambda *_args, **_kwargs: copy.deepcopy(calibration_payload),
+            calibration_draft_hash=web_app._calibration_draft_hash,
+            save_calibration_state=lambda *_args, **_kwargs: None,
+            load_advice_state=lambda *_args, **_kwargs: None,
+            record_visual_approval_artifact=lambda *_args, **_kwargs: None,
+            merge_advice_state=lambda *_args, **_kwargs: {},
+            upsert_override=lambda *_args, **_kwargs: None,
+        )
+
+        self.assertTrue(result["ok"])
+        with open_db(self.config.paths.db_path) as connection:
+            row = connection.execute(select(content_intent_boundary_observations)).mappings().one()
+        self.assertEqual(row["verdict"], "acceptable")
+        self.assertEqual(row["boundary_size_bytes"], 130_000_000)
+        self.assertEqual(row["intent_semantic_id"], intent.semantic_id)
+        self.assertEqual(row["content_fingerprint"], "content-1")
+
     def test_save_profile_action_blocks_current_failed_target_search_before_approval(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
             "mode": "sample",
@@ -12218,6 +12354,53 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_video_filter_skips_downsample_when_source_is_already_within_max_height(self) -> None:
         self.assertIsNone(video_filters.build_video_filter({"max_height": 1080}, width=1920, height=800))
+
+    def test_planned_output_dimensions_match_crop_and_scale_filters(self) -> None:
+        self.assertEqual(
+            video_filters.planned_output_dimensions(
+                {"black_bar_handling": "auto", "max_height": 720},
+                width=1920,
+                height=1080,
+                detected_crop="1920:800:0:140",
+            ),
+            (1728, 720),
+        )
+        self.assertEqual(
+            video_filters.planned_output_dimensions(
+                {"max_height": 720},
+                width=1920,
+                height=1080,
+                detected_crop=None,
+            ),
+            (1280, 720),
+        )
+        self.assertEqual(
+            video_filters.planned_output_dimensions(
+                {"max_height": 1080},
+                width=1280,
+                height=720,
+                detected_crop=None,
+            ),
+            (1280, 720),
+        )
+        self.assertEqual(
+            video_filters.planned_output_dimensions(
+                {"max_height": 720},
+                width=1918,
+                height=1080,
+                detected_crop=None,
+            ),
+            (1278, 720),
+        )
+        self.assertEqual(
+            video_filters.planned_output_dimensions(
+                {"max_height": 720},
+                width=2562,
+                height=1440,
+                detected_crop=None,
+            ),
+            (1282, 720),
+        )
 
     def test_video_filter_picks_most_common_meaningful_crop(self) -> None:
         stderr = "\n".join(
