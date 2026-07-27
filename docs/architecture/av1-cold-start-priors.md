@@ -192,6 +192,13 @@ work, range hits, quality-floor outcomes, final-size outcomes, visual verdicts,
 and operator-attention events without carrying title, path, source, or media
 identities into the public cell.
 
+`mediaforce/tuning/av1_validation_harness.py` is a separate prospective
+execution-contract boundary. It adapts reviewed validation locks into one
+validation-sourced warm-start probe, validates the existing target-size search
+trace, and emits a canonical machine-bound ordered-work trace. Production cold
+start and calibration modules do not import it, so validation locks cannot
+masquerade as packaged public cells or private replay evidence.
+
 Synthetic unit fixtures prove arithmetic, conflict handling, deterministic
 serialization, and fallback behavior. They are not training evidence and are
 not reported as empirical predictor accuracy. Controlled real-media evidence

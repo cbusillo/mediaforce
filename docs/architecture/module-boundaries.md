@@ -252,6 +252,9 @@ Guidance:
 - `av1_trait_feasibility.py`
   - read-only public-safe aggregate inventory and coherent derivation preflight
     for proposed AV1 validation cells
+- `av1_validation_harness.py`
+  - isolated reviewed-lock candidate contexts, validation-only warm-start hints,
+    and canonical machine-bound target-size trace validation
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

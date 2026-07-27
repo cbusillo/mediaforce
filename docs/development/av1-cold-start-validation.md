@@ -69,6 +69,40 @@ Low-confidence animation or grain/noise advisories cannot silently create those
 cell identities. The v1 preregistration remains immutable; these findings guide
 the versioned successor protocol rather than relabeling v1 evidence.
 
+## Isolated validation harness
+
+`mediaforce/tuning/av1_validation_harness.py` defines the `av1vh1`
+validation-only context and trace contract. It consumes an already reviewed
+candidate lock, its bound execution authorization, and a public-safe machine
+binding. It does not call the normal cold-start predictor, load private replay
+evidence, mutate the packaged bundle, register a web/runtime route, or discover
+media.
+
+The harness deliberately reuses the existing target-size search rather than
+simulating its control flow. A guided dry run creates one
+`QualitySearchWarmStart` with source `av1_validation_harness`. The existing
+search records the locked first probe and, when that probe is rejected or
+fails, continues through the unchanged measured full-search path. The harness
+then validates and sanitizes that target-size trace into ordered work:
+
+- exactly one `locked_first_probe` for a recommended guided case
+- zero locked probes for baseline or no-recommendation cases
+- one or more `measured_full_search_probe` entries whenever fallback is invoked
+
+The canonical public trace binds the manifest plan, candidate lock,
+authorization, compatibility and policy signatures, bitrate/byte target,
+quality floor, transform plan, search signature, encoder/metric toolchain, and
+ordered observed work. Source paths, titles, source IDs, fingerprints, private
+mapping tokens, review-media identities, and raw database rows are never
+copied into the trace. Noncanonical bytes, missing warm-start evidence,
+tampered CRFs, mismatched machine bindings, stale or under-supported locks,
+private local personalization, and operator-authored success claims fail
+closed.
+
+The harness remains a preregistration input for #285. Its traces do not grant
+runtime authority, select media, create candidate locks, or activate the public
+bundle.
+
 ## Evidence lifecycle
 
 The execution phase has five boundaries:
