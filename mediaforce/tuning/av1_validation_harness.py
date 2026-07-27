@@ -47,6 +47,18 @@ _SEARCH_REASONS = frozenset({
     "target_requires_crossing_quality_floor",
     "transform_plan_identity_invalid",
 })
+_DECISION_FALLBACK_REASONS = frozenset({
+    "compression_intent_requires_directional_search",
+    "content_profile_uncovered",
+})
+_TRACE_FALLBACK_REASONS = _DECISION_FALLBACK_REASONS | frozenset({
+    "candidate_rejected",
+    "invalid_hint_contract",
+    "probe_error",
+    "quality_floor_miss",
+    "source_cap_miss",
+    "target_band_miss",
+})
 
 AV1ValidationHarnessMode = Literal["baseline", "guided"]
 AV1ValidationHarnessPredictionStatus = Literal["baseline", "recommended", "no_recommendation"]
@@ -219,6 +231,8 @@ class AV1ValidationHarnessDecisionV1:
         elif self.prediction_status == "no_recommendation":
             if self.context is not None or not self.fallback_reason:
                 raise AV1ValidationHarnessError("AV1 validation fallback requires a governed reason")
+            if self.fallback_reason not in _DECISION_FALLBACK_REASONS:
+                raise AV1ValidationHarnessError("AV1 validation fallback reason is unsupported")
         else:
             raise AV1ValidationHarnessError("AV1 validation guided decision is invalid")
 
@@ -321,7 +335,11 @@ class AV1ValidationHarnessTraceV1:
             raise AV1ValidationHarnessError("AV1 validation no-recommendation trace must execute fallback")
         if self.prediction_status == "recommended" and self.fallback_invoked and not self.fallback_reason:
             raise AV1ValidationHarnessError("AV1 validation guided fallback requires the observed reason")
-        if not self.manifest_id.startswith("av1vmanifest1_") or not self.cell_plan_id.startswith("av1vplan1_"):
+        if self.fallback_reason is not None and self.fallback_reason not in _TRACE_FALLBACK_REASONS:
+            raise AV1ValidationHarnessError("AV1 validation trace fallback reason is unsupported")
+        if not self.manifest_id.startswith(("av1vmanifest1_", "av1vmanifest2_")) or not self.cell_plan_id.startswith(
+                ("av1vplan1_", "av1vplan2_")
+        ):
             raise AV1ValidationHarnessError("AV1 validation trace manifest or plan ID is invalid")
         if not self.machine_binding_id.startswith("av1vhm1_"):
             raise AV1ValidationHarnessError("AV1 validation trace machine binding is invalid")

@@ -255,6 +255,9 @@ Guidance:
 - `av1_validation_harness.py`
   - isolated reviewed-lock candidate contexts, validation-only warm-start hints,
     and canonical machine-bound target-size trace validation
+- `av1_validation_v2.py`
+  - immutable v2 preregistration, digest-bound aggregate eligibility,
+    explicit excluded-cell records, and fail-closed derivation-only authority
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

@@ -31,9 +31,11 @@ active cells because Mediaforce does not yet have approved public aggregate
 evidence. It therefore returns `no_public_evidence` on an untrained install.
 
 This is deliberate rather than a placeholder recommendation. Issue #277 owns
-the controlled animation/live-action holdouts that may authorize active cells.
-Private runtime observations, historical unlabeled rows, and hand-authored CRF
-guesses cannot populate the public artifact.
+the controlled holdouts that may authorize active cells. The immutable v1
+animation/typical preregistration is historical no-go evidence; the v2
+successor preregisters reachable motion and darkness candidates without
+activating either one. Private runtime observations, historical unlabeled rows,
+and hand-authored CRF guesses cannot populate the public artifact.
 
 ## Version and serialization contract
 
@@ -199,17 +201,26 @@ trace, and emits a canonical machine-bound ordered-work trace. Production cold
 start and calibration modules do not import it, so validation locks cannot
 masquerade as packaged public cells or private replay evidence.
 
+`mediaforce/tuning/av1_validation_v2.py` owns the immutable v2 manifest,
+digest-only eligibility binding, explicit excluded-cell records, and the
+separate derivation-only authorization contract. The manifest itself authorizes
+no runtime work. A derivation authorization can permit only unchanged measured
+full search on the reserved derivation partition; it cannot invoke the
+validation harness, address holdouts, inject a candidate, or activate the
+public bundle.
+
 Synthetic unit fixtures prove arithmetic, conflict handling, deterministic
 serialization, and fallback behavior. They are not training evidence and are
 not reported as empirical predictor accuracy. Controlled real-media evidence
 and any decision to activate bundle cells belong to #277.
 
-Issue #277 adds a separate manifest → evidence → report lifecycle around this
-arithmetic. The canonical preregistration lives outside the package under
-`docs/validation/`; it freezes privacy-safe case slots, exact cohort rules,
-paired arm order, strict evidence thresholds, fallback-conformance coverage,
-and the requirement that runtime remain paused until private source selection
-and candidate locks are independently reviewed.
+Issue #277 adds a separate manifest → private partition → derivation locks →
+holdout authorization → evidence → report lifecycle around this arithmetic.
+Canonical preregistrations live outside the package under `docs/validation/`;
+they freeze privacy-safe case slots, exact cohort rules, paired arm order,
+strict evidence thresholds, fallback-conformance coverage, excluded cells, and
+the requirement that runtime remain paused unless a narrower bound authority
+has been independently reviewed.
 
 Private source/title/series mappings never enter the manifest or aggregate
 report. A local evidence set may use opaque random tokens plus compatibility,
