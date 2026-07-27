@@ -68,5 +68,13 @@ jobs:
       - name: Build frontend
         run: npm --prefix frontend run build
 
+      - name: Build package archives
+        run: uv build
+
+      - name: Verify package contents
+        run: >-
+          uv run python scripts/verify_package_contents.py
+          dist/*.whl dist/*.tar.gz
+
       - name: Run web route smoke
         run: npm --prefix frontend run smoke:web

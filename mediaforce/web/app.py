@@ -119,6 +119,7 @@ from mediaforce.tuning.tuning_memory import (
     record_visual_approval_artifact,
     sibling_approved_season_memory,
 )
+from mediaforce.tuning.av1_cold_start import plan_av1_cold_start
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     target_size_search_public_view
 from mediaforce.tuning.compression_intent import compression_intent_options
@@ -3498,7 +3499,31 @@ def _calibration_run_deps() -> CalibrationRunDeps:
         generate_compare_clips=generate_compare_clips,
         staged_artifact_columns=CALIBRATION_STAGED_ARTIFACT_COLUMNS,
         quality_toolchain_identity=quality_toolchain_identity,
+        select_quality_metric=select_quality_metric,
+        plan_av1_cold_start=_plan_av1_cold_start_for_calibration,
     )
+
+
+def _plan_av1_cold_start_for_calibration(
+        *,
+        config: MediaforceConfig,
+        prefix: str,
+        sample_item: dict[str, Any],
+        compatibility_payload: dict[str, Any],
+        configured_min_crf: int,
+        configured_max_crf: int,
+        as_of: str,
+) -> Any:
+    with open_db(config.paths.db_path) as connection:
+        return plan_av1_cold_start(
+            connection,
+            sample_item=sample_item,
+            prefix=prefix,
+            compatibility_payload=compatibility_payload,
+            configured_min_crf=configured_min_crf,
+            configured_max_crf=configured_max_crf,
+            as_of=as_of,
+        )
 
 
 def _load_job_state(connection: DBClient, config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:

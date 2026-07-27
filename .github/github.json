@@ -7,6 +7,7 @@
     "codingStandards": "docs/policies/coding-standards.md",
     "architecture": "docs/architecture/module-boundaries.md",
     "databaseTooling": "docs/development/database-tooling.md",
+    "packageBuilds": "docs/development/package-builds.md",
     "workstationUi": "docs/style/workstation-ui.md",
     "style": [
       "docs/style/index.md",
@@ -35,7 +36,8 @@
     },
     "build": {
       "frontend": "npm --prefix frontend run build",
-      "package": "uv build"
+      "package": "uv build",
+      "packageContents": "uv run python scripts/verify_package_contents.py dist/*.whl dist/*.tar.gz"
     },
     "smoke": {
       "cli": "uv run mediaforce --help"

@@ -52,6 +52,10 @@ class QualitySearchWarmStart:
     candidate_crf: int
     search_signature_id: str
     cohort_id: str
+    source: str = "quality_memory"
+    confidence: str | None = None
+    provenance_id: str | None = None
+    review_risks: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

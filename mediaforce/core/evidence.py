@@ -10,15 +10,22 @@ EVIDENCE_SCHEMA = "mediaforce.evidence"
 EVIDENCE_VERSION = 1
 
 
-def stable_json_hash(payload: object) -> str:
-    encoded = json.dumps(
+def canonical_json_bytes(payload: object) -> bytes:
+    return json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    ).encode("utf-8")
+
+
+def canonical_json_text(payload: object) -> str:
+    return canonical_json_bytes(payload).decode("utf-8")
+
+
+def stable_json_hash(payload: object) -> str:
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
 def stable_policy_hash(policy: Mapping[str, Any] | None) -> str:
