@@ -175,6 +175,31 @@ serialization, and fallback behavior. They are not training evidence and are
 not reported as empirical predictor accuracy. Controlled real-media evidence
 and any decision to activate bundle cells belong to #277.
 
+Issue #277 adds a separate manifest → evidence → report lifecycle around this
+arithmetic. The canonical preregistration lives outside the package under
+`docs/validation/`; it freezes privacy-safe case slots, exact cohort rules,
+paired arm order, strict evidence thresholds, fallback-conformance coverage,
+and the requirement that runtime remain paused until private source selection
+and candidate locks are independently reviewed.
+
+Private source/title/series mappings never enter the manifest or aggregate
+report. A local evidence set may use opaque random tokens plus compatibility,
+policy, selection-lock, and derivation-snapshot digests. An immutable execution
+authorization binds the pinned manifest, private selection lock, and every
+reviewed candidate lock before any case may run. The public report strips the
+private tokens, commits to the full private evidence payload digest, refuses to
+pool cells, keeps missing/failed/safety-stopped cases visible, and reports
+deterministic blockers. It cannot create a prior cell or mutate the checked-in
+bundle.
+
+The preregistration requires sixteen paired holdouts for each activation
+candidate, fresh conflict-free derivation evidence, moderate-or-higher
+confidence, an explicit numeric quality floor, one-sided exact range-hit and
+candidate-work evidence, zero safety regressions, source/series independence,
+and blinded duplicate-review agreement. These governance gates are
+intentionally stricter than the three-case minimum that protects the generic
+bundle schema.
+
 ## Failure behavior
 
 The predictor returns no recommendation for missing, invalid, stale,
