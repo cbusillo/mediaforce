@@ -4,7 +4,7 @@ Issue #277 owns the controlled evidence that may prove or reject public AV1
 cold-start cells. The checked-in preregistration freezes the experiment design
 without selecting media, starting Mediaforce, or authorizing any encode.
 
-## Checked-in protocol
+## V1 historical protocol
 
 `docs/validation/av1-cold-start-preregistration-v1.json` is canonical JSON with
 a deterministic manifest ID and payload digest. It declares:
@@ -30,9 +30,60 @@ uv run python scripts/verify_av1_cold_start_preregistration.py \
   validate docs/validation/av1-cold-start-preregistration-v1.json --json
 ```
 
-The validator reports `runtime_execution_authorized=false`. A valid manifest is
-permission to prepare a private mapping and candidate locks, not permission to
-run encodes.
+The validator reports `runtime_execution_authorized=false`. V1 remains immutable
+historical no-go evidence; its underfilled and unreachable cells are not
+reinterpreted, relabeled, or backfilled.
+
+## V2 successor preregistration
+
+`docs/validation/av1-cold-start-preregistration-v2.json` is the canonical issue
+`#285` successor. It binds `acstp1`, `acstf1`, `av1vh1`, the unchanged production
+predictor contract `acsp1`, the validation-candidate contract `acsvp1`, and the
+derivation-authorization contract `acsvda1`. It registers:
+
+- sixteen paired holdout slots each for exact `motion` and exact `darkness`
+  `balanced` candidates
+- three baseline-only fallback-conformance slots each for grain/noise, mixed,
+  texture/detail, and the `reference`, `transparent`, and `perceptual_floor`
+  directional-intent paths
+- fifty total case slots, with candidate ordinals alternating baseline-first
+  and guided-first and duplicate review fixed at ordinals 4, 8, 12, and 16
+- explicit exclusions for animation and typical candidate cells, low-motion
+  dialogue, and unknown fallback rather than silently dropping them
+
+The selection was frozen from a fresh read-only aggregate inventory at
+`2026-07-27T21:08:41Z`. The count-bearing eligibility attestation remains in
+machine-local state outside the repository. The checked-in manifest carries
+only its deterministic ID and SHA-256 digest; it contains no runtime database
+values, media identities, paths, titles, fingerprints, or mappings.
+
+Validate the successor without loading runtime state:
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  validate docs/validation/av1-cold-start-preregistration-v2.json --json
+```
+
+The v2 manifest reports both `runtime_execution_authorized=false` and
+`holdout_execution_authorized=false`. Its authority is preregistration only. A
+merged v2 permits #286 to prepare the private source partition while Mediaforce
+remains paused; it does not authorize observations, encodes, review media, or a
+candidate probe.
+
+The separate `acsvda1` authorization may later permit ordinary sampled
+calibration and unchanged measured full search on selection-lock-reserved
+derivation sources only. It hard-rejects validation candidates, guided probes,
+holdout case execution, and public bundle activation. A different, later
+authorization must bind the reviewed candidate locks before any v2 holdout can
+run. The verifier therefore refuses the v2 `report` action at this phase.
+
+Validate the pinned machine-local aggregate attestation without printing its
+counts:
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  validate-eligibility /path/to/eligibility-attestation-v1.json --json
+```
 
 ## Trait reachability preflight
 
@@ -60,8 +111,8 @@ preflight; the private mapping must still prove unique titles/series, source
 group concentration, derivation/holdout disjointness, and every other selection
 constraint. Every feasibility report carries `execution_authorized=false` and
 `runtime_integration_required=true`; it cannot start Mediaforce, alter the v1
-request path, or authorize an encode. Issue #285 owns integration of the
-prospective projection into an executable successor protocol.
+request path, or authorize an encode. The v2 successor binds this prospective
+projection without changing production routing.
 
 The current analyzer deliberately reports low-motion dialogue as unreachable,
 and the current request contract reports unknown fallback cases as unreachable.
@@ -99,29 +150,36 @@ tampered CRFs, mismatched machine bindings, stale or under-supported locks,
 private local personalization, and operator-authored success claims fail
 closed.
 
-The harness remains a preregistration input for #285. Its traces do not grant
-runtime authority, select media, create candidate locks, or activate the public
-bundle.
+The harness is bound by the v2 preregistration and accepts v1 or v2 manifest and
+plan IDs while preserving the same isolated execution semantics. Its traces do
+not grant runtime authority, select media, create candidate locks, or activate
+the public bundle. Fallback reasons are allow-listed so a trace cannot carry
+operator-authored titles, paths, or arbitrary private text.
 
 ## Evidence lifecycle
 
-The execution phase has five boundaries:
+The v2 evidence lifecycle has six boundaries:
 
-1. Map the protocol's case slots to eligible media in a private local file.
+1. Validate the checked-in v2 manifest against its digest-bound aggregate
+   eligibility attestation. This does not authorize runtime execution.
+2. Map the protocol's case slots and separate derivation pools to eligible media
+   in a private local file.
    Commit only its SHA-256 selection lock to the redacted evidence set.
-2. Build a candidate lock from current-contract derivation observations. Each
+3. Create the separate derivation-only authorization, then build a candidate
+   lock from current-contract observations collected through unchanged measured
+   full search. Each
    candidate requires at least twelve eligible observations from six
    independent sources. The lock carries opaque derivation source, series, and
    source-group tokens so the holdout mapper can prove there is no overlap.
    Historical rows may not be relabeled or backfilled.
-3. Independently review the exact traits, CRF range, compatibility and policy
+4. Independently review the exact traits, CRF range, compatibility and policy
    signatures, bitrate range, numeric quality floor, confidence, derivation
    freshness/conflict state, derivation snapshot, and selection lock.
-4. Create one immutable execution authorization that binds the manifest,
+5. Create one immutable holdout execution authorization that binds the manifest,
    selection-lock digest, and every reviewed candidate-lock ID. Every result
    must be later than this authorization, and evidence finalization must be
    later than every result.
-5. Record one redacted result for every preregistered case, then aggregate it
+6. Record one redacted result for every preregistered case, then aggregate it
    with the verifier. Missing, failed, incompatible, contaminated, or
    safety-stopped cases remain visible and block the affected cell.
 
@@ -181,9 +239,10 @@ schema gates. Each candidate cell requires:
 - the exact candidate lock, compatibility, policy, trait set, bitrate range,
   quality floor, and reviewed selection lock used by every case
 
-The `0.025` per-cell threshold controls the two separately preregistered
-animation/live-action publication claims. Reports remain per-cell; they do not
-make a pooled claim that every AV1 prior works.
+The `0.025` per-cell threshold controls each separately preregistered claim. V1
+registered animation and typical live action; v2 registers motion and darkness.
+Reports remain per-cell and do not make a pooled claim that every AV1 prior
+works.
 
 Failure does not lower a threshold or widen a cell. The permitted conclusion is
 `insufficient evidence to activate this cell`; the existing no-recommendation

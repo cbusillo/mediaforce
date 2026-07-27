@@ -2,16 +2,28 @@ import argparse
 import json
 from pathlib import Path
 import sys
-from typing import Sequence
+from typing import Sequence, TypeAlias
 
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
+    AV1ColdStartValidationManifestV1,
     assert_preregistered_av1_cold_start_validation_manifest,
     build_av1_cold_start_validation_report,
     format_av1_cold_start_validation_report,
     load_av1_cold_start_validation_evidence_set,
     load_av1_cold_start_validation_manifest,
 )
+from mediaforce.tuning.av1_validation_v2 import (
+    AV1ValidationManifestV2,
+    AV1ValidationV2Error,
+    assert_preregistered_av1_validation_manifest_v2,
+    assert_preregistered_av1_validation_v2_eligibility,
+    load_av1_validation_manifest_v2,
+    load_av1_validation_v2_eligibility,
+)
+
+
+ValidationManifest: TypeAlias = AV1ColdStartValidationManifestV1 | AV1ValidationManifestV2
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
     validate = actions.add_parser("validate", help="Validate one canonical preregistration manifest")
     validate.add_argument("manifest", type=Path)
     validate.add_argument("--json", action="store_true", dest="json_output")
+
+    eligibility = actions.add_parser(
+        "validate-eligibility",
+        help="Validate the pinned machine-local v2 aggregate eligibility attestation",
+    )
+    eligibility.add_argument("attestation", type=Path)
+    eligibility.add_argument("--json", action="store_true", dest="json_output")
 
     report = actions.add_parser("report", help="Build a deterministic aggregate acceptance report")
     report.add_argument("manifest", type=Path)
@@ -36,26 +55,49 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        manifest = load_av1_cold_start_validation_manifest(args.manifest)
-        assert_preregistered_av1_cold_start_validation_manifest(manifest)
-        if args.action == "validate":
+        if args.action == "validate-eligibility":
+            eligibility = load_av1_validation_v2_eligibility(args.attestation)
+            assert_preregistered_av1_validation_v2_eligibility(eligibility)
             payload = {
-                "manifest_id": manifest.manifest_id,
-                "state": manifest.state,
-                "cell_plan_count": len(manifest.cell_plans),
-                "registered_case_count": len(manifest.cases),
+                "attestation_id": eligibility.attestation_id,
+                "as_of": eligibility.as_of,
+                "eligible_cell_count": sum(cell.state == "eligible" for cell in eligibility.cells),
+                "excluded_cell_count": sum(cell.state == "excluded" for cell in eligibility.cells),
                 "runtime_execution_authorized": False,
+                "holdout_execution_authorized": False,
             }
             if args.json_output:
                 print(json.dumps(payload, indent=2, sort_keys=True))
             else:
                 print(
-                    f"manifest={manifest.manifest_id} state={manifest.state} "
-                    f"plans={len(manifest.cell_plans)} cases={len(manifest.cases)} "
-                    "runtime_execution_authorized=false"
+                    f"attestation={eligibility.attestation_id} as_of={eligibility.as_of} "
+                    f"eligible={payload['eligible_cell_count']} excluded={payload['excluded_cell_count']} "
+                    "runtime_execution_authorized=false holdout_execution_authorized=false"
                 )
             return 0
 
+        manifest = _load_manifest(args.manifest)
+        if isinstance(manifest, AV1ValidationManifestV2):
+            assert_preregistered_av1_validation_manifest_v2(manifest)
+        else:
+            assert_preregistered_av1_cold_start_validation_manifest(manifest)
+        if args.action == "validate":
+            payload = _validation_payload(manifest)
+            if args.json_output:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(
+                    f"manifest={manifest.manifest_id} state={payload['state']} "
+                    f"plans={len(manifest.cell_plans)} cases={len(manifest.cases)} "
+                    "runtime_execution_authorized=false "
+                    f"holdout_execution_authorized={str(payload['holdout_execution_authorized']).lower()}"
+                )
+            return 0
+
+        if isinstance(manifest, AV1ValidationManifestV2):
+            raise AV1ValidationV2Error(
+                "AV1 v2 holdout reports remain blocked until a separate execution authorization exists"
+            )
         evidence_set = load_av1_cold_start_validation_evidence_set(args.evidence)
         report = build_av1_cold_start_validation_report(
             manifest,
@@ -68,9 +110,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_av1_cold_start_validation_report(report))
         return 0 if report.supports_publication_review else 2
-    except (AV1ColdStartValidationError, OSError) as exc:
+    except (AV1ColdStartValidationError, AV1ValidationV2Error, OSError, json.JSONDecodeError) as exc:
         print(f"AV1 cold-start validation failed: {exc}", file=sys.stderr)
         return 1
+
+
+def _load_manifest(path: Path) -> ValidationManifest:
+    payload = json.loads(path.read_bytes())
+    if not isinstance(payload, dict):
+        raise AV1ColdStartValidationError("AV1 validation manifest must be a JSON object")
+    schema_version = payload.get("schema_version")
+    if schema_version == 1:
+        return load_av1_cold_start_validation_manifest(path)
+    if schema_version == 2:
+        return load_av1_validation_manifest_v2(path)
+    raise AV1ColdStartValidationError("AV1 validation manifest schema version is unsupported")
+
+
+def _validation_payload(manifest: ValidationManifest) -> dict[str, object]:
+    if isinstance(manifest, AV1ValidationManifestV2):
+        return {
+            "manifest_id": manifest.manifest_id,
+            "schema_version": 2,
+            "state": "preregistered_derivation_only",
+            "authority": "derivation_only",
+            "cell_plan_count": len(manifest.cell_plans),
+            "candidate_cell_count": sum(plan.mode == "publication_candidate" for plan in manifest.cell_plans),
+            "fallback_cell_count": sum(plan.mode == "fallback_conformance" for plan in manifest.cell_plans),
+            "excluded_cell_count": len(manifest.excluded_cells),
+            "registered_case_count": len(manifest.cases),
+            "runtime_execution_authorized": False,
+            "holdout_execution_authorized": False,
+        }
+    return {
+        "manifest_id": manifest.manifest_id,
+        "schema_version": 1,
+        "state": manifest.state,
+        "cell_plan_count": len(manifest.cell_plans),
+        "registered_case_count": len(manifest.cases),
+        "runtime_execution_authorized": False,
+        "holdout_execution_authorized": False,
+    }
 
 
 if __name__ == "__main__":

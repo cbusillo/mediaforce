@@ -56,6 +56,8 @@ _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ID_RE = re.compile(
     r"av1v(?:plan|case|lock|authorization|result|manifest|evidence|report)1_[0-9a-f]{32}\Z"
 )
+_MANIFEST_REFERENCE_RE = re.compile(r"av1vmanifest[12]_[0-9a-f]{32}\Z")
+_PLAN_REFERENCE_RE = re.compile(r"av1vplan[12]_[0-9a-f]{32}\Z")
 _FALLBACK_REASON_RE = re.compile(r"[a-z][a-z0-9_]{2,95}\Z")
 
 _RESULT_FAILURE_REASONS = frozenset({
@@ -495,9 +497,9 @@ class AV1ColdStartValidationCandidateLockV1:
     def __post_init__(self) -> None:
         if not _ID_RE.fullmatch(self.candidate_lock_id) or not self.candidate_lock_id.startswith("av1vlock1_"):
             raise AV1ColdStartValidationError("AV1 validation candidate-lock ID is invalid")
-        if not _ID_RE.fullmatch(self.manifest_id) or not self.manifest_id.startswith("av1vmanifest1_"):
+        if not _MANIFEST_REFERENCE_RE.fullmatch(self.manifest_id):
             raise AV1ColdStartValidationError("AV1 validation candidate lock references an invalid manifest")
-        if not _ID_RE.fullmatch(self.cell_plan_id) or not self.cell_plan_id.startswith("av1vplan1_"):
+        if not _PLAN_REFERENCE_RE.fullmatch(self.cell_plan_id):
             raise AV1ColdStartValidationError("AV1 validation candidate lock references an invalid plan")
         if self.exact_traits != tuple(sorted(set(self.exact_traits))) or not self.exact_traits:
             raise AV1ColdStartValidationError("AV1 validation candidate traits must be non-empty and sorted")
@@ -613,7 +615,7 @@ class AV1ColdStartValidationExecutionAuthorizationV1:
                 "av1vauthorization1_"
         ):
             raise AV1ColdStartValidationError("AV1 validation execution-authorization ID is invalid")
-        if not _ID_RE.fullmatch(self.manifest_id) or not self.manifest_id.startswith("av1vmanifest1_"):
+        if not _MANIFEST_REFERENCE_RE.fullmatch(self.manifest_id):
             raise AV1ColdStartValidationError("AV1 validation authorization references an invalid manifest")
         if not _SHA256_RE.fullmatch(self.selection_lock_sha256):
             raise AV1ColdStartValidationError("AV1 validation authorization selection lock is invalid")
