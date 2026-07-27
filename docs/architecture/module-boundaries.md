@@ -243,8 +243,9 @@ Guidance:
     private replay overlay, bounded CRF prediction, confidence, provenance, and
     no-recommendation behavior
 - `av1_cold_start_evaluation.py`
-  - privacy-safe held-out range, candidate-work, and safety-regression
-    aggregation for controlled prior publication decisions
+  - deterministic AV1 preregistration manifests, private redacted evidence
+    validation, privacy-safe held-out range/candidate-work/safety aggregation,
+    and non-mutating publication-review reports
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

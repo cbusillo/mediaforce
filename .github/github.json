@@ -8,6 +8,7 @@
     "architecture": "docs/architecture/module-boundaries.md",
     "databaseTooling": "docs/development/database-tooling.md",
     "packageBuilds": "docs/development/package-builds.md",
+    "av1ColdStartValidation": "docs/development/av1-cold-start-validation.md",
     "workstationUi": "docs/style/workstation-ui.md",
     "style": [
       "docs/style/index.md",
@@ -48,11 +49,7 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": [
-        "changed_files",
-        "directory",
-        "whole_project"
-      ]
+      "scopePreference": ["changed_files", "directory", "whole_project"]
     },
     "docsRequiredWhen": [
       "behavior changes",
