@@ -246,6 +246,12 @@ Guidance:
   - deterministic AV1 preregistration manifests, private redacted evidence
     validation, privacy-safe held-out range/candidate-work/safety aggregation,
     and non-mutating publication-review reports
+- `av1_trait_projection.py`
+  - versioned deterministic AV1 cell identity, review-only advisory separation,
+    retained-analysis reclassification, and current producer reachability
+- `av1_trait_feasibility.py`
+  - read-only public-safe aggregate inventory and coherent derivation preflight
+    for proposed AV1 validation cells
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

@@ -81,7 +81,22 @@ remains available.
 
 ## Content and intent
 
-Measured fingerprint traits map into the public multi-label vocabulary:
+Prospective validation uses the `acstp1` AV1 trait projection rather than the
+fingerprint decision's raw finding list. The projection is canonical JSON with
+a hash-bound `projection_id`; it separates stable cell identity from review-only
+advisories before any validation cell is selected.
+
+Stable non-advisory `dark_luma`, `high_motion`, and `high_texture` findings can
+produce darkness, motion, and texture/detail identity at the contract's
+confidence floor. `animation_cues` and `likely_film_grain` are the only
+advisories explicitly promotable into identity, and only at the higher
+promotion floor. Audio complexity, duplicate cadence, banding risk, analog or
+ambiguous noise, and low-confidence animation/grain findings remain review
+advisories. An audio-only or advisory-only decision therefore remains
+`typical`; an unrecognized or low-confidence identity finding becomes
+`unknown` rather than being mislabeled as typical.
+
+The projected public multi-label vocabulary is:
 
 - `animation`
 - `darkness`
@@ -93,12 +108,19 @@ Measured fingerprint traits map into the public multi-label vocabulary:
 - `typical`
 - `unknown`
 
-`mixed` is added when multiple measured risk traits are present. `unknown` is
-an explicit state, not an inferred genre. The current fingerprint contract does
-not invent low-motion dialogue; that label is used only when measured evidence
-provides it. Public cells require an exact match to the complete sorted trait
-set, so a narrow animation-only cell cannot generalize into unvalidated dark,
-grainy, textured, or mixed content.
+`mixed` is added when multiple measured identity traits are present. `unknown`
+is an explicit state, not an inferred genre. The current analyzer has no
+low-motion-dialogue producer, and the current request contract rejects
+unmeasured evidence before it can create an unknown fallback request. The
+feasibility gate therefore marks both paths unavailable instead of accepting an
+unexecutable preregistration cell. Public cells require an exact match to the
+complete sorted trait set, so a narrow animation-only cell cannot generalize
+into unvalidated dark, grainy, textured, or mixed content.
+
+Historical content-intent observations remain append-only. Feasibility can
+join an observation to current retained fingerprint analysis only when the
+content-version binding still matches, then apply `acstp1` in memory without
+rewriting the observation or reopening the media.
 
 Each confirmed compression intent has one exact optimization objective:
 
