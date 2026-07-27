@@ -34,6 +34,41 @@ The validator reports `runtime_execution_authorized=false`. A valid manifest is
 permission to prepare a private mapping and candidate locks, not permission to
 run encodes.
 
+## Trait reachability preflight
+
+Before a future preregistration is treated as executable, run the read-only
+trait feasibility report against the proposed manifest and an explicit UTC
+cutoff:
+
+```bash
+uv run mediaforce av1-trait-feasibility \
+  docs/validation/av1-cold-start-preregistration-v1.json \
+  --as-of 2026-07-27T18:00:00Z --json
+```
+
+The `acstp1` projection reclassifies compatible retained fingerprint analysis
+without reading media. The report emits only aggregate item, parent-scope,
+source, series, source-group, coherent compatibility/policy cohort, and bitrate
+range counts. Paths, titles, source IDs, fingerprints, review-media identities,
+compatibility tokens, and policy tokens are never emitted. The report is
+deterministic for the same database snapshot, manifest, and `--as-of` value.
+
+`ready_for_private_mapping` means only that current code can produce the
+requested trait/intent path and aggregate inventory and derivation upper bounds
+meet the preregistered minima. Parent-scope diversity is a conservative public
+preflight; the private mapping must still prove unique titles/series, source
+group concentration, derivation/holdout disjointness, and every other selection
+constraint. Every feasibility report carries `execution_authorized=false` and
+`runtime_integration_required=true`; it cannot start Mediaforce, alter the v1
+request path, or authorize an encode. Issue #285 owns integration of the
+prospective projection into an executable successor protocol.
+
+The current analyzer deliberately reports low-motion dialogue as unreachable,
+and the current request contract reports unknown fallback cases as unreachable.
+Low-confidence animation or grain/noise advisories cannot silently create those
+cell identities. The v1 preregistration remains immutable; these findings guide
+the versioned successor protocol rather than relabeling v1 evidence.
+
 ## Evidence lifecycle
 
 The execution phase has five boundaries:

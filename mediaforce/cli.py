@@ -32,6 +32,10 @@ from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.quality_acceptance import format_quality_acceptance_report, load_quality_acceptance_report
+from mediaforce.tuning.av1_trait_feasibility import (
+    format_av1_trait_feasibility_report,
+    load_av1_trait_feasibility_report_from_path,
+)
 
 
 class TargetSizePreflightBlocked(RuntimeError):
@@ -115,6 +119,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="json_output",
         help="Print the stable JSON report",
+    )
+
+    av1_trait_feasibility_parser = subparsers.add_parser(
+        "av1-trait-feasibility",
+        help="Report privacy-safe reachability for AV1 validation cells",
+    )
+    av1_trait_feasibility_parser.add_argument(
+        "manifest",
+        type=Path,
+        help="Path to a canonical AV1 validation preregistration manifest",
+    )
+    av1_trait_feasibility_parser.add_argument(
+        "--as-of",
+        required=True,
+        help="Canonical UTC report cutoff such as 2026-07-27T18:00:00Z",
+    )
+    av1_trait_feasibility_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Print the stable privacy-safe JSON report",
     )
 
     plan_parser = subparsers.add_parser("plan", help="Generate a run manifest from current state")
@@ -225,6 +250,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(format_quality_acceptance_report(report))
         return 0
+
+    if args.command == "av1-trait-feasibility":
+        try:
+            with open_readonly_db(config.paths.db_path) as connection:
+                report = load_av1_trait_feasibility_report_from_path(
+                    connection,
+                    manifest_path=args.manifest,
+                    as_of=args.as_of,
+                )
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"AV1 trait feasibility failed: {exc}")
+            return 1
+        if args.json_output:
+            print(json.dumps(report.to_payload(), indent=2, sort_keys=True))
+        else:
+            print(format_av1_trait_feasibility_report(report))
+        return 0 if report.ready else 2
 
     purge_transient_artifacts(config)
     default_review_dir = config.paths.review_dir
