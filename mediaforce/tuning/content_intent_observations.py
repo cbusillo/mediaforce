@@ -14,7 +14,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import content_intent_boundary_observations
-from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
+from mediaforce.core.evidence import canonical_json_text, stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import build_svt_params
 from mediaforce.tuning.compression_intent import CompressionIntentV1, compression_intent_from_item
@@ -240,6 +240,7 @@ class ContentIntentBoundarySummary:
 class ContentIntentBoundaryCohort:
     scope: BoundaryCohortScope
     cohort_id: str
+    boundary_status: BoundarySummaryStatus
     observation_count: int
     source_count: int
     confidence: BoundaryCohortConfidence
@@ -249,6 +250,11 @@ class ContentIntentBoundaryCohort:
     acceptable_bitrate_mad: int | None
     minimum_acceptable_bitrate_bps: int | None
     maximum_acceptable_bitrate_bps: int | None
+    median_acceptable_crf: float | None
+    acceptable_crf_mad: float | None
+    minimum_acceptable_crf: float | None
+    maximum_acceptable_crf: float | None
+    evidence_snapshot_id: str | None
     actionable: bool
     reason: str
 
@@ -260,6 +266,14 @@ class ContentIntentPersonalizationState:
     compatibility_key: str
     item_boundary: ContentIntentBoundarySummary
     cohorts: tuple[ContentIntentBoundaryCohort, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ContentIntentReplayContext:
+    source_id: str
+    content_id: str
+    content_profile_id: str
+    content_traits: tuple[str, ...]
 
 
 def build_content_intent_boundary_compatibility(
@@ -412,6 +426,7 @@ def build_visual_content_intent_observation(
         moment_indexes: Sequence[int],
         recorded_at: str,
 ) -> ContentIntentObservationBuildResult:
+    normalized_recorded_at = _timestamp(recorded_at, "recorded timestamp")
     if verdict not in {"approved", "rejected"}:
         raise ValueError("Visual boundary observations require an approved or rejected verdict")
     normalized_concerns = tuple(
@@ -581,6 +596,7 @@ def build_visual_content_intent_observation(
         "intent_snapshot_id": intent.snapshot_id,
         "content_fingerprint_kind": CONTENT_VERSION_FINGERPRINT_KIND,
         "artifact_fingerprint": artifact_fingerprint,
+        "recorded_at": normalized_recorded_at,
     }
     return ContentIntentObservationBuildResult(
         _build_observation(
@@ -629,7 +645,7 @@ def build_visual_content_intent_observation(
             quality_floor_met=measured_quality_score >= minimum_quality_score,
             assessment=assessment,
             provenance=provenance,
-            recorded_at=_required_text(recorded_at, "recorded timestamp"),
+            recorded_at=normalized_recorded_at,
         ),
         None,
     )
@@ -807,6 +823,7 @@ def correct_content_intent_boundary_observation(
         provenance={
             **object_dict(json.loads(previous.provenance_json)),
             "correction_reason": reason_code,
+            "recorded_at": successor_recorded_at,
         },
         recorded_at=successor_recorded_at,
     )
@@ -951,6 +968,76 @@ def replay_content_intent_personalization(
         intent_semantic_id: str,
         compatibility_key: str,
 ) -> ContentIntentPersonalizationState:
+    scoped_rows = _content_intent_replay_scope_rows(
+        observations,
+        source_id=source_id,
+        content_id=content_id,
+        prefix=prefix,
+        content_profile_id=content_profile_id,
+        intent_semantic_id=intent_semantic_id,
+        compatibility_key=compatibility_key,
+    )
+    cohorts = (
+        _cohort("item", scoped_rows["item"], f"item:{content_id}"),
+        _cohort(
+            "folder",
+            scoped_rows["folder"],
+            f"folder:{stable_json_hash({'prefix': _normalized_path(prefix)})[:24]}",
+        ),
+        _cohort(
+            "content_class",
+            scoped_rows["content_class"],
+            f"content:{content_profile_id}",
+        ),
+        _cohort("operator", scoped_rows["operator"], "operator:local"),
+    )
+    return ContentIntentPersonalizationState(
+        model_compatibility_id=_model_compatibility_id(
+            content_profile_id=content_profile_id,
+            intent_semantic_id=intent_semantic_id,
+            compatibility_key=compatibility_key,
+        ),
+        intent_semantic_id=intent_semantic_id,
+        compatibility_key=compatibility_key,
+        item_boundary=summarize_content_intent_boundary(scoped_rows["item"]),
+        cohorts=cohorts,
+    )
+
+
+def content_intent_replay_scope_rows(
+        observations: Sequence[Mapping[str, Any]],
+        *,
+        source_id: str,
+        content_id: str,
+        prefix: str,
+        content_profile_id: str,
+        intent_semantic_id: str,
+        compatibility_key: str,
+        scope: BoundaryCohortScope,
+) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        _content_intent_replay_scope_rows(
+            observations,
+            source_id=source_id,
+            content_id=content_id,
+            prefix=prefix,
+            content_profile_id=content_profile_id,
+            intent_semantic_id=intent_semantic_id,
+            compatibility_key=compatibility_key,
+        )[scope]
+    )
+
+
+def _content_intent_replay_scope_rows(
+        observations: Sequence[Mapping[str, Any]],
+        *,
+        source_id: str,
+        content_id: str,
+        prefix: str,
+        content_profile_id: str,
+        intent_semantic_id: str,
+        compatibility_key: str,
+) -> dict[BoundaryCohortScope, list[Mapping[str, Any]]]:
     current_observations = _current_revision_rows(observations)
     intent_technical_compatible = [
         observation
@@ -973,38 +1060,37 @@ def replay_content_intent_personalization(
         if str(observation.get("content_profile_id")) == content_profile_id
     ]
     normalized_prefix = _normalized_path(prefix)
-    cohorts = (
-        _cohort("item", exact, f"item:{content_id}"),
-        _cohort(
-            "folder",
-            [
-                observation
-                for observation in profile_compatible
-                if str(observation.get("prefix")) == normalized_prefix
-            ],
-            f"folder:{normalized_prefix}",
-        ),
-        _cohort(
-            "content_class",
-            [
-                observation
-                for observation in profile_compatible
-                if str(observation.get("content_profile_id")) == content_profile_id
-            ],
-            f"content:{content_profile_id}",
-        ),
-        _cohort("operator", profile_compatible, "operator:local"),
-    )
-    return ContentIntentPersonalizationState(
-        model_compatibility_id=_model_compatibility_id(
-            content_profile_id=content_profile_id,
-            intent_semantic_id=intent_semantic_id,
-            compatibility_key=compatibility_key,
-        ),
-        intent_semantic_id=intent_semantic_id,
-        compatibility_key=compatibility_key,
-        item_boundary=summarize_content_intent_boundary(exact),
-        cohorts=cohorts,
+    return {
+        "item": exact,
+        "folder": [
+            observation
+            for observation in profile_compatible
+            if str(observation.get("prefix")) == normalized_prefix
+        ],
+        "content_class": [
+            observation
+            for observation in profile_compatible
+            if str(observation.get("prefix")) != normalized_prefix
+        ],
+        "operator": profile_compatible,
+    }
+
+
+def content_intent_replay_context(
+        sample_item: Mapping[str, Any],
+) -> ContentIntentReplayContext:
+    item = object_dict(sample_item)
+    content_fingerprint = str(item.get("content_version_fingerprint") or "").strip()
+    content_traits = _content_traits(item)
+    if not content_fingerprint:
+        raise ValueError("Content-intent replay requires a content-version fingerprint")
+    if not content_traits:
+        raise ValueError("Content-intent replay requires measured content traits")
+    return ContentIntentReplayContext(
+        source_id=stable_source_id(item),
+        content_id=_content_id(content_fingerprint),
+        content_profile_id=_content_profile_id(content_traits),
+        content_traits=content_traits,
     )
 
 
@@ -1457,10 +1543,28 @@ def _cohort(
     unacceptable_count = sum(
         1 for observation in observations if str(observation.get("verdict")) == "unacceptable"
     )
-    source_count = len({str(observation.get("source_id")) for observation in observations})
+    acceptable_crfs = [
+        value
+        for observation in observations
+        if str(observation.get("verdict")) == "acceptable"
+        for value in (_observation_chosen_crf(observation),)
+        if value is not None
+    ]
+    acceptable_source_count = len({
+        str(observation.get("source_id"))
+        for observation in observations
+        if str(observation.get("verdict")) == "acceptable"
+        and int_value(observation.get("boundary_bitrate_bps")) > 0
+    })
     central = round(median(acceptable)) if acceptable else None
     mad = round(median(abs(value - central) for value in acceptable)) if acceptable and central is not None else None
-    confidence = _cohort_confidence(source_count, central, mad)
+    central_crf = round(median(acceptable_crfs), 3) if acceptable_crfs else None
+    crf_mad = (
+        round(median(abs(value - central_crf) for value in acceptable_crfs), 3)
+        if acceptable_crfs and central_crf is not None
+        else None
+    )
+    confidence = _cohort_confidence(acceptable_source_count, central, mad)
     boundary = summarize_content_intent_boundary(observations)
     actionable = (
         boundary.status not in {"empty", "conflicting"}
@@ -1484,8 +1588,9 @@ def _cohort(
     return ContentIntentBoundaryCohort(
         scope=scope,
         cohort_id=cohort_id,
+        boundary_status=boundary.status,
         observation_count=len(observations),
-        source_count=source_count,
+        source_count=acceptable_source_count,
         confidence=confidence,
         acceptable_count=len(acceptable),
         unacceptable_count=unacceptable_count,
@@ -1493,9 +1598,35 @@ def _cohort(
         acceptable_bitrate_mad=mad,
         minimum_acceptable_bitrate_bps=min(acceptable) if acceptable else None,
         maximum_acceptable_bitrate_bps=max(acceptable) if acceptable else None,
+        median_acceptable_crf=central_crf,
+        acceptable_crf_mad=crf_mad,
+        minimum_acceptable_crf=min(acceptable_crfs) if acceptable_crfs else None,
+        maximum_acceptable_crf=max(acceptable_crfs) if acceptable_crfs else None,
+        evidence_snapshot_id=(
+            f"cics1_{stable_json_hash(sorted(
+                str(observation.get('payload_sha256') or '')
+                for observation in observations
+            ))[:32]}"
+            if observations
+            else None
+        ),
         actionable=actionable,
         reason=reason,
     )
+
+
+def _observation_chosen_crf(observation: Mapping[str, Any]) -> float | None:
+    try:
+        assessment = object_dict(json.loads(str(observation.get("assessment_json") or "{}")))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    value = assessment.get("chosen_crf")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    if not math.isfinite(normalized) or not 0 <= normalized <= 63:
+        return None
+    return round(normalized, 3)
 
 
 def _cohort_confidence(
@@ -1572,4 +1703,4 @@ def _optional_text(value: object) -> str | None:
 
 
 def _json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return canonical_json_text(value)

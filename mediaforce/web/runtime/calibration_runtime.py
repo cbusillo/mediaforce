@@ -28,6 +28,7 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_frame_rate,
     content_intent_stream_plan_id,
 )
+from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +67,8 @@ class CalibrationRunDeps:
     review_moment_payload: Any | None = None
     default_review_timestamps: Any | None = None
     quality_toolchain_identity: Any | None = None
+    select_quality_metric: Any | None = None
+    plan_av1_cold_start: Any | None = None
 
 
 class _CalibrationTelemetry:
@@ -707,14 +710,21 @@ def run_sampled_calibration(
             str(sample_item.get("source_fingerprint") or "") or None
         )
     preferred_quality_metric = str(video_policy.get("quality_metric") or "auto").strip().casefold()
+    selected_quality_metric = (
+        preferred_quality_metric if preferred_quality_metric in {"vmaf", "xpsnr"} else "xpsnr"
+    )
+    default_quality_target = 95.0 if selected_quality_metric == "vmaf" else 41.0
+    if deps.select_quality_metric is not None:
+        selected_quality_metric, default_quality_target = deps.select_quality_metric(
+            preferred_quality_metric
+        )
+    quality_target = float(
+        video_policy.get(f"target_{selected_quality_metric}", default_quality_target)
+    )
     toolchain_identity_before = (
         object_dict(
             deps.quality_toolchain_identity(
-                quality_metric=(
-                    preferred_quality_metric
-                    if preferred_quality_metric in {"vmaf", "xpsnr"}
-                    else "xpsnr"
-                ),
+                quality_metric=selected_quality_metric,
                 host=quality_host,
                 process_controller=process_controller,
             )
@@ -722,6 +732,42 @@ def run_sampled_calibration(
         if deps.quality_toolchain_identity is not None
         else {}
     )
+    cold_start_prediction = unavailable_av1_cold_start_prediction("cold_start_planner_unavailable")
+    if deps.plan_av1_cold_start is not None:
+        preliminary_compatibility = _content_intent_compatibility_payload(
+            sample_item=sample_item,
+            video_policy=video_policy,
+            stream_budget=stream_budget.to_payload(),
+            output_dimensions=output_dimensions,
+            effective_preset=preset,
+            video_filter=video_filter,
+            encoder_parameters=encoder_parameters,
+            toolchain_identity=toolchain_identity_before,
+            quality_metric=selected_quality_metric,
+            quality_target=quality_target,
+            target_size_trace=None,
+        )
+        if preliminary_compatibility is None:
+            cold_start_prediction = unavailable_av1_cold_start_prediction(
+                "cold_start_compatibility_unavailable"
+            )
+        else:
+            try:
+                cold_start_prediction = deps.plan_av1_cold_start(
+                    config=config,
+                    prefix=prefix,
+                    sample_item=sample_item,
+                    compatibility_payload=preliminary_compatibility,
+                    configured_min_crf=int(video_policy["min_crf"]),
+                    configured_max_crf=int(video_policy["max_crf"]),
+                    as_of=deps.now_iso(),
+                )
+            except Exception as exc:
+                LOGGER.warning("AV1 cold-start planning failed: %s", exc)
+                cold_start_prediction = unavailable_av1_cold_start_prediction(
+                    "cold_start_planner_error"
+                )
+    quality_kwargs.update(_av1_cold_start_quality_kwargs(cold_start_prediction))
     if progress_callback is not None:
         progress_callback("searching_target")
     quality_result = deps.search_quality_for_source(quality_source_path, video_policy, **quality_kwargs)
@@ -837,6 +883,8 @@ def run_sampled_calibration(
         else None
     )
     target_size_trace = object_dict(getattr(quality_result, "target_size_trace", None)) or None
+    cold_start_payload = cold_start_prediction.to_payload()
+    cold_start_payload["execution"] = object_dict(object_dict(target_size_trace).get("warm_start")) or None
     compatibility_payload = _content_intent_compatibility_payload(
         sample_item=sample_item,
         video_policy=video_policy,
@@ -876,6 +924,7 @@ def run_sampled_calibration(
             "sampled_clip_bytes": sample_result.sampled_clip_size_bytes,
             "review_artifact_size_bytes": review_artifact_size_bytes or None,
             "content_intent_compatibility": compatibility_payload,
+            "av1_cold_start_prior": cold_start_payload,
             "estimated_audio_bytes": stream_budget.audio_bytes,
             "estimated_subtitle_bytes": stream_budget.subtitle_bytes,
             "estimated_attachment_bytes": stream_budget.attachment_bytes,
@@ -923,6 +972,16 @@ def run_sampled_calibration(
         ],
     }
     return payload, None
+
+
+def _av1_cold_start_quality_kwargs(prediction: Any) -> dict[str, Any]:
+    hint = prediction.search_hint()
+    if hint is None:
+        return {}
+    return {
+        "warm_start": hint,
+        "expected_search_signature_id": hint.search_signature_id,
+    }
 
 
 def _configured_host_record(config: MediaforceConfig, host_data: dict[str, Any]) -> dict[str, Any] | None:

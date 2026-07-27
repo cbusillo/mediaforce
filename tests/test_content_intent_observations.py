@@ -18,7 +18,11 @@ from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.evidence import stable_source_id
-from mediaforce.tuning.compression_intent import CompressionIntentV1
+from mediaforce.tuning.av1_cold_start import (
+    load_packaged_av1_cold_start_bundle,
+    plan_av1_cold_start,
+)
+from mediaforce.tuning.compression_intent import CompressionIntentLevel, CompressionIntentV1
 from mediaforce.tuning.content_intent_observations import (
     ContentIntentBoundaryCompatibilityV1,
     ContentIntentBoundaryObservation,
@@ -84,6 +88,7 @@ class ContentIntentObservationTests(unittest.TestCase):
         self.assertFalse(append_content_intent_boundary_observation(self.connection, observation))
         row = self.connection.execute(select(content_intent_boundary_observations)).mappings().one()
         self.assertEqual(row["payload_sha256"], observation.payload_sha256)
+        self.assertEqual(json.loads(row["provenance_json"])["recorded_at"], observation.recorded_at)
         self.assertNotIn("operator_note", row["assessment_json"])
 
     def test_visual_rejection_runtime_records_current_boundary(self) -> None:
@@ -655,9 +660,147 @@ class ContentIntentObservationTests(unittest.TestCase):
 
         self.assertEqual(state.cohorts[1].source_count, 3)
         self.assertEqual(state.cohorts[1].confidence, "moderate")
+        self.assertEqual(state.cohorts[1].boundary_status, "acceptable_only")
+        self.assertEqual(state.cohorts[1].median_acceptable_crf, 31.0)
+        self.assertEqual(state.cohorts[1].minimum_acceptable_crf, 31.0)
+        self.assertEqual(state.cohorts[1].maximum_acceptable_crf, 31.0)
+        self.assertNotIn("Futurama", state.cohorts[1].cohort_id)
         self.assertTrue(state.cohorts[1].actionable)
-        self.assertTrue(state.cohorts[2].actionable)
+        self.assertEqual(state.cohorts[2].observation_count, 0)
+        self.assertFalse(state.cohorts[2].actionable)
         self.assertTrue(state.cohorts[3].actionable)
+
+    def test_planner_replays_persisted_local_crf_distribution(self) -> None:
+        first_item = None
+        first_calibration = None
+        prefix = "tv/Futurama/Season 8"
+        for index in range(1, 4):
+            sample_item, calibration = self._review_payload(
+                library_item_id=index,
+                rel_path=f"{prefix}/Episode {index:02d}.mkv",
+                content_fingerprint=f"content-balanced-{index:02d}",
+                job_id=f"balanced-sample-{index}",
+                artifact_fingerprint=f"cira1_balanced_{index}",
+                intent_level="balanced",
+            )
+            target_bitrate = int(
+                sample_item["stream_budget_ledger"]["totals"]["remaining_video_bitrate_bps"]
+            )
+            predicted_video_bytes = round(target_bitrate * 2_700.0 / 8)
+            calibration["sample_result"]["predicted_video_size_bytes"] = predicted_video_bytes
+            calibration["sample_result"]["predicted_total_size_bytes"] = (
+                predicted_video_bytes + 8_000_000
+            )
+            observation = self._observation(sample_item, calibration, prefix=prefix)
+            self.assertTrue(
+                append_content_intent_boundary_observation(self.connection, observation)
+            )
+            first_item = first_item or sample_item
+            first_calibration = first_calibration or calibration
+        assert first_item is not None
+        assert first_calibration is not None
+
+        query_item, query_calibration = self._review_payload(
+            library_item_id=99,
+            rel_path=f"{prefix}/Held Out.mkv",
+            content_fingerprint="content-balanced-held-out",
+            job_id="balanced-held-out",
+            artifact_fingerprint="cira1_balanced_held_out",
+            intent_level="balanced",
+        )
+        prediction = plan_av1_cold_start(
+            self.connection,
+            sample_item=query_item,
+            prefix=prefix,
+            compatibility_payload=query_calibration["sample_result"][
+                "content_intent_compatibility"
+            ],
+            configured_min_crf=18,
+            configured_max_crf=38,
+            as_of="2026-07-27T12:00:00Z",
+            bundle_result=load_packaged_av1_cold_start_bundle(),
+        )
+
+        self.assertTrue(prediction.recommended)
+        self.assertEqual(prediction.source, "local")
+        self.assertEqual(prediction.local_scope, "folder")
+        self.assertEqual(prediction.candidate_crf, 31)
+
+    def test_rejection_only_sources_do_not_raise_crf_confidence(self) -> None:
+        observations: list[dict[str, object]] = []
+        first = None
+        for index in range(1, 4):
+            sample_item, calibration = self._review_payload(
+                library_item_id=index,
+                rel_path=f"tv/Futurama/Season 8/Episode {index:02d}.mkv",
+                content_fingerprint=f"content-mixed-verdict-{index:02d}",
+                job_id=f"mixed-verdict-{index}",
+                artifact_fingerprint=f"cira1_mixed_verdict_{index}",
+            )
+            observation = self._observation(
+                sample_item,
+                calibration,
+                verdict="approved" if index == 1 else "rejected",
+            )
+            first = first or observation
+            observations.append(observation.values())
+        assert first is not None
+
+        state = replay_content_intent_personalization(
+            observations,
+            source_id=first.source_id,
+            content_id=first.content_id,
+            prefix=first.prefix,
+            content_profile_id=first.content_profile_id,
+            intent_semantic_id=first.intent_semantic_id,
+            compatibility_key=first.compatibility_key,
+        )
+
+        self.assertEqual(state.cohorts[1].source_count, 1)
+        self.assertEqual(state.cohorts[1].confidence, "limited")
+        self.assertFalse(state.cohorts[1].actionable)
+
+    def test_content_class_uses_cross_folder_evidence_only(self) -> None:
+        observations: list[dict[str, object]] = []
+        first = None
+        for index, rel_path in enumerate(
+                (
+                    "tv/Futurama/Season 8/Episode 01.mkv",
+                    "tv/Disenchantment/Season 1/Episode 01.mkv",
+                    "tv/Simpsons/Season 1/Episode 01.mkv",
+                ),
+                start=1,
+        ):
+            sample_item, calibration = self._review_payload(
+                library_item_id=index,
+                rel_path=rel_path,
+                content_fingerprint=f"content-cross-folder-{index}",
+                job_id=f"sample-cross-folder-{index}",
+                artifact_fingerprint=f"cira1_cross_folder_{index}",
+                boundary_size_bytes=129_000_000 + index * 1_000_000,
+            )
+            observation = self._observation(
+                sample_item,
+                calibration,
+                prefix=rel_path.rsplit("/", 1)[0],
+            )
+            first = first or observation
+            observations.append(observation.values())
+        assert first is not None
+
+        state = replay_content_intent_personalization(
+            observations,
+            source_id=first.source_id,
+            content_id=first.content_id,
+            prefix=first.prefix,
+            content_profile_id=first.content_profile_id,
+            intent_semantic_id=first.intent_semantic_id,
+            compatibility_key=first.compatibility_key,
+        )
+
+        self.assertEqual(state.cohorts[1].observation_count, 1)
+        self.assertEqual(state.cohorts[2].observation_count, 2)
+        self.assertEqual(state.cohorts[3].observation_count, 3)
 
     def test_replay_does_not_mix_distinct_content_feature_profiles(self) -> None:
         first_item, first_calibration = self._review_payload()
@@ -1129,9 +1272,10 @@ class ContentIntentObservationTests(unittest.TestCase):
             *,
             verdict: Literal["approved", "rejected"] = "approved",
             concern_tags: list[str] | None = None,
+            prefix: str = "tv/Futurama/Season 8",
     ) -> ContentIntentBoundaryObservation:
         result = build_visual_content_intent_observation(
-            prefix="tv/Futurama/Season 8",
+            prefix=prefix,
             sample_item=sample_item,
             calibration=calibration,
             verdict=verdict,
@@ -1153,8 +1297,9 @@ class ContentIntentObservationTests(unittest.TestCase):
             job_id: str = "sample-1",
             artifact_fingerprint: str = "cira1_sample_1",
             boundary_size_bytes: int = 130_000_000,
+            intent_level: CompressionIntentLevel = "perceptual_floor",
     ) -> tuple[dict[str, object], dict[str, object]]:
-        intent = CompressionIntentV1(level="perceptual_floor", source="operator", confirmed=True)
+        intent = CompressionIntentV1(level=intent_level, source="operator", confirmed=True)
         policy: dict[str, object] = {
             "video": {
                 "encoder": "libsvtav1",
@@ -1166,7 +1311,7 @@ class ContentIntentObservationTests(unittest.TestCase):
                 "target_vmaf": 95.0,
                 "min_target_vmaf": 92.0,
                 "compression_intent_schema_version": 1,
-                "compression_intent": "perceptual_floor",
+                "compression_intent": intent_level,
                 "compression_intent_source": "operator",
                 "compression_intent_confirmed": True,
             },

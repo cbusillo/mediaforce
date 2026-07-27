@@ -7456,6 +7456,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             payload["sample_result"]["stream_budget_ledger"]["ledger_id"],
             payload["sample_item"]["stream_budget_ledger"]["ledger_id"],
         )
+        cold_start = payload["sample_result"]["av1_cold_start_prior"]
+        self.assertEqual(cold_start["status"], "no_recommendation")
+        self.assertTrue(cold_start["fallback"]["full_measured_calibration"])
 
     def test_load_calibration_state_builds_review_pairs_for_browser_player(self) -> None:
         review_dir = self.config.paths.review_dir / "run-pairs" / "item-00"

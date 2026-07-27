@@ -1,6 +1,7 @@
 import copy
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from importlib import resources
 import json
 import os
 import shutil
@@ -13,7 +14,33 @@ from typing import Any
 from mediaforce.library.library_settings import configured_library_definitions, library_definition_map, \
     library_production_supported
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "defaults.toml"
+_SOURCE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_SOURCE_DEFAULT_CONFIG_PATH = _SOURCE_PROJECT_ROOT / "config" / "defaults.toml"
+
+
+def _source_checkout_default_config_path(project_root: Path) -> Path | None:
+    candidate = project_root / "config" / "defaults.toml"
+    if (
+            candidate.is_file()
+            and (project_root / "pyproject.toml").is_file()
+            and (project_root / "hatch_build.py").is_file()
+    ):
+        return candidate
+    return None
+
+
+def _default_config_path() -> Path:
+    source_config = _source_checkout_default_config_path(_SOURCE_PROJECT_ROOT)
+    if source_config is not None:
+        return source_config
+    try:
+        packaged = resources.files("mediaforce.package_defaults").joinpath("defaults.toml")
+    except ModuleNotFoundError:
+        return _SOURCE_DEFAULT_CONFIG_PATH
+    return Path(str(packaged))
+
+
+DEFAULT_CONFIG_PATH = _default_config_path()
 FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
 BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
 

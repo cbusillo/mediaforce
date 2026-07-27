@@ -238,6 +238,13 @@ Guidance:
   - append-only approved/rejected content-by-intent size boundaries,
     correction-safe persistence, compatibility identities, and deterministic
     local item/folder/content-class/operator replay
+- `av1_cold_start.py`
+  - versioned public prior schema/resource loading, semantic compatibility,
+    private replay overlay, bounded CRF prediction, confidence, provenance, and
+    no-recommendation behavior
+- `av1_cold_start_evaluation.py`
+  - privacy-safe held-out range, candidate-work, and safety-regression
+    aggregation for controlled prior publication decisions
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
@@ -267,6 +274,13 @@ Guidance:
   and replay under `mediaforce/tuning/content_intent_observations.py`. Runtime
   review actions may emit explicit events, but they must not independently
   infer compatibility, relabel history, or mutate derived personalization.
+- Keep shipped AV1 prior parsing, matching, public/local separation, and
+  first-probe recommendation under `mediaforce/tuning/av1_cold_start.py`.
+  Public bundle rows never enter the observation log, and local replay never
+  writes back into package data.
+- Keep install-safe package defaults under `mediaforce/package_defaults/`.
+  Operator config, folder overrides, and machine-local paths remain under root
+  `config/` and never become package data.
 - Keep quality-memory retrieval read-only and under
   `mediaforce/tuning/quality_memory.py`; keep passive persistence under
   `mediaforce/tuning/quality_observations.py`; keep passive recommendation and

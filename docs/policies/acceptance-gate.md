@@ -19,6 +19,8 @@ We do not stop at "it works." We stop when we fully like the result.
 - Backend tests pass
 - Frontend checks, lint, unit tests, and build pass
 - CLI smoke passes
+- Package-sensitive changes pass `uv build` and
+  `scripts/verify_package_contents.py`
 - Docs are updated when behavior, workflow, operations, or operator-facing
   expectations change
 - The final code is something we would be happy to own long term

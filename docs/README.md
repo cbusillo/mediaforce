@@ -36,6 +36,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/architecture/content-intent-boundary-evidence.md`: append-only visual
   size boundaries, compatibility, correction-safe replay, and private local
   content-by-intent personalization
+- `docs/architecture/av1-cold-start-priors.md`: versioned public AV1 priors,
+  private local overlays, confidence, compatibility, and measured fallback
 - `docs/architecture/quality-search-memory.md`: read-only accepted-outcome
   cohorts, signature invalidation, robust CRF summaries, and authority limits
 - `docs/architecture/advisor-routing.md`: evaluated task routing, Codex Lab
@@ -59,6 +61,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 - `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
   legacy-bridge notes, and migration validation commands
+- `docs/development/package-builds.md`: wheel/sdist resource boundaries and
+  privacy-safe package verification
 - `docs/development/browser-review-guidance.md`: browser-review subagent launch
   contract for UI exploration and critique
 - `docs/development/browser-qa-matrix.md`: repeatable browser route, fixture,

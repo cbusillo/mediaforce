@@ -73,6 +73,11 @@ A unique predecessor index prevents forks. Withdrawal is a correction row with
 and IDs make producer retries idempotent, and replay rejects rows whose stored
 hashes do not reconstruct.
 
+New observations also copy `recorded_at` into hash-bound provenance. The public
+cold-start predictor requires that copy to match the row timestamp before local
+evidence can pass its freshness gate; older rows remain replayable but do not
+gain newly invented timestamp authority.
+
 The migration can downgrade while the table is empty. Once evidence exists it
 refuses downgrade rather than silently discarding immutable operator evidence.
 
@@ -84,7 +89,8 @@ eligible, hash-valid rows. It then derives four nested local scopes:
 - item: exact source and content version; one valid boundary can remain an
   item-local exception
 - folder: compatible content profiles under the same folder prefix
-- content class: the same measured multi-label profile across folders
+- content class: the same measured multi-label profile outside the current
+  folder, so the evidence is genuinely cross-folder
 - operator: all local evidence for the same profile, intent, and technical
   contract
 
@@ -93,15 +99,16 @@ rejection is a lower bound. The derived bitrate posterior uses projected AV1
 video bytes rather than total bytes, so copied audio and attachment size do not
 pollute the encoder starting point. Audio-only rejection feedback is excluded.
 Crossing bounds are reported as conflicting and are not actionable. Broader
-scopes require at least three independent source IDs and bounded dispersion
-before becoming actionable; repeated observations from one item cannot unlock
-a folder, class, or operator prior.
+scopes require at least three independent acceptable source IDs and bounded
+dispersion before becoming actionable; rejection-only sources and repeated
+observations from one item cannot unlock a folder, class, or operator prior.
 
 The replay result is advisory starting-point state for the bounded prior work.
 It does not authorize size growth, alter quality floors, or bypass measured
-search. Combining this private local posterior with a shipped cold-start prior
-and activating a first-probe recommendation belongs to the separate cold-start
-predictor contract.
+search. `docs/architecture/av1-cold-start-priors.md` defines how this private
+local posterior is combined with the independently versioned public bundle and
+converted into one measured first-probe hint or an explicit no-recommendation
+outcome.
 
 ## Privacy and storage
 
