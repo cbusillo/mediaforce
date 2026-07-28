@@ -343,20 +343,24 @@ digest, and runner-binary digest. A concurrent or repeated lane cannot replace
 that claim; a crash leaves an unresolved terminal claim, and a rejected review
 remains terminal. The exact PATH-selected runner must match the authorization
 before launch and again after completion. The already-verified authorized bytes
-are executed from an owner-only ephemeral copy rather than reopening the mutable
-PATH-selected source. On the macOS execution host, a held no-follow descriptor
-and kqueue vnode guard reject any write, delete, rename, link, or revoke event on
-that copy before its output can become evidence; unavailable secure monitoring
-fails closed. Each attestation binds the claim plus the SHA-256 digest of the
-canonical immutable owner-only completion transcript, and the loader recomputes
-that digest before trusting it. The attestation and transcript are written
-together as one immutable atomic lane envelope. Duplicate run IDs or transcript
-digests are rejected. The completed process must emit a matching quiescent agent
-message whose final non-empty line is the exact proposal-, lane-, claim-, and
-run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker; the decision is extracted rather
-than supplied by the operator. Public summaries expose only that the runner
-identity is bound, never the canonical private path. Review, verdict, proposal,
-and lock timestamps come from the runtime clock.
+must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
+unbound interpreter. Those bytes are executed from an owner-only ephemeral copy
+rather than reopening the mutable PATH-selected source. The review process uses
+a fixed system `PATH`, strips loader, interpreter, proxy, certificate, and model
+endpoint overrides, and gives agent shell commands an explicit minimal
+environment with no caller-environment inheritance. On the macOS execution host,
+a held no-follow descriptor and kqueue vnode guard reject any write, delete,
+rename, link, or revoke event on that copy before its output can become evidence;
+unavailable secure monitoring fails closed. Each attestation binds the claim plus
+the SHA-256 digest of the canonical immutable owner-only completion transcript,
+and the loader recomputes that digest before trusting it. The attestation and
+transcript are written together as one immutable atomic lane envelope. Duplicate
+run IDs or transcript digests are rejected. The completed process must emit a
+matching quiescent agent message whose final non-empty line is the exact
+proposal-, lane-, claim-, and run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker;
+the decision is extracted rather than supplied by the operator. Public summaries
+expose only that the runner identity is bound, never the canonical private path.
+Review, verdict, proposal, and lock timestamps come from the runtime clock.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write

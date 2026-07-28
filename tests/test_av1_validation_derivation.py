@@ -107,7 +107,7 @@ V2_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v2.json"
 SELECTED_AT = "2026-07-27T22:50:00Z"
 AUTHORIZED_AT = "2026-07-28T00:00:00Z"
 VALID_UNTIL = "2026-08-01T00:00:00Z"
-REVIEW_RUNNER_BYTES = b"test-code-binary"
+REVIEW_RUNNER_BYTES = b"\xcf\xfa\xed\xfe" + b"test-code-binary"
 
 
 class AV1ValidationDerivationTests(unittest.TestCase):
@@ -497,6 +497,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             launched_runner = Path(run_review.call_args.args[0][0])
             self.assertNotEqual(launched_runner, code_binary)
             self.assertFalse(launched_runner.exists())
+            review_command = run_review.call_args.args[0]
+            self.assertIn('shell_environment_policy.inherit="none"', review_command)
+            review_environment = run_review.call_args.kwargs["env"]
+            self.assertEqual(
+                review_environment["PATH"],
+                verify_av1_cold_start_preregistration._AGENT_REVIEW_SAFE_PATH,
+            )
             evidence_payload = json.loads(evidence)
             self.assertEqual(evidence_payload["review_run_id"], agent_id)
             self.assertEqual(evidence_payload["returncode"], 0)
@@ -514,6 +521,61 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 evidence,
                 review=review,
             )
+
+    def test_review_runner_rejects_interpreter_script(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Path(directory) / "code"
+            runner.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+            runner.chmod(0o700)
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration.shutil,
+                    "which",
+                    return_value=str(runner),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "native Mach-O",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._review_runner_identity()
+
+    def test_review_runner_environment_removes_injection_overrides(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DYLD_INSERT_LIBRARIES": "/private/injected.dylib",
+                "HOME": "/private/fake-home",
+                "GIT_EXEC_PATH": "/private/git-tools",
+                "LD_PRELOAD": "/private/injected.so",
+                "NODE_OPTIONS": "--require=/private/injected.js",
+                "OPENAI_BASE_URL": "https://invalid.example",
+                "PATH": "/private/bin:/usr/bin",
+                "SAFE_REVIEW_VALUE": "retained",
+            },
+            clear=False,
+        ):
+            environment = (
+                verify_av1_cold_start_preregistration._review_runner_environment()
+            )
+        self.assertEqual(
+            environment["PATH"],
+            verify_av1_cold_start_preregistration._AGENT_REVIEW_SAFE_PATH,
+        )
+        self.assertEqual(environment["SAFE_REVIEW_VALUE"], "retained")
+        self.assertEqual(
+            environment["HOME"],
+            verify_av1_cold_start_preregistration._review_user_home(),
+        )
+        self.assertEqual(environment["SHELL"], "/bin/zsh")
+        for key in (
+            "DYLD_INSERT_LIBRARIES",
+            "GIT_EXEC_PATH",
+            "LD_PRELOAD",
+            "NODE_OPTIONS",
+            "OPENAI_BASE_URL",
+        ):
+            self.assertNotIn(key, environment)
 
     def test_review_runner_rejects_path_substitution_before_launch(self) -> None:
         with (

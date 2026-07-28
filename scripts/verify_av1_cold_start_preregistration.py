@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import select
 import shutil
 import stat
@@ -93,6 +94,43 @@ ValidationManifest: TypeAlias = (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _AGENT_REVIEW_MARKER = AV1_VALIDATION_DERIVATION_AGENT_REVIEW_MARKER
 _AGENT_REVIEW_MAX_SECONDS = 1800
+_AGENT_REVIEW_SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_MACH_O_MAGICS = frozenset({
+    b"\xce\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xce",
+    b"\xcf\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xcf",
+    b"\xca\xfe\xba\xbe",
+    b"\xbe\xba\xfe\xca",
+    b"\xca\xfe\xba\xbf",
+    b"\xbf\xba\xfe\xca",
+})
+_REVIEW_RUNNER_BLOCKED_ENVIRONMENT_NAMES = frozenset({
+    "ALL_PROXY",
+    "BASH_ENV",
+    "CDPATH",
+    "CODEX_HOME",
+    "CODE_HOME",
+    "CURL_CA_BUNDLE",
+    "ENV",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "OPENAI_BASE_URL",
+    "OPENAI_WIRE_API",
+    "PERL5OPT",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "REQUESTS_CA_BUNDLE",
+    "RUBYOPT",
+    "SHELL",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "ZDOTDIR",
+})
 
 
 def _now_iso() -> str:
@@ -903,6 +941,7 @@ def _review_runner_identity() -> tuple[Path, str, str, bytes]:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+    _assert_native_review_runner(binary_bytes)
     canonical_path_sha256 = (
         f"sha256:{hashlib.sha256(str(resolved_binary).encode('utf-8')).hexdigest()}"
     )
@@ -922,6 +961,74 @@ def _authorized_review_runner_identity(
             "AV1 derivation Every Code executable drifted from the authorization"
         )
     return identity
+
+
+def _assert_native_review_runner(binary_bytes: bytes) -> None:
+    if binary_bytes[:4] not in _MACH_O_MAGICS:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code executable must be a native Mach-O binary"
+        )
+
+
+def _review_runner_environment() -> dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper() not in _REVIEW_RUNNER_BLOCKED_ENVIRONMENT_NAMES
+        and not key.upper().startswith(("DYLD_", "GIT_"))
+    }
+    environment.update({
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_PAGER": "cat",
+        "HOME": _review_user_home(),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "LOGNAME": _review_user_name(),
+        "PAGER": "cat",
+        "PATH": _AGENT_REVIEW_SAFE_PATH,
+        "SHELL": "/bin/zsh",
+        "TMPDIR": "/tmp",
+        "USER": _review_user_name(),
+        "ZDOTDIR": "/var/empty",
+    })
+    return environment
+
+
+def _review_user_home() -> str:
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def _review_user_name() -> str:
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def _review_shell_environment() -> dict[str, str]:
+    return {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_PAGER": "cat",
+        "HOME": _review_user_home(),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PAGER": "cat",
+        "PATH": _AGENT_REVIEW_SAFE_PATH,
+        "SHELL": "/bin/zsh",
+        "TMPDIR": "/tmp",
+        "USER": _review_user_name(),
+        "ZDOTDIR": "/var/empty",
+    }
+
+
+def _review_shell_environment_overrides() -> tuple[str, ...]:
+    return (
+        'shell_environment_policy.inherit="none"',
+        "shell_environment_policy.ignore_default_excludes=false",
+        *(
+            f"shell_environment_policy.set.{key}={json.dumps(value)}"
+            for key, value in sorted(_review_shell_environment().items())
+        ),
+    )
 
 
 def _review_runner_descriptor_sha256(descriptor: int) -> str:
@@ -978,6 +1085,7 @@ def _private_review_runner(
         raise AV1ValidationDerivationError(
             "AV1 derivation secure Every Code execution monitoring is unavailable"
         )
+    _assert_native_review_runner(binary_bytes)
     if f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}" != expected_sha256:
         raise AV1ValidationDerivationError(
             "AV1 derivation private Every Code executable does not match the authorization"
@@ -1097,11 +1205,15 @@ def _run_code_agent_review(
                 "exec",
                 "-s",
                 "read-only",
+            ]
+            for override in _review_shell_environment_overrides():
+                command.extend(("-c", override))
+            command.extend((
                 "--json",
                 "--max-seconds",
                 str(_AGENT_REVIEW_MAX_SECONDS),
                 "-",
-            ]
+            ))
             try:
                 completed = subprocess.run(
                     command,
@@ -1111,6 +1223,7 @@ def _run_code_agent_review(
                     capture_output=True,
                     timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
                     check=False,
+                    env=_review_runner_environment(),
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise AV1ValidationDerivationError(
