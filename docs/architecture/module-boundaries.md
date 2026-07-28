@@ -258,6 +258,12 @@ Guidance:
 - `av1_validation_v2.py`
   - immutable v2 preregistration, digest-bound aggregate eligibility,
     explicit excluded-cell records, and fail-closed derivation-only authority
+- `av1_validation_partition.py`
+  - pure private v2 partition schema, domain-separated HMAC selection/tokens,
+    canonical selection-lock digests, and fail-closed identity constraints
+- `av1_validation_partition_inventory.py`
+  - read-only current fingerprint/config projection into private partition
+    candidates without runtime, observation, authorization, or encode authority
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

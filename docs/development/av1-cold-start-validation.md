@@ -77,6 +77,87 @@ holdout case execution, and public bundle activation. A different, later
 authorization must bind the reviewed candidate locks before any v2 holdout can
 run. The verifier therefore refuses the v2 `report` action at this phase.
 
+## Private v2 source partition
+
+Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
+slots and two twelve-source derivation reservations while Mediaforce remains
+paused. The pure contract lives in
+`mediaforce/tuning/av1_validation_partition.py`; the separate read-only
+inventory adapter lives in
+`mediaforce/tuning/av1_validation_partition_inventory.py`. Neither module
+starts runtime work, probes media, creates observations, builds a candidate
+lock, or creates either execution authorization.
+
+Create a dedicated owner-only directory outside the repository, then create its
+HMAC key once:
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  create-partition-key /private/owner-only/av1-v2/partition.key --json
+```
+
+The command emits an opaque `token_key_id`. Record that ID on issue `#286`
+before reading the private inventory. The later build requires the same ID, so
+replacing or rerolling the HMAC key after its durable commitment fails closed.
+
+Build the immutable private partition from the checked-in manifest, pinned
+machine-local eligibility attestation, current measured fingerprint inventory,
+and an explicit canonical UTC timestamp:
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  build-partition docs/validation/av1-cold-start-preregistration-v2.json \
+  /private/owner-only/eligibility-attestation-v1.json \
+  --key /private/owner-only/av1-v2/partition.key \
+  --expected-token-key-id av1vkey1_<committed-id> \
+  --output /private/owner-only/av1-v2/source-partition-v1.json \
+  --selected-at 2026-07-27T23:00:00Z --json
+```
+
+Validate both the embedded immutable private inventory snapshot and the current
+read-only database/config projection. A narrowed inventory, selected-source
+change, taxonomy change, policy change, or compatibility change fails the
+current-input gate:
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  validate-partition docs/validation/av1-cold-start-preregistration-v2.json \
+  /private/owner-only/eligibility-attestation-v1.json \
+  /private/owner-only/av1-v2/source-partition-v1.json \
+  --key /private/owner-only/av1-v2/partition.key --json
+```
+
+The partition requires owner-only directory and file permissions, rejects any
+private artifact path inside the repository, and never prints the output path,
+local item IDs, identity tokens, fingerprints, titles, series, or source-group
+values. Its public-safe output is limited to the manifest ID, the selection-lock
+and derivation-partition digests, preregistered counts, and false execution
+authority flags.
+
+Selection uses domain-separated HMAC-SHA256 ranking and identity tokens. It
+enforces exact trait selectors for publication candidates, the registered
+`contains_all` selectors for fallback cells, and global uniqueness across all
+seventy-four reservations by content version, logical title, and series.
+Publication holdout and derivation cohorts separately enforce the six-group
+minimum and one-third concentration maximum, and no derivation source group may
+overlap any holdout source group. Ambiguous duplicate content versions are
+excluded before the immutable inventory snapshot is frozen. Within a plan,
+holdout slots receive selection priority over derivation reservations so the
+holdout cohort cannot be shaped by later derivation needs.
+
+The lock also binds one coherent pre-execution compatibility signature,
+plan-specific policy signatures, target-video-bitrate ranges, and the configured
+numeric quality floor before any derivation observation exists. Revalidate the
+partition before creating the later derivation authorization. Any config,
+policy, toolchain, or selected-source drift is a stop condition, not a reason to
+rewrite the frozen snapshot or mapping.
+
+The private partition and key are machine-local audit artifacts. Only the
+reviewed `selection_lock_sha256` and `derivation_partition_sha256` may leave
+owner-only storage. The lock carries `runtime_execution_authorized=false`,
+`derivation_execution_authorized=false`, and
+`holdout_execution_authorized=false`; creating it does not create `acsvda1`.
+
 Validate the pinned machine-local aggregate attestation without printing its
 counts:
 
@@ -163,8 +244,9 @@ The v2 evidence lifecycle has six boundaries:
 1. Validate the checked-in v2 manifest against its digest-bound aggregate
    eligibility attestation. This does not authorize runtime execution.
 2. Map the protocol's case slots and separate derivation pools to eligible media
-   in a private local file.
-   Commit only its SHA-256 selection lock to the redacted evidence set.
+   in the canonical owner-only `av1vsp1` private partition. Independently review
+   the exact partition, and commit only its SHA-256 selection lock and
+   derivation-partition digest to later redacted evidence.
 3. Create the separate derivation-only authorization, then build a candidate
    lock from current-contract observations collected through unchanged measured
    full search. Each
@@ -191,9 +273,10 @@ digest, and is the only publication-safe output. Rebuilding a different
 self-consistent manifest is insufficient: reporting requires exact equality
 with the checked-in issue #277 preregistration.
 
-No database migration is required. The protocol and report builder are pure
-Python and do not import database, scheduler, web-runtime, subprocess, or media
-probing code.
+No database migration is required. The protocol, partition contract, and report
+builder are pure Python and do not import database, scheduler, web-runtime,
+subprocess, or media probing code. The partition inventory adapter is a separate
+read-only database/config boundary and does not open a writable connection.
 
 ## Paired holdout contract
 
