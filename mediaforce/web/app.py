@@ -163,6 +163,12 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     run_full_calibration as runtime_run_full_calibration, \
     run_sampled_calibration as runtime_run_sampled_calibration, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+    mediaforce_runtime_lock_owner,
+    mediaforce_runtime_lock_path,
+)
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
@@ -2273,31 +2279,18 @@ def _default_web_port() -> int:
 
 @contextmanager
 def _exclusive_web_server_lock(config: MediaforceConfig, settings: WebStartupSettings) -> Iterator[None]:
-    lock_path = _web_server_lock_path(config)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            owner = _web_server_lock_owner(lock_path)
-            owner_detail = f" ({owner})" if owner else ""
-            raise SystemExit(f"mediaforce-web is already running{owner_detail}") from exc
-
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(json.dumps(_web_server_lock_payload(config, settings), indent=2, sort_keys=True))
-        lock_file.write("\n")
-        lock_file.flush()
-        os.fsync(lock_file.fileno())
-        try:
+    try:
+        with exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload=_web_server_lock_payload(config, settings),
+        ):
             yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            _remove_web_server_lock(lock_path)
+    except MediaforceRuntimeBusyError as exc:
+        raise SystemExit(str(exc).replace("Mediaforce runtime", "mediaforce-web")) from exc
 
 
 def _web_server_lock_path(config: MediaforceConfig) -> Path:
-    return config.paths.web_state_dir.parent / "mediaforce-web.lock"
+    return mediaforce_runtime_lock_path(config)
 
 
 def _web_server_lock_payload(config: MediaforceConfig, settings: WebStartupSettings) -> dict[str, object]:
@@ -2312,27 +2305,12 @@ def _web_server_lock_payload(config: MediaforceConfig, settings: WebStartupSetti
 
 
 def _web_server_lock_owner(lock_path: Path) -> str | None:
-    try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    pid = payload.get("pid")
-    host = payload.get("host")
-    port = payload.get("port")
-    if pid and host and port:
-        return f"pid {pid} on {host}:{port}"
-    if pid:
-        return f"pid {pid}"
-    return None
+    return mediaforce_runtime_lock_owner(lock_path)
 
 
 def _remove_web_server_lock(lock_path: Path) -> None:
-    try:
-        lock_path.unlink()
-    except FileNotFoundError:
-        return
+    if lock_path.exists():
+        lock_path.write_text("", encoding="utf-8")
 
 
 def create_reloadable_app() -> FastAPI:

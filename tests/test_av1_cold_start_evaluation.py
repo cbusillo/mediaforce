@@ -427,6 +427,53 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ColdStartValidationError, "too large"):
             av1_cold_start_validation_manifest_from_payload(payload)
 
+    def test_manifest_rejects_unsatisfiable_derivation_evidence_count(self) -> None:
+        payload = self._manifest().to_payload()
+        criteria = dict(payload["criteria"])
+        criteria["minimum_derivation_evidence_count"] = 13
+        payload["criteria"] = criteria
+
+        with self.assertRaisesRegex(AV1ColdStartValidationError, "exactly twelve"):
+            av1_cold_start_validation_manifest_from_payload(payload)
+
+    def test_candidate_lock_requires_exact_derivation_evidence_count(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
+
+        with self.assertRaisesRegex(AV1ColdStartValidationError, "requires exactly 12"):
+            replace(
+                candidate_lock,
+                derivation_evidence_count=11,
+                derivation_title_tokens=candidate_lock.derivation_title_tokens[:-1],
+            )
+
+    def test_candidate_lock_rejects_source_group_concentration(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
+
+        with self.assertRaisesRegex(AV1ColdStartValidationError, "concentration"):
+            replace(
+                candidate_lock,
+                derivation_source_group_observation_tokens=(
+                    *("derivation.group.001",) * 5,
+                    *("derivation.group.002",) * 3,
+                    "derivation.group.003",
+                    "derivation.group.004",
+                    "derivation.group.005",
+                    "derivation.group.006",
+                ),
+            )
+
+    def test_candidate_lock_rejects_zero_quality_floor(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
+
+        with self.assertRaisesRegex(AV1ColdStartValidationError, "quality floor"):
+            replace(candidate_lock, minimum_quality_score=0.0)
+
     def _manifest(self) -> AV1ColdStartValidationManifestV1:
         return build_preregistered_av1_cold_start_validation_manifest()
 
@@ -470,11 +517,19 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             derivation_evidence_count=12,
             derivation_source_count=6,
             derivation_source_tokens=derivation_source_tokens,
+            derivation_title_tokens=tuple(
+                f"derivation.title.{index:03d}" for index in range(1, 13)
+            ),
             derivation_series_tokens=tuple(
                 f"derivation.series.{index:03d}" for index in range(1, 7)
             ),
             derivation_source_group_tokens=tuple(
                 f"derivation.group.{index:03d}" for index in range(1, 7)
+            ),
+            derivation_source_group_observation_tokens=tuple(
+                f"derivation.group.{index:03d}"
+                for index in range(1, 7)
+                for _ in range(2)
             ),
             derivation_oldest_recorded_at=derivation_oldest_recorded_at,
             derivation_newest_recorded_at=derivation_newest_recorded_at,
@@ -537,6 +592,7 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             completed_at=f"2026-07-27T{source_index + 2:02d}:00:00Z",
             status="complete",
             source_token=f"source.token.{source_index:03d}",
+            title_token=f"title.token.{source_index:03d}",
             series_token=f"series.token.{source_index:03d}",
             source_group_token=f"source.group.{((source_index - 1) % 6) + 1:02d}",
             content_traits=traits,
@@ -570,6 +626,7 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             "completed_at": result.completed_at,
             "status": result.status,
             "source_token": result.source_token,
+            "title_token": result.title_token,
             "series_token": result.series_token,
             "source_group_token": result.source_group_token,
             "content_traits": result.content_traits,

@@ -6383,7 +6383,10 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({"pid": 123, "host": "127.0.0.1", "port": 8777}))
 
-        with patch("mediaforce.web.app.fcntl.flock", side_effect=BlockingIOError):
+        with patch(
+            "mediaforce.web.runtime_lock.fcntl.flock",
+            side_effect=BlockingIOError,
+        ):
             with self.assertRaises(SystemExit) as raised:
                 with web_app._exclusive_web_server_lock(self.config, settings):
                     pass

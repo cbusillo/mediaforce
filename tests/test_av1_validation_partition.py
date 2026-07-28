@@ -82,6 +82,13 @@ class AV1ValidationPartitionTests(unittest.TestCase):
         self.assertNotIn("local_item_id", json.dumps(summary))
         self.assertNotIn("source_token", json.dumps(summary))
 
+    def test_partition_expectations_require_positive_quality_floor(self) -> None:
+        with self.assertRaisesRegex(
+            AV1ValidationPartitionError,
+            "quality expectations",
+        ):
+            replace(self.expectations, minimum_quality_score=0.0)
+
     def test_partition_is_deterministic_for_shuffled_inventory(self) -> None:
         expected = self._build()
         actual = build_av1_validation_private_partition(
@@ -410,6 +417,15 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             self.assertEqual(
                 load_av1_validation_private_partition(partition_path), partition
             )
+
+            key_link = private_dir / "partition-key-link"
+            partition_link = private_dir / "partition-link.json"
+            key_link.symlink_to(key_path)
+            partition_link.symlink_to(partition_path)
+            with self.assertRaisesRegex(AV1ValidationPartitionError, "regular file"):
+                load_av1_validation_partition_key(key_link)
+            with self.assertRaisesRegex(AV1ValidationPartitionError, "regular file"):
+                load_av1_validation_private_partition(partition_link)
 
     def test_private_artifact_path_rejects_repository_contents(self) -> None:
         with self.assertRaisesRegex(

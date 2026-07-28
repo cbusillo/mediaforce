@@ -71,6 +71,10 @@ Guidance:
   - `queue_actions.py`
   - `job_runtime.py`
   - `calibration_runtime.py`
+  - `av1_validation_derivation.py`
+    - isolated, derivation-only execution adapter over sampled calibration
+  - `runtime_lock.py`
+    - shared process exclusivity for web and bounded operator runtimes
   - `encode_runtime.py`
   - `folder_state.py`
   - `folder_actions.py`

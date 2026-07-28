@@ -67,12 +67,11 @@ class AV1ValidationPartitionExpectations:
                 raise AV1ValidationPartitionError(f"AV1 partition {label} is invalid")
         if not _QUALITY_METRIC_RE.fullmatch(self.quality_metric):
             raise AV1ValidationPartitionError("AV1 partition quality metric is invalid")
-        if not all(
-            math.isfinite(value) and value >= 0
-            for value in (
-                self.quality_target,
-                self.minimum_quality_score,
-            )
+        if (
+            not math.isfinite(self.quality_target)
+            or self.quality_target < 0
+            or not math.isfinite(self.minimum_quality_score)
+            or self.minimum_quality_score <= 0
         ):
             raise AV1ValidationPartitionError(
                 "AV1 partition quality expectations are invalid"
@@ -727,8 +726,7 @@ def serialize_av1_validation_private_partition(
 
 
 def load_av1_validation_private_partition(path: Path) -> AV1ValidationPrivatePartition:
-    _assert_owner_only_regular_file(path, label="private partition")
-    raw = path.read_bytes()
+    raw = _read_owner_only_regular_file(path, label="private partition")
     try:
         payload = object_dict(json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -921,8 +919,7 @@ def create_av1_validation_partition_key(path: Path) -> str:
 
 
 def load_av1_validation_partition_key(path: Path) -> bytes:
-    _assert_owner_only_regular_file(path, label="partition key")
-    key = path.read_bytes()
+    key = _read_owner_only_regular_file(path, label="partition key")
     _validate_key(key)
     return key
 
@@ -1735,7 +1732,7 @@ def _required_text(value: object, label: str) -> str:
 def _assert_owner_only_directory(path: Path) -> None:
     if os.name != "posix":
         return
-    directory_stat = path.stat()
+    directory_stat = path.lstat()
     if not stat.S_ISDIR(directory_stat.st_mode):
         raise AV1ValidationPartitionError(
             "AV1 private artifact parent is not a directory"
@@ -1747,13 +1744,35 @@ def _assert_owner_only_directory(path: Path) -> None:
 
 
 def _assert_owner_only_regular_file(path: Path, *, label: str) -> None:
-    file_stat = path.stat()
+    file_stat = path.lstat()
     if not stat.S_ISREG(file_stat.st_mode):
         raise AV1ValidationPartitionError(f"AV1 {label} is not a regular file")
     if os.name == "posix" and (
         file_stat.st_uid != os.getuid() or file_stat.st_mode & 0o077
     ):
         raise AV1ValidationPartitionError(f"AV1 {label} permissions must be owner-only")
+
+
+def _read_owner_only_regular_file(path: Path, *, label: str) -> bytes:
+    _assert_owner_only_regular_file(path, label=label)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise AV1ValidationPartitionError(f"AV1 {label} is not a regular file")
+        if os.name == "posix" and (
+            file_stat.st_uid != os.getuid() or file_stat.st_mode & 0o077
+        ):
+            raise AV1ValidationPartitionError(f"AV1 {label} permissions must be owner-only")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    except OSError as exc:
+        raise AV1ValidationPartitionError(f"AV1 {label} could not be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _expectations_from_payload(

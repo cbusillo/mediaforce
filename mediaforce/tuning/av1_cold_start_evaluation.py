@@ -29,6 +29,11 @@ AV1_COLD_START_VALIDATION_CONTRACT_VERSION = "acsv1"
 AV1_COLD_START_VALIDATION_PREDICTOR_CONTRACT_VERSION = "acsp1"
 AV1_COLD_START_VALIDATION_REGISTERED_AT = "2026-07-27T00:00:00Z"
 AV1_COLD_START_VALIDATION_VALID_UNTIL = "2027-01-27T00:00:00Z"
+AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT = 12
+AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_GROUP_COUNT = 6
+AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_SOURCE_GROUP_COUNT = (
+    AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT // 3
+)
 
 AV1ColdStartValidationMode = Literal["publication_candidate", "fallback_conformance"]
 AV1ColdStartValidationTraitMatch = Literal["exact", "contains_all"]
@@ -161,8 +166,13 @@ class AV1ColdStartValidationCriteriaV1:
     confidence_score: float
 
     def __post_init__(self) -> None:
-        if self.minimum_derivation_evidence_count < 12:
-            raise AV1ColdStartValidationError("AV1 validation requires at least twelve derivation observations")
+        if (
+            self.minimum_derivation_evidence_count
+            != AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT
+        ):
+            raise AV1ColdStartValidationError(
+                "AV1 validation requires exactly twelve derivation observations"
+            )
         if not 6 <= self.minimum_derivation_source_count <= self.minimum_derivation_evidence_count:
             raise AV1ColdStartValidationError("AV1 validation derivation-source minimum is invalid")
         if self.minimum_holdout_count < 16:
@@ -482,8 +492,10 @@ class AV1ColdStartValidationCandidateLockV1:
     derivation_evidence_count: int
     derivation_source_count: int
     derivation_source_tokens: tuple[str, ...]
+    derivation_title_tokens: tuple[str, ...]
     derivation_series_tokens: tuple[str, ...]
     derivation_source_group_tokens: tuple[str, ...]
+    derivation_source_group_observation_tokens: tuple[str, ...]
     derivation_oldest_recorded_at: str
     derivation_newest_recorded_at: str
     derivation_conflict_count: int
@@ -514,13 +526,15 @@ class AV1ColdStartValidationCandidateLockV1:
                 raise AV1ColdStartValidationError("AV1 validation candidate signature is invalid")
         if not 0 < self.target_video_bitrate_min_bps <= self.target_video_bitrate_max_bps:
             raise AV1ColdStartValidationError("AV1 validation candidate bitrate range is invalid")
-        if not math.isfinite(self.minimum_quality_score) or self.minimum_quality_score < 0:
+        if not math.isfinite(self.minimum_quality_score) or self.minimum_quality_score <= 0:
             raise AV1ColdStartValidationError("AV1 validation candidate quality floor is invalid")
         if self.confidence_level not in {"none", "limited", "moderate", "high"}:
             raise AV1ColdStartValidationError("AV1 validation candidate confidence is unsupported")
         if not math.isfinite(self.confidence_score) or not 0 <= self.confidence_score <= 1:
             raise AV1ColdStartValidationError("AV1 validation candidate confidence score is invalid")
-        if self.derivation_evidence_count < 0 or self.derivation_source_count < 0:
+        if self.derivation_evidence_count != AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT:
+            raise AV1ColdStartValidationError("AV1 validation candidate lock requires exactly 12 derivation observations")
+        if self.derivation_source_count < 0:
             raise AV1ColdStartValidationError("AV1 validation derivation counts must be non-negative")
         if self.derivation_source_count > self.derivation_evidence_count:
             raise AV1ColdStartValidationError("AV1 validation derivation sources exceed evidence")
@@ -528,13 +542,54 @@ class AV1ColdStartValidationCandidateLockV1:
             raise AV1ColdStartValidationError("AV1 validation derivation conflict count is invalid")
         for tokens in (
             self.derivation_source_tokens,
+            self.derivation_title_tokens,
             self.derivation_series_tokens,
             self.derivation_source_group_tokens,
         ):
-            if tokens != tuple(sorted(set(tokens))) or len(tokens) < self.derivation_source_count:
+            if tokens != tuple(sorted(set(tokens))) or not tokens:
                 raise AV1ColdStartValidationError("AV1 validation derivation tokens are incomplete")
             if any(not _SAFE_TOKEN_RE.fullmatch(token) for token in tokens):
                 raise AV1ColdStartValidationError("AV1 validation derivation token is invalid")
+        if (
+            self.derivation_source_group_observation_tokens
+            != tuple(sorted(self.derivation_source_group_observation_tokens))
+            or len(self.derivation_source_group_observation_tokens)
+            != self.derivation_evidence_count
+            or any(
+                not _SAFE_TOKEN_RE.fullmatch(token)
+                for token in self.derivation_source_group_observation_tokens
+            )
+        ):
+            raise AV1ColdStartValidationError(
+                "AV1 validation derivation source-group observations are invalid"
+            )
+        source_group_counts = Counter(self.derivation_source_group_observation_tokens)
+        if tuple(sorted(source_group_counts)) != self.derivation_source_group_tokens:
+            raise AV1ColdStartValidationError(
+                "AV1 validation derivation source-group observations are incomplete"
+            )
+        if len(source_group_counts) < AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_GROUP_COUNT:
+            raise AV1ColdStartValidationError(
+                "AV1 validation derivation requires at least six source groups"
+            )
+        if any(
+            count > AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_SOURCE_GROUP_COUNT
+            for count in source_group_counts.values()
+        ):
+            raise AV1ColdStartValidationError(
+                "AV1 validation derivation source-group concentration is too high"
+            )
+        if len(self.derivation_source_tokens) != self.derivation_source_count:
+            raise AV1ColdStartValidationError("AV1 validation derivation source tokens are incomplete")
+        if len(self.derivation_title_tokens) != self.derivation_evidence_count:
+            raise AV1ColdStartValidationError("AV1 validation derivation title tokens are incomplete")
+        if len(self.derivation_series_tokens) < self.derivation_source_count:
+            raise AV1ColdStartValidationError("AV1 validation derivation series tokens are incomplete")
+        if (
+            len(self.derivation_series_tokens) > self.derivation_evidence_count
+            or len(self.derivation_source_group_tokens) > self.derivation_source_count
+        ):
+            raise AV1ColdStartValidationError("AV1 validation derivation grouping tokens exceed evidence")
         for digest in (self.derivation_snapshot_sha256, self.selection_lock_sha256, self.payload_sha256):
             if not _SHA256_RE.fullmatch(digest):
                 raise AV1ColdStartValidationError("AV1 validation candidate digest is invalid")
@@ -579,8 +634,12 @@ class AV1ColdStartValidationCandidateLockV1:
             "derivation_evidence_count": self.derivation_evidence_count,
             "derivation_source_count": self.derivation_source_count,
             "derivation_source_tokens": list(self.derivation_source_tokens),
+            "derivation_title_tokens": list(self.derivation_title_tokens),
             "derivation_series_tokens": list(self.derivation_series_tokens),
             "derivation_source_group_tokens": list(self.derivation_source_group_tokens),
+            "derivation_source_group_observation_tokens": list(
+                self.derivation_source_group_observation_tokens
+            ),
             "derivation_oldest_recorded_at": self.derivation_oldest_recorded_at,
             "derivation_newest_recorded_at": self.derivation_newest_recorded_at,
             "derivation_conflict_count": self.derivation_conflict_count,
@@ -716,6 +775,7 @@ class AV1ColdStartValidationResultV1:
     completed_at: str
     status: AV1ColdStartValidationStatus
     source_token: str
+    title_token: str
     series_token: str
     source_group_token: str
     content_traits: tuple[str, ...]
@@ -756,6 +816,7 @@ class AV1ColdStartValidationResultV1:
             raise AV1ColdStartValidationError("AV1 validation result status is unsupported")
         for token in (
             self.source_token,
+            self.title_token,
             self.series_token,
             self.source_group_token,
             self.compatibility_signature,
@@ -814,6 +875,7 @@ class AV1ColdStartValidationResultV1:
             "completed_at": self.completed_at,
             "status": self.status,
             "source_token": self.source_token,
+            "title_token": self.title_token,
             "series_token": self.series_token,
             "source_group_token": self.source_group_token,
             "content_traits": list(self.content_traits),
@@ -1360,8 +1422,10 @@ def build_av1_cold_start_validation_candidate_lock(
         derivation_evidence_count: int,
         derivation_source_count: int,
         derivation_source_tokens: Sequence[str],
+        derivation_title_tokens: Sequence[str],
         derivation_series_tokens: Sequence[str],
         derivation_source_group_tokens: Sequence[str],
+        derivation_source_group_observation_tokens: Sequence[str],
         derivation_oldest_recorded_at: str,
         derivation_newest_recorded_at: str,
         derivation_conflict_count: int,
@@ -1387,8 +1451,12 @@ def build_av1_cold_start_validation_candidate_lock(
         "derivation_evidence_count": derivation_evidence_count,
         "derivation_source_count": derivation_source_count,
         "derivation_source_tokens": sorted(set(derivation_source_tokens)),
+        "derivation_title_tokens": sorted(set(derivation_title_tokens)),
         "derivation_series_tokens": sorted(set(derivation_series_tokens)),
         "derivation_source_group_tokens": sorted(set(derivation_source_group_tokens)),
+        "derivation_source_group_observation_tokens": sorted(
+            derivation_source_group_observation_tokens
+        ),
         "derivation_oldest_recorded_at": derivation_oldest_recorded_at,
         "derivation_newest_recorded_at": derivation_newest_recorded_at,
         "derivation_conflict_count": derivation_conflict_count,
@@ -1417,8 +1485,12 @@ def build_av1_cold_start_validation_candidate_lock(
         derivation_evidence_count=derivation_evidence_count,
         derivation_source_count=derivation_source_count,
         derivation_source_tokens=tuple(semantic_payload["derivation_source_tokens"]),
+        derivation_title_tokens=tuple(semantic_payload["derivation_title_tokens"]),
         derivation_series_tokens=tuple(semantic_payload["derivation_series_tokens"]),
         derivation_source_group_tokens=tuple(semantic_payload["derivation_source_group_tokens"]),
+        derivation_source_group_observation_tokens=tuple(
+            semantic_payload["derivation_source_group_observation_tokens"]
+        ),
         derivation_oldest_recorded_at=derivation_oldest_recorded_at,
         derivation_newest_recorded_at=derivation_newest_recorded_at,
         derivation_conflict_count=derivation_conflict_count,
@@ -1472,6 +1544,7 @@ def build_av1_cold_start_validation_result(
         completed_at: str,
         status: AV1ColdStartValidationStatus,
         source_token: str,
+        title_token: str,
         series_token: str,
         source_group_token: str,
         content_traits: Sequence[str],
@@ -1499,6 +1572,7 @@ def build_av1_cold_start_validation_result(
         "completed_at": completed_at,
         "status": status,
         "source_token": source_token,
+        "title_token": title_token,
         "series_token": series_token,
         "source_group_token": source_group_token,
         "content_traits": sorted(set(str(trait) for trait in content_traits)),
@@ -1528,6 +1602,7 @@ def build_av1_cold_start_validation_result(
         completed_at=completed_at,
         status=status,
         source_token=source_token,
+        title_token=title_token,
         series_token=series_token,
         source_group_token=source_group_token,
         content_traits=tuple(semantic_payload["content_traits"]),
@@ -1994,10 +2069,13 @@ def _build_publication_candidate_report(
             compatible_results.append(result)
 
     source_tokens = {result.source_token for result in compatible_results}
+    title_counts = Counter(result.title_token for result in compatible_results)
     series_counts = Counter(result.series_token for result in compatible_results)
     source_group_counts = Counter(result.source_group_token for result in compatible_results)
     if len(source_tokens) < criteria.minimum_holdout_count:
         blockers.append("held_out_source_tokens_not_unique")
+    if any(count > 1 for count in title_counts.values()):
+        blockers.append("held_out_titles_reused")
     if any(count > 1 for count in series_counts.values()):
         blockers.append("held_out_series_reused")
     maximum_source_group_count = math.floor(len(compatible_results) / 3)
@@ -2008,6 +2086,8 @@ def _build_publication_candidate_report(
     if candidate_lock is not None:
         if source_tokens.intersection(candidate_lock.derivation_source_tokens):
             blockers.append("derivation_holdout_source_overlap")
+        if set(title_counts).intersection(candidate_lock.derivation_title_tokens):
+            blockers.append("derivation_holdout_title_overlap")
         if set(series_counts).intersection(candidate_lock.derivation_series_tokens):
             blockers.append("derivation_holdout_series_overlap")
         if set(source_group_counts).intersection(candidate_lock.derivation_source_group_tokens):
@@ -2350,8 +2430,10 @@ def _candidate_lock_from_payload(
         "derivation_evidence_count",
         "derivation_source_count",
         "derivation_source_tokens",
+        "derivation_title_tokens",
         "derivation_series_tokens",
         "derivation_source_group_tokens",
+        "derivation_source_group_observation_tokens",
         "derivation_oldest_recorded_at",
         "derivation_newest_recorded_at",
         "derivation_conflict_count",
@@ -2401,6 +2483,13 @@ def _candidate_lock_from_payload(
             _text(value, "derivation source token")
             for value in _sequence(payload["derivation_source_tokens"], "derivation source tokens")
         ),
+        derivation_title_tokens=tuple(
+            _text(value, "derivation title token")
+            for value in _sequence(
+                payload["derivation_title_tokens"],
+                "derivation title tokens",
+            )
+        ),
         derivation_series_tokens=tuple(
             _text(value, "derivation series token")
             for value in _sequence(payload["derivation_series_tokens"], "derivation series tokens")
@@ -2410,6 +2499,13 @@ def _candidate_lock_from_payload(
             for value in _sequence(
                 payload["derivation_source_group_tokens"],
                 "derivation source-group tokens",
+            )
+        ),
+        derivation_source_group_observation_tokens=tuple(
+            _text(value, "derivation source-group observation token")
+            for value in _sequence(
+                payload["derivation_source_group_observation_tokens"],
+                "derivation source-group observation tokens",
             )
         ),
         derivation_oldest_recorded_at=_text(
@@ -2515,6 +2611,7 @@ def _result_from_payload(payload: Mapping[str, Any]) -> AV1ColdStartValidationRe
         "completed_at",
         "status",
         "source_token",
+        "title_token",
         "series_token",
         "source_group_token",
         "content_traits",
@@ -2548,6 +2645,7 @@ def _result_from_payload(payload: Mapping[str, Any]) -> AV1ColdStartValidationRe
         completed_at=_text(payload["completed_at"], "result completion"),
         status=cast(AV1ColdStartValidationStatus, _text(payload["status"], "result status")),
         source_token=_text(payload["source_token"], "source token"),
+        title_token=_text(payload["title_token"], "title token"),
         series_token=_text(payload["series_token"], "series token"),
         source_group_token=_text(payload["source_group_token"], "source-group token"),
         content_traits=tuple(

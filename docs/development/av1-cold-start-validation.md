@@ -174,6 +174,152 @@ Successful validation emits only `eligibility_valid=true` and false execution
 authority flags. It does not emit the attestation ID, cutoff timestamp, or any
 aggregate counts.
 
+## Bounded v2 derivation workflow
+
+Issue `#287` uses `av1vdw1` to turn the reviewed partition into one immutable,
+owner-only derivation plan. Plan creation revalidates the exact partition
+against the current read-only inventory before it embeds the separate
+`acsvda1` authorization and exactly twenty-four derivation assignments:
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  create-derivation-plan \
+  docs/validation/av1-cold-start-preregistration-v2.json \
+  /private/owner-only/eligibility-attestation-v1.json \
+  /private/owner-only/av1-v2/source-partition-v1.json \
+  --key /private/owner-only/av1-v2/partition.key \
+  --valid-until YYYY-MM-DDTHH:MM:SSZ --json
+```
+
+The plan authorizes only its twelve motion and twelve darkness reservations.
+The command writes `plan.json` only beneath the plan-global canonical private
+state root derived from `web_state_dir`; there is no caller-selected plan path.
+Its authorization timestamp comes from the runtime clock. The plan binds a
+privacy-safe digest of the resolved database, review, and web-state locations;
+every later command must use that same machine-local runtime context. Every
+execution, proposal, and finalization also re-compares the plan's complete
+twenty-four-assignment payload with the frozen partition rather than trusting
+top-level digests alone.
+Each assignment has one attempt. Execution cannot select a replacement, retry a
+source, use a holdout, invoke the validation harness, inject a cold-start or
+guided probe, consume local personalization, backfill a historical row, or
+activate the public bundle. A claim file is created before media work begins so
+an interrupted process cannot silently rerun the same reservation. Attempt,
+terminal-intent, terminal-record, proposal, review, and candidate-lock artifacts
+live under the plan-global canonical private state root derived from
+`web_state_dir`; callers cannot select alternate artifact directories. Each
+directory carries an immutable binding to one plan or proposal, so artifacts
+cannot be mixed across authorization windows or review sets.
+
+Run one assignment at a time. The command revalidates the partition and current
+inventory before touching media, uses the exact assigned library item, forces
+the existing sampled calibration path to leave the cold-start planner absent,
+and preserves an owner-only attempt artifact plus review media. Derivation
+review clips are redirected beneath the plan-global private artifact root;
+their directory is `0700`, files are `0600`, and verdict-time identity checks
+use no-follow file descriptors:
+
+The authorization binds the resolved database, review, and state roots together
+with the current machine, AV1 encoder/metric toolchain, and merged statistical
+contract. Assignment execution holds the same exclusive runtime lock as
+`mediaforce-web`, so web, staging, database, and cleanup work cannot overlap the
+bounded derivation case. Machine or toolchain drift before the claim or after
+measurement is a safety stop rather than a newly compatible cohort.
+
+```bash
+uv run python scripts/verify_av1_cold_start_preregistration.py \
+  run-derivation-assignment \
+  docs/validation/av1-cold-start-preregistration-v2.json \
+  /private/owner-only/av1-v2/source-partition-v1.json \
+  '<web_state_dir>/av1-validation-derivation/<plan_id>/plan.json' \
+  av1vderive1_<opaque-slot> \
+  --key /private/owner-only/av1-v2/partition.key \
+  --config /private/owner-only/mediaforce.toml --json
+```
+
+Successful technical attempts remain `review_pending` until a human records an
+explicit visual verdict. The verdict path appends the existing current-contract
+`ContentIntentBoundaryObservation`; it never infers a verdict. Derivation rows
+are active evidence for the bound candidate snapshot but are explicitly marked
+ineligible for local personalization, so later planning and holdout execution
+cannot consume them as warm-start evidence. The complete derivation terminal is
+preceded by an immutable verdict intent that freezes the first human input and
+runtime timestamp. The terminal is then validated and written as an immutable
+terminal intent before the observation is appended. The quarantined database
+row is committed before the immutable terminal record is completed; an
+interrupted retry reuses the frozen verdict timestamp, idempotently confirms the
+same observation, and finishes the missing terminal without replacing or
+duplicating evidence. Review-media identity is freshly recomputed immediately
+before the verdict and must still match the frozen attempt.
+Rejected, excluded, failed, stopped, and missing outcomes remain visible and
+cannot be replaced. The next reservation cannot run until every prior technical
+attempt has its human terminal. Any terminal unsuccessful attempt or unfavorable
+reviewed record stops later assignments. Because each candidate has exactly
+twelve reservations and requires twelve eligible observations, any unfavorable
+or incomplete reservation is an exact candidate no-go.
+
+Candidate derivation uses every retained terminal record. The proposal and final
+candidate lock retain opaque source, logical-title, series, and source-group
+token sets plus the sorted source-group token for every derivation observation.
+That multiplicity-preserving projection makes the six-group minimum and
+one-third concentration maximum independently verifiable after serialization,
+while later holdout evidence can recheck within-holdout title uniqueness and
+every derivation/holdout overlap dimension. No raw title or source identity
+enters those artifacts. For an eligible cell, the CRF bounds are the full
+observed minimum and maximum with the median center;
+no trimming is allowed. CRF MAD must be at most `2.0`, the full span must be at
+most `6`, and the range must contain an executable integer CRF. The bitrate
+range is the full observed minimum and maximum. The quality floor remains the
+numeric value frozen in the partition. Confidence reuses the existing bitrate
+relative-MAD categories and records `round(1 - relative_mad, 3)` after the hard
+evidence and independent-source minima; limited confidence or a score below
+`0.7` is a no-go. The proposal records the measured CRF MAD, bitrate relative
+MAD, derived conflict count, and pre-run statistical-contract digest. A
+proposal exists only when the conflict count is zero, so reviewers can verify
+the exact applied dispersion and confidence contract from immutable evidence.
+
+The full-search proof validates the native target-size trace contract, including
+the first `target_seed`, any later `compression_floor`, `expanded_bound`, or
+`refine` measurements, the native curve/retry policy, and exact selected CRF,
+quality, and bitrate projection values. A one-point `target_seed` trace remains
+valid when the unchanged search naturally selects its first measured candidate;
+the workflow does not force exploratory probes that production search would not
+perform.
+
+The resulting proposal is explicitly non-authoritative. Finalization requires
+five proposal-bound approvals from distinct completed Every Code agent runs:
+architecture, statistical/model-contract, privacy/security,
+experimental-design, and adversarial. `record-derivation-review` launches a new
+read-only `code exec --json` process itself; it accepts no caller-supplied result
+path. Each attestation binds a fresh run nonce and SHA-256 digest of the
+immutable owner-only completion transcript. The attestation and transcript are
+written together as one immutable atomic lane envelope, preventing a crash from
+leaving a trusted half-review. Duplicate run IDs or transcript digests are
+rejected. The completed process must emit a matching quiescent
+agent message whose final non-empty line is the exact proposal-, lane-, and
+run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker; the decision is extracted
+rather than supplied by the operator. Review, verdict, proposal, and lock
+timestamps come from the runtime clock. A rejection blocks finalization.
+Finalization loads configuration once, opens an immediate database write
+transaction, revalidates the frozen partition against inventory in that same
+transaction, rereads current observations, and computes and writes the lock
+through one runtime-owned finalization API. That API derives the canonical root
+from config and the immutable plan path, loads the attempts, terminals,
+proposal, and review envelopes itself, and exposes no write-capable caller path
+that accepts a precomputed evaluation. A finalized candidate lock still does
+not authorize holdout execution or mutate the shipped public bundle.
+
+The candidate-lock file is a provenance envelope, not a standalone lock. It
+commits to the plan and derivation authorization, proposal, five atomic review
+envelopes, canonical artifact-root binding, candidate lock, and terminal
+snapshot. #288 must load it through the verified derivation-chain loader and
+must reject a raw or synthetic candidate lock. That loader also derives the
+root from config, reloads the full chain, and rechecks current database evidence
+inside an immediate transaction. These owner-local hashes detect
+stale, copied, mixed, and partially replaced artifacts; they do not claim to
+authenticate against a malicious machine owner who changes code and rebuilds a
+fully self-consistent private evidence tree.
+
 ## Trait reachability preflight
 
 Before a future preregistration is treated as executable, run the read-only
