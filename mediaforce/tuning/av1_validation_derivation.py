@@ -1690,6 +1690,42 @@ def build_av1_validation_derivation_review_claim(
     )
 
 
+def build_av1_validation_derivation_review_prompt(
+        *,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+) -> str:
+    if (
+        claim.plan_id != proposal.plan_id
+        or claim.proposal_id != proposal.proposal_id
+        or claim.proposal_payload_sha256 != proposal.payload_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review prompt inputs are not bound"
+        )
+    marker = {
+        "decision": "approved|rejected",
+        "lane": claim.lane,
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "review_run_id": claim.review_run_id,
+    }
+    proposal_json = canonical_json_bytes(proposal.to_payload()).decode("utf-8")
+    marker_json = canonical_json_bytes(marker).decode("utf-8")
+    return (
+        "Perform one independent, read-only AV1 derivation candidate review. "
+        "Do not modify files, invoke another agent, reveal opaque tokens, or infer private media identity. "
+        f"Review lane: {claim.lane}. Review the repository implementation and this canonical proposal payload:\n"
+        f"Immutable review claim: {claim.claim_id} ({claim.payload_sha256}).\n"
+        f"{proposal_json}\n"
+        "Reject on any actionable gate failure; otherwise approve. Explain findings concisely. "
+        "End with exactly one final marker line using valid JSON and replace the decision placeholder:\n"
+        f"{AV1_VALIDATION_DERIVATION_AGENT_REVIEW_MARKER}{marker_json}"
+    )
+
+
 def build_av1_validation_derivation_review_attestation(
         *,
         proposal: AV1ValidationDerivationCandidateProposal,
@@ -2785,8 +2821,24 @@ def validate_av1_validation_derivation_review_run_evidence(
         "proposal_id", "proposal_payload_sha256", "review_claim_id",
         "review_claim_payload_sha256", "lane", "decision",
         "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
-        "prompt_sha256", "stdout", "stderr", "returncode",
+        "proposal", "review_claim", "prompt_sha256", "stdout", "stderr",
+        "returncode",
     }, "derivation review run evidence")
+    try:
+        proposal_payload = object_dict(payload.get("proposal"))
+        claim_payload = object_dict(payload.get("review_claim"))
+        proposal = av1_validation_derivation_candidate_proposal_from_payload(
+            proposal_payload,
+            raw=canonical_json_bytes(proposal_payload),
+        )
+        claim = av1_validation_derivation_review_claim_from_payload(
+            claim_payload,
+            raw=canonical_json_bytes(claim_payload),
+        )
+    except (TypeError, ValueError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review run evidence bindings are invalid"
+        ) from exc
     review_run_id = _required_text(payload.get("review_run_id"), "review run ID")
     stdout = payload.get("stdout")
     stderr = payload.get("stderr")
@@ -2807,6 +2859,11 @@ def validate_av1_validation_derivation_review_run_evidence(
         != review.review_runner_canonical_path_sha256
         or payload.get("review_runner_binary_sha256")
         != review.review_runner_binary_sha256
+        or proposal.proposal_id != review.proposal_id
+        or proposal.payload_sha256 != review.proposal_payload_sha256
+        or claim.review_run_id != review_run_id
+        or claim.plan_id != proposal.plan_id
+        or not _av1_validation_derivation_review_matches_claim(review, claim)
         or type(returncode) is not int
         or returncode != 0
         or not isinstance(stdout, str)
@@ -2840,22 +2897,18 @@ def validate_av1_validation_derivation_review_run_evidence(
     prompt_sha256 = _required_text(payload.get("prompt_sha256"), "review prompt digest")
     _require_sha256(prompt_sha256, "review prompt digest")
     final_message, prompt = _completed_code_review_message(stdout)
-    if prompt_sha256 != f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}":
+    expected_prompt = build_av1_validation_derivation_review_prompt(
+        proposal=proposal,
+        claim=claim,
+    )
+    if prompt != expected_prompt:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review prompt does not match its frozen inputs"
+        )
+    if prompt_sha256 != f"sha256:{hashlib.sha256(expected_prompt.encode('utf-8')).hexdigest()}":
         raise AV1ValidationDerivationError(
             "AV1 derivation review prompt digest does not match its completed run"
         )
-    for bound_value in (
-        review_run_id,
-        review.proposal_id,
-        review.proposal_payload_sha256,
-        review.review_claim_id,
-        review.review_claim_payload_sha256,
-        review.lane,
-    ):
-        if bound_value not in prompt:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review prompt is not bound to its attestation"
-            )
     marker = _code_review_marker(final_message)
     if marker != {
         "decision": review.decision,
@@ -2871,28 +2924,84 @@ def validate_av1_validation_derivation_review_run_evidence(
         )
 
 
+def _review_transcript_json_object(
+        pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review JSON contains duplicate JSON keys"
+            )
+        value[key] = item
+    return value
+
+
 def _completed_code_review_message(stdout: str) -> tuple[str, str]:
-    config_seen = False
+    stage = "config"
     prompt: str | None = None
     messages: list[str] = []
     completed_message: str | None = None
-    for line in stdout.splitlines():
+    config_keys = {"provider", "model", "workdir", "approval", "sandbox"}
+    reserved_event_keys = {"prompt", "msg", "id", "event_seq", "order"}
+    for line in stdout.split("\n"):
+        if line.endswith("\r"):
+            line = line[:-1]
         if not line.strip():
             continue
+        if completed_message is not None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review transcript has events after completion"
+            )
         try:
-            event = object_dict(json.loads(line))
+            event = object_dict(json.loads(
+                line,
+                object_pairs_hook=_review_transcript_json_object,
+            ))
         except (json.JSONDecodeError, TypeError) as exc:
             raise AV1ValidationDerivationError(
                 "AV1 derivation review transcript is not canonical JSONL"
             ) from exc
-        if {"provider", "model", "workdir", "approval", "sandbox"}.issubset(event):
-            if event.get("approval") != "never" or event.get("sandbox") != "read-only":
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review did not run read-only"
+        has_config_fields = bool(config_keys.intersection(event))
+        is_config = config_keys.issubset(event)
+        is_prompt = set(event) == {"prompt"}
+        if stage == "config":
+            if (
+                not is_config
+                or any(
+                    not isinstance(event.get(key), str)
+                    or not str(event[key]).strip()
+                    for key in ("provider", "model", "workdir")
                 )
-            config_seen = True
-        if set(event) == {"prompt"} and isinstance(event.get("prompt"), str):
+                or event.get("approval") != "never"
+                or event.get("sandbox") != "read-only"
+                or reserved_event_keys.intersection(event)
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review transcript configuration is invalid"
+                )
+            stage = "prompt"
+            continue
+        if has_config_fields:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review transcript configuration is duplicated or out of order"
+            )
+        if stage == "prompt":
+            if (
+                not is_prompt
+                or not isinstance(event.get("prompt"), str)
+                or not event["prompt"]
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review transcript prompt is missing or out of order"
+                )
             prompt = event["prompt"]
+            stage = "events"
+            continue
+        if "prompt" in event:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review transcript prompt is duplicated or out of order"
+            )
         message = event.get("msg")
         if not isinstance(message, dict):
             continue
@@ -2903,11 +3012,19 @@ def _completed_code_review_message(stdout: str) -> tuple[str, str]:
         if (
             message.get("type") == "task_lifecycle"
             and message.get("phase") == "quiescent"
-            and isinstance(message.get("last_agent_message"), str)
         ):
-            completed_message = message["last_agent_message"]
+            last_agent_message = message.get("last_agent_message")
+            if (
+                not isinstance(last_agent_message, str)
+                or not messages
+                or last_agent_message != messages[-1]
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review transcript completion is invalid"
+                )
+            completed_message = last_agent_message
     if (
-        not config_seen
+        stage != "events"
         or prompt is None
         or not messages
         or completed_message != messages[-1]
@@ -2935,7 +3052,8 @@ def _code_review_marker(message: str) -> dict[str, Any]:
         )
     try:
         marker = object_dict(json.loads(
-            marker_lines[0][len(AV1_VALIDATION_DERIVATION_AGENT_REVIEW_MARKER):]
+            marker_lines[0][len(AV1_VALIDATION_DERIVATION_AGENT_REVIEW_MARKER):],
+            object_pairs_hook=_review_transcript_json_object,
         ))
     except (json.JSONDecodeError, TypeError) as exc:
         raise AV1ValidationDerivationError(

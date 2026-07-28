@@ -219,10 +219,17 @@ continue, so a power loss cannot silently erase assignment or review ownership.
 On the next runtime-lock-held invocation, an orphaned assignment claim is
 terminalized as an unfavorable `interrupted_claim` without rerunning media, and
 a persisted non-review attempt missing its terminal record is idempotently
-terminalized before any later reservation can run.
+terminalized before any later reservation can run. Recovery first confirms the
+same canonical state root and its frozen plan/partition bindings, then runs
+before full runtime-context, execution-environment, statistics-contract, live
+inventory, or source compatibility checks. Later database, review-directory,
+toolchain, policy-code, or source drift therefore cannot strand an existing
+claim. Because the state root also owns the global runtime lock, a moved
+`web_state_dir` must be restored before recovery rather than silently using a
+different lock domain.
 
-Run one assignment at a time. The command revalidates the partition and current
-inventory before touching media, uses the exact assigned library item, forces
+Run one fresh assignment at a time. The command revalidates the partition and
+current inventory before touching media, uses the exact assigned library item, forces
 the existing sampled calibration path to leave the cold-start planner absent,
 and preserves an owner-only attempt artifact plus review media. Derivation
 review clips are redirected beneath the partition-global private artifact root;
@@ -239,8 +246,12 @@ bounded derivation case. Machine or toolchain drift before the claim or after
 measurement is a safety stop rather than a newly compatible cohort.
 The shared lock uses a stable parent-directory guard in addition to the metadata
 file, so unlinking and recreating `mediaforce-web.lock` cannot create a second
-lock inode for another compliant runtime. `scripts/mediaforce-dev.sh` leaves
-that persistent lock path in place when stopping the backend.
+lock inode for another compliant runtime. The lock path resolves
+`web_state_dir` symlinks before choosing that parent, so aliases cannot create a
+second lock domain. Fresh execution samples its authorization timestamp only
+after all preflight checks and immediately before the immutable claim.
+`scripts/mediaforce-dev.sh` leaves that persistent lock path in place when
+stopping the backend.
 
 ```bash
 uv run python scripts/verify_av1_cold_start_preregistration.py \
@@ -365,6 +376,10 @@ transcript are written together as one immutable atomic lane envelope. Duplicate
 run IDs or transcript digests are rejected. The completed process must emit a
 matching quiescent agent message whose final non-empty line is the exact
 proposal-, lane-, claim-, and run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker;
+the JSONL parser requires one ordered config record and one ordered prompt,
+rejects duplicate JSON keys, reserved-field mixing, malformed or repeated
+completion, and any event after quiescence, and treats only LF/CRLF as record
+boundaries so Unicode line separators remain inside their JSON strings.
 the decision is extracted rather than supplied by the operator. Public summaries
 expose only that the runner identity is bound, never the canonical private path.
 Review, verdict, proposal, and lock timestamps come from the runtime clock.

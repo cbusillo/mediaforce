@@ -26,6 +26,8 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationTerminalRecord,
     _attempt_semantic_payload,
+    _code_review_marker,
+    _completed_code_review_message,
     _derivation_id,
     _payload_sha256,
     _terminal_semantic_payload,
@@ -35,6 +37,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     build_av1_validation_derivation_attempt,
     build_av1_validation_derivation_plan,
     build_av1_validation_derivation_review_claim,
+    build_av1_validation_derivation_review_prompt,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
     build_av1_validation_derivation_terminal_record,
@@ -64,6 +67,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     _current_derivation_review_artifact_fingerprint,
     _prepare_derivation_review_root,
     _recover_interrupted_derivation_state,
+    _run_av1_validation_derivation_assignment_locked,
     _secure_derivation_review_media,
     assert_av1_validation_derivation_execution_contract,
     av1_validation_derivation_execution_environment_sha256,
@@ -73,6 +77,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     record_av1_validation_derivation_visual_verdict,
     run_av1_validation_derivation_assignment,
 )
+from mediaforce.web.runtime_lock import mediaforce_runtime_lock_path
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
     build_av1_cold_start_validation_candidate_lock,
@@ -423,7 +428,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             code_binary.write_bytes(REVIEW_RUNNER_BYTES)
             code_binary.chmod(0o700)
             final_message = (
-                "Review complete.\n"
+                "Résumé\u2028review\u2029complete.\n"
                 "MEDIAFORCE_AV1_REVIEW_V2 "
                 f"{json.dumps(marker, sort_keys=True, separators=(',', ':'))}"
             )
@@ -438,21 +443,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "workdir": str(root),
                     "approval": "never",
                     "sandbox": "read-only",
-                }),
-                json.dumps({"prompt": prompt}),
+                }, ensure_ascii=False),
+                json.dumps({"prompt": prompt}, ensure_ascii=False),
                 json.dumps({
                     "msg": {
                         "type": "agent_message",
                         "message": final_message,
                     }
-                }),
+                }, ensure_ascii=False),
                 json.dumps({
                     "msg": {
                         "type": "task_lifecycle",
                         "phase": "quiescent",
                         "last_agent_message": final_message,
                     }
-                }),
+                }, ensure_ascii=False),
             ))
             completed = SimpleNamespace(
                 returncode=0,
@@ -507,6 +512,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration._AGENT_REVIEW_SAFE_PATH,
             )
             evidence_payload = json.loads(evidence)
+            self.assertEqual(evidence, canonical_json_bytes(evidence_payload))
             self.assertEqual(evidence_payload["review_run_id"], agent_id)
             self.assertEqual(evidence_payload["returncode"], 0)
             self.assertNotIn(str(code_binary), evidence.decode("utf-8"))
@@ -546,6 +552,243 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ),
             ):
                 verify_av1_cold_start_preregistration._review_runner_identity()
+
+    def test_review_recorder_rejects_noncanonical_transcript(self) -> None:
+        agent_id = "12345678-1234-1234-1234-123456789abd"
+        proposal = self._candidate_proposal()
+        expected_claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            lane="architecture",
+            review_run_id=agent_id,
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
+            claimed_at="2026-07-28T03:00:00Z",
+        )
+        prompt = verify_av1_cold_start_preregistration._agent_review_prompt(
+            proposal=proposal,
+            claim=expected_claim,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            code_binary = Path(directory) / "code"
+            code_binary.write_bytes(REVIEW_RUNNER_BYTES)
+            code_binary.chmod(0o700)
+            completed = SimpleNamespace(
+                returncode=0,
+                stdout="\n".join((
+                    json.dumps({
+                        "provider": "test",
+                        "model": "test-model",
+                        "workdir": directory,
+                        "approval": "never",
+                        "sandbox": "read-only",
+                    }),
+                    json.dumps({"prompt": prompt}),
+                    "not-json",
+                )),
+                stderr="",
+            )
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_authorized_review_runner_identity",
+                    return_value=(
+                        code_binary,
+                        self.authorization.review_runner_canonical_path_sha256,
+                        self.authorization.review_runner_binary_sha256,
+                        REVIEW_RUNNER_BYTES,
+                    ),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration.subprocess,
+                    "run",
+                    return_value=completed,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration.uuid,
+                    "uuid4",
+                    return_value=agent_id,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_now_iso",
+                    return_value="2026-07-28T03:00:00Z",
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "not canonical JSONL",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._run_code_agent_review(
+                    artifact_root=self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    lane="architecture",
+                )
+            self.assertEqual(
+                load_av1_validation_derivation_review_claims(
+                    self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                ),
+                (expected_claim,),
+            )
+
+    def test_review_transcript_requires_ordered_valid_config_and_prompt(self) -> None:
+        config = {
+            "provider": "test",
+            "model": "test-model",
+            "workdir": "/private/test",
+            "approval": "never",
+            "sandbox": "read-only",
+        }
+        prompt = {"prompt": "review prompt"}
+        final_message = "Review complete."
+        message = {
+            "msg": {
+                "type": "agent_message",
+                "message": final_message,
+            }
+        }
+        completion = {
+            "msg": {
+                "type": "task_lifecycle",
+                "phase": "quiescent",
+                "last_agent_message": final_message,
+            }
+        }
+        cases = (
+            (
+                "malformed config",
+                ({**config, "provider": None}, prompt, message, completion),
+                "configuration is invalid",
+            ),
+            (
+                "config with message fields",
+                (
+                    {
+                        **config,
+                        "msg": {
+                            "type": "agent_message",
+                            "message": final_message,
+                        },
+                    },
+                    prompt,
+                    message,
+                    completion,
+                ),
+                "configuration is invalid",
+            ),
+            (
+                "duplicate prompt",
+                (config, prompt, prompt, message, completion),
+                "prompt is duplicated or out of order",
+            ),
+            (
+                "smuggled duplicate prompt",
+                (
+                    config,
+                    prompt,
+                    {
+                        "prompt": "drifted prompt",
+                        "msg": {
+                            "type": "agent_message",
+                            "message": final_message,
+                        },
+                    },
+                    completion,
+                ),
+                "prompt is duplicated or out of order",
+            ),
+            (
+                "smuggled config field",
+                (
+                    config,
+                    prompt,
+                    {
+                        "provider": "drifted-provider",
+                        "msg": {
+                            "type": "agent_message",
+                            "message": final_message,
+                        },
+                    },
+                    completion,
+                ),
+                "configuration is duplicated or out of order",
+            ),
+            (
+                "prompt after completion",
+                (config, prompt, message, completion, prompt),
+                "events after completion",
+            ),
+            (
+                "malformed early completion",
+                (
+                    config,
+                    prompt,
+                    {
+                        "msg": {
+                            "type": "task_lifecycle",
+                            "phase": "quiescent",
+                            "last_agent_message": None,
+                        }
+                    },
+                    message,
+                    completion,
+                ),
+                "completion is invalid",
+            ),
+        )
+        for label, events, expected_error in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                expected_error,
+            ):
+                _completed_code_review_message("\n".join(
+                    canonical_json_bytes(event).decode("utf-8")
+                    for event in events
+                ))
+
+        duplicate_key_lines = (
+            (
+                "duplicate prompt key",
+                '{"prompt":"first","prompt":"review prompt"}',
+            ),
+            (
+                "duplicate config key",
+                (
+                    '{"provider":"first","provider":"test",'
+                    '"model":"test-model","workdir":"/private/test",'
+                    '"approval":"never","sandbox":"read-only"}'
+                ),
+            ),
+        )
+        for label, duplicate_line in duplicate_key_lines:
+            lines = [
+                canonical_json_bytes(config).decode("utf-8"),
+                canonical_json_bytes(prompt).decode("utf-8"),
+                canonical_json_bytes(message).decode("utf-8"),
+                canonical_json_bytes(completion).decode("utf-8"),
+            ]
+            lines[0 if "config" in label else 1] = duplicate_line
+            with self.subTest(label=label), self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "duplicate JSON keys",
+            ):
+                _completed_code_review_message("\n".join(lines))
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "duplicate JSON keys",
+        ):
+            _code_review_marker(
+                'MEDIAFORCE_AV1_REVIEW_V2 '
+                '{"decision":"approved","decision":"rejected"}'
+            )
 
     def test_review_runner_environment_removes_injection_overrides(self) -> None:
         with patch.dict(
@@ -962,6 +1205,56 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
             "digest does not match its canonical evidence",
+        ):
+            validate_av1_validation_derivation_review_run_evidence(
+                evidence,
+                review=review,
+            )
+
+    def test_review_evidence_rejects_prompt_drift_with_matching_digest(self) -> None:
+        proposal = self._candidate_proposal()
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            lane="architecture",
+            review_run_id="50000000-0000-0000-0000-000000000002",
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        evidence_payload = json.loads(
+            _review_run_evidence(proposal=proposal, claim=claim)
+        )
+        events = [
+            json.loads(line)
+            for line in str(evidence_payload["stdout"]).split("\n")
+        ]
+        drifted_prompt = f"proposal_id={proposal.proposal_id}"
+        events[1] = {"prompt": drifted_prompt}
+        evidence_payload["stdout"] = "\n".join(
+            canonical_json_bytes(event).decode("utf-8")
+            for event in events
+        )
+        evidence_payload["prompt_sha256"] = (
+            f"sha256:{hashlib.sha256(drifted_prompt.encode('utf-8')).hexdigest()}"
+        )
+        evidence = canonical_json_bytes(evidence_payload)
+        review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=(
+                f"sha256:{hashlib.sha256(evidence).hexdigest()}"
+            ),
+            decision="approved",
+            reviewed_at="2026-07-28T03:01:00Z",
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "prompt does not match its frozen inputs",
         ):
             validate_av1_validation_derivation_review_run_evidence(
                 evidence,
@@ -1571,6 +1864,136 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(attempt.status, "stopped")
             self.assertEqual(attempt.reason_code, "interrupted_claim")
             self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_interrupted_claim_terminalizes_before_live_inventory_validation(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_assignment_claim(
+            attempts_dir,
+            assignment_id=assignment.assignment_id,
+            plan_id=self.plan.plan_id,
+            authorization_id=self.plan.authorization.authorization_id,
+            claimed_at="2026-07-28T01:00:00Z",
+        )
+        drifted_config = SimpleNamespace(
+            paths=SimpleNamespace(
+                db_path=self.runtime_config.paths.db_path.with_name("drifted.sqlite3"),
+                review_dir=self.runtime_config.paths.review_dir.with_name("drifted-review"),
+                web_state_dir=self.runtime_config.paths.web_state_dir,
+            )
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                side_effect=AssertionError("live inventory must not be read"),
+            ) as open_database,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+                side_effect=AssertionError("execution drift must not be checked"),
+            ) as execution_contract,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "interrupted state was terminalized",
+            ),
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=drifted_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-28T01:01:00Z",
+            )
+        open_database.assert_not_called()
+        execution_contract.assert_not_called()
+        attempt = load_av1_validation_derivation_attempts(attempts_dir)[0]
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(attempt.reason_code, "interrupted_claim")
+        self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_fresh_authorization_timestamp_is_sampled_after_preflight(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        timestamps = iter(("2026-07-31T23:59:59Z", VALID_UNTIL))
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract"
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "outside its authorization window",
+            ),
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: next(timestamps),
+            )
+        self.assertFalse(attempts_dir.exists())
+
+    def test_runtime_lock_path_canonicalizes_web_state_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "real" / "state"
+            state_dir.mkdir(parents=True)
+            alias_parent = root / "alias"
+            alias_parent.mkdir()
+            alias_state = alias_parent / "state"
+            alias_state.symlink_to(state_dir, target_is_directory=True)
+            real_config = SimpleNamespace(
+                paths=SimpleNamespace(web_state_dir=state_dir)
+            )
+            alias_config = SimpleNamespace(
+                paths=SimpleNamespace(web_state_dir=alias_state)
+            )
+            self.assertEqual(
+                mediaforce_runtime_lock_path(real_config),
+                mediaforce_runtime_lock_path(alias_config),
+            )
+
+    def test_assignment_loader_allows_recovery_before_full_runtime_context_check(self) -> None:
+        drifted_config = SimpleNamespace(
+            paths=SimpleNamespace(
+                db_path=self.runtime_config.paths.db_path.with_name("drifted.sqlite3"),
+                review_dir=self.runtime_config.paths.review_dir.with_name("drifted-review"),
+                web_state_dir=self.runtime_config.paths.web_state_dir,
+            )
+        )
+        with patch.object(
+            verify_av1_cold_start_preregistration,
+            "load_config",
+            return_value=drifted_config,
+        ):
+            plan, artifact_root = (
+                verify_av1_cold_start_preregistration._load_recovery_capable_derivation_plan(
+                    plan_path=self.runtime_artifact_root / "plan.json",
+                    config_path=Path("unused.toml"),
+                )
+            )
+        self.assertEqual(plan, self.plan)
+        self.assertEqual(artifact_root, self.runtime_artifact_root.resolve())
 
     def test_nonreview_attempt_without_terminal_is_recovered(self) -> None:
         attempt = self._failed_attempt(self.plan.assignments[0].assignment_id)
@@ -3231,7 +3654,7 @@ def _calibration_payload(
 
 def _review_run_evidence(
         *,
-        proposal: object,
+        proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
         decision: Literal["approved", "rejected"] = "approved",
 ) -> bytes:
@@ -3241,13 +3664,9 @@ def _review_run_evidence(
     review_run_id = str(getattr(claim, "review_run_id"))
     review_claim_id = str(getattr(claim, "claim_id"))
     review_claim_payload_sha256 = str(getattr(claim, "payload_sha256"))
-    prompt = (
-        f"review_run_id={review_run_id}\n"
-        f"proposal_id={proposal_id}\n"
-        f"proposal_payload_sha256={proposal_payload_sha256}\n"
-        f"review_claim_id={review_claim_id}\n"
-        f"review_claim_payload_sha256={review_claim_payload_sha256}\n"
-        f"lane={lane}"
+    prompt = build_av1_validation_derivation_review_prompt(
+        proposal=proposal,
+        claim=claim,
     )
     marker = {
         "decision": decision,
@@ -3261,30 +3680,30 @@ def _review_run_evidence(
     final_message = (
         "Review complete.\n"
         "MEDIAFORCE_AV1_REVIEW_V2 "
-        f"{json.dumps(marker, sort_keys=True, separators=(',', ':'))}"
+        f"{canonical_json_bytes(marker).decode('utf-8')}"
     )
     stdout = "\n".join((
-        json.dumps({
+        canonical_json_bytes({
             "provider": "test",
             "model": "test-model",
             "workdir": "/private/test",
             "approval": "never",
             "sandbox": "read-only",
-        }, sort_keys=True),
-        json.dumps({"prompt": prompt}, sort_keys=True),
-        json.dumps({
+        }).decode("utf-8"),
+        canonical_json_bytes({"prompt": prompt}).decode("utf-8"),
+        canonical_json_bytes({
             "msg": {
                 "type": "agent_message",
                 "message": final_message,
             }
-        }, sort_keys=True),
-        json.dumps({
+        }).decode("utf-8"),
+        canonical_json_bytes({
             "msg": {
                 "type": "task_lifecycle",
                 "phase": "quiescent",
                 "last_agent_message": final_message,
             }
-        }, sort_keys=True),
+        }).decode("utf-8"),
     ))
     return canonical_json_bytes({
         "schema": "mediaforce.av1_derivation_agent_review_run",
@@ -3303,6 +3722,8 @@ def _review_run_evidence(
         "review_runner_binary_sha256": str(
             getattr(claim, "review_runner_binary_sha256")
         ),
+        "proposal": proposal.to_payload(),
+        "review_claim": claim.to_payload(),
         "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
         "stdout": stdout,
         "stderr": "",

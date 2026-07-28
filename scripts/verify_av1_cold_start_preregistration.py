@@ -18,6 +18,7 @@ import uuid
 
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
 from mediaforce.core.db import open_readonly_db
+from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
@@ -38,17 +39,20 @@ from mediaforce.tuning.av1_validation_v2 import (
     load_av1_validation_v2_eligibility,
 )
 from mediaforce.tuning.av1_validation_derivation import (
-    AV1_VALIDATION_DERIVATION_AGENT_REVIEW_MARKER,
+    AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationReviewDecision,
     AV1ValidationDerivationReviewLane,
+    _code_review_marker,
+    _completed_code_review_message,
     av1_validation_derivation_candidate_evaluation_public_summary,
     av1_validation_derivation_plan_public_summary,
     av1_validation_derivation_statistics_contract_sha256,
     build_av1_validation_derivation_plan,
+    build_av1_validation_derivation_review_prompt,
     build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
@@ -93,7 +97,6 @@ ValidationManifest: TypeAlias = (
     AV1ColdStartValidationManifestV1 | AV1ValidationManifestV2
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-_AGENT_REVIEW_MARKER = AV1_VALIDATION_DERIVATION_AGENT_REVIEW_MARKER
 _AGENT_REVIEW_MAX_SECONDS = 1800
 _AGENT_REVIEW_SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _MACH_O_MAGICS = frozenset({
@@ -105,32 +108,6 @@ _MACH_O_MAGICS = frozenset({
     b"\xbe\xba\xfe\xca",
     b"\xca\xfe\xba\xbf",
     b"\xbf\xba\xfe\xca",
-})
-_REVIEW_RUNNER_BLOCKED_ENVIRONMENT_NAMES = frozenset({
-    "ALL_PROXY",
-    "BASH_ENV",
-    "CDPATH",
-    "CODEX_HOME",
-    "CODE_HOME",
-    "CURL_CA_BUNDLE",
-    "ENV",
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "NODE_OPTIONS",
-    "NODE_PATH",
-    "OPENAI_BASE_URL",
-    "OPENAI_WIRE_API",
-    "PERL5OPT",
-    "PYTHONHOME",
-    "PYTHONPATH",
-    "REQUESTS_CA_BUNDLE",
-    "RUBYOPT",
-    "SHELL",
-    "SSL_CERT_DIR",
-    "SSL_CERT_FILE",
-    "ZDOTDIR",
 })
 
 
@@ -555,7 +532,7 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
             assert_private_artifact_path(path, repository_root=REPOSITORY_ROOT)
         manifest = load_av1_validation_manifest_v2(args.manifest)
         partition = load_av1_validation_private_partition(args.partition)
-        plan, artifact_root = _load_canonical_derivation_plan(
+        plan, artifact_root = _load_recovery_capable_derivation_plan(
             plan_path=args.plan,
             config_path=args.config,
         )
@@ -885,15 +862,46 @@ def _load_canonical_derivation_plan(
         config_path: Path,
         config: MediaforceConfig | None = None,
 ) -> tuple[AV1ValidationDerivationPlan, Path]:
-    assert_private_artifact_path(plan_path, repository_root=REPOSITORY_ROOT)
-    plan = load_av1_validation_derivation_plan(plan_path)
+    plan, bound_artifact_root = _load_bound_derivation_plan(plan_path)
     artifact_root = _derivation_artifact_root_for_plan(
         config=config or load_config(config_path),
         plan=plan,
     )
-    if plan_path.expanduser().resolve() != (artifact_root / "plan.json").resolve():
+    if bound_artifact_root != artifact_root.expanduser().resolve():
         raise AV1ValidationDerivationError(
             "AV1 derivation plan must use the partition-global canonical private state root"
+        )
+    return plan, artifact_root
+
+
+def _load_recovery_capable_derivation_plan(
+        *,
+        plan_path: Path,
+        config_path: Path,
+) -> tuple[AV1ValidationDerivationPlan, Path]:
+    plan, artifact_root = _load_bound_derivation_plan(plan_path)
+    config = load_config(config_path)
+    expected_state_root = (
+        config.paths.web_state_dir
+        / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+        / plan.partition_id
+    ).expanduser().resolve()
+    if artifact_root != expected_state_root:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation recovery requires the canonical runtime state root"
+        )
+    return plan, artifact_root
+
+
+def _load_bound_derivation_plan(
+        plan_path: Path,
+) -> tuple[AV1ValidationDerivationPlan, Path]:
+    assert_private_artifact_path(plan_path, repository_root=REPOSITORY_ROOT)
+    plan = load_av1_validation_derivation_plan(plan_path)
+    artifact_root = plan_path.expanduser().resolve().parent
+    if plan_path.expanduser().resolve() != artifact_root / "plan.json":
+        raise AV1ValidationDerivationError(
+            "AV1 derivation plan must use the frozen artifact-root plan path"
         )
     validate_av1_validation_derivation_artifact_root_binding(
         artifact_root,
@@ -1272,18 +1280,19 @@ def _run_code_agent_review(
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code review failed"
         )
-    final_message, completion_seen = _completed_agent_message(completed.stdout)
-    if not completion_seen or final_message is None:
+    final_message, transcript_prompt = _completed_code_review_message(
+        completed.stdout
+    )
+    if transcript_prompt != prompt:
         raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code review lacks completed-run evidence"
+            "AV1 derivation Every Code review prompt drifted during execution"
         )
     decision = _agent_review_decision(
         final_message,
         proposal=proposal,
         claim=claim,
     )
-    evidence = json.dumps(
-        {
+    evidence = canonical_json_bytes({
             "schema": "mediaforce.av1_derivation_agent_review_run",
             "schema_version": 1,
             "review_run_id": review_run_id,
@@ -1296,43 +1305,14 @@ def _run_code_agent_review(
             "decision": decision,
             "review_runner_canonical_path_sha256": before_identity[1],
             "review_runner_binary_sha256": before_identity[2],
+            "proposal": proposal.to_payload(),
+            "review_claim": claim.to_payload(),
             "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
             "stdout": completed.stdout,
             "stderr": completed.stderr,
             "returncode": completed.returncode,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    })
     return claim, evidence, decision
-
-
-def _completed_agent_message(stdout: str) -> tuple[str | None, bool]:
-    messages: list[str] = []
-    completed_message: str | None = None
-    for line in stdout.splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        message = event.get("msg")
-        if not isinstance(message, dict):
-            continue
-        if message.get("type") == "agent_message" and isinstance(
-            message.get("message"), str
-        ):
-            messages.append(message["message"])
-        if (
-            message.get("type") == "task_lifecycle"
-            and message.get("phase") == "quiescent"
-            and isinstance(message.get("last_agent_message"), str)
-        ):
-            completed_message = message["last_agent_message"]
-    if not messages or completed_message != messages[-1]:
-        return None, False
-    return messages[-1], True
 
 
 def _agent_review_decision(
@@ -1341,36 +1321,7 @@ def _agent_review_decision(
         proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
 ) -> AV1ValidationDerivationReviewDecision:
-    nonempty_lines = [line.strip() for line in message.splitlines() if line.strip()]
-    marker_lines = [
-        line for line in nonempty_lines if line.startswith(_AGENT_REVIEW_MARKER)
-    ]
-    if (
-        not nonempty_lines
-        or len(marker_lines) != 1
-        or marker_lines[0] != nonempty_lines[-1]
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review lacks one terminal structured verdict"
-        )
-    try:
-        marker = json.loads(marker_lines[0][len(_AGENT_REVIEW_MARKER):])
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review verdict is invalid"
-        ) from exc
-    if not isinstance(marker, dict) or set(marker) != {
-        "decision",
-        "lane",
-        "proposal_id",
-        "proposal_payload_sha256",
-        "review_claim_id",
-        "review_claim_payload_sha256",
-        "review_run_id",
-    }:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review verdict contract is invalid"
-        )
+    marker = _code_review_marker(message)
     decision = marker.get("decision")
     if (
         marker.get("proposal_id") != proposal.proposal_id
@@ -1392,24 +1343,9 @@ def _agent_review_prompt(
         proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
 ) -> str:
-    marker = {
-        "decision": "approved|rejected",
-        "lane": claim.lane,
-        "proposal_id": proposal.proposal_id,
-        "proposal_payload_sha256": proposal.payload_sha256,
-        "review_claim_id": claim.claim_id,
-        "review_claim_payload_sha256": claim.payload_sha256,
-        "review_run_id": claim.review_run_id,
-    }
-    return (
-        "Perform one independent, read-only AV1 derivation candidate review. "
-        "Do not modify files, invoke another agent, reveal opaque tokens, or infer private media identity. "
-        f"Review lane: {claim.lane}. Review the repository implementation and this canonical proposal payload:\n"
-        f"Immutable review claim: {claim.claim_id} ({claim.payload_sha256}).\n"
-        f"{json.dumps(proposal.to_payload(), sort_keys=True, separators=(',', ':'))}\n"
-        "Reject on any actionable gate failure; otherwise approve. Explain findings concisely. "
-        "End with exactly one final marker line using valid JSON and replace the decision placeholder:\n"
-        f"{_AGENT_REVIEW_MARKER}{json.dumps(marker, sort_keys=True, separators=(',', ':'))}"
+    return build_av1_validation_derivation_review_prompt(
+        proposal=proposal,
+        claim=claim,
     )
 
 

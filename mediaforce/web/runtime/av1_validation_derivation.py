@@ -196,6 +196,13 @@ def av1_validation_derivation_artifact_root(
         plan: AV1ValidationDerivationPlan,
 ) -> Path:
     assert_av1_validation_derivation_runtime_context(config, plan)
+    return _av1_validation_derivation_state_root(config, plan)
+
+
+def _av1_validation_derivation_state_root(
+        config: MediaforceConfig,
+        plan: AV1ValidationDerivationPlan,
+) -> Path:
     return (
         config.paths.web_state_dir
         / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
@@ -384,12 +391,7 @@ def _run_av1_validation_derivation_assignment_locked(
         plan=plan,
         partition=partition,
     )
-    assert_av1_validation_derivation_execution_contract(manifest, plan)
-    artifact_root = av1_validation_derivation_artifact_root(config, plan)
-    validate_av1_validation_derivation_artifact_root_binding(
-        artifact_root,
-        plan,
-    )
+    artifact_root = attempts_directory.expanduser().resolve().parent
     if (
         attempts_directory.resolve()
         != (artifact_root / "attempts").resolve()
@@ -398,6 +400,39 @@ def _run_av1_validation_derivation_assignment_locked(
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation runtime artifacts must use the partition-global canonical directory"
+        )
+    expected_state_root = _av1_validation_derivation_state_root(
+        config,
+        plan,
+    ).expanduser().resolve()
+    if artifact_root != expected_state_root:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation recovery requires the canonical runtime state root"
+        )
+    validate_av1_validation_derivation_artifact_root_binding(
+        artifact_root,
+        plan,
+    )
+    if load_av1_validation_derivation_plan(artifact_root / "plan.json") != plan:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation runtime plan does not match the frozen artifact root"
+        )
+    clock = now_iso or _now_iso
+    recovery_completed_at = clock()
+    if _recover_interrupted_derivation_state(
+        plan=plan,
+        partition=partition,
+        attempts_directory=attempts_directory,
+        terminal_records_directory=terminal_records_directory,
+        completed_at=recovery_completed_at,
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
+        )
+    assert_av1_validation_derivation_execution_contract(manifest, plan)
+    if av1_validation_derivation_artifact_root(config, plan).resolve() != artifact_root:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation runtime artifacts drifted from the immutable runtime context"
         )
     with open_readonly_db(config.paths.db_path) as connection:
         inventory = load_av1_validation_partition_inventory(connection, config=config)
@@ -414,25 +449,14 @@ def _run_av1_validation_derivation_assignment_locked(
     )
     if source is None:
         raise AV1ValidationDerivationError("AV1 derivation source is absent from the partition")
-    clock = now_iso or _now_iso
-    started_at = clock()
-    if _recover_interrupted_derivation_state(
-        plan=plan,
-        partition=partition,
-        attempts_directory=attempts_directory,
-        terminal_records_directory=terminal_records_directory,
-        completed_at=started_at,
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
-        )
-    assert_av1_validation_derivation_authorization_active(plan, at=started_at)
     _assert_next_assignment(
         plan=plan,
         assignment_id=assignment.assignment_id,
         attempts_directory=attempts_directory,
         terminal_records_directory=terminal_records_directory,
     )
+    started_at = clock()
+    assert_av1_validation_derivation_authorization_active(plan, at=started_at)
     write_av1_validation_derivation_assignment_claim(
         attempts_directory,
         assignment_id=assignment.assignment_id,
