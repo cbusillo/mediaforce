@@ -1051,6 +1051,7 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 artifact_root / "terminal-intents",
                 terminal,
             )
+        if result.observation is not None:
             try:
                 append_content_intent_boundary_observation(
                     connection,
@@ -1060,11 +1061,11 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 raise AV1ValidationDerivationError(
                     "AV1 derivation visual observation conflicts with existing evidence"
                 ) from exc
+        ensure_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+        )
     assert_av1_validation_derivation_execution_contract(manifest, plan)
-    ensure_av1_validation_derivation_terminal_record(
-        terminal_records_directory,
-        terminal,
-    )
     return terminal
 
 

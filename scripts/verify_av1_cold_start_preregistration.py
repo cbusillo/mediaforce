@@ -1,14 +1,17 @@
 import argparse
+from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import stat
 import subprocess
 import sys
-from typing import Sequence, TypeAlias
+import tempfile
+from typing import cast, Iterator, Sequence, TypeAlias
 import uuid
 
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
@@ -446,6 +449,7 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
             _review_runner_path,
             review_runner_canonical_path_sha256,
             review_runner_binary_sha256,
+            _review_runner_bytes,
         ) = _review_runner_identity()
         if args.action == "create-derivation-plan":
             authorization = build_av1_validation_v2_derivation_authorization(
@@ -859,7 +863,7 @@ def _load_canonical_derivation_plan(
     return plan, artifact_root
 
 
-def _review_runner_identity() -> tuple[Path, str, str]:
+def _review_runner_identity() -> tuple[Path, str, str, bytes]:
     code_binary = shutil.which("code")
     if code_binary is None:
         raise AV1ValidationDerivationError(
@@ -903,12 +907,12 @@ def _review_runner_identity() -> tuple[Path, str, str]:
         f"sha256:{hashlib.sha256(str(resolved_binary).encode('utf-8')).hexdigest()}"
     )
     binary_sha256 = f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}"
-    return resolved_binary, canonical_path_sha256, binary_sha256
+    return resolved_binary, canonical_path_sha256, binary_sha256, binary_bytes
 
 
 def _authorized_review_runner_identity(
         plan: AV1ValidationDerivationPlan,
-) -> tuple[Path, str, str]:
+) -> tuple[Path, str, str, bytes]:
     identity = _review_runner_identity()
     if (
         identity[1] != plan.authorization.review_runner_canonical_path_sha256
@@ -918,6 +922,135 @@ def _authorized_review_runner_identity(
             "AV1 derivation Every Code executable drifted from the authorization"
         )
     return identity
+
+
+def _review_runner_descriptor_sha256(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while chunk := os.pread(descriptor, 1024 * 1024, offset):
+        digest.update(chunk)
+        offset += len(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _assert_private_review_runner_identity(
+        path: Path,
+        descriptor: int,
+        *,
+        expected_sha256: str,
+) -> None:
+    descriptor_info = os.fstat(descriptor)
+    path_info = path.lstat()
+    if (
+        not stat.S_ISREG(descriptor_info.st_mode)
+        or stat.S_ISLNK(path_info.st_mode)
+        or descriptor_info.st_uid != os.getuid()
+        or stat.S_IMODE(descriptor_info.st_mode) != 0o500
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (path_info.st_dev, path_info.st_ino)
+        or not os.access(path, os.X_OK)
+        or _review_runner_descriptor_sha256(descriptor) != expected_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation private Every Code executable identity is invalid"
+        )
+
+
+@contextmanager
+def _private_review_runner(
+        binary_bytes: bytes,
+        *,
+        expected_sha256: str,
+) -> Iterator[Path]:
+    required_kqueue_names = (
+        "kqueue",
+        "kevent",
+        "KQ_FILTER_VNODE",
+        "KQ_EV_ADD",
+        "KQ_EV_CLEAR",
+        "KQ_NOTE_WRITE",
+        "KQ_NOTE_DELETE",
+        "KQ_NOTE_RENAME",
+        "KQ_NOTE_LINK",
+        "KQ_NOTE_REVOKE",
+    )
+    if any(not hasattr(select, name) for name in required_kqueue_names):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation secure Every Code execution monitoring is unavailable"
+        )
+    if f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}" != expected_sha256:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation private Every Code executable does not match the authorization"
+        )
+    directory = Path(tempfile.mkdtemp(prefix="mediaforce-av1-review-runner-"))
+    path = directory / "code"
+    descriptor = -1
+    watcher = None
+    try:
+        directory.chmod(0o700)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        write_descriptor = os.open(path, flags, 0o500)
+        try:
+            view = memoryview(binary_bytes)
+            while view:
+                written = os.write(write_descriptor, view)
+                if written <= 0:
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation private Every Code executable could not be written"
+                    )
+                view = view[written:]
+            os.fchmod(write_descriptor, 0o500)
+            os.fsync(write_descriptor)
+        finally:
+            os.close(write_descriptor)
+        read_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            read_flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, read_flags)
+        watcher = select.kqueue()
+        vnode_flags = (
+            select.KQ_NOTE_WRITE
+            | select.KQ_NOTE_DELETE
+            | select.KQ_NOTE_RENAME
+            | select.KQ_NOTE_LINK
+            | select.KQ_NOTE_REVOKE
+        )
+        watcher.control(
+            [select.kevent(
+                descriptor,
+                filter=select.KQ_FILTER_VNODE,
+                flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                fflags=vnode_flags,
+            )],
+            0,
+            0,
+        )
+        _assert_private_review_runner_identity(
+            path,
+            descriptor,
+            expected_sha256=expected_sha256,
+        )
+        try:
+            yield path
+        finally:
+            events = watcher.control(None, 8, 0)
+            if events:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation private Every Code executable changed during review"
+                )
+            _assert_private_review_runner_identity(
+                path,
+                descriptor,
+                expected_sha256=expected_sha256,
+            )
+    finally:
+        if watcher is not None:
+            watcher.close()
+        if descriptor >= 0:
+            os.close(descriptor)
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _run_code_agent_review(
@@ -932,7 +1065,6 @@ def _run_code_agent_review(
     AV1ValidationDerivationReviewDecision,
 ]:
     before_identity = _authorized_review_runner_identity(plan)
-    resolved_binary = before_identity[0]
     review_run_id = str(uuid.uuid4())
     claim = build_av1_validation_derivation_review_claim(
         plan=plan,
@@ -953,36 +1085,40 @@ def _run_code_agent_review(
         proposal=proposal,
         claim=claim,
     )
-    command = [
-        str(resolved_binary),
-        "-a",
-        "never",
-        "exec",
-        "-s",
-        "read-only",
-        "--json",
-        "--max-seconds",
-        str(_AGENT_REVIEW_MAX_SECONDS),
-        "-",
-    ]
     try:
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=REPOSITORY_ROOT,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation Every Code review did not complete"
-            ) from exc
+        with _private_review_runner(
+            before_identity[3],
+            expected_sha256=before_identity[2],
+        ) as review_runner:
+            command = [
+                str(review_runner),
+                "-a",
+                "never",
+                "exec",
+                "-s",
+                "read-only",
+                "--json",
+                "--max-seconds",
+                str(_AGENT_REVIEW_MAX_SECONDS),
+                "-",
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=REPOSITORY_ROOT,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation Every Code review did not complete"
+                ) from exc
     finally:
         after_identity = _authorized_review_runner_identity(plan)
-        if after_identity != before_identity:
+        if after_identity[:3] != before_identity[:3]:
             raise AV1ValidationDerivationError(
                 "AV1 derivation Every Code executable changed during review"
             )
@@ -1102,7 +1238,7 @@ def _agent_review_decision(
         raise AV1ValidationDerivationError(
             "AV1 derivation review verdict does not match its run, proposal, and lane"
         )
-    return decision
+    return cast(AV1ValidationDerivationReviewDecision, decision)
 
 
 def _agent_review_prompt(

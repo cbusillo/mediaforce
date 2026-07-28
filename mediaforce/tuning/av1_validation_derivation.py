@@ -3799,6 +3799,7 @@ def _validate_calibration_payload(
 ) -> None:
     _validate_calibration_execution(calibration)
     sample_item = object_dict(calibration.get("sample_item"))
+    stream_budget_ledger = object_dict(sample_item.get("stream_budget_ledger"))
     sample_result = object_dict(calibration.get("sample_result"))
     target_trace = object_dict(sample_result.get("target_size_trace"))
     quality_floor = object_dict(target_trace.get("quality_floor"))
@@ -3814,6 +3815,8 @@ def _validate_calibration_payload(
         int_value(sample_item.get("library_item_id")) != assignment.local_item_id
         or str(sample_item.get("content_version_fingerprint") or "")
         != source_identity
+        or int_value(stream_budget_ledger.get("remaining_video_bitrate_bps"))
+        != assignment.target_video_bitrate_bps
         or str(sample_result.get("quality_metric") or "").casefold()
         != assignment.quality_metric.casefold()
         or not math.isclose(quality_target, assignment.quality_target, rel_tol=0.0, abs_tol=0.001)

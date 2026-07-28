@@ -91,6 +91,7 @@ from mediaforce.tuning.av1_validation_v2 import (
 from mediaforce.tuning.content_intent_observations import (
     ContentIntentBoundaryCompatibilityV1,
     ContentIntentBoundaryObservation,
+    ContentIntentObservationConflictError,
     ContentIntentObservationBuildResult,
     _build_observation,
     _rehash_observation,
@@ -106,6 +107,7 @@ V2_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v2.json"
 SELECTED_AT = "2026-07-27T22:50:00Z"
 AUTHORIZED_AT = "2026-07-28T00:00:00Z"
 VALID_UNTIL = "2026-08-01T00:00:00Z"
+REVIEW_RUNNER_BYTES = b"test-code-binary"
 
 
 class AV1ValidationDerivationTests(unittest.TestCase):
@@ -175,7 +177,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 av1_validation_derivation_statistics_contract_sha256(self.manifest)
             ),
             review_runner_canonical_path_sha256=f"sha256:{'a' * 64}",
-            review_runner_binary_sha256=f"sha256:{'b' * 64}",
+            review_runner_binary_sha256=(
+                f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+            ),
             authorized_at=AUTHORIZED_AT,
             valid_until=VALID_UNTIL,
         )
@@ -414,7 +418,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             code_binary = root / "code"
-            code_binary.write_bytes(b"test-code-binary")
+            code_binary.write_bytes(REVIEW_RUNNER_BYTES)
             code_binary.chmod(0o700)
             final_message = (
                 "Review complete.\n"
@@ -461,13 +465,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         code_binary,
                         self.authorization.review_runner_canonical_path_sha256,
                         self.authorization.review_runner_binary_sha256,
+                        REVIEW_RUNNER_BYTES,
                     ),
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration.subprocess,
                     "run",
                     return_value=completed,
-                ),
+                ) as run_review,
                 patch.object(
                     verify_av1_cold_start_preregistration.uuid,
                     "uuid4",
@@ -489,6 +494,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
             self.assertEqual(claim, expected_claim)
             self.assertEqual(decision, "approved")
+            launched_runner = Path(run_review.call_args.args[0][0])
+            self.assertNotEqual(launched_runner, code_binary)
+            self.assertFalse(launched_runner.exists())
             evidence_payload = json.loads(evidence)
             self.assertEqual(evidence_payload["review_run_id"], agent_id)
             self.assertEqual(evidence_payload["returncode"], 0)
@@ -516,6 +524,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     Path("/private/substitute-code"),
                     f"sha256:{'c' * 64}",
                     self.authorization.review_runner_binary_sha256,
+                    REVIEW_RUNNER_BYTES,
                 ),
             ),
             patch.object(
@@ -541,11 +550,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             Path("/private/authorized-code"),
             self.authorization.review_runner_canonical_path_sha256,
             self.authorization.review_runner_binary_sha256,
+            REVIEW_RUNNER_BYTES,
         )
         after_identity = (
             Path("/private/substitute-code"),
             f"sha256:{'c' * 64}",
             self.authorization.review_runner_binary_sha256,
+            REVIEW_RUNNER_BYTES,
         )
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
         with (
@@ -589,6 +600,81 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )),
             1,
         )
+
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
+    def test_private_review_runner_detects_swap_and_restore(self) -> None:
+        expected_sha256 = (
+            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+        )
+        runner_directory: Path | None = None
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "changed during review",
+        ):
+            with verify_av1_cold_start_preregistration._private_review_runner(
+                REVIEW_RUNNER_BYTES,
+                expected_sha256=expected_sha256,
+            ) as runner:
+                runner_directory = runner.parent
+                substitute = runner.with_name("substitute")
+                original = runner.with_name("original")
+                substitute.write_bytes(b"substitute-code-binary")
+                substitute.chmod(0o500)
+                runner.rename(original)
+                substitute.rename(runner)
+                runner.rename(substitute)
+                original.rename(runner)
+        assert runner_directory is not None
+        self.assertFalse(runner_directory.exists())
+
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
+    def test_private_review_runner_detects_write_and_restore(self) -> None:
+        expected_sha256 = (
+            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "changed during review",
+        ):
+            with verify_av1_cold_start_preregistration._private_review_runner(
+                REVIEW_RUNNER_BYTES,
+                expected_sha256=expected_sha256,
+            ) as runner:
+                runner.chmod(0o700)
+                runner.write_bytes(b"substitute-code-binary")
+                runner.write_bytes(REVIEW_RUNNER_BYTES)
+                runner.chmod(0o500)
+
+    def test_attempt_rejects_persisted_stream_budget_drift(self) -> None:
+        assignment = self.plan.assignments[0]
+        calibration = _calibration_payload(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            compatibility=_compatibility(assignment),
+        )
+        sample_item = calibration["sample_item"]
+        assert isinstance(sample_item, dict)
+        persisted_ledger = sample_item["stream_budget_ledger"]
+        assert isinstance(persisted_ledger, dict)
+        ledger = dict(persisted_ledger)
+        ledger["remaining_video_bitrate_bps"] = (
+            assignment.target_video_bitrate_bps + 1
+        )
+        sample_item["stream_budget_ledger"] = ledger
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "unchanged measured full search",
+        ):
+            build_av1_validation_derivation_attempt(
+                plan=self.plan,
+                partition=self.partition,
+                assignment_id=assignment.assignment_id,
+                started_at="2026-07-28T01:00:00Z",
+                completed_at="2026-07-28T01:05:00Z",
+                status="review_pending",
+                calibration_payload=calibration,
+            )
 
     def test_review_claim_race_leaves_one_terminal_unresolved_claim(self) -> None:
         proposal = self._candidate_proposal()
@@ -1577,6 +1663,93 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
         )
 
+    def test_derivation_verdict_does_not_write_terminal_on_observation_conflict(self) -> None:
+        assignment = self.plan.assignments[0]
+        source_identity = _source_identity(self.partition, assignment)
+        observation = _observation(
+            assignment=assignment,
+            source_identity=source_identity,
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="review_pending",
+            calibration_payload=_calibration_payload(
+                assignment=assignment,
+                source_identity=source_identity,
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            ),
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(connection),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation",
+                side_effect=ContentIntentObservationConflictError("conflict"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record"
+            ) as write_terminal,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "conflicts with existing evidence",
+            ),
+        ):
+            record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        write_terminal.assert_not_called()
+
     def test_derivation_verdict_rejects_changed_review_media(self) -> None:
         assignment = self.plan.assignments[0]
         attempt = build_av1_validation_derivation_attempt(
@@ -1807,9 +1980,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "verdict-intent",
             "terminal-intent",
             "db-append",
+            "terminal-record",
             "db-exit",
             "execution-contract",
-            "terminal-record",
             "lock-exit",
         ])
 
@@ -2542,6 +2715,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         root / "private-code-runner",
                         self.authorization.review_runner_canonical_path_sha256,
                         self.authorization.review_runner_binary_sha256,
+                        REVIEW_RUNNER_BYTES,
                     ),
                 ),
                 redirect_stdout(stdout),
@@ -2869,6 +3043,11 @@ def _calibration_payload(
             "library_item_id": assignment.local_item_id,
             "content_version_fingerprint": source_identity,
             "duration_seconds": duration_seconds,
+            "stream_budget_ledger": {
+                "remaining_video_bitrate_bps": (
+                    assignment.target_video_bitrate_bps
+                ),
+            },
         },
         "sample_result": {
             "chosen_crf": crf,

@@ -257,14 +257,17 @@ ineligible for local personalization, so later planning and holdout execution
 cannot consume them as warm-start evidence. The complete derivation terminal is
 preceded by an immutable verdict intent that freezes the first human input and
 runtime timestamp. The terminal is then validated and written as an immutable
-terminal intent before the observation is appended. The quarantined database
-row is committed before the immutable terminal record is completed; an
-interrupted retry reuses the frozen verdict timestamp, idempotently confirms the
-same observation, and finishes the missing terminal without replacing or
-duplicating evidence. Review-media identity is freshly recomputed immediately
-before the verdict and must still match the frozen attempt. The complete media
-recheck, immutable verdict intent, immediate database transaction, observation
-append, and terminal-intent/terminal-record path holds the shared runtime lock.
+terminal intent before the observation is appended. After a successful append,
+the immutable terminal record is written before the database transaction can
+commit. An append conflict therefore cannot create a false terminal, while a
+terminal-record write failure rolls back the database append. If the database
+commit fails after the immutable record exists, an interrupted retry reuses the
+frozen verdict timestamp and idempotently completes the same observation without
+replacing or duplicating evidence. Review-media identity is freshly recomputed
+immediately before the verdict and must still match the frozen attempt. The
+complete media recheck, immutable verdict intent, immediate database transaction,
+observation append, and terminal-intent/terminal-record path holds the shared
+runtime lock.
 Inside that lock it reloads the canonical plan and attempt, revalidates the
 current partition inputs and execution contract, and fails closed before any
 verdict or terminal mutation on drift.
@@ -322,10 +325,12 @@ the exact applied dispersion and confidence contract from immutable evidence.
 The full-search proof validates the native target-size trace contract, including
 the first `target_seed`, any later `compression_floor`, `expanded_bound`, or
 `refine` measurements, the native curve/retry policy, and exact selected CRF,
-quality, and bitrate projection values. A one-point `target_seed` trace remains
-valid when the unchanged search naturally selects its first measured candidate;
-the workflow does not force exploratory probes that production search would not
-perform.
+quality, and bitrate projection values. The persisted sample stream-budget
+ledger must also retain the exact frozen assignment
+`target_video_bitrate_bps`; a changed or missing remaining-video-bitrate value
+invalidates the attempt. A one-point `target_seed` trace remains valid when the
+unchanged search naturally selects its first measured candidate; the workflow
+does not force exploratory probes that production search would not perform.
 
 The resulting proposal is explicitly non-authoritative. Finalization requires
 five proposal-bound approvals from distinct completed Every Code agent runs:
@@ -337,17 +342,21 @@ binds the run nonce, authorization, proposal, lane, canonical runner-path
 digest, and runner-binary digest. A concurrent or repeated lane cannot replace
 that claim; a crash leaves an unresolved terminal claim, and a rejected review
 remains terminal. The exact PATH-selected runner must match the authorization
-before launch and again after completion, so PATH substitution or an in-place
-binary change fails closed. Each attestation binds the claim plus the SHA-256
-digest of the canonical immutable owner-only completion transcript, and the
-loader recomputes that digest before trusting it. The attestation and transcript
-are written together as one immutable atomic lane envelope. Duplicate run IDs
-or transcript digests are rejected. The completed process must emit a matching
-quiescent agent message whose final non-empty line is the exact proposal-,
-lane-, claim-, and run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker; the decision
-is extracted rather than supplied by the operator. Public summaries expose only
-that the runner identity is bound, never the canonical private path. Review,
-verdict, proposal, and lock timestamps come from the runtime clock.
+before launch and again after completion. The already-verified authorized bytes
+are executed from an owner-only ephemeral copy rather than reopening the mutable
+PATH-selected source. On the macOS execution host, a held no-follow descriptor
+and kqueue vnode guard reject any write, delete, rename, link, or revoke event on
+that copy before its output can become evidence; unavailable secure monitoring
+fails closed. Each attestation binds the claim plus the SHA-256 digest of the
+canonical immutable owner-only completion transcript, and the loader recomputes
+that digest before trusting it. The attestation and transcript are written
+together as one immutable atomic lane envelope. Duplicate run IDs or transcript
+digests are rejected. The completed process must emit a matching quiescent agent
+message whose final non-empty line is the exact proposal-, lane-, claim-, and
+run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker; the decision is extracted rather
+than supplied by the operator. Public summaries expose only that the runner
+identity is bound, never the canonical private path. Review, verdict, proposal,
+and lock timestamps come from the runtime clock.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write
