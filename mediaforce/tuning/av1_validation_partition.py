@@ -497,7 +497,23 @@ def build_av1_validation_private_partition(
 ) -> AV1ValidationPrivatePartition:
     assert_preregistered_av1_validation_manifest_v2(manifest)
     _assert_partition_criteria(manifest)
-    _parse_timestamp(selected_at, "selection timestamp")
+    selection_timestamp = _parse_timestamp(selected_at, "selection timestamp")
+    manifest_registered_at = _parse_timestamp(
+        manifest.registered_at,
+        "manifest registration",
+    )
+    manifest_valid_until = _parse_timestamp(
+        manifest.valid_until,
+        "manifest expiration",
+    )
+    if selection_timestamp < manifest_registered_at:
+        raise AV1ValidationPartitionError(
+            "AV1 partition selection timestamp predates manifest registration"
+        )
+    if selection_timestamp >= manifest_valid_until:
+        raise AV1ValidationPartitionError(
+            "AV1 partition selection timestamp must precede manifest expiration"
+        )
     _validate_key(token_key)
     token_key_id = _token_key_id(token_key)
     if expected_token_key_id != token_key_id:

@@ -114,6 +114,10 @@ uv run python scripts/verify_av1_cold_start_preregistration.py \
   --selected-at 2026-07-27T23:00:00Z --json
 ```
 
+The selection timestamp must be at or after the manifest registration and
+strictly before its expiration. Both the initial build and every embedded or
+current-input replay reject an out-of-window timestamp.
+
 Validate both the embedded immutable private inventory snapshot and the current
 read-only database/config projection. A narrowed inventory, selected-source
 change, taxonomy change, policy change, or compatibility change fails the
@@ -165,6 +169,10 @@ counts:
 uv run python scripts/verify_av1_cold_start_preregistration.py \
   validate-eligibility /path/to/eligibility-attestation-v1.json --json
 ```
+
+Successful validation emits only `eligibility_valid=true` and false execution
+authority flags. It does not emit the attestation ID, cutoff timestamp, or any
+aggregate counts.
 
 ## Trait reachability preflight
 
