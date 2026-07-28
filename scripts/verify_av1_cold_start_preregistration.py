@@ -137,25 +137,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             eligibility = load_av1_validation_v2_eligibility(args.attestation)
             assert_preregistered_av1_validation_v2_eligibility(eligibility)
             payload = {
-                "attestation_id": eligibility.attestation_id,
-                "as_of": eligibility.as_of,
-                "eligible_cell_count": sum(
-                    cell.state == "eligible" for cell in eligibility.cells
-                ),
-                "excluded_cell_count": sum(
-                    cell.state == "excluded" for cell in eligibility.cells
-                ),
+                "eligibility_valid": True,
                 "runtime_execution_authorized": False,
+                "derivation_execution_authorized": False,
                 "holdout_execution_authorized": False,
             }
-            if args.json_output:
-                print(json.dumps(payload, indent=2, sort_keys=True))
-            else:
-                print(
-                    f"attestation={eligibility.attestation_id} as_of={eligibility.as_of} "
-                    f"eligible={payload['eligible_cell_count']} excluded={payload['excluded_cell_count']} "
-                    "runtime_execution_authorized=false holdout_execution_authorized=false"
-                )
+            _print_partition_payload(payload, json_output=args.json_output)
             return 0
 
         manifest = _load_manifest(args.manifest)

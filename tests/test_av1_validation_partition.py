@@ -1,10 +1,14 @@
 import copy
+from contextlib import redirect_stdout
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from mediaforce.tuning.av1_validation_partition import (
     AV1ValidationPartitionError,
@@ -27,6 +31,7 @@ from mediaforce.tuning.av1_validation_partition import (
     write_av1_validation_private_partition,
 )
 from mediaforce.tuning.av1_validation_v2 import load_av1_validation_manifest_v2
+from scripts import verify_av1_cold_start_preregistration
 
 
 V2_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v2.json")
@@ -102,6 +107,59 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             expectations=self.expectations,
             token_key=self.token_key,
         )
+
+    def test_partition_rejects_selection_outside_manifest_window(self) -> None:
+        registered_at = datetime.fromisoformat(
+            self.manifest.registered_at.replace("Z", "+00:00")
+        )
+        valid_until = datetime.fromisoformat(
+            self.manifest.valid_until.replace("Z", "+00:00")
+        )
+        partition = build_av1_validation_private_partition(
+            manifest=self.manifest,
+            eligibility_attestation_id=self.manifest.eligibility_attestation_id,
+            eligibility_payload_sha256=self.manifest.eligibility_payload_sha256,
+            sources=self.sources,
+            expectations=self.expectations,
+            token_key=self.token_key,
+            expected_token_key_id=self.token_key_id,
+            selected_at=self.manifest.registered_at,
+        )
+        self.assertEqual(partition.selected_at, self.manifest.registered_at)
+
+        invalid_timestamps = (
+            (
+                registered_at - timedelta(seconds=1),
+                "predates manifest registration",
+            ),
+            (valid_until, "must precede manifest expiration"),
+            (
+                valid_until + timedelta(seconds=1),
+                "must precede manifest expiration",
+            ),
+        )
+        for timestamp, message in invalid_timestamps:
+            selected_at = (
+                timestamp.astimezone(UTC)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+            with self.subTest(selected_at=selected_at):
+                with self.assertRaisesRegex(AV1ValidationPartitionError, message):
+                    build_av1_validation_private_partition(
+                        manifest=self.manifest,
+                        eligibility_attestation_id=(
+                            self.manifest.eligibility_attestation_id
+                        ),
+                        eligibility_payload_sha256=(
+                            self.manifest.eligibility_payload_sha256
+                        ),
+                        sources=self.sources,
+                        expectations=self.expectations,
+                        token_key=self.token_key,
+                        expected_token_key_id=self.token_key_id,
+                        selected_at=selected_at,
+                    )
 
     def test_derivation_selection_cannot_remap_frozen_holdouts(self) -> None:
         candidates_by_plan = {
@@ -389,6 +447,49 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             expected_token_key_id=self.token_key_id,
             selected_at=SELECTED_AT,
         )
+
+
+class AV1ValidationPartitionCliTests(unittest.TestCase):
+    def test_validate_eligibility_output_is_count_free(self) -> None:
+        expected = {
+            "eligibility_valid": True,
+            "runtime_execution_authorized": False,
+            "derivation_execution_authorized": False,
+            "holdout_execution_authorized": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            attestation_path = Path(directory) / "eligibility.json"
+            for json_output in (False, True):
+                output = io.StringIO()
+                argv = ["validate-eligibility", str(attestation_path)]
+                if json_output:
+                    argv.append("--json")
+                with (
+                    self.subTest(json_output=json_output),
+                    patch.object(
+                        verify_av1_cold_start_preregistration,
+                        "load_av1_validation_v2_eligibility",
+                        return_value=object(),
+                    ),
+                    patch.object(
+                        verify_av1_cold_start_preregistration,
+                        "assert_preregistered_av1_validation_v2_eligibility",
+                    ),
+                    redirect_stdout(output),
+                ):
+                    exit_code = verify_av1_cold_start_preregistration.main(argv)
+
+                self.assertEqual(exit_code, 0)
+                if json_output:
+                    self.assertEqual(json.loads(output.getvalue()), expected)
+                else:
+                    self.assertEqual(
+                        output.getvalue().strip(),
+                        "eligibility_valid=true "
+                        "runtime_execution_authorized=false "
+                        "derivation_execution_authorized=false "
+                        "holdout_execution_authorized=false",
+                    )
 
 
 def _partition_sources(
