@@ -1,5 +1,6 @@
 import argparse
 from contextlib import contextmanager
+import ctypes
 from datetime import UTC, datetime
 import hashlib
 import json
@@ -913,6 +914,10 @@ def _review_runner_identity() -> tuple[Path, str, str, bytes]:
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code executable is unavailable"
         ) from exc
+    if resolved_binary != _trusted_code_ancestor_path():
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code executable is not the active trusted runner"
+        )
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -971,13 +976,7 @@ def _assert_native_review_runner(binary_bytes: bytes) -> None:
 
 
 def _review_runner_environment() -> dict[str, str]:
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if key.upper() not in _REVIEW_RUNNER_BLOCKED_ENVIRONMENT_NAMES
-        and not key.upper().startswith(("DYLD_", "GIT_"))
-    }
-    environment.update({
+    return {
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_PAGER": "cat",
@@ -991,8 +990,42 @@ def _review_runner_environment() -> dict[str, str]:
         "TMPDIR": "/tmp",
         "USER": _review_user_name(),
         "ZDOTDIR": "/var/empty",
-    })
-    return environment
+    }
+
+
+def _trusted_code_ancestor_path() -> Path:
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+        proc_pidpath = libproc.proc_pidpath
+        proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        proc_pidpath.restype = ctypes.c_int
+    except (AttributeError, OSError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation active Every Code runner identity is unavailable"
+        ) from exc
+    process_id = os.getppid()
+    for _ in range(16):
+        buffer = ctypes.create_string_buffer(4096)
+        if proc_pidpath(process_id, buffer, len(buffer)) > 0:
+            candidate = Path(buffer.value.decode("utf-8")).resolve()
+            if candidate.name == "code":
+                return candidate
+        parent = subprocess.run(
+            ["/bin/ps", "-o", "ppid=", "-p", str(process_id)],
+            text=True,
+            capture_output=True,
+            check=False,
+            env={"PATH": _AGENT_REVIEW_SAFE_PATH},
+        )
+        try:
+            process_id = int(parent.stdout.strip())
+        except ValueError:
+            break
+        if process_id <= 1:
+            break
+    raise AV1ValidationDerivationError(
+        "AV1 derivation must run from the active trusted Every Code session"
+    )
 
 
 def _review_user_home() -> str:

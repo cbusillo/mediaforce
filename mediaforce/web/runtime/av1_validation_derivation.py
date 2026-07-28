@@ -55,6 +55,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     evaluate_av1_validation_derivation_candidate,
     ensure_av1_validation_derivation_terminal_intent,
     ensure_av1_validation_derivation_terminal_record,
+    load_av1_validation_derivation_assignment_claims,
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_plan,
@@ -415,6 +416,16 @@ def _run_av1_validation_derivation_assignment_locked(
         raise AV1ValidationDerivationError("AV1 derivation source is absent from the partition")
     clock = now_iso or _now_iso
     started_at = clock()
+    if _recover_interrupted_derivation_state(
+        plan=plan,
+        partition=partition,
+        attempts_directory=attempts_directory,
+        terminal_records_directory=terminal_records_directory,
+        completed_at=started_at,
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
+        )
     assert_av1_validation_derivation_authorization_active(plan, at=started_at)
     _assert_next_assignment(
         plan=plan,
@@ -427,6 +438,7 @@ def _run_av1_validation_derivation_assignment_locked(
         assignment_id=assignment.assignment_id,
         plan_id=plan.plan_id,
         authorization_id=plan.authorization.authorization_id,
+        claimed_at=started_at,
     )
     controller = process_controller or ManagedProcessController()
     run_deps = deps or build_av1_validation_derivation_calibration_deps()
@@ -1284,6 +1296,89 @@ def _assert_next_assignment(
         raise AV1ValidationDerivationError(
             "AV1 derivation assignment is not next in the immutable worklist"
         )
+
+
+def _recover_interrupted_derivation_state(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        partition: AV1ValidationPrivatePartition,
+        attempts_directory: Path,
+        terminal_records_directory: Path,
+        completed_at: str,
+) -> bool:
+    attempts = (
+        load_av1_validation_derivation_attempts(attempts_directory)
+        if attempts_directory.exists()
+        else ()
+    )
+    records = (
+        load_av1_validation_derivation_terminal_records(
+            terminal_records_directory
+        )
+        if terminal_records_directory.exists()
+        else ()
+    )
+    terminal_attempt_ids = {record.attempt_id for record in records}
+    unterminated = [
+        attempt
+        for attempt in attempts
+        if attempt.attempt_id not in terminal_attempt_ids
+        and attempt.status != "review_pending"
+    ]
+    if len(unterminated) > 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation has multiple unterminated attempts"
+        )
+    if unterminated:
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=plan,
+            partition=partition,
+            attempt=unterminated[0],
+        )
+        write_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+        )
+        return True
+    attempted_ids = {attempt.assignment_id for attempt in attempts}
+    claims = load_av1_validation_derivation_assignment_claims(attempts_directory)
+    orphaned = [
+        claim for claim in claims if claim["assignment_id"] not in attempted_ids
+    ]
+    if len(orphaned) > 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation has multiple interrupted claimed assignments"
+        )
+    if not orphaned:
+        return False
+    claim = orphaned[0]
+    if (
+        claim["plan_id"] != plan.plan_id
+        or claim["authorization_id"] != plan.authorization.authorization_id
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation interrupted claim is bound to another plan"
+        )
+    attempt = _failed_attempt(
+        plan=plan,
+        partition=partition,
+        assignment_id=str(claim["assignment_id"]),
+        started_at=str(claim["claimed_at"]),
+        completed_at=completed_at,
+        status="stopped",
+        reason_code="interrupted_claim",
+    )
+    write_av1_validation_derivation_attempt(attempts_directory, attempt)
+    terminal = build_av1_validation_derivation_terminal_record(
+        plan=plan,
+        partition=partition,
+        attempt=attempt,
+    )
+    write_av1_validation_derivation_terminal_record(
+        terminal_records_directory,
+        terminal,
+    )
+    return True
 
 
 def _current_derivation_review_artifact_fingerprint(

@@ -108,6 +108,7 @@ AV1_VALIDATION_DERIVATION_REASON_CODES = frozenset({
     "authorization_expired",
     "compatibility_drift",
     "content_intent_observation_excluded",
+    "interrupted_claim",
     "media_unavailable",
     "metrics_incomplete",
     "operator_stop",
@@ -2414,6 +2415,7 @@ def write_av1_validation_derivation_assignment_claim(
         assignment_id: str,
         plan_id: str,
         authorization_id: str,
+        claimed_at: str,
 ) -> Path:
     bind_av1_validation_derivation_attempt_directory(
         directory,
@@ -2428,8 +2430,52 @@ def write_av1_validation_derivation_assignment_claim(
         "plan_id": plan_id,
         "authorization_id": authorization_id,
         "assignment_id": assignment_id,
+        "claimed_at": claimed_at,
     }))
     return path
+
+
+def load_av1_validation_derivation_assignment_claims(
+        directory: Path,
+) -> tuple[dict[str, Any], ...]:
+    if not directory.exists():
+        return ()
+    claims: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.claim")):
+        payload, raw = _load_owner_only_json(path, "derivation assignment claim")
+        _require_exact_keys(payload, {
+            "schema", "schema_version", "contract_version", "plan_id",
+            "authorization_id", "assignment_id", "claimed_at",
+        }, "derivation assignment claim")
+        claim = {
+            "schema": "mediaforce.av1_cold_start_derivation_assignment_claim",
+            "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+            "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+            "plan_id": _required_text(payload.get("plan_id"), "plan ID"),
+            "authorization_id": _required_text(
+                payload.get("authorization_id"), "authorization ID"
+            ),
+            "assignment_id": _required_text(
+                payload.get("assignment_id"), "assignment ID"
+            ),
+            "claimed_at": _required_text(
+                payload.get("claimed_at"), "claim timestamp"
+            ),
+        }
+        if (
+            payload.get("schema") != claim["schema"]
+            or int_value(payload.get("schema_version"))
+            != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
+            or payload.get("contract_version")
+            != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
+            or raw != canonical_json_bytes(claim)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation assignment claim is invalid"
+            )
+        _parse_timestamp(str(claim["claimed_at"]), "claim timestamp")
+        claims.append(claim)
+    return tuple(claims)
 
 
 def load_av1_validation_derivation_terminal_records(
@@ -3800,6 +3846,7 @@ def _validate_calibration_payload(
     _validate_calibration_execution(calibration)
     sample_item = object_dict(calibration.get("sample_item"))
     stream_budget_ledger = object_dict(sample_item.get("stream_budget_ledger"))
+    stream_budget_totals = object_dict(stream_budget_ledger.get("totals"))
     sample_result = object_dict(calibration.get("sample_result"))
     target_trace = object_dict(sample_result.get("target_size_trace"))
     quality_floor = object_dict(target_trace.get("quality_floor"))
@@ -3815,7 +3862,7 @@ def _validate_calibration_payload(
         int_value(sample_item.get("library_item_id")) != assignment.local_item_id
         or str(sample_item.get("content_version_fingerprint") or "")
         != source_identity
-        or int_value(stream_budget_ledger.get("remaining_video_bitrate_bps"))
+        or int_value(stream_budget_totals.get("remaining_video_bitrate_bps"))
         != assignment.target_video_bitrate_bps
         or str(sample_result.get("quality_metric") or "").casefold()
         != assignment.quality_metric.casefold()

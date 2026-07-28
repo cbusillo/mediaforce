@@ -216,6 +216,10 @@ directory carries an immutable binding to one plan or proposal, so artifacts
 cannot be mixed across authorization windows or review sets. Newly created
 claim files and newly created parent directories are fsynced before work can
 continue, so a power loss cannot silently erase assignment or review ownership.
+On the next runtime-lock-held invocation, an orphaned assignment claim is
+terminalized as an unfavorable `interrupted_claim` without rerunning media, and
+a persisted non-review attempt missing its terminal record is idempotently
+terminalized before any later reservation can run.
 
 Run one assignment at a time. The command revalidates the partition and current
 inventory before touching media, uses the exact assigned library item, forces
@@ -344,11 +348,14 @@ that claim; a crash leaves an unresolved terminal claim, and a rejected review
 remains terminal. The exact PATH-selected runner must match the authorization
 before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
-unbound interpreter. Those bytes are executed from an owner-only ephemeral copy
+unbound interpreter. Its canonical path must also match the active ancestor Code
+process that is conducting the operator session, so a different PATH-selected
+native binary cannot establish its own trust root. Those bytes are executed from
+an owner-only ephemeral copy
 rather than reopening the mutable PATH-selected source. The review process uses
-a fixed system `PATH`, strips loader, interpreter, proxy, certificate, and model
-endpoint overrides, and gives agent shell commands an explicit minimal
-environment with no caller-environment inheritance. On the macOS execution host,
+a fixed system `PATH` and a strict allowlisted process environment containing no
+caller secrets; agent shell commands use the same explicit minimal environment
+with no caller-environment inheritance. On the macOS execution host,
 a held no-follow descriptor and kqueue vnode guard reject any write, delete,
 rename, link, or revoke event on that copy before its output can become evidence;
 unavailable secure monitoring fails closed. Each attestation binds the claim plus

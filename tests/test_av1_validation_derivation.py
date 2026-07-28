@@ -63,6 +63,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     _assert_next_assignment,
     _current_derivation_review_artifact_fingerprint,
     _prepare_derivation_review_root,
+    _recover_interrupted_derivation_state,
     _secure_derivation_review_media,
     assert_av1_validation_derivation_execution_contract,
     av1_validation_derivation_execution_environment_sha256,
@@ -321,6 +322,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     assignment_id=self.plan.assignments[0].assignment_id,
                     plan_id=self.plan.plan_id,
                     authorization_id=self.plan.authorization.authorization_id,
+                    claimed_at="2026-07-28T01:00:00Z",
                 )
             fsynced_paths = {
                 call.args[0] for call in fsync_directory.call_args_list
@@ -533,6 +535,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "which",
                     return_value=str(runner),
                 ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_trusted_code_ancestor_path",
+                    return_value=runner.resolve(),
+                ),
                 self.assertRaisesRegex(
                     AV1ValidationDerivationError,
                     "native Mach-O",
@@ -562,13 +569,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             environment["PATH"],
             verify_av1_cold_start_preregistration._AGENT_REVIEW_SAFE_PATH,
         )
-        self.assertEqual(environment["SAFE_REVIEW_VALUE"], "retained")
+        self.assertNotIn("SAFE_REVIEW_VALUE", environment)
         self.assertEqual(
             environment["HOME"],
             verify_av1_cold_start_preregistration._review_user_home(),
         )
         self.assertEqual(environment["SHELL"], "/bin/zsh")
         for key in (
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
             "DYLD_INSERT_LIBRARIES",
             "GIT_EXEC_PATH",
             "LD_PRELOAD",
@@ -576,6 +585,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "OPENAI_BASE_URL",
         ):
             self.assertNotIn(key, environment)
+
+    def test_review_runner_rejects_non_ancestor_native_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runner = Path(directory) / "code"
+            runner.write_bytes(REVIEW_RUNNER_BYTES)
+            runner.chmod(0o700)
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration.shutil,
+                    "which",
+                    return_value=str(runner),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_trusted_code_ancestor_path",
+                    return_value=Path("/private/trusted/code"),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "active trusted runner",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._review_runner_identity()
 
     def test_review_runner_rejects_path_substitution_before_launch(self) -> None:
         with (
@@ -720,9 +752,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         persisted_ledger = sample_item["stream_budget_ledger"]
         assert isinstance(persisted_ledger, dict)
         ledger = dict(persisted_ledger)
-        ledger["remaining_video_bitrate_bps"] = (
+        totals = dict(ledger["totals"])
+        totals["remaining_video_bitrate_bps"] = (
             assignment.target_video_bitrate_bps + 1
         )
+        ledger["totals"] = totals
         sample_item["stream_budget_ledger"] = ledger
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
@@ -1499,6 +1533,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 assignment_id=assignment.assignment_id,
                 plan_id=self.plan.plan_id,
                 authorization_id=self.plan.authorization.authorization_id,
+                claimed_at="2026-07-28T01:00:00Z",
             )
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
@@ -1510,6 +1545,49 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     attempts_directory=attempts_dir,
                     terminal_records_directory=root / "records",
                 )
+
+    def test_interrupted_claim_is_terminalized_without_rerunning_media(self) -> None:
+        assignment = self.plan.assignments[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempts_dir = root / "attempts"
+            records_dir = root / "records"
+            write_av1_validation_derivation_assignment_claim(
+                attempts_dir,
+                assignment_id=assignment.assignment_id,
+                plan_id=self.plan.plan_id,
+                authorization_id=self.plan.authorization.authorization_id,
+                claimed_at="2026-07-28T01:00:00Z",
+            )
+            self.assertTrue(_recover_interrupted_derivation_state(
+                plan=self.plan,
+                partition=self.partition,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                completed_at="2026-07-28T01:01:00Z",
+            ))
+            attempt = load_av1_validation_derivation_attempts(attempts_dir)[0]
+            terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+            self.assertEqual(attempt.status, "stopped")
+            self.assertEqual(attempt.reason_code, "interrupted_claim")
+            self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_nonreview_attempt_without_terminal_is_recovered(self) -> None:
+        attempt = self._failed_attempt(self.plan.assignments[0].assignment_id)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempts_dir = root / "attempts"
+            records_dir = root / "records"
+            write_av1_validation_derivation_attempt(attempts_dir, attempt)
+            self.assertTrue(_recover_interrupted_derivation_state(
+                plan=self.plan,
+                partition=self.partition,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                completed_at="2026-07-28T01:01:00Z",
+            ))
+            terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+            self.assertEqual(terminal.attempt_id, attempt.attempt_id)
 
     def test_runtime_rejects_noncanonical_artifact_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3106,9 +3184,12 @@ def _calibration_payload(
             "content_version_fingerprint": source_identity,
             "duration_seconds": duration_seconds,
             "stream_budget_ledger": {
-                "remaining_video_bitrate_bps": (
-                    assignment.target_video_bitrate_bps
-                ),
+                "schema_version": 1,
+                "totals": {
+                    "remaining_video_bitrate_bps": (
+                        assignment.target_video_bitrate_bps
+                    ),
+                },
             },
         },
         "sample_result": {
