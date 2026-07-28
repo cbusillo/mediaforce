@@ -328,7 +328,7 @@ stop_backend() {
 		pid="$(mediaforce_backend_root_pid "${pid}")"
 		kill_pid_tree "${pid}"
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
-		rm -f "${BACKEND_PID_FILE}" "${BACKEND_LOCK_FILE}"
+		rm -f "${BACKEND_PID_FILE}"
 		echo "backend: stopped pid ${pid}"
 		return 0
 	fi
@@ -340,11 +340,11 @@ stop_backend() {
 			kill_pid_tree "${listener_pid}"
 		done <<<"${managed_pids}"
 		wait_for_no_managed_listener "${BACKEND_PORT}" pid_matches_mediaforce_backend || true
-		rm -f "${BACKEND_PID_FILE}" "${BACKEND_LOCK_FILE}"
+		rm -f "${BACKEND_PID_FILE}"
 		echo "backend: stopped listener $(printf '%s' "${managed_pids}" | paste -sd ',' -)"
 		return 0
 	fi
-	rm -f "${BACKEND_PID_FILE}" "${BACKEND_LOCK_FILE}"
+	rm -f "${BACKEND_PID_FILE}"
 	echo "backend: stopped"
 }
 

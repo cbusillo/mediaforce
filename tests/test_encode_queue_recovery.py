@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import tomllib
@@ -69,6 +70,7 @@ from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
+from mediaforce.web import runtime_lock as runtime_lock_module
 from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode_runtime, \
     folder_actions as folder_actions_runtime, \
@@ -6392,6 +6394,70 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     pass
 
         self.assertIn("pid 123 on 127.0.0.1:8777", str(raised.exception))
+
+    def test_runtime_lock_survives_lock_file_unlink_and_recreation(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(web_state_dir=Path(sys.argv[1])),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-lock-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            self.config,
+            owner_payload={"purpose": "parent-lock-probe"},
+        ):
+            lock_path.unlink()
+            lock_path.write_text(
+                json.dumps({"pid": 999, "purpose": "replacement"}),
+                encoding="utf-8",
+            )
+            lock_path.chmod(0o600)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(self.config.paths.web_state_dir),
+                ],
+                cwd=Path.cwd(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 23, completed.stderr)
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            self.config,
+            owner_payload={"purpose": "post-recreation-probe"},
+        ):
+            self.assertIn("post-recreation-probe", lock_path.read_text())
+
+    def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
+        script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")
+        lock_deletions = [
+            line
+            for line in script.splitlines()
+            if "rm -f" in line and "BACKEND_LOCK_FILE" in line
+        ]
+        self.assertEqual(lock_deletions, [])
 
     @staticmethod
     def test_create_reloadable_app_uses_default_config_when_env_path_is_blank() -> None:

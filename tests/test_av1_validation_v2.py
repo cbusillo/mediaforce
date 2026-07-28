@@ -23,7 +23,6 @@ from mediaforce.tuning.av1_validation_harness import (
 from mediaforce.tuning.av1_validation_v2 import (
     AV1_VALIDATION_V1_MANIFEST_ID,
     AV1_VALIDATION_V1_MANIFEST_PAYLOAD_SHA256,
-    AV1ValidationManifestV2,
     AV1ValidationV2EligibilityCell,
     AV1ValidationV2Error,
     assert_preregistered_av1_validation_manifest_v2,
@@ -124,6 +123,8 @@ class AV1ValidationV2Tests(unittest.TestCase):
             runtime_context_sha256=f"sha256:{'c' * 64}",
             execution_environment_sha256=f"sha256:{'d' * 64}",
             statistics_contract_sha256=f"sha256:{'e' * 64}",
+            review_runner_canonical_path_sha256=f"sha256:{'f' * 64}",
+            review_runner_binary_sha256=f"sha256:{'0' * 64}",
             authorized_at="2026-08-01T00:00:00Z",
             valid_until="2026-08-02T00:00:00Z",
         )
@@ -137,6 +138,14 @@ class AV1ValidationV2Tests(unittest.TestCase):
         self.assertFalse(payload["guided_probe_allowed"])
         self.assertFalse(payload["holdout_case_execution_allowed"])
         self.assertFalse(payload["public_bundle_activation_allowed"])
+        self.assertEqual(
+            payload["review_runner_canonical_path_sha256"],
+            f"sha256:{'f' * 64}",
+        )
+        self.assertEqual(
+            payload["review_runner_binary_sha256"],
+            f"sha256:{'0' * 64}",
+        )
 
         payload["guided_probe_allowed"] = True
         with self.assertRaises(AV1ValidationV2Error):

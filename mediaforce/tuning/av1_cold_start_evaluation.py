@@ -30,6 +30,9 @@ AV1_COLD_START_VALIDATION_PREDICTOR_CONTRACT_VERSION = "acsp1"
 AV1_COLD_START_VALIDATION_REGISTERED_AT = "2026-07-27T00:00:00Z"
 AV1_COLD_START_VALIDATION_VALID_UNTIL = "2027-01-27T00:00:00Z"
 AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT = 12
+AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT = 6
+AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS = 180
+AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN = 6.0
 AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_GROUP_COUNT = 6
 AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_SOURCE_GROUP_COUNT = (
     AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT // 3
@@ -173,13 +176,21 @@ class AV1ColdStartValidationCriteriaV1:
             raise AV1ColdStartValidationError(
                 "AV1 validation requires exactly twelve derivation observations"
             )
-        if not 6 <= self.minimum_derivation_source_count <= self.minimum_derivation_evidence_count:
+        if not (
+            AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT
+            <= self.minimum_derivation_source_count
+            <= self.minimum_derivation_evidence_count
+        ):
             raise AV1ColdStartValidationError("AV1 validation derivation-source minimum is invalid")
         if self.minimum_holdout_count < 16:
             raise AV1ColdStartValidationError("AV1 validation requires at least sixteen held-out cases")
         if not 6 <= self.minimum_holdout_source_count <= self.minimum_holdout_count:
             raise AV1ColdStartValidationError("AV1 validation held-out source minimum is invalid")
-        if not 1 <= self.maximum_derivation_age_days <= 180:
+        if not (
+            1
+            <= self.maximum_derivation_age_days
+            <= AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS
+        ):
             raise AV1ColdStartValidationError("AV1 validation derivation evidence age is too permissive")
         rates = (
             self.range_hit_null_rate,
@@ -194,7 +205,12 @@ class AV1ColdStartValidationCriteriaV1:
             raise AV1ColdStartValidationError("AV1 validation range-hit null rate must remain one half")
         if self.maximum_one_sided_p_value > 0.025:
             raise AV1ColdStartValidationError("AV1 validation significance threshold is too permissive")
-        if not math.isfinite(self.maximum_candidate_crf_span) or not 0 < self.maximum_candidate_crf_span <= 6:
+        if (
+            not math.isfinite(self.maximum_candidate_crf_span)
+            or not 0
+            < self.maximum_candidate_crf_span
+            <= AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN
+        ):
             raise AV1ColdStartValidationError("AV1 validation candidate range exceeds the safe span")
         if self.maximum_safety_regression_count != 0:
             raise AV1ColdStartValidationError("AV1 validation safety regressions must remain zero")
@@ -521,6 +537,11 @@ class AV1ColdStartValidationCandidateLockV1:
             raise AV1ColdStartValidationError("AV1 validation candidate CRFs must be finite")
         if not 0 <= self.crf_lower <= self.crf_center <= self.crf_upper <= 63:
             raise AV1ColdStartValidationError("AV1 validation candidate CRF range is invalid")
+        if (
+            self.crf_upper - self.crf_lower
+            > AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN
+        ):
+            raise AV1ColdStartValidationError("AV1 validation candidate CRF span is too wide")
         for signature in (self.compatibility_signature, self.policy_signature):
             if not _SAFE_TOKEN_RE.fullmatch(signature):
                 raise AV1ColdStartValidationError("AV1 validation candidate signature is invalid")
@@ -534,8 +555,13 @@ class AV1ColdStartValidationCandidateLockV1:
             raise AV1ColdStartValidationError("AV1 validation candidate confidence score is invalid")
         if self.derivation_evidence_count != AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT:
             raise AV1ColdStartValidationError("AV1 validation candidate lock requires exactly 12 derivation observations")
-        if self.derivation_source_count < 0:
-            raise AV1ColdStartValidationError("AV1 validation derivation counts must be non-negative")
+        if (
+            self.derivation_source_count
+            < AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT
+        ):
+            raise AV1ColdStartValidationError(
+                "AV1 validation derivation source count is below the preregistered minimum"
+            )
         if self.derivation_source_count > self.derivation_evidence_count:
             raise AV1ColdStartValidationError("AV1 validation derivation sources exceed evidence")
         if self.derivation_conflict_count < 0:
@@ -583,11 +609,10 @@ class AV1ColdStartValidationCandidateLockV1:
             raise AV1ColdStartValidationError("AV1 validation derivation source tokens are incomplete")
         if len(self.derivation_title_tokens) != self.derivation_evidence_count:
             raise AV1ColdStartValidationError("AV1 validation derivation title tokens are incomplete")
-        if len(self.derivation_series_tokens) < self.derivation_source_count:
+        if len(self.derivation_series_tokens) != self.derivation_evidence_count:
             raise AV1ColdStartValidationError("AV1 validation derivation series tokens are incomplete")
         if (
-            len(self.derivation_series_tokens) > self.derivation_evidence_count
-            or len(self.derivation_source_group_tokens) > self.derivation_source_count
+            len(self.derivation_source_group_tokens) > self.derivation_source_count
         ):
             raise AV1ColdStartValidationError("AV1 validation derivation grouping tokens exceed evidence")
         for digest in (self.derivation_snapshot_sha256, self.selection_lock_sha256, self.payload_sha256):
@@ -605,6 +630,10 @@ class AV1ColdStartValidationCandidateLockV1:
         )
         if not oldest_recorded_at <= newest_recorded_at <= locked_at:
             raise AV1ColdStartValidationError("AV1 validation derivation chronology is invalid")
+        if oldest_recorded_at < locked_at - timedelta(
+            days=AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS
+        ):
+            raise AV1ColdStartValidationError("AV1 validation derivation evidence is stale")
         if reviewed_at < locked_at or self.review_state != "approved_for_holdout":
             raise AV1ColdStartValidationError("AV1 validation candidate review state is invalid")
         semantic_payload = self.semantic_payload()

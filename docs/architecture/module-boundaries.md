@@ -72,9 +72,11 @@ Guidance:
   - `job_runtime.py`
   - `calibration_runtime.py`
   - `av1_validation_derivation.py`
-    - isolated, derivation-only execution adapter over sampled calibration
+    - isolated derivation-only execution adapter over sampled calibration
+    - shared-lock verdict/finalization transactions and current-input rechecks
   - `runtime_lock.py`
     - shared process exclusivity for web and bounded operator runtimes
+    - stable parent-directory guard against lock-file unlink/recreate splits
   - `encode_runtime.py`
   - `folder_state.py`
   - `folder_actions.py`
@@ -262,6 +264,11 @@ Guidance:
 - `av1_validation_v2.py`
   - immutable v2 preregistration, digest-bound aggregate eligibility,
     explicit excluded-cell records, and fail-closed derivation-only authority
+- `av1_validation_derivation.py`
+  - immutable partition-global plan, attempt, terminal, proposal, review-claim,
+    review-evidence, and candidate-lock contracts
+  - preregistered candidate statistics, affected-cell stop semantics, and
+    authorization-bound Every Code runner identity
 - `av1_validation_partition.py`
   - pure private v2 partition schema, domain-separated HMAC selection/tokens,
     canonical selection-lock digests, and fail-closed identity constraints

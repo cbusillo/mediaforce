@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import stat
 
 from mediaforce.core.config import MediaforceConfig
 
@@ -36,6 +37,45 @@ def mediaforce_runtime_lock_owner(lock_path: Path) -> str | None:
     return purpose or None
 
 
+def _acquire_nonblocking_lock(
+        descriptor: int,
+        *,
+        lock_path: Path,
+) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        owner = mediaforce_runtime_lock_owner(lock_path)
+        owner_detail = f" ({owner})" if owner else ""
+        raise MediaforceRuntimeBusyError(
+            f"Mediaforce runtime is already active{owner_detail}"
+        ) from exc
+
+
+def _open_runtime_lock_file(lock_path: Path) -> int:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        descriptor_info = os.fstat(descriptor)
+        path_info = lock_path.lstat()
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime lock identity is invalid"
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 @contextmanager
 def exclusive_mediaforce_runtime_lock(
         config: MediaforceConfig,
@@ -44,29 +84,45 @@ def exclusive_mediaforce_runtime_lock(
 ) -> Iterator[None]:
     lock_path = mediaforce_runtime_lock_path(config)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        os.chmod(lock_path, 0o600)
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            owner = mediaforce_runtime_lock_owner(lock_path)
-            owner_detail = f" ({owner})" if owner else ""
-            raise MediaforceRuntimeBusyError(
-                f"Mediaforce runtime is already active{owner_detail}"
-            ) from exc
-
-        payload = {"pid": os.getpid(), **dict(owner_payload)}
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(json.dumps(payload, indent=2, sort_keys=True))
-        lock_file.write("\n")
-        lock_file.flush()
-        os.fsync(lock_file.fileno())
-        try:
-            yield
-        finally:
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    directory_descriptor = os.open(lock_path.parent, directory_flags)
+    lock_descriptor = -1
+    directory_locked = False
+    try:
+        _acquire_nonblocking_lock(
+            directory_descriptor,
+            lock_path=lock_path,
+        )
+        directory_locked = True
+        lock_descriptor = _open_runtime_lock_file(lock_path)
+        _acquire_nonblocking_lock(
+            lock_descriptor,
+            lock_path=lock_path,
+        )
+        with os.fdopen(lock_descriptor, "r+", encoding="utf-8") as lock_file:
+            lock_descriptor = -1
+            payload = {"pid": os.getpid(), **dict(owner_payload)}
             lock_file.seek(0)
             lock_file.truncate()
+            lock_file.write(json.dumps(payload, indent=2, sort_keys=True))
+            lock_file.write("\n")
             lock_file.flush()
             os.fsync(lock_file.fileno())
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                lock_file.truncate()
+                lock_file.flush()
+                os.fsync(lock_file.fileno())
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        if lock_descriptor >= 0:
+            os.close(lock_descriptor)
+        try:
+            if directory_locked:
+                fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(directory_descriptor)

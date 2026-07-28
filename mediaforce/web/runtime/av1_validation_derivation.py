@@ -58,6 +58,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_plan,
+    load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelopes,
     load_av1_validation_derivation_terminal_records,
     _finalize_and_write_av1_validation_derivation_candidate_lock,
@@ -197,7 +198,7 @@ def av1_validation_derivation_artifact_root(
     return (
         config.paths.web_state_dir
         / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
-        / plan.plan_id
+        / plan.partition_id
     )
 
 
@@ -395,7 +396,7 @@ def _run_av1_validation_derivation_assignment_locked(
         != (artifact_root / "terminal-records").resolve()
     ):
         raise AV1ValidationDerivationError(
-            "AV1 derivation runtime artifacts must use the plan-global canonical directory"
+            "AV1 derivation runtime artifacts must use the partition-global canonical directory"
         )
     with open_readonly_db(config.paths.db_path) as connection:
         inventory = load_av1_validation_partition_inventory(connection, config=config)
@@ -683,10 +684,16 @@ def finalize_av1_validation_derivation_candidate_lock(
             records = load_av1_validation_derivation_terminal_records(
                 artifact_root / "terminal-records"
             )
+            review_claims = load_av1_validation_derivation_review_claims(
+                artifact_root,
+                plan=plan,
+                proposal=proposal,
+            )
             review_envelopes = load_av1_validation_derivation_review_envelopes(
                 artifact_root,
                 plan=plan,
                 proposal=proposal,
+                claims=review_claims,
             )
             locked_at = clock()
             with open_db(config.paths.db_path) as connection:
@@ -725,6 +732,7 @@ def finalize_av1_validation_derivation_candidate_lock(
                     artifact_root,
                     plan=plan,
                     proposal=proposal,
+                    review_claims=review_claims,
                     review_envelopes=review_envelopes,
                     current_evaluation=current_evaluation,
                     locked_at=locked_at,
@@ -779,10 +787,16 @@ def load_verified_av1_validation_derivation_candidate_lock(
             records = load_av1_validation_derivation_terminal_records(
                 artifact_root / "terminal-records"
             )
+            review_claims = load_av1_validation_derivation_review_claims(
+                artifact_root,
+                plan=plan,
+                proposal=proposal,
+            )
             review_envelopes = load_av1_validation_derivation_review_envelopes(
                 artifact_root,
                 plan=plan,
                 proposal=proposal,
+                claims=review_claims,
             )
             persisted = _load_av1_validation_derivation_candidate_lock_envelope(
                 artifact_root,
@@ -825,6 +839,7 @@ def load_verified_av1_validation_derivation_candidate_lock(
                     artifact_root,
                     plan=plan,
                     proposal=proposal,
+                    review_claims=review_claims,
                     review_envelopes=review_envelopes,
                     current_evaluation=current_evaluation,
                     cell_plan_id=cell_plan_id,
@@ -838,8 +853,55 @@ def load_verified_av1_validation_derivation_candidate_lock(
 def record_av1_validation_derivation_visual_verdict(
         *,
         config_path: Path,
+        manifest: AV1ValidationManifestV2,
         plan: AV1ValidationDerivationPlan,
         partition: AV1ValidationPrivatePartition,
+        token_key: bytes,
+        attempt: AV1ValidationDerivationAttempt,
+        terminal_records_directory: Path,
+        verdict: str,
+        concern_tags: list[str],
+        evidence_ids: list[str],
+        moment_indexes: list[int],
+        recorded_at: str,
+) -> AV1ValidationDerivationTerminalRecord:
+    config = load_config(config_path)
+    try:
+        with exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload={
+                "purpose": "av1-derivation-verdict",
+                "plan_id": plan.plan_id,
+                "assignment_id": attempt.assignment_id,
+            },
+        ):
+            return _record_av1_validation_derivation_visual_verdict_locked(
+                config=config,
+                manifest=manifest,
+                plan=plan,
+                partition=partition,
+                token_key=token_key,
+                attempt=attempt,
+                terminal_records_directory=terminal_records_directory,
+                verdict=verdict,
+                concern_tags=concern_tags,
+                evidence_ids=evidence_ids,
+                moment_indexes=moment_indexes,
+                recorded_at=recorded_at,
+            )
+    except MediaforceRuntimeBusyError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict requires the Mediaforce runtime to be paused"
+        ) from exc
+
+
+def _record_av1_validation_derivation_visual_verdict_locked(
+        *,
+        config: MediaforceConfig,
+        manifest: AV1ValidationManifestV2,
+        plan: AV1ValidationDerivationPlan,
+        partition: AV1ValidationPrivatePartition,
+        token_key: bytes,
         attempt: AV1ValidationDerivationAttempt,
         terminal_records_directory: Path,
         verdict: str,
@@ -852,109 +914,153 @@ def record_av1_validation_derivation_visual_verdict(
         raise AV1ValidationDerivationError("AV1 derivation attempt is not awaiting visual review")
     if verdict not in {"approved", "rejected"}:
         raise AV1ValidationDerivationError("AV1 derivation visual verdict is invalid")
+    assert_preregistered_av1_validation_manifest_v2(manifest)
+    validate_av1_validation_private_partition(
+        partition,
+        manifest=manifest,
+        token_key=token_key,
+    )
+    validate_av1_validation_derivation_plan_binding(
+        plan=plan,
+        partition=partition,
+    )
     validate_av1_validation_derivation_attempt_binding(
         plan=plan,
         partition=partition,
         attempt=attempt,
     )
-    calibration = attempt.calibration_payload()
-    sample_item = object_dict(calibration.get("sample_item"))
-    config = load_config(config_path)
     artifact_root = av1_validation_derivation_artifact_root(config, plan)
     validate_av1_validation_derivation_artifact_root_binding(
         artifact_root,
         plan,
     )
+    persisted_plan = load_av1_validation_derivation_plan(
+        artifact_root / "plan.json"
+    )
+    if persisted_plan != plan:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict plan is not the canonical partition authority"
+        )
+    persisted_attempt = next(
+        (
+            item
+            for item in load_av1_validation_derivation_attempts(
+                artifact_root / "attempts"
+            )
+            if item.assignment_id == attempt.assignment_id
+        ),
+        None,
+    )
+    if persisted_attempt != attempt:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict attempt is not the immutable current attempt"
+        )
     if terminal_records_directory.resolve() != (
         artifact_root / "terminal-records"
     ).resolve():
         raise AV1ValidationDerivationError(
-            "AV1 derivation terminal artifacts must use the plan-global canonical directory"
+            "AV1 derivation terminal artifacts must use the partition-global canonical directory"
         )
-    review_root = _prepare_derivation_review_root(artifact_root)
-    _secure_derivation_review_media(review_root)
-    current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
-        review_root=review_root,
-        calibration=calibration,
-    )
-    if (
-        current_review_fingerprint is None
-        or current_review_fingerprint
-        != str(calibration.get("review_artifact_fingerprint") or "")
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review media is unavailable or changed"
+    calibration = attempt.calibration_payload()
+    sample_item = object_dict(calibration.get("sample_item"))
+    with open_db(config.paths.db_path) as connection:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        inventory = load_av1_validation_partition_inventory(
+            connection,
+            config=config,
         )
-    verdict_intent = resolve_av1_validation_derivation_verdict_intent(
-        artifact_root / "verdict-intents",
-        plan=plan,
-        attempt=attempt,
-        verdict=verdict,
-        concern_tags=concern_tags,
-        evidence_ids=evidence_ids,
-        moment_indexes=moment_indexes,
-        recorded_at=recorded_at,
-    )
-    verdict = str(verdict_intent["verdict"])
-    concern_tags = [
-        str(value) for value in object_list(verdict_intent["concern_tags"])
-    ]
-    evidence_ids = [
-        str(value) for value in object_list(verdict_intent["evidence_ids"])
-    ]
-    moment_indexes = [
-        int(value) for value in object_list(verdict_intent["moment_indexes"])
-    ]
-    recorded_at = str(verdict_intent["recorded_at"])
-    calibration["current_review_artifact_fingerprint"] = current_review_fingerprint
-    prefix = _derivation_prefix(config, sample_item)
-    result = build_visual_content_intent_observation(
-        prefix=prefix,
-        sample_item=sample_item,
-        calibration=calibration,
-        verdict=verdict,
-        concern_tags=concern_tags,
-        evidence_ids=evidence_ids,
-        moment_indexes=moment_indexes,
-        recorded_at=recorded_at,
-        personalization_eligible=False,
-        personalization_exclusion_reason=(
-            AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
-        ),
-    )
-    if result.observation is None:
-        terminal = build_av1_validation_derivation_terminal_record(
+        validate_av1_validation_partition_current_inputs(
+            partition,
+            manifest=manifest,
+            sources=inventory.sources,
+            expectations=inventory.expectations,
+            token_key=token_key,
+        )
+        assert_av1_validation_derivation_execution_contract(manifest, plan)
+        review_root = _prepare_derivation_review_root(artifact_root)
+        _secure_derivation_review_media(review_root)
+        current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
+            review_root=review_root,
+            calibration=calibration,
+        )
+        if (
+            current_review_fingerprint is None
+            or current_review_fingerprint
+            != str(calibration.get("review_artifact_fingerprint") or "")
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review media is unavailable or changed"
+            )
+        verdict_intent = resolve_av1_validation_derivation_verdict_intent(
+            artifact_root / "verdict-intents",
             plan=plan,
-            partition=partition,
             attempt=attempt,
-            observation_exclusion_reason="content_intent_observation_excluded",
+            verdict=verdict,
+            concern_tags=concern_tags,
+            evidence_ids=evidence_ids,
+            moment_indexes=moment_indexes,
+            recorded_at=recorded_at,
         )
-        ensure_av1_validation_derivation_terminal_intent(
-            artifact_root / "terminal-intents",
-            terminal,
+        frozen_verdict = str(verdict_intent["verdict"])
+        frozen_concern_tags = [
+            str(value) for value in object_list(verdict_intent["concern_tags"])
+        ]
+        frozen_evidence_ids = [
+            str(value) for value in object_list(verdict_intent["evidence_ids"])
+        ]
+        frozen_moment_indexes = [
+            int(value) for value in object_list(verdict_intent["moment_indexes"])
+        ]
+        frozen_recorded_at = str(verdict_intent["recorded_at"])
+        calibration["current_review_artifact_fingerprint"] = (
+            current_review_fingerprint
         )
-        ensure_av1_validation_derivation_terminal_record(
-            terminal_records_directory,
-            terminal,
+        result = build_visual_content_intent_observation(
+            prefix=_derivation_prefix(config, sample_item),
+            sample_item=sample_item,
+            calibration=calibration,
+            verdict=frozen_verdict,
+            concern_tags=frozen_concern_tags,
+            evidence_ids=frozen_evidence_ids,
+            moment_indexes=frozen_moment_indexes,
+            recorded_at=frozen_recorded_at,
+            personalization_eligible=False,
+            personalization_exclusion_reason=(
+                AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
+            ),
         )
-        return terminal
-    terminal = build_av1_validation_derivation_terminal_record(
-        plan=plan,
-        partition=partition,
-        attempt=attempt,
-        observation=result.observation,
-    )
-    ensure_av1_validation_derivation_terminal_intent(
-        artifact_root / "terminal-intents",
-        terminal,
-    )
-    try:
-        with open_db(config.paths.db_path) as connection:
-            append_content_intent_boundary_observation(connection, result.observation)
-    except ContentIntentObservationConflictError as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation visual observation conflicts with existing evidence"
-        ) from exc
+        if result.observation is None:
+            terminal = build_av1_validation_derivation_terminal_record(
+                plan=plan,
+                partition=partition,
+                attempt=attempt,
+                observation_exclusion_reason="content_intent_observation_excluded",
+            )
+            ensure_av1_validation_derivation_terminal_intent(
+                artifact_root / "terminal-intents",
+                terminal,
+            )
+        else:
+            terminal = build_av1_validation_derivation_terminal_record(
+                plan=plan,
+                partition=partition,
+                attempt=attempt,
+                observation=result.observation,
+            )
+            ensure_av1_validation_derivation_terminal_intent(
+                artifact_root / "terminal-intents",
+                terminal,
+            )
+            try:
+                append_content_intent_boundary_observation(
+                    connection,
+                    result.observation,
+                )
+            except ContentIntentObservationConflictError as exc:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation visual observation conflicts with existing evidence"
+                ) from exc
+    assert_av1_validation_derivation_execution_contract(manifest, plan)
     ensure_av1_validation_derivation_terminal_record(
         terminal_records_directory,
         terminal,
@@ -1089,24 +1195,6 @@ def _assert_next_assignment(
                 "AV1 derivation attempt is bound to another work item"
             )
         attempts_by_id[attempt.assignment_id] = attempt
-    attempted_ids = set(attempts_by_id)
-    expected_prefix = tuple(
-        assignment.assignment_id
-        for assignment in plan.assignments[:len(attempted_ids)]
-    )
-    actual_prefix = tuple(
-        assignment.assignment_id
-        for assignment in plan.assignments
-        if assignment.assignment_id in attempted_ids
-    )
-    if actual_prefix != expected_prefix:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation attempts are not an ordered prefix of the immutable worklist"
-        )
-    if any(attempt.status != "review_pending" for attempt in attempts):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation has a terminal unsuccessful attempt and cannot continue"
-        )
     records = (
         load_av1_validation_derivation_terminal_records(terminal_records_directory)
         if terminal_records_directory.exists()
@@ -1137,20 +1225,11 @@ def _assert_next_assignment(
                 "AV1 derivation terminal record does not match its attempt"
             )
         records_by_id[record.assignment_id] = record
+    attempted_ids = set(attempts_by_id)
     record_ids = set(records_by_id)
     if attempted_ids != record_ids:
         raise AV1ValidationDerivationError(
             "AV1 derivation must record the prior human visual terminal before continuing"
-        )
-    if any(
-        record.status != "observed"
-        or record.observation is None
-        or record.observation.verdict != "acceptable"
-        or not record.observation.quality_floor_met
-        for record in records
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation has an unfavorable terminal record and cannot continue"
         )
     claim_ids = {
         path.stem
@@ -1160,12 +1239,46 @@ def _assert_next_assignment(
         raise AV1ValidationDerivationError(
             "AV1 derivation has an interrupted claimed assignment and cannot continue"
         )
-    next_assignment = next(
-        (item.assignment_id for item in plan.assignments if item.assignment_id not in attempted_ids),
-        None,
-    )
+    stopped_cells: set[str] = set()
+    next_assignment: str | None = None
+    for assignment in plan.assignments:
+        attempt = attempts_by_id.get(assignment.assignment_id)
+        if assignment.cell_plan_id in stopped_cells:
+            if attempt is not None:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation attempted a later assignment in an affected stopped cell"
+                )
+            continue
+        if attempt is None:
+            if next_assignment is None:
+                next_assignment = assignment.assignment_id
+            continue
+        if next_assignment is not None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation attempts do not preserve the immutable canonical order"
+            )
+        record = records_by_id[assignment.assignment_id]
+        if (
+            attempt.status != "review_pending"
+            or record.status != "observed"
+            or record.observation is None
+            or record.observation.verdict != "acceptable"
+            or not record.observation.quality_floor_met
+        ):
+            stopped_cells.add(assignment.cell_plan_id)
     if next_assignment is None:
-        raise AV1ValidationDerivationError("AV1 derivation worklist is already complete")
+        raise AV1ValidationDerivationError(
+            "AV1 derivation worklist has no remaining assignment"
+        )
+    requested_assignment = assignments_by_id.get(assignment_id)
+    if requested_assignment is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation assignment is not authorized"
+        )
+    if requested_assignment.cell_plan_id in stopped_cells:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation assignment belongs to an affected stopped cell"
+        )
     if assignment_id != next_assignment:
         raise AV1ValidationDerivationError(
             "AV1 derivation assignment is not next in the immutable worklist"

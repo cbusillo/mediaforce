@@ -1,4 +1,6 @@
-from contextlib import redirect_stdout
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import replace
 import hashlib
 import io
@@ -6,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 from typing import Literal, Sequence
 import unittest
@@ -17,8 +20,10 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
     AV1ValidationDerivationAttempt,
+    AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
+    AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationTerminalRecord,
     _attempt_semantic_payload,
     _derivation_id,
@@ -29,6 +34,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     av1_validation_derivation_statistics_contract_sha256,
     build_av1_validation_derivation_attempt,
     build_av1_validation_derivation_plan,
+    build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
     build_av1_validation_derivation_terminal_record,
@@ -39,6 +45,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     _load_verified_av1_validation_derivation_candidate_lock as load_verified_av1_validation_derivation_candidate_lock,
     load_av1_validation_derivation_plan,
     load_av1_validation_derivation_attempts,
+    load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelopes,
     load_av1_validation_derivation_terminal_records,
     resolve_av1_validation_derivation_verdict_intent,
@@ -46,6 +53,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     validate_av1_validation_derivation_plan_binding,
     write_av1_validation_derivation_candidate_proposal,
     write_av1_validation_derivation_plan,
+    write_av1_validation_derivation_review_claim,
     write_av1_validation_derivation_review_envelope,
     write_av1_validation_derivation_attempt,
     write_av1_validation_derivation_assignment_claim,
@@ -166,6 +174,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             statistics_contract_sha256=(
                 av1_validation_derivation_statistics_contract_sha256(self.manifest)
             ),
+            review_runner_canonical_path_sha256=f"sha256:{'a' * 64}",
+            review_runner_binary_sha256=f"sha256:{'b' * 64}",
             authorized_at=AUTHORIZED_AT,
             valid_until=VALID_UNTIL,
         )
@@ -178,7 +188,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.runtime_artifact_root = (
             self.runtime_config.paths.web_state_dir
             / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
-            / self.plan.plan_id
+            / self.plan.partition_id
         )
         write_av1_validation_derivation_plan(
             self.runtime_artifact_root,
@@ -261,7 +271,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             artifact_root = (
                 root
                 / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
-                / self.plan.plan_id
+                / self.plan.partition_id
             )
             plan_path = write_av1_validation_derivation_plan(
                 artifact_root,
@@ -274,10 +284,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
-                "plan-global canonical root",
+                "partition-global canonical root",
             ):
                 write_av1_validation_derivation_plan(
-                    root / "alternate" / self.plan.plan_id,
+                    root / "alternate" / self.plan.partition_id,
                     self.plan,
                 )
 
@@ -295,22 +305,110 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
                 write_av1_validation_derivation_terminal_record(records_dir, record)
 
+    def test_assignment_and_review_claim_directories_are_fsynced_through_parents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempts_directory = root / "nested" / "claims" / "attempts"
+            with patch(
+                "mediaforce.tuning.av1_validation_derivation._fsync_directory"
+            ) as fsync_directory:
+                write_av1_validation_derivation_assignment_claim(
+                    attempts_directory,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    plan_id=self.plan.plan_id,
+                    authorization_id=self.plan.authorization.authorization_id,
+                )
+            fsynced_paths = {
+                call.args[0] for call in fsync_directory.call_args_list
+            }
+            self.assertTrue({
+                root,
+                root / "nested",
+                root / "nested" / "claims",
+                attempts_directory,
+            }.issubset(fsynced_paths))
+
+        proposal = self._candidate_proposal()
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            lane="architecture",
+            review_run_id="70000000-0000-0000-0000-000000000001",
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation._fsync_directory"
+        ) as fsync_directory:
+            write_av1_validation_derivation_review_claim(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+            )
+        fsynced_paths = {
+            call.args[0] for call in fsync_directory.call_args_list
+        }
+        resolved_artifact_root = self.runtime_artifact_root.resolve()
+        self.assertTrue({
+            resolved_artifact_root,
+            resolved_artifact_root / "review-claims",
+            (
+                resolved_artifact_root
+                / "review-claims"
+                / proposal.proposal_id
+            ),
+        }.issubset(fsynced_paths))
+
     def test_review_attestation_identity_comes_from_code_managed_result(self) -> None:
         agent_id = "12345678-1234-1234-1234-123456789abc"
-        proposal = SimpleNamespace(
-            proposal_id="av1vdproposal1_test",
-            payload_sha256="sha256:" + "a" * 64,
+        cell_plan_id = self.plan.assignments[0].cell_plan_id
+        assignments = [
+            assignment
+            for assignment in self.plan.assignments
+            if assignment.cell_plan_id == cell_plan_id
+        ]
+        records = [
+            self._observed_record(assignment.assignment_id, crf=28.0)
+            for assignment in assignments
+        ]
+        evaluation = evaluate_av1_validation_derivation_candidate(
+            manifest=self.manifest,
+            plan=self.plan,
+            partition=self.partition,
+            cell_plan_id=cell_plan_id,
+            attempts=self._attempts(records),
+            records=records,
+            current_observations=self._current_observations(records),
             proposed_at="2026-07-28T02:00:00Z",
-            to_payload=lambda: {
-                "proposal_id": "av1vdproposal1_test",
-                "payload_sha256": "sha256:" + "a" * 64,
-            },
+        )
+        assert evaluation.proposal is not None
+        proposal = evaluation.proposal
+        expected_claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            lane="architecture",
+            review_run_id=agent_id,
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
+            claimed_at="2026-07-28T03:00:00Z",
         )
         marker = {
             "decision": "approved",
             "lane": "architecture",
             "proposal_id": proposal.proposal_id,
             "proposal_payload_sha256": proposal.payload_sha256,
+            "review_claim_id": expected_claim.claim_id,
+            "review_claim_payload_sha256": expected_claim.payload_sha256,
             "review_run_id": agent_id,
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -325,8 +423,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             prompt = verify_av1_cold_start_preregistration._agent_review_prompt(
                 proposal=proposal,
-                lane="architecture",
-                review_run_id=agent_id,
+                claim=expected_claim,
             )
             stdout = "\n".join((
                 json.dumps({
@@ -358,9 +455,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             with (
                 patch.object(
-                    verify_av1_cold_start_preregistration.shutil,
-                    "which",
-                    return_value=str(code_binary),
+                    verify_av1_cold_start_preregistration,
+                    "_authorized_review_runner_identity",
+                    return_value=(
+                        code_binary,
+                        self.authorization.review_runner_canonical_path_sha256,
+                        self.authorization.review_runner_binary_sha256,
+                    ),
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration.subprocess,
@@ -372,28 +473,314 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "uuid4",
                     return_value=agent_id,
                 ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_now_iso",
+                    return_value="2026-07-28T03:00:00Z",
+                ),
             ):
-                reviewer_token, evidence, decision = (
+                claim, evidence, decision = (
                     verify_av1_cold_start_preregistration._run_code_agent_review(
+                        artifact_root=self.runtime_artifact_root,
+                        plan=self.plan,
                         proposal=proposal,
                         lane="architecture",
                     )
                 )
-            self.assertEqual(reviewer_token, f"agent:{agent_id}")
+            self.assertEqual(claim, expected_claim)
             self.assertEqual(decision, "approved")
             evidence_payload = json.loads(evidence)
             self.assertEqual(evidence_payload["review_run_id"], agent_id)
             self.assertEqual(evidence_payload["returncode"], 0)
+            self.assertNotIn(str(code_binary), evidence.decode("utf-8"))
             review = build_av1_validation_derivation_review_attestation(
                 proposal=proposal,
-                lane="architecture",
-                reviewer_token=reviewer_token,
+                claim=claim,
                 review_evidence_sha256=(
                     f"sha256:{hashlib.sha256(evidence).hexdigest()}"
                 ),
                 decision=decision,
                 reviewed_at="2026-07-28T03:00:00Z",
             )
+            validate_av1_validation_derivation_review_run_evidence(
+                evidence,
+                review=review,
+            )
+
+    def test_review_runner_rejects_path_substitution_before_launch(self) -> None:
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_review_runner_identity",
+                return_value=(
+                    Path("/private/substitute-code"),
+                    f"sha256:{'c' * 64}",
+                    self.authorization.review_runner_binary_sha256,
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration.subprocess,
+                "run",
+            ) as run_review,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "drifted from the authorization",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._run_code_agent_review(
+                artifact_root=self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=self._candidate_proposal(),
+                lane="architecture",
+            )
+        run_review.assert_not_called()
+
+    def test_review_runner_is_reverified_after_launch(self) -> None:
+        proposal = self._candidate_proposal()
+        before_identity = (
+            Path("/private/authorized-code"),
+            self.authorization.review_runner_canonical_path_sha256,
+            self.authorization.review_runner_binary_sha256,
+        )
+        after_identity = (
+            Path("/private/substitute-code"),
+            f"sha256:{'c' * 64}",
+            self.authorization.review_runner_binary_sha256,
+        )
+        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_review_runner_identity",
+                side_effect=(before_identity, after_identity),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration.subprocess,
+                "run",
+                return_value=completed,
+            ) as run_review,
+            patch.object(
+                verify_av1_cold_start_preregistration.uuid,
+                "uuid4",
+                return_value="60000000-0000-0000-0000-000000000001",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_now_iso",
+                return_value="2026-07-28T03:00:01Z",
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "drifted from the authorization",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._run_code_agent_review(
+                artifact_root=self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                lane="architecture",
+            )
+        run_review.assert_called_once()
+        self.assertEqual(
+            len(load_av1_validation_derivation_review_claims(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+            )),
+            1,
+        )
+
+    def test_review_claim_race_leaves_one_terminal_unresolved_claim(self) -> None:
+        proposal = self._candidate_proposal()
+        claims = [
+            build_av1_validation_derivation_review_claim(
+                plan=self.plan,
+                proposal=proposal,
+                lane="architecture",
+                review_run_id=f"20000000-0000-0000-0000-{index:012x}",
+                review_runner_canonical_path_sha256=(
+                    self.authorization.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.authorization.review_runner_binary_sha256
+                ),
+                claimed_at=f"2026-07-28T03:00:0{index}Z",
+            )
+            for index in (1, 2)
+        ]
+        barrier = threading.Barrier(2)
+
+        def write_claim(claim: AV1ValidationDerivationReviewClaim) -> bool:
+            barrier.wait()
+            try:
+                write_av1_validation_derivation_review_claim(
+                    self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    claim=claim,
+                )
+            except AV1ValidationDerivationError:
+                return False
+            return True
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = tuple(executor.map(write_claim, claims))
+        self.assertEqual(sorted(outcomes), [False, True])
+        persisted_claims = load_av1_validation_derivation_review_claims(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+        )
+        self.assertEqual(len(persisted_claims), 1)
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "all five immutable review claims",
+        ):
+            finalize_av1_validation_derivation_candidate_lock(
+                proposal=proposal,
+                review_claims=persisted_claims,
+                reviews=(),
+                current_evaluation=SimpleNamespace(
+                    blockers=(),
+                    proposal=proposal,
+                    cell_plan_id=proposal.cell_plan_id,
+                    derivation_snapshot_sha256=(
+                        proposal.derivation_snapshot_sha256
+                    ),
+                ),
+                locked_at=proposal.proposed_at,
+            )
+
+    def test_rejected_review_is_persisted_and_cannot_be_replaced(self) -> None:
+        proposal = self._candidate_proposal()
+        claims = []
+        reviews = []
+        for index, lane in enumerate(
+            AV1_VALIDATION_DERIVATION_REVIEW_LANES,
+            start=1,
+        ):
+            claim = build_av1_validation_derivation_review_claim(
+                plan=self.plan,
+                proposal=proposal,
+                lane=lane,
+                review_run_id=f"30000000-0000-0000-0000-{index:012x}",
+                review_runner_canonical_path_sha256=(
+                    self.authorization.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.authorization.review_runner_binary_sha256
+                ),
+                claimed_at=f"2026-07-28T03:00:{index:02d}Z",
+            )
+            decision: Literal["approved", "rejected"] = (
+                "rejected" if lane == "privacy_security" else "approved"
+            )
+            evidence = _review_run_evidence(
+                proposal=proposal,
+                claim=claim,
+                decision=decision,
+            )
+            review = build_av1_validation_derivation_review_attestation(
+                proposal=proposal,
+                claim=claim,
+                review_evidence_sha256=(
+                    f"sha256:{hashlib.sha256(evidence).hexdigest()}"
+                ),
+                decision=decision,
+                reviewed_at=f"2026-07-28T03:{index:02d}:00Z",
+            )
+            envelope = build_av1_validation_derivation_review_envelope(
+                review=review,
+                evidence=evidence,
+            )
+            write_av1_validation_derivation_review_claim(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+            )
+            write_av1_validation_derivation_review_envelope(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                envelope=envelope,
+            )
+            claims.append(claim)
+            reviews.append(review)
+
+        replacement = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            lane="privacy_security",
+            review_run_id="40000000-0000-0000-0000-000000000001",
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
+            claimed_at="2026-07-28T03:10:00Z",
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "already exists",
+        ):
+            write_av1_validation_derivation_review_claim(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=replacement,
+            )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "did not approve",
+        ):
+            current_proposal = self._candidate_proposal(
+                proposed_at="2026-07-28T03:10:00Z"
+            )
+            finalize_av1_validation_derivation_candidate_lock(
+                proposal=proposal,
+                review_claims=claims,
+                reviews=reviews,
+                current_evaluation=SimpleNamespace(
+                    blockers=(),
+                    proposal=current_proposal,
+                    cell_plan_id=current_proposal.cell_plan_id,
+                    derivation_snapshot_sha256=(
+                        current_proposal.derivation_snapshot_sha256
+                    ),
+                ),
+                locked_at="2026-07-28T03:10:00Z",
+            )
+
+    def test_review_evidence_digest_must_match_canonical_evidence(self) -> None:
+        proposal = self._candidate_proposal()
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            lane="architecture",
+            review_run_id="50000000-0000-0000-0000-000000000001",
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        evidence = _review_run_evidence(proposal=proposal, claim=claim)
+        review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=f"sha256:{'f' * 64}",
+            decision="approved",
+            reviewed_at="2026-07-28T03:01:00Z",
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "digest does not match its canonical evidence",
+        ):
             validate_av1_validation_derivation_review_run_evidence(
                 evidence,
                 review=review,
@@ -708,6 +1095,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             statistics_contract_sha256=(
                 self.authorization.statistics_contract_sha256
             ),
+            review_runner_canonical_path_sha256=(
+                self.authorization.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.authorization.review_runner_binary_sha256
+            ),
             authorized_at="2026-07-28T00:01:00Z",
             valid_until=VALID_UNTIL,
         )
@@ -717,6 +1110,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             authorization=second_authorization,
             runtime_context_sha256=self.plan.runtime_context_sha256,
         )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "another artifact set",
+        ):
+            write_av1_validation_derivation_plan(
+                self.runtime_artifact_root,
+                second_plan,
+            )
         first_assignment = self.plan.assignments[0]
         first_attempt = self._failed_attempt(first_assignment.assignment_id)
         second_attempt = build_av1_validation_derivation_attempt(
@@ -737,25 +1138,95 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 write_av1_validation_derivation_attempt(attempts_dir, second_attempt)
 
-    def test_unsuccessful_attempt_stops_remaining_worklist(self) -> None:
+    def test_unsuccessful_attempt_stops_only_the_affected_cell(self) -> None:
         first_assignment, second_assignment = self.plan.assignments[:2]
+        other_cell_assignment = next(
+            assignment
+            for assignment in self.plan.assignments
+            if assignment.cell_plan_id != first_assignment.cell_plan_id
+        )
+        later_other_cell_assignment = next(
+            assignment
+            for assignment in self.plan.assignments
+            if (
+                assignment.cell_plan_id == other_cell_assignment.cell_plan_id
+                and assignment.ordinal > other_cell_assignment.ordinal
+            )
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             attempts_dir = root / "attempts"
+            records_dir = root / "records"
             write_av1_validation_derivation_attempt(
                 attempts_dir,
                 self._failed_attempt(first_assignment.assignment_id),
             )
+            write_av1_validation_derivation_terminal_record(
+                records_dir,
+                self._failed_record(first_assignment.assignment_id),
+            )
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
-                "unsuccessful attempt",
+                "affected stopped cell",
             ):
                 _assert_next_assignment(
                     plan=self.plan,
                     assignment_id=second_assignment.assignment_id,
                     attempts_directory=attempts_dir,
-                    terminal_records_directory=root / "records",
+                    terminal_records_directory=records_dir,
                 )
+            _assert_next_assignment(
+                plan=self.plan,
+                assignment_id=other_cell_assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+            )
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "not next in the immutable worklist",
+            ):
+                _assert_next_assignment(
+                    plan=self.plan,
+                    assignment_id=later_other_cell_assignment.assignment_id,
+                    attempts_directory=attempts_dir,
+                    terminal_records_directory=records_dir,
+                )
+
+    def test_unfavorable_verdict_stops_only_the_affected_cell(self) -> None:
+        first_assignment, second_assignment = self.plan.assignments[:2]
+        other_cell_assignment = next(
+            assignment
+            for assignment in self.plan.assignments
+            if assignment.cell_plan_id != first_assignment.cell_plan_id
+        )
+        record = self._observed_record(
+            first_assignment.assignment_id,
+            crf=28.0,
+            verdict="unacceptable",
+        )
+        attempt = self._attempts((record,))[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempts_dir = root / "attempts"
+            records_dir = root / "records"
+            write_av1_validation_derivation_attempt(attempts_dir, attempt)
+            write_av1_validation_derivation_terminal_record(records_dir, record)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "affected stopped cell",
+            ):
+                _assert_next_assignment(
+                    plan=self.plan,
+                    assignment_id=second_assignment.assignment_id,
+                    attempts_directory=attempts_dir,
+                    terminal_records_directory=records_dir,
+                )
+            _assert_next_assignment(
+                plan=self.plan,
+                assignment_id=other_cell_assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+            )
 
     def test_review_pending_attempt_requires_human_terminal_before_continuing(self) -> None:
         first_assignment, second_assignment = self.plan.assignments[:2]
@@ -849,7 +1320,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     terminal_records_directory=records_dir,
                 )
 
-    def test_next_assignment_requires_attempts_to_form_an_ordered_prefix(self) -> None:
+    def test_next_assignment_requires_immutable_canonical_order(self) -> None:
         first_assignment, second_assignment = self.plan.assignments[:2]
         record = self._observed_record(second_assignment.assignment_id, crf=28.0)
         attempt = self._attempts((record,))[0]
@@ -861,7 +1332,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             write_av1_validation_derivation_terminal_record(records_dir, record)
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
-                "ordered prefix",
+                "immutable canonical order",
             ):
                 _assert_next_assignment(
                     plan=self.plan,
@@ -902,7 +1373,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     AV1ValidationDerivationError,
-                    "plan-global canonical directory",
+                    "partition-global canonical directory",
                 ),
             ):
                 run_av1_validation_derivation_assignment(
@@ -1037,13 +1508,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         terminal_records_directory = (
             self.runtime_config.paths.web_state_dir
             / "av1-validation-derivation"
-            / self.plan.plan_id
+            / self.plan.partition_id
             / "terminal-records"
         )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
         with (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.load_config",
                 return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(connection),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
@@ -1071,8 +1558,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 record_av1_validation_derivation_visual_verdict(
                     config_path=Path("unused.toml"),
+                    manifest=self.manifest,
                     plan=self.plan,
                     partition=self.partition,
+                    token_key=self.token_key,
                     attempt=attempt,
                     terminal_records_directory=terminal_records_directory,
                     verdict="approved",
@@ -1107,13 +1596,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         terminal_records_directory = (
             self.runtime_config.paths.web_state_dir
             / "av1-validation-derivation"
-            / self.plan.plan_id
+            / self.plan.partition_id
             / "terminal-records"
         )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
         with (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.load_config",
                 return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(connection),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
@@ -1129,8 +1634,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         ):
             record_av1_validation_derivation_visual_verdict(
                 config_path=Path("unused.toml"),
+                manifest=self.manifest,
                 plan=self.plan,
                 partition=self.partition,
+                token_key=self.token_key,
                 attempt=attempt,
                 terminal_records_directory=terminal_records_directory,
                 verdict="approved",
@@ -1140,6 +1647,254 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 recorded_at="2026-07-28T01:06:00Z",
             )
         build_observation.assert_not_called()
+
+    def test_derivation_verdict_holds_runtime_lock_through_terminal_commit(self) -> None:
+        assignment = self.plan.assignments[0]
+        source_identity = _source_identity(self.partition, assignment)
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="review_pending",
+            calibration_payload=_calibration_payload(
+                assignment=assignment,
+                source_identity=source_identity,
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            ),
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        observation = _observation(
+            assignment=assignment,
+            source_identity=source_identity,
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        events: list[str] = []
+        lock_held = False
+
+        @contextmanager
+        def runtime_lock(
+                _config: object,
+                *,
+                owner_payload: object,
+        ) -> Iterator[None]:
+            nonlocal lock_held
+            self.assertIsNotNone(owner_payload)
+            lock_held = True
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+                lock_held = False
+
+        @contextmanager
+        def database(_path: Path) -> Iterator[SimpleNamespace]:
+            self.assertTrue(lock_held)
+            events.append("db-enter")
+            try:
+                yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
+            finally:
+                events.append("db-exit")
+
+        def record_event(label: str) -> None:
+            self.assertTrue(lock_held)
+            events.append(label)
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                side_effect=runtime_lock,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs",
+                side_effect=lambda *_args, **_kwargs: record_event(
+                    "partition-current"
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+                side_effect=lambda *_args, **_kwargs: record_event(
+                    "execution-contract"
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                side_effect=lambda **_kwargs: (
+                    record_event("media-recheck")
+                    or attempt.calibration_payload()["review_artifact_fingerprint"]
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.resolve_av1_validation_derivation_verdict_intent",
+                side_effect=lambda *_args, **_kwargs: (
+                    record_event("verdict-intent")
+                    or {
+                        "verdict": "approved",
+                        "concern_tags": [],
+                        "evidence_ids": [],
+                        "moment_indexes": [],
+                        "recorded_at": "2026-07-28T01:06:00Z",
+                    }
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_intent",
+                side_effect=lambda *_args, **_kwargs: record_event("terminal-intent"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation",
+                side_effect=lambda *_args, **_kwargs: record_event("db-append"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record",
+                side_effect=lambda *_args, **_kwargs: record_event("terminal-record"),
+            ),
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(terminal.status, "observed")
+        self.assertEqual(events, [
+            "lock-enter",
+            "db-enter",
+            "partition-current",
+            "execution-contract",
+            "media-recheck",
+            "verdict-intent",
+            "terminal-intent",
+            "db-append",
+            "db-exit",
+            "execution-contract",
+            "terminal-record",
+            "lock-exit",
+        ])
+
+    def test_derivation_verdict_fails_closed_on_current_input_drift(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="review_pending",
+            calibration_payload=_calibration_payload(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            ),
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(connection),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs",
+                side_effect=AV1ValidationDerivationError("current inputs drifted"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint"
+            ) as review_fingerprint,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.resolve_av1_validation_derivation_verdict_intent"
+            ) as verdict_intent,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation"
+            ) as append_observation,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record"
+            ) as write_terminal,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "current inputs drifted",
+            ),
+        ):
+            record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        review_fingerprint.assert_not_called()
+        verdict_intent.assert_not_called()
+        append_observation.assert_not_called()
+        write_terminal.assert_not_called()
 
     def test_derivation_observation_is_not_replay_eligible(self) -> None:
         assignment = self.plan.assignments[0]
@@ -1215,7 +1970,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 recorded_at="2026-07-28T01:05:00Z",
             )
 
-    def test_candidate_uses_full_crf_range_and_dispersion_confidence(self) -> None:
+    def test_candidate_uses_assignment_bitrate_range_and_observed_dispersion(self) -> None:
         cell_plan_id = self.plan.assignments[0].cell_plan_id
         assignments = [item for item in self.plan.assignments if item.cell_plan_id == cell_plan_id]
         records = [
@@ -1250,8 +2005,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(evaluation.proposal.derivation_conflict_count, 0)
         self.assertEqual(evaluation.proposal.confidence_level, "moderate")
         self.assertEqual(evaluation.proposal.confidence_score, 0.85)
-        self.assertEqual(evaluation.proposal.target_video_bitrate_min_bps, 850_000)
-        self.assertEqual(evaluation.proposal.target_video_bitrate_max_bps, 1_150_000)
+        self.assertEqual(
+            evaluation.proposal.target_video_bitrate_min_bps,
+            min(assignment.target_video_bitrate_bps for assignment in assignments),
+        )
+        self.assertEqual(
+            evaluation.proposal.target_video_bitrate_max_bps,
+            max(assignment.target_video_bitrate_bps for assignment in assignments),
+        )
 
     def test_candidate_rejects_full_crf_span_even_when_center_is_tight(self) -> None:
         cell_plan_id = self.plan.assignments[0].cell_plan_id
@@ -1273,6 +2034,48 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         self.assertIsNone(evaluation.proposal)
         self.assertIn("crf_span_too_wide", evaluation.blockers)
+
+    def test_proposal_type_reasserts_preregistered_invariants(self) -> None:
+        cell_plan_id = self.plan.assignments[0].cell_plan_id
+        assignments = [
+            assignment
+            for assignment in self.plan.assignments
+            if assignment.cell_plan_id == cell_plan_id
+        ]
+        records = [
+            self._observed_record(assignment.assignment_id, crf=28.0)
+            for assignment in assignments
+        ]
+        evaluation = evaluate_av1_validation_derivation_candidate(
+            manifest=self.manifest,
+            plan=self.plan,
+            partition=self.partition,
+            cell_plan_id=cell_plan_id,
+            attempts=self._attempts(records),
+            records=records,
+            current_observations=self._current_observations(records),
+            proposed_at="2026-07-28T03:00:00Z",
+        )
+        assert evaluation.proposal is not None
+        proposal = evaluation.proposal
+
+        for field_updates, message in (
+            ({"crf_lower": 24.0, "crf_upper": 31.0}, "CRF span is too wide"),
+            ({"minimum_derivation_source_count": 5}, "source-count contract"),
+            (
+                {"derivation_series_tokens": proposal.derivation_series_tokens[:-1]},
+                "unique source, title, and series reservations",
+            ),
+            (
+                {"derivation_oldest_recorded_at": "2026-01-01T00:00:00Z"},
+                "evidence is stale",
+            ),
+        ):
+            with self.subTest(field_updates=field_updates), self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                message,
+            ):
+                replace(proposal, **field_updates)
 
     def test_candidate_rejects_wide_crf_dispersion_with_acceptable_span(self) -> None:
         cell_plan_id = self.plan.assignments[0].cell_plan_id
@@ -1342,22 +2145,34 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         assert evaluation.proposal is not None
         review_evidence: dict[str, bytes] = {}
+        review_claims = []
         reviews = []
         for index, lane in enumerate(
             AV1_VALIDATION_DERIVATION_REVIEW_LANES,
             start=1,
         ):
-            review_run_id = f"00000000-0000-0000-0000-{index:012x}"
-            evidence = _review_run_evidence(
+            claim = build_av1_validation_derivation_review_claim(
+                plan=self.plan,
                 proposal=evaluation.proposal,
                 lane=lane,
-                review_run_id=review_run_id,
+                review_run_id=f"00000000-0000-0000-0000-{index:012x}",
+                review_runner_canonical_path_sha256=(
+                    self.authorization.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.authorization.review_runner_binary_sha256
+                ),
+                claimed_at=f"2026-07-28T03:00:{index:02d}Z",
+            )
+            review_claims.append(claim)
+            evidence = _review_run_evidence(
+                proposal=evaluation.proposal,
+                claim=claim,
             )
             review_evidence[lane] = evidence
             reviews.append(build_av1_validation_derivation_review_attestation(
                 proposal=evaluation.proposal,
-                lane=lane,
-                reviewer_token=f"agent:{review_run_id}",
+                claim=claim,
                 review_evidence_sha256=(
                     f"sha256:{hashlib.sha256(evidence).hexdigest()}"
                 ),
@@ -1378,25 +2193,39 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ValidationDerivationError, "all five"):
             finalize_av1_validation_derivation_candidate_lock(
                 proposal=evaluation.proposal,
+                review_claims=review_claims,
                 reviews=reviews[:-1],
                 current_evaluation=current_evaluation,
                 locked_at=locked_at,
             )
-        duplicate_evidence_reviews = [
-            build_av1_validation_derivation_review_attestation(
+        duplicate_evidence_claims = [
+            build_av1_validation_derivation_review_claim(
+                plan=self.plan,
                 proposal=evaluation.proposal,
                 lane=lane,
-                reviewer_token=(
-                    f"agent:10000000-0000-0000-0000-{index:012x}"
+                review_run_id=f"10000000-0000-0000-0000-{index:012x}",
+                review_runner_canonical_path_sha256=(
+                    self.authorization.review_runner_canonical_path_sha256
                 ),
-                review_evidence_sha256=f"sha256:{1:064x}",
-                decision="approved",
-                reviewed_at=f"2026-07-28T03:{index:02d}:30Z",
+                review_runner_binary_sha256=(
+                    self.authorization.review_runner_binary_sha256
+                ),
+                claimed_at=f"2026-07-28T03:00:{index:02d}Z",
             )
             for index, lane in enumerate(
                 AV1_VALIDATION_DERIVATION_REVIEW_LANES,
                 start=1,
             )
+        ]
+        duplicate_evidence_reviews = [
+            build_av1_validation_derivation_review_attestation(
+                proposal=evaluation.proposal,
+                claim=claim,
+                review_evidence_sha256=f"sha256:{1:064x}",
+                decision="approved",
+                reviewed_at=f"2026-07-28T03:{index:02d}:30Z",
+            )
+            for index, claim in enumerate(duplicate_evidence_claims, start=1)
         ]
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
@@ -1404,12 +2233,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         ):
             finalize_av1_validation_derivation_candidate_lock(
                 proposal=evaluation.proposal,
+                review_claims=duplicate_evidence_claims,
                 reviews=duplicate_evidence_reviews,
                 current_evaluation=current_evaluation,
                 locked_at=locked_at,
             )
         lock = finalize_av1_validation_derivation_candidate_lock(
             proposal=evaluation.proposal,
+            review_claims=review_claims,
             reviews=reviews,
             current_evaluation=current_evaluation,
             locked_at=locked_at,
@@ -1423,7 +2254,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             artifact_root = (
                 Path(directory)
                 / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
-                / self.plan.plan_id
+                / self.plan.partition_id
             )
             write_av1_validation_derivation_plan(artifact_root, self.plan)
             proposal_path = write_av1_validation_derivation_candidate_proposal(
@@ -1453,7 +2284,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     cell_plan_id="../outside",
                 )
             review_envelopes = []
-            for review in reviews:
+            for claim, review in zip(review_claims, reviews, strict=True):
+                write_av1_validation_derivation_review_claim(
+                    artifact_root,
+                    plan=self.plan,
+                    proposal=evaluation.proposal,
+                    claim=claim,
+                )
                 envelope = build_av1_validation_derivation_review_envelope(
                     review=review,
                     evidence=review_evidence[review.lane],
@@ -1462,6 +2299,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     artifact_root,
                     plan=self.plan,
                     proposal=evaluation.proposal,
+                    claim=claim,
                     envelope=envelope,
                 )
                 review_envelopes.append(envelope)
@@ -1473,10 +2311,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             stale_temporary.write_bytes(b"interrupted")
             stale_temporary.chmod(0o600)
+            loaded_claims = load_av1_validation_derivation_review_claims(
+                artifact_root,
+                plan=self.plan,
+                proposal=evaluation.proposal,
+            )
             loaded_envelopes = load_av1_validation_derivation_review_envelopes(
                 artifact_root,
                 plan=self.plan,
                 proposal=evaluation.proposal,
+                claims=loaded_claims,
             )
             self.assertEqual(
                 {
@@ -1489,6 +2333,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 artifact_root,
                 plan=self.plan,
                 proposal=evaluation.proposal,
+                review_claims=loaded_claims,
                 review_envelopes=loaded_envelopes,
                 current_evaluation=current_evaluation,
                 locked_at=locked_at,
@@ -1499,6 +2344,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     artifact_root,
                     plan=self.plan,
                     proposal=evaluation.proposal,
+                    review_claims=loaded_claims,
                     review_envelopes=loaded_envelopes,
                     current_evaluation=current_evaluation,
                     cell_plan_id=cell_plan_id,
@@ -1531,6 +2377,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         ):
             finalize_av1_validation_derivation_candidate_lock(
                 proposal=evaluation.proposal,
+                review_claims=review_claims,
                 reviews=reviews,
                 current_evaluation=stale_evaluation,
                 locked_at=locked_at,
@@ -1613,6 +2460,53 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 }
             )
 
+        with self.assertRaisesRegex(
+            AV1ColdStartValidationError,
+            "CRF span is too wide",
+        ):
+            build_av1_cold_start_validation_candidate_lock(
+                **{
+                    **candidate_lock_kwargs,
+                    "crf_lower": 24.0,
+                    "crf_upper": 31.0,
+                }
+            )
+
+        with self.assertRaisesRegex(
+            AV1ColdStartValidationError,
+            "series tokens are incomplete",
+        ):
+            build_av1_cold_start_validation_candidate_lock(
+                **{
+                    **candidate_lock_kwargs,
+                    "derivation_series_tokens": series_tokens[:-1],
+                }
+            )
+
+        with self.assertRaisesRegex(
+            AV1ColdStartValidationError,
+            "below the preregistered minimum",
+        ):
+            build_av1_cold_start_validation_candidate_lock(
+                **{
+                    **candidate_lock_kwargs,
+                    "derivation_source_count": 5,
+                    "derivation_source_tokens": source_tokens[:5],
+                }
+            )
+
+        with self.assertRaisesRegex(
+            AV1ColdStartValidationError,
+            "evidence is stale",
+        ):
+            build_av1_cold_start_validation_candidate_lock(
+                **{
+                    **candidate_lock_kwargs,
+                    "locked_at": "2027-02-01T03:00:00Z",
+                    "reviewed_at": "2027-02-01T03:00:00Z",
+                }
+            )
+
     def test_create_plan_cli_output_is_public_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "private"
@@ -1641,6 +2535,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "_now_iso",
                     return_value=AUTHORIZED_AT,
                 ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_review_runner_identity",
+                    return_value=(
+                        root / "private-code-runner",
+                        self.authorization.review_runner_canonical_path_sha256,
+                        self.authorization.review_runner_binary_sha256,
+                    ),
+                ),
                 redirect_stdout(stdout),
             ):
                 exit_code = verify_av1_cold_start_preregistration.main([
@@ -1660,7 +2563,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             plan_path = (
                 runtime_config.paths.web_state_dir
                 / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
-                / payload["plan_id"]
+                / self.partition.partition_id
                 / "plan.json"
             )
             self.assertTrue(plan_path.is_file())
@@ -1668,6 +2571,35 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertNotIn("local_item_id", serialized)
             self.assertNotIn("source_token", serialized)
             self.assertNotIn(str(root), serialized)
+
+    def _candidate_proposal(
+            self,
+            *,
+            proposed_at: str = "2026-07-28T03:00:00Z",
+    ) -> AV1ValidationDerivationCandidateProposal:
+        cell_plan_id = self.plan.assignments[0].cell_plan_id
+        assignments = [
+            assignment
+            for assignment in self.plan.assignments
+            if assignment.cell_plan_id == cell_plan_id
+        ]
+        records = [
+            self._observed_record(assignment.assignment_id, crf=28.0)
+            for assignment in assignments
+        ]
+        evaluation = evaluate_av1_validation_derivation_candidate(
+            manifest=self.manifest,
+            plan=self.plan,
+            partition=self.partition,
+            cell_plan_id=cell_plan_id,
+            attempts=self._attempts(records),
+            records=records,
+            current_observations=self._current_observations(records),
+            proposed_at=proposed_at,
+        )
+        if evaluation.proposal is None:
+            raise AssertionError(evaluation.blockers)
+        return evaluation.proposal
 
     def _failed_attempt(self, assignment_id: str) -> AV1ValidationDerivationAttempt:
         return build_av1_validation_derivation_attempt(
@@ -1978,22 +2910,30 @@ def _calibration_payload(
 def _review_run_evidence(
         *,
         proposal: object,
-        lane: str,
-        review_run_id: str,
+        claim: AV1ValidationDerivationReviewClaim,
+        decision: Literal["approved", "rejected"] = "approved",
 ) -> bytes:
     proposal_id = str(getattr(proposal, "proposal_id"))
     proposal_payload_sha256 = str(getattr(proposal, "payload_sha256"))
+    lane = str(getattr(claim, "lane"))
+    review_run_id = str(getattr(claim, "review_run_id"))
+    review_claim_id = str(getattr(claim, "claim_id"))
+    review_claim_payload_sha256 = str(getattr(claim, "payload_sha256"))
     prompt = (
         f"review_run_id={review_run_id}\n"
         f"proposal_id={proposal_id}\n"
         f"proposal_payload_sha256={proposal_payload_sha256}\n"
+        f"review_claim_id={review_claim_id}\n"
+        f"review_claim_payload_sha256={review_claim_payload_sha256}\n"
         f"lane={lane}"
     )
     marker = {
-        "decision": "approved",
+        "decision": decision,
         "lane": lane,
         "proposal_id": proposal_id,
         "proposal_payload_sha256": proposal_payload_sha256,
+        "review_claim_id": review_claim_id,
+        "review_claim_payload_sha256": review_claim_payload_sha256,
         "review_run_id": review_run_id,
     }
     final_message = (
@@ -2031,9 +2971,16 @@ def _review_run_evidence(
         "reviewer_token": f"agent:{review_run_id}",
         "proposal_id": proposal_id,
         "proposal_payload_sha256": proposal_payload_sha256,
+        "review_claim_id": review_claim_id,
+        "review_claim_payload_sha256": review_claim_payload_sha256,
         "lane": lane,
-        "decision": "approved",
-        "code_binary_sha256": "sha256:" + "c" * 64,
+        "decision": decision,
+        "review_runner_canonical_path_sha256": str(
+            getattr(claim, "review_runner_canonical_path_sha256")
+        ),
+        "review_runner_binary_sha256": str(
+            getattr(claim, "review_runner_binary_sha256")
+        ),
         "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
         "stdout": stdout,
         "stderr": "",

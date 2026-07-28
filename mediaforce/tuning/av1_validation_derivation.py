@@ -18,6 +18,9 @@ from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_cold_start_evaluation import (
+    AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN,
+    AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS,
+    AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT,
     AV1_COLD_START_VALIDATION_REQUIRED_DERIVATION_EVIDENCE_COUNT,
     AV1ColdStartValidationCandidateLockV1,
     _candidate_lock_from_payload,
@@ -54,14 +57,17 @@ AV1_VALIDATION_DERIVATION_REVIEW_SCHEMA = "mediaforce.av1_cold_start_derivation_
 AV1_VALIDATION_DERIVATION_REVIEW_ENVELOPE_SCHEMA = (
     "mediaforce.av1_cold_start_derivation_review_envelope"
 )
+AV1_VALIDATION_DERIVATION_REVIEW_CLAIM_SCHEMA = (
+    "mediaforce.av1_cold_start_derivation_review_claim"
+)
 AV1_VALIDATION_DERIVATION_LOCK_ENVELOPE_SCHEMA = (
     "mediaforce.av1_cold_start_derivation_candidate_lock_envelope"
 )
 AV1_VALIDATION_DERIVATION_DIRECTORY_BINDING_SCHEMA = (
     "mediaforce.av1_cold_start_derivation_directory_binding"
 )
-AV1_VALIDATION_DERIVATION_SCHEMA_VERSION = 1
-AV1_VALIDATION_DERIVATION_CONTRACT_VERSION = "av1vdw1"
+AV1_VALIDATION_DERIVATION_SCHEMA_VERSION = 2
+AV1_VALIDATION_DERIVATION_CONTRACT_VERSION = "av1vdw2"
 AV1_VALIDATION_DERIVATION_EXECUTION_SCOPE = "reserved_derivation_sources_only"
 AV1_VALIDATION_DERIVATION_SEARCH_MODE = "unchanged_measured_full_search"
 AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY = "av1-validation-derivation"
@@ -511,6 +517,9 @@ class AV1ValidationDerivationCandidateProposal:
     crf_mad: float
     bitrate_relative_mad: float
     statistics_contract_sha256: str
+    minimum_derivation_source_count: int
+    maximum_derivation_age_days: int
+    maximum_candidate_crf_span: float
     compatibility_signature: str
     policy_signature: str
     target_video_bitrate_min_bps: int
@@ -549,6 +558,17 @@ class AV1ValidationDerivationCandidateProposal:
             raise AV1ValidationDerivationError("AV1 derivation proposal CRF range is invalid")
         if math.ceil(self.crf_lower) > math.floor(self.crf_upper):
             raise AV1ValidationDerivationError("AV1 derivation proposal has no executable CRF")
+        if not (
+            math.isfinite(self.maximum_candidate_crf_span)
+            and 0
+            < self.maximum_candidate_crf_span
+            <= AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation proposal CRF-span contract is invalid"
+            )
+        if self.crf_upper - self.crf_lower > self.maximum_candidate_crf_span:
+            raise AV1ValidationDerivationError("AV1 derivation proposal CRF span is too wide")
         if (
             not math.isfinite(self.crf_mad)
             or self.crf_mad < 0
@@ -572,9 +592,25 @@ class AV1ValidationDerivationCandidateProposal:
             raise AV1ValidationDerivationError("AV1 derivation proposal quality floor is invalid")
         if self.derivation_evidence_count != AV1_VALIDATION_DERIVATION_RESERVATION_COUNT:
             raise AV1ValidationDerivationError("AV1 derivation proposal evidence count is invalid")
+        if not (
+            AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT
+            <= self.minimum_derivation_source_count
+            <= self.derivation_evidence_count
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation proposal source-count contract is invalid"
+            )
+        if not (
+            1
+            <= self.maximum_derivation_age_days
+            <= AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation proposal freshness contract is invalid"
+            )
         if self.derivation_conflict_count != 0:
             raise AV1ValidationDerivationError("AV1 derivation proposal evidence is conflicting")
-        if self.derivation_source_count < AV1_VALIDATION_MINIMUM_SOURCE_GROUP_COUNT:
+        if self.derivation_source_count < self.minimum_derivation_source_count:
             raise AV1ValidationDerivationError("AV1 derivation proposal source count is invalid")
         if self.confidence_level not in {"moderate", "high"} or self.confidence_score < 0.7:
             raise AV1ValidationDerivationError("AV1 derivation proposal confidence is insufficient")
@@ -643,6 +679,8 @@ class AV1ValidationDerivationCandidateProposal:
         proposed = _parse_timestamp(self.proposed_at, "proposal timestamp")
         if not oldest <= newest <= proposed:
             raise AV1ValidationDerivationError("AV1 derivation proposal chronology is invalid")
+        if oldest < proposed - timedelta(days=self.maximum_derivation_age_days):
+            raise AV1ValidationDerivationError("AV1 derivation proposal evidence is stale")
         semantic_payload = self.semantic_payload()
         if self.proposal_id != _derivation_id("proposal", semantic_payload):
             raise AV1ValidationDerivationError("AV1 derivation proposal ID does not match its payload")
@@ -664,6 +702,9 @@ class AV1ValidationDerivationCandidateProposal:
             "crf_mad": self.crf_mad,
             "bitrate_relative_mad": self.bitrate_relative_mad,
             "statistics_contract_sha256": self.statistics_contract_sha256,
+            "minimum_derivation_source_count": self.minimum_derivation_source_count,
+            "maximum_derivation_age_days": self.maximum_derivation_age_days,
+            "maximum_candidate_crf_span": self.maximum_candidate_crf_span,
             "compatibility_signature": self.compatibility_signature,
             "policy_signature": self.policy_signature,
             "target_video_bitrate_min_bps": self.target_video_bitrate_min_bps,
@@ -700,12 +741,102 @@ class AV1ValidationDerivationCandidateProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class AV1ValidationDerivationReviewClaim:
+    claim_id: str
+    plan_id: str
+    authorization_id: str
+    proposal_id: str
+    proposal_payload_sha256: str
+    lane: AV1ValidationDerivationReviewLane
+    review_run_id: str
+    reviewer_token: str
+    review_runner_canonical_path_sha256: str
+    review_runner_binary_sha256: str
+    claimed_at: str
+    payload_sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.plan_id.startswith("av1vdplan1_"):
+            raise AV1ValidationDerivationError("AV1 derivation review claim plan is invalid")
+        if not self.authorization_id.startswith("av1vderivation1_"):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim authorization is invalid"
+            )
+        if not self.proposal_id.startswith("av1vdproposal1_"):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim proposal is invalid"
+            )
+        if self.lane not in AV1_VALIDATION_DERIVATION_REVIEW_LANES:
+            raise AV1ValidationDerivationError("AV1 derivation review claim lane is invalid")
+        if (
+            not _AGENT_REVIEWER_RE.fullmatch(self.reviewer_token)
+            or self.reviewer_token != f"agent:{self.review_run_id}"
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim must identify one Every Code agent run"
+            )
+        for digest, label in (
+            (self.proposal_payload_sha256, "proposal digest"),
+            (
+                self.review_runner_canonical_path_sha256,
+                "review-runner canonical-path digest",
+            ),
+            (self.review_runner_binary_sha256, "review-runner binary digest"),
+            (self.payload_sha256, "review-claim digest"),
+        ):
+            _require_sha256(digest, label)
+        _parse_timestamp(self.claimed_at, "review-claim timestamp")
+        semantic_payload = self.semantic_payload()
+        if self.claim_id != _derivation_id("review_claim", semantic_payload):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim ID does not match its payload"
+            )
+        if self.payload_sha256 != _payload_sha256({
+            "claim_id": self.claim_id,
+            **semantic_payload,
+        }):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim digest does not match its payload"
+            )
+
+    def semantic_payload(self) -> dict[str, Any]:
+        return {
+            "schema": AV1_VALIDATION_DERIVATION_REVIEW_CLAIM_SCHEMA,
+            "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+            "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+            "plan_id": self.plan_id,
+            "authorization_id": self.authorization_id,
+            "proposal_id": self.proposal_id,
+            "proposal_payload_sha256": self.proposal_payload_sha256,
+            "lane": self.lane,
+            "review_run_id": self.review_run_id,
+            "reviewer_token": self.reviewer_token,
+            "review_runner_canonical_path_sha256": (
+                self.review_runner_canonical_path_sha256
+            ),
+            "review_runner_binary_sha256": self.review_runner_binary_sha256,
+            "claimed_at": self.claimed_at,
+        }
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "claim_id": self.claim_id,
+            **self.semantic_payload(),
+            "payload_sha256": self.payload_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AV1ValidationDerivationReviewAttestation:
     attestation_id: str
     proposal_id: str
     proposal_payload_sha256: str
+    review_claim_id: str
+    review_claim_payload_sha256: str
     lane: AV1ValidationDerivationReviewLane
     reviewer_token: str
+    review_runner_canonical_path_sha256: str
+    review_runner_binary_sha256: str
     review_evidence_sha256: str
     decision: AV1ValidationDerivationReviewDecision
     reviewed_at: str
@@ -718,7 +849,20 @@ class AV1ValidationDerivationReviewAttestation:
             raise AV1ValidationDerivationError(
                 "AV1 derivation reviewer token must identify one Every Code agent run"
             )
-        _require_sha256(self.review_evidence_sha256, "review evidence digest")
+        if not self.review_claim_id.startswith("av1vdreviewclaim1_"):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim reference is invalid"
+            )
+        for digest, label in (
+            (self.review_claim_payload_sha256, "review-claim digest"),
+            (
+                self.review_runner_canonical_path_sha256,
+                "review-runner canonical-path digest",
+            ),
+            (self.review_runner_binary_sha256, "review-runner binary digest"),
+            (self.review_evidence_sha256, "review evidence digest"),
+        ):
+            _require_sha256(digest, label)
         if self.decision not in {"approved", "rejected"}:
             raise AV1ValidationDerivationError("AV1 derivation review decision is invalid")
         _require_sha256(self.proposal_payload_sha256, "proposal digest")
@@ -737,8 +881,14 @@ class AV1ValidationDerivationReviewAttestation:
             "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
             "proposal_id": self.proposal_id,
             "proposal_payload_sha256": self.proposal_payload_sha256,
+            "review_claim_id": self.review_claim_id,
+            "review_claim_payload_sha256": self.review_claim_payload_sha256,
             "lane": self.lane,
             "reviewer_token": self.reviewer_token,
+            "review_runner_canonical_path_sha256": (
+                self.review_runner_canonical_path_sha256
+            ),
+            "review_runner_binary_sha256": self.review_runner_binary_sha256,
             "review_evidence_sha256": self.review_evidence_sha256,
             "decision": self.decision,
             "reviewed_at": self.reviewed_at,
@@ -1384,6 +1534,10 @@ def evaluate_av1_validation_derivation_candidate(
             blockers=tuple(sorted(set(blockers))),
             proposal=None,
         )
+    target_bitrates = sorted(
+        assignment.target_video_bitrate_bps
+        for assignment in expected
+    )
     proposed_payload = _proposal_semantic_payload(
         plan=plan,
         cell_plan_id=cell_plan_id,
@@ -1394,8 +1548,13 @@ def evaluate_av1_validation_derivation_candidate(
         crf_mad=crf_mad,
         bitrate_relative_mad=relative_mad,
         statistics_contract_sha256=plan.authorization.statistics_contract_sha256,
-        bitrate_min=bitrates[0],
-        bitrate_max=bitrates[-1],
+        minimum_derivation_source_count=(
+            manifest.criteria.minimum_derivation_source_count
+        ),
+        maximum_derivation_age_days=manifest.criteria.maximum_derivation_age_days,
+        maximum_candidate_crf_span=manifest.criteria.maximum_candidate_crf_span,
+        target_video_bitrate_min_bps=target_bitrates[0],
+        target_video_bitrate_max_bps=target_bitrates[-1],
         confidence_level=cast(Literal["moderate", "high"], confidence_level),
         confidence_score=confidence_score,
         derivation_conflict_count=derivation_conflict_count,
@@ -1415,10 +1574,15 @@ def evaluate_av1_validation_derivation_candidate(
         crf_mad=crf_mad,
         bitrate_relative_mad=relative_mad,
         statistics_contract_sha256=plan.authorization.statistics_contract_sha256,
+        minimum_derivation_source_count=(
+            manifest.criteria.minimum_derivation_source_count
+        ),
+        maximum_derivation_age_days=manifest.criteria.maximum_derivation_age_days,
+        maximum_candidate_crf_span=manifest.criteria.maximum_candidate_crf_span,
         compatibility_signature=observations[0].compatibility_signature,
         policy_signature=observations[0].policy_signature,
-        target_video_bitrate_min_bps=bitrates[0],
-        target_video_bitrate_max_bps=bitrates[-1],
+        target_video_bitrate_min_bps=target_bitrates[0],
+        target_video_bitrate_max_bps=target_bitrates[-1],
         minimum_quality_score=observations[0].minimum_quality_score,
         confidence_level=cast(Literal["moderate", "high"], confidence_level),
         confidence_score=confidence_score,
@@ -1446,20 +1610,106 @@ def evaluate_av1_validation_derivation_candidate(
     )
 
 
+def build_av1_validation_derivation_review_claim(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        lane: AV1ValidationDerivationReviewLane,
+        review_run_id: str,
+        review_runner_canonical_path_sha256: str,
+        review_runner_binary_sha256: str,
+        claimed_at: str,
+) -> AV1ValidationDerivationReviewClaim:
+    claimed = _parse_timestamp(claimed_at, "review-claim timestamp")
+    if (
+        proposal.plan_id != plan.plan_id
+        or proposal.manifest_id != plan.manifest_id
+        or proposal.selection_lock_sha256 != plan.selection_lock_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claim is bound to another plan"
+        )
+    if (
+        review_runner_canonical_path_sha256
+        != plan.authorization.review_runner_canonical_path_sha256
+        or review_runner_binary_sha256
+        != plan.authorization.review_runner_binary_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review runner does not match the authorization"
+        )
+    if not (
+        _parse_timestamp(proposal.proposed_at, "proposal timestamp")
+        <= claimed
+        < _parse_timestamp(
+            plan.authorization.valid_until,
+            "derivation authorization expiration",
+        )
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claim is outside its authorization window"
+        )
+    reviewer_token = f"agent:{review_run_id}"
+    semantic_payload = {
+        "schema": AV1_VALIDATION_DERIVATION_REVIEW_CLAIM_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+        "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+        "plan_id": plan.plan_id,
+        "authorization_id": plan.authorization.authorization_id,
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "lane": lane,
+        "review_run_id": review_run_id,
+        "reviewer_token": reviewer_token,
+        "review_runner_canonical_path_sha256": (
+            review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": review_runner_binary_sha256,
+        "claimed_at": _utc_timestamp(claimed),
+    }
+    claim_id = _derivation_id("review_claim", semantic_payload)
+    return AV1ValidationDerivationReviewClaim(
+        claim_id=claim_id,
+        plan_id=plan.plan_id,
+        authorization_id=plan.authorization.authorization_id,
+        proposal_id=proposal.proposal_id,
+        proposal_payload_sha256=proposal.payload_sha256,
+        lane=lane,
+        review_run_id=review_run_id,
+        reviewer_token=reviewer_token,
+        review_runner_canonical_path_sha256=(
+            review_runner_canonical_path_sha256
+        ),
+        review_runner_binary_sha256=review_runner_binary_sha256,
+        claimed_at=_utc_timestamp(claimed),
+        payload_sha256=_payload_sha256({
+            "claim_id": claim_id,
+            **semantic_payload,
+        }),
+    )
+
+
 def build_av1_validation_derivation_review_attestation(
         *,
         proposal: AV1ValidationDerivationCandidateProposal,
-        lane: AV1ValidationDerivationReviewLane,
-        reviewer_token: str,
+        claim: AV1ValidationDerivationReviewClaim,
         review_evidence_sha256: str,
         decision: AV1ValidationDerivationReviewDecision,
         reviewed_at: str,
 ) -> AV1ValidationDerivationReviewAttestation:
     reviewed = _parse_timestamp(reviewed_at, "review timestamp")
-    if reviewed < _parse_timestamp(
-        proposal.proposed_at, "proposal timestamp"
+    if (
+        claim.proposal_id != proposal.proposal_id
+        or claim.proposal_payload_sha256 != proposal.payload_sha256
+        or claim.plan_id != proposal.plan_id
     ):
-        raise AV1ValidationDerivationError("AV1 derivation review predates its proposal")
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claim is bound to another proposal"
+        )
+    if reviewed < _parse_timestamp(claim.claimed_at, "review-claim timestamp"):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review predates its immutable claim"
+        )
     normalized_reviewed_at = _utc_timestamp(reviewed)
     semantic_payload = {
         "schema": AV1_VALIDATION_DERIVATION_REVIEW_SCHEMA,
@@ -1467,8 +1717,14 @@ def build_av1_validation_derivation_review_attestation(
         "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
-        "lane": lane,
-        "reviewer_token": reviewer_token,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "lane": claim.lane,
+        "reviewer_token": claim.reviewer_token,
+        "review_runner_canonical_path_sha256": (
+            claim.review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
         "review_evidence_sha256": review_evidence_sha256,
         "decision": decision,
         "reviewed_at": normalized_reviewed_at,
@@ -1478,8 +1734,14 @@ def build_av1_validation_derivation_review_attestation(
         attestation_id=attestation_id,
         proposal_id=proposal.proposal_id,
         proposal_payload_sha256=proposal.payload_sha256,
-        lane=lane,
-        reviewer_token=reviewer_token,
+        review_claim_id=claim.claim_id,
+        review_claim_payload_sha256=claim.payload_sha256,
+        lane=claim.lane,
+        reviewer_token=claim.reviewer_token,
+        review_runner_canonical_path_sha256=(
+            claim.review_runner_canonical_path_sha256
+        ),
+        review_runner_binary_sha256=claim.review_runner_binary_sha256,
         review_evidence_sha256=review_evidence_sha256,
         decision=decision,
         reviewed_at=normalized_reviewed_at,
@@ -1522,11 +1784,16 @@ def build_av1_validation_derivation_review_envelope(
 
 
 def _av1_validation_derivation_review_set_sha256(
+        claims: Sequence[AV1ValidationDerivationReviewClaim],
         envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
 ) -> str:
     reviews = tuple(envelope.review for envelope in envelopes)
+    claims_by_lane = {claim.lane: claim for claim in claims}
     if (
-        len(envelopes) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
+        len(claims) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
+        or set(claims_by_lane) != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
+        or len({claim.review_run_id for claim in claims}) != len(claims)
+        or len(envelopes) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
         or {review.lane for review in reviews}
         != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
         or len({review.reviewer_token for review in reviews}) != len(reviews)
@@ -1535,11 +1802,25 @@ def _av1_validation_derivation_review_set_sha256(
         raise AV1ValidationDerivationError(
             "AV1 derivation review set is incomplete or not independent"
         )
+    if any(
+        not _av1_validation_derivation_review_matches_claim(
+            review,
+            claims_by_lane[review.lane],
+        )
+        for review in reviews
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review set does not resolve its immutable claims"
+        )
     return _payload_sha256({
         "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
         "reviews": [
             {
                 "lane": envelope.review.lane,
+                "claim_id": claims_by_lane[envelope.review.lane].claim_id,
+                "claim_payload_sha256": (
+                    claims_by_lane[envelope.review.lane].payload_sha256
+                ),
                 "envelope_id": envelope.envelope_id,
                 "envelope_payload_sha256": envelope.payload_sha256,
             }
@@ -1548,9 +1829,30 @@ def _av1_validation_derivation_review_set_sha256(
     })
 
 
+def _av1_validation_derivation_review_matches_claim(
+        review: AV1ValidationDerivationReviewAttestation,
+        claim: AV1ValidationDerivationReviewClaim,
+) -> bool:
+    return (
+        review.review_claim_id == claim.claim_id
+        and review.review_claim_payload_sha256 == claim.payload_sha256
+        and review.proposal_id == claim.proposal_id
+        and review.proposal_payload_sha256 == claim.proposal_payload_sha256
+        and review.lane == claim.lane
+        and review.reviewer_token == claim.reviewer_token
+        and review.review_runner_canonical_path_sha256
+        == claim.review_runner_canonical_path_sha256
+        and review.review_runner_binary_sha256
+        == claim.review_runner_binary_sha256
+        and _parse_timestamp(review.reviewed_at, "review timestamp")
+        >= _parse_timestamp(claim.claimed_at, "review-claim timestamp")
+    )
+
+
 def finalize_av1_validation_derivation_candidate_lock(
         *,
         proposal: AV1ValidationDerivationCandidateProposal,
+        review_claims: Sequence[AV1ValidationDerivationReviewClaim],
         reviews: Sequence[AV1ValidationDerivationReviewAttestation],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         locked_at: str,
@@ -1573,6 +1875,21 @@ def finalize_av1_validation_derivation_candidate_lock(
         raise AV1ValidationDerivationError(
             "AV1 derivation candidate is no longer current at lock time"
         )
+    if _parse_timestamp(
+        current_proposal.derivation_oldest_recorded_at,
+        "oldest current observation",
+    ) < locked - timedelta(days=current_proposal.maximum_derivation_age_days):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation candidate evidence is stale at lock time"
+        )
+    claims_by_lane = {claim.lane: claim for claim in review_claims}
+    if (
+        len(review_claims) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
+        or set(claims_by_lane) != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation candidate requires all five immutable review claims"
+        )
     if {review.lane for review in reviews} != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES):
         raise AV1ValidationDerivationError("AV1 derivation candidate requires all five review lanes")
     if len(reviews) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES):
@@ -1585,8 +1902,13 @@ def finalize_av1_validation_derivation_candidate_lock(
         )
     for review in reviews:
         reviewed = _parse_timestamp(review.reviewed_at, "review timestamp")
+        claim = claims_by_lane[review.lane]
         if (
-            review.proposal_id != proposal.proposal_id
+            claim.plan_id != proposal.plan_id
+            or claim.proposal_id != proposal.proposal_id
+            or claim.proposal_payload_sha256 != proposal.payload_sha256
+            or not _av1_validation_derivation_review_matches_claim(review, claim)
+            or review.proposal_id != proposal.proposal_id
             or review.proposal_payload_sha256 != proposal.payload_sha256
             or review.decision != "approved"
             or reviewed < _parse_timestamp(
@@ -1635,6 +1957,7 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         *,
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
+        review_claims: Sequence[AV1ValidationDerivationReviewClaim],
         review_envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         locked_at: str,
@@ -1642,6 +1965,7 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
     reviews = tuple(envelope.review for envelope in review_envelopes)
     candidate_lock = finalize_av1_validation_derivation_candidate_lock(
         proposal=proposal,
+        review_claims=review_claims,
         reviews=reviews,
         current_evaluation=current_evaluation,
         locked_at=locked_at,
@@ -1653,6 +1977,15 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         or candidate_lock.cell_plan_id not in {
             assignment.cell_plan_id for assignment in plan.assignments
         }
+        or any(
+            claim.plan_id != plan.plan_id
+            or claim.authorization_id != plan.authorization.authorization_id
+            or claim.review_runner_canonical_path_sha256
+            != plan.authorization.review_runner_canonical_path_sha256
+            or claim.review_runner_binary_sha256
+            != plan.authorization.review_runner_binary_sha256
+            for claim in review_claims
+        )
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation candidate lock is bound to another plan"
@@ -1679,6 +2012,7 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
         "review_set_sha256": _av1_validation_derivation_review_set_sha256(
+            review_claims,
             review_envelopes
         ),
         "artifact_root_binding_sha256": (
@@ -1754,6 +2088,7 @@ def _load_verified_av1_validation_derivation_candidate_lock(
         *,
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
+        review_claims: Sequence[AV1ValidationDerivationReviewClaim],
         review_envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         cell_plan_id: str,
@@ -1770,6 +2105,7 @@ def _load_verified_av1_validation_derivation_candidate_lock(
     reviews = tuple(item.review for item in review_envelopes)
     expected_lock = finalize_av1_validation_derivation_candidate_lock(
         proposal=proposal,
+        review_claims=review_claims,
         reviews=reviews,
         current_evaluation=current_evaluation,
         locked_at=envelope.candidate_lock.locked_at,
@@ -1786,6 +2122,7 @@ def _load_verified_av1_validation_derivation_candidate_lock(
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
         "review_set_sha256": _av1_validation_derivation_review_set_sha256(
+            review_claims,
             review_envelopes
         ),
         "artifact_root_binding_sha256": (
@@ -1808,11 +2145,11 @@ def _av1_validation_derivation_artifact_root_path(
 ) -> Path:
     root = artifact_root.expanduser().resolve()
     if (
-        root.name != plan.plan_id
+        root.name != plan.partition_id
         or root.parent.name != AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
     ):
         raise AV1ValidationDerivationError(
-            "AV1 derivation artifacts must use the plan-global canonical root"
+            "AV1 derivation artifacts must use the partition-global canonical root"
         )
     return root
 
@@ -2198,11 +2535,110 @@ def load_av1_validation_derivation_candidate_proposal(
     return proposal
 
 
+def write_av1_validation_derivation_review_claim(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+) -> Path:
+    root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
+    if (
+        proposal.plan_id != plan.plan_id
+        or proposal.manifest_id != plan.manifest_id
+        or claim.plan_id != plan.plan_id
+        or claim.authorization_id != plan.authorization.authorization_id
+        or claim.proposal_id != proposal.proposal_id
+        or claim.proposal_payload_sha256 != proposal.payload_sha256
+        or claim.review_runner_canonical_path_sha256
+        != plan.authorization.review_runner_canonical_path_sha256
+        or claim.review_runner_binary_sha256
+        != plan.authorization.review_runner_binary_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claim is bound to another run or proposal"
+        )
+    directory = root / "review-claims" / proposal.proposal_id
+    _bind_owner_only_directory(
+        directory,
+        kind="review_claims",
+        binding_id=proposal.proposal_id,
+        binding_digest=proposal.payload_sha256,
+    )
+    path = directory / f"{claim.lane}.json"
+    _write_owner_only(path, canonical_json_bytes(claim.to_payload()))
+    return path
+
+
+def load_av1_validation_derivation_review_claims(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+) -> tuple[AV1ValidationDerivationReviewClaim, ...]:
+    root = _assert_av1_validation_derivation_artifact_root_binding(
+        artifact_root,
+        plan,
+    )
+    if proposal.plan_id != plan.plan_id or proposal.manifest_id != plan.manifest_id:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation proposal is bound to another plan"
+        )
+    directory = root / "review-claims" / proposal.proposal_id
+    binding = _load_owner_only_directory_binding(
+        directory,
+        expected_kind="review_claims",
+    )
+    if (
+        binding["binding_id"] != proposal.proposal_id
+        or binding["binding_digest"] != proposal.payload_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review-claim directory binding drifted"
+        )
+    claims: list[AV1ValidationDerivationReviewClaim] = []
+    for path in sorted(directory.glob("*.json")):
+        if path.stem not in AV1_VALIDATION_DERIVATION_REVIEW_LANES:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review-claim directory contains an invalid lane"
+            )
+        payload, raw = _load_owner_only_json(
+            path,
+            "derivation review claim",
+        )
+        claim = av1_validation_derivation_review_claim_from_payload(
+            payload,
+            raw=raw,
+        )
+        if (
+            claim.plan_id != plan.plan_id
+            or claim.authorization_id != plan.authorization.authorization_id
+            or claim.proposal_id != proposal.proposal_id
+            or claim.proposal_payload_sha256 != proposal.payload_sha256
+            or claim.lane != path.stem
+            or claim.review_runner_canonical_path_sha256
+            != plan.authorization.review_runner_canonical_path_sha256
+            or claim.review_runner_binary_sha256
+            != plan.authorization.review_runner_binary_sha256
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review claim is bound to another run or proposal"
+            )
+        claims.append(claim)
+    lanes = [claim.lane for claim in claims]
+    if len(lanes) != len(set(lanes)):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review-claim directory repeats a lane"
+        )
+    return tuple(sorted(claims, key=lambda item: item.lane))
+
+
 def write_av1_validation_derivation_review_envelope(
         artifact_root: Path,
         *,
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
         envelope: AV1ValidationDerivationReviewEnvelope,
 ) -> Path:
     review = envelope.review
@@ -2212,6 +2648,7 @@ def write_av1_validation_derivation_review_envelope(
         or proposal.manifest_id != plan.manifest_id
         or review.proposal_id != proposal.proposal_id
         or review.proposal_payload_sha256 != proposal.payload_sha256
+        or not _av1_validation_derivation_review_matches_claim(review, claim)
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation review envelope is bound to another run or proposal"
@@ -2233,6 +2670,7 @@ def load_av1_validation_derivation_review_envelopes(
         *,
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
+        claims: Sequence[AV1ValidationDerivationReviewClaim],
 ) -> tuple[AV1ValidationDerivationReviewEnvelope, ...]:
     root = _assert_av1_validation_derivation_artifact_root_binding(
         artifact_root,
@@ -2266,16 +2704,22 @@ def load_av1_validation_derivation_review_envelopes(
         )
     envelopes = tuple(envelopes_list)
     reviews = tuple(envelope.review for envelope in envelopes)
+    claims_by_lane = {claim.lane: claim for claim in claims}
     lanes = [review.lane for review in reviews]
     if len(lanes) != len(set(lanes)):
         raise AV1ValidationDerivationError("AV1 derivation review directory repeats a lane")
     if any(
         review.proposal_id != binding["binding_id"]
         or review.proposal_payload_sha256 != binding["binding_digest"]
+        or review.lane not in claims_by_lane
+        or not _av1_validation_derivation_review_matches_claim(
+            review,
+            claims_by_lane[review.lane],
+        )
         for review in reviews
     ):
         raise AV1ValidationDerivationError("AV1 derivation review directory binding drifted")
-    _av1_validation_derivation_review_set_sha256(envelopes)
+    _av1_validation_derivation_review_set_sha256(claims, envelopes)
     return envelopes
 
 
@@ -2292,8 +2736,10 @@ def validate_av1_validation_derivation_review_run_evidence(
         ) from exc
     _require_exact_keys(payload, {
         "schema", "schema_version", "review_run_id", "reviewer_token",
-        "proposal_id", "proposal_payload_sha256", "lane", "decision",
-        "code_binary_sha256", "prompt_sha256", "stdout", "stderr", "returncode",
+        "proposal_id", "proposal_payload_sha256", "review_claim_id",
+        "review_claim_payload_sha256", "lane", "decision",
+        "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
+        "prompt_sha256", "stdout", "stderr", "returncode",
     }, "derivation review run evidence")
     review_run_id = _required_text(payload.get("review_run_id"), "review run ID")
     stdout = payload.get("stdout")
@@ -2306,8 +2752,15 @@ def validate_av1_validation_derivation_review_run_evidence(
         or review.reviewer_token != f"agent:{review_run_id}"
         or payload.get("proposal_id") != review.proposal_id
         or payload.get("proposal_payload_sha256") != review.proposal_payload_sha256
+        or payload.get("review_claim_id") != review.review_claim_id
+        or payload.get("review_claim_payload_sha256")
+        != review.review_claim_payload_sha256
         or payload.get("lane") != review.lane
         or payload.get("decision") != review.decision
+        or payload.get("review_runner_canonical_path_sha256")
+        != review.review_runner_canonical_path_sha256
+        or payload.get("review_runner_binary_sha256")
+        != review.review_runner_binary_sha256
         or type(returncode) is not int
         or returncode != 0
         or not isinstance(stdout, str)
@@ -2318,9 +2771,26 @@ def validate_av1_validation_derivation_review_run_evidence(
             "AV1 derivation review run evidence does not match its attestation"
         )
     _require_sha256(
-        _required_text(payload.get("code_binary_sha256"), "Code binary digest"),
-        "Code binary digest",
+        _required_text(
+            payload.get("review_runner_canonical_path_sha256"),
+            "review-runner canonical-path digest",
+        ),
+        "review-runner canonical-path digest",
     )
+    _require_sha256(
+        _required_text(
+            payload.get("review_runner_binary_sha256"),
+            "review-runner binary digest",
+        ),
+        "review-runner binary digest",
+    )
+    canonical_evidence = canonical_json_bytes(payload)
+    if review.review_evidence_sha256 != (
+        f"sha256:{hashlib.sha256(canonical_evidence).hexdigest()}"
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review evidence digest does not match its canonical evidence"
+        )
     prompt_sha256 = _required_text(payload.get("prompt_sha256"), "review prompt digest")
     _require_sha256(prompt_sha256, "review prompt digest")
     final_message, prompt = _completed_code_review_message(stdout)
@@ -2332,6 +2802,8 @@ def validate_av1_validation_derivation_review_run_evidence(
         review_run_id,
         review.proposal_id,
         review.proposal_payload_sha256,
+        review.review_claim_id,
+        review.review_claim_payload_sha256,
         review.lane,
     ):
         if bound_value not in prompt:
@@ -2344,6 +2816,8 @@ def validate_av1_validation_derivation_review_run_evidence(
         "lane": review.lane,
         "proposal_id": review.proposal_id,
         "proposal_payload_sha256": review.proposal_payload_sha256,
+        "review_claim_id": review.review_claim_id,
+        "review_claim_payload_sha256": review.review_claim_payload_sha256,
         "review_run_id": review_run_id,
     }:
         raise AV1ValidationDerivationError(
@@ -2422,7 +2896,8 @@ def _code_review_marker(message: str) -> dict[str, Any]:
             "AV1 derivation review completion marker is invalid"
         ) from exc
     _require_exact_keys(marker, {
-        "decision", "lane", "proposal_id", "proposal_payload_sha256", "review_run_id",
+        "decision", "lane", "proposal_id", "proposal_payload_sha256",
+        "review_claim_id", "review_claim_payload_sha256", "review_run_id",
     }, "derivation review completion marker")
     return marker
 
@@ -2439,6 +2914,7 @@ def av1_validation_derivation_plan_public_summary(
         "selection_lock_sha256": plan.selection_lock_sha256,
         "derivation_partition_sha256": plan.derivation_partition_sha256,
         "runtime_context_bound": True,
+        "review_runner_identity_bound": True,
         "authorization_id": plan.authorization.authorization_id,
         "derivation_assignment_count": len(plan.assignments),
         "candidate_count": len({assignment.cell_plan_id for assignment in plan.assignments}),
@@ -2634,7 +3110,9 @@ def av1_validation_derivation_candidate_proposal_from_payload(
         "proposal_id", "schema", "schema_version", "contract_version", "plan_id",
         "manifest_id", "cell_plan_id", "exact_traits", "crf_lower", "crf_center",
         "crf_upper", "crf_mad", "bitrate_relative_mad",
-        "statistics_contract_sha256", "compatibility_signature", "policy_signature",
+        "statistics_contract_sha256", "minimum_derivation_source_count",
+        "maximum_derivation_age_days", "maximum_candidate_crf_span",
+        "compatibility_signature", "policy_signature",
         "target_video_bitrate_min_bps", "target_video_bitrate_max_bps",
         "minimum_quality_score", "confidence_level", "confidence_score",
         "derivation_evidence_count", "derivation_source_count", "derivation_source_tokens",
@@ -2671,6 +3149,15 @@ def av1_validation_derivation_candidate_proposal_from_payload(
             value.get("statistics_contract_sha256"),
             "statistics contract digest",
         ),
+        minimum_derivation_source_count=int_value(
+            value.get("minimum_derivation_source_count")
+        ),
+        maximum_derivation_age_days=int_value(
+            value.get("maximum_derivation_age_days")
+        ),
+        maximum_candidate_crf_span=float_value(
+            value.get("maximum_candidate_crf_span")
+        ),
         compatibility_signature=_required_text(value.get("compatibility_signature"), "compatibility signature"),
         policy_signature=_required_text(value.get("policy_signature"), "policy signature"),
         target_video_bitrate_min_bps=int_value(value.get("target_video_bitrate_min_bps")),
@@ -2704,6 +3191,68 @@ def av1_validation_derivation_candidate_proposal_from_payload(
     return proposal
 
 
+def av1_validation_derivation_review_claim_from_payload(
+        payload: Mapping[str, Any],
+        *,
+        raw: bytes | None = None,
+) -> AV1ValidationDerivationReviewClaim:
+    value = object_dict(payload)
+    _require_exact_keys(value, {
+        "claim_id", "schema", "schema_version", "contract_version", "plan_id",
+        "authorization_id", "proposal_id", "proposal_payload_sha256", "lane",
+        "review_run_id", "reviewer_token",
+        "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
+        "claimed_at", "payload_sha256",
+    }, "derivation review claim")
+    if (
+        value.get("schema") != AV1_VALIDATION_DERIVATION_REVIEW_CLAIM_SCHEMA
+        or int_value(value.get("schema_version"))
+        != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
+        or value.get("contract_version")
+        != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review-claim contract is invalid"
+        )
+    claim = AV1ValidationDerivationReviewClaim(
+        claim_id=_required_text(value.get("claim_id"), "review-claim ID"),
+        plan_id=_required_text(value.get("plan_id"), "plan ID"),
+        authorization_id=_required_text(
+            value.get("authorization_id"),
+            "authorization ID",
+        ),
+        proposal_id=_required_text(value.get("proposal_id"), "proposal ID"),
+        proposal_payload_sha256=_required_text(
+            value.get("proposal_payload_sha256"),
+            "proposal digest",
+        ),
+        lane=cast(
+            AV1ValidationDerivationReviewLane,
+            _required_text(value.get("lane"), "review lane"),
+        ),
+        review_run_id=_required_text(value.get("review_run_id"), "review run ID"),
+        reviewer_token=_required_text(value.get("reviewer_token"), "reviewer token"),
+        review_runner_canonical_path_sha256=_required_text(
+            value.get("review_runner_canonical_path_sha256"),
+            "review-runner canonical-path digest",
+        ),
+        review_runner_binary_sha256=_required_text(
+            value.get("review_runner_binary_sha256"),
+            "review-runner binary digest",
+        ),
+        claimed_at=_required_text(value.get("claimed_at"), "review-claim timestamp"),
+        payload_sha256=_required_text(
+            value.get("payload_sha256"),
+            "review-claim digest",
+        ),
+    )
+    if raw is not None and raw != canonical_json_bytes(claim.to_payload()):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review-claim JSON is not canonical"
+        )
+    return claim
+
+
 def av1_validation_derivation_review_attestation_from_payload(
         payload: Mapping[str, Any],
         *,
@@ -2712,7 +3261,9 @@ def av1_validation_derivation_review_attestation_from_payload(
     value = object_dict(payload)
     _require_exact_keys(value, {
         "attestation_id", "schema", "schema_version", "contract_version", "proposal_id",
-        "proposal_payload_sha256", "lane", "reviewer_token", "review_evidence_sha256",
+        "proposal_payload_sha256", "review_claim_id", "review_claim_payload_sha256",
+        "lane", "reviewer_token", "review_runner_canonical_path_sha256",
+        "review_runner_binary_sha256", "review_evidence_sha256",
         "decision", "reviewed_at", "payload_sha256",
     }, "derivation review attestation")
     if (
@@ -2725,8 +3276,24 @@ def av1_validation_derivation_review_attestation_from_payload(
         attestation_id=_required_text(value.get("attestation_id"), "attestation ID"),
         proposal_id=_required_text(value.get("proposal_id"), "proposal ID"),
         proposal_payload_sha256=_required_text(value.get("proposal_payload_sha256"), "proposal digest"),
+        review_claim_id=_required_text(
+            value.get("review_claim_id"),
+            "review-claim ID",
+        ),
+        review_claim_payload_sha256=_required_text(
+            value.get("review_claim_payload_sha256"),
+            "review-claim digest",
+        ),
         lane=cast(AV1ValidationDerivationReviewLane, _required_text(value.get("lane"), "review lane")),
         reviewer_token=_required_text(value.get("reviewer_token"), "reviewer token"),
+        review_runner_canonical_path_sha256=_required_text(
+            value.get("review_runner_canonical_path_sha256"),
+            "review-runner canonical-path digest",
+        ),
+        review_runner_binary_sha256=_required_text(
+            value.get("review_runner_binary_sha256"),
+            "review-runner binary digest",
+        ),
         review_evidence_sha256=_required_text(
             value.get("review_evidence_sha256"),
             "review evidence digest",
@@ -2962,8 +3529,11 @@ def _proposal_semantic_payload(
         crf_mad: float,
         bitrate_relative_mad: float,
         statistics_contract_sha256: str,
-        bitrate_min: int,
-        bitrate_max: int,
+        minimum_derivation_source_count: int,
+        maximum_derivation_age_days: int,
+        maximum_candidate_crf_span: float,
+        target_video_bitrate_min_bps: int,
+        target_video_bitrate_max_bps: int,
         confidence_level: Literal["moderate", "high"],
         confidence_score: float,
         derivation_conflict_count: int,
@@ -2986,10 +3556,13 @@ def _proposal_semantic_payload(
         "crf_mad": crf_mad,
         "bitrate_relative_mad": bitrate_relative_mad,
         "statistics_contract_sha256": statistics_contract_sha256,
+        "minimum_derivation_source_count": minimum_derivation_source_count,
+        "maximum_derivation_age_days": maximum_derivation_age_days,
+        "maximum_candidate_crf_span": maximum_candidate_crf_span,
         "compatibility_signature": observations[0].compatibility_signature,
         "policy_signature": observations[0].policy_signature,
-        "target_video_bitrate_min_bps": bitrate_min,
-        "target_video_bitrate_max_bps": bitrate_max,
+        "target_video_bitrate_min_bps": target_video_bitrate_min_bps,
+        "target_video_bitrate_max_bps": target_video_bitrate_max_bps,
         "minimum_quality_score": observations[0].minimum_quality_score,
         "confidence_level": confidence_level,
         "confidence_score": confidence_score,
@@ -3028,6 +3601,11 @@ def _proposal_lock_inputs(
         "crf_mad": proposal.crf_mad,
         "bitrate_relative_mad": proposal.bitrate_relative_mad,
         "statistics_contract_sha256": proposal.statistics_contract_sha256,
+        "minimum_derivation_source_count": (
+            proposal.minimum_derivation_source_count
+        ),
+        "maximum_derivation_age_days": proposal.maximum_derivation_age_days,
+        "maximum_candidate_crf_span": proposal.maximum_candidate_crf_span,
         "compatibility_signature": proposal.compatibility_signature,
         "policy_signature": proposal.policy_signature,
         "target_video_bitrate_min_bps": proposal.target_video_bitrate_min_bps,
@@ -3532,7 +4110,38 @@ def _write_owner_only(path: Path, data: bytes) -> None:
 
 
 def _ensure_owner_only_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    missing: list[Path] = []
+    current = path
+    while True:
+        try:
+            current.lstat()
+            break
+        except FileNotFoundError:
+            missing.append(current)
+            parent = current.parent
+            if parent == current:
+                raise AV1ValidationDerivationError(
+                    "AV1 private derivation directory is unavailable"
+                )
+            current = parent
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 private derivation directory is unavailable"
+            ) from exc
+    for directory in reversed(missing):
+        created = False
+        try:
+            os.mkdir(directory, mode=0o700)
+            created = True
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 private derivation directory could not be created"
+            ) from exc
+        _assert_owner_only_directory(directory)
+        if created:
+            _fsync_directory(directory.parent)
     _assert_owner_only_directory(path)
 
 
@@ -3687,6 +4296,7 @@ def _derivation_id(kind: str, payload: Mapping[str, Any]) -> str:
         "attempt": "av1vdattempt1",
         "terminal": "av1vdterminal1",
         "proposal": "av1vdproposal1",
+        "review_claim": "av1vdreviewclaim1",
         "review": "av1vdreview1",
         "review_envelope": "av1vdreviewenv1",
         "lock_envelope": "av1vdlockenv1",

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Sequence, TypeAlias
@@ -36,11 +37,14 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
+    AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationReviewDecision,
+    AV1ValidationDerivationReviewLane,
     av1_validation_derivation_candidate_evaluation_public_summary,
     av1_validation_derivation_plan_public_summary,
     av1_validation_derivation_statistics_contract_sha256,
     build_av1_validation_derivation_plan,
+    build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
     evaluate_av1_validation_derivation_candidate,
@@ -51,6 +55,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     validate_av1_validation_derivation_artifact_root_binding,
     write_av1_validation_derivation_candidate_proposal,
     write_av1_validation_derivation_plan,
+    write_av1_validation_derivation_review_claim,
     write_av1_validation_derivation_review_envelope,
 )
 from mediaforce.web.runtime.av1_validation_derivation import (
@@ -189,9 +194,11 @@ def build_parser() -> argparse.ArgumentParser:
         "record-derivation-verdict",
         help="Append one human visual verdict and freeze its terminal derivation record",
     )
+    record_verdict.add_argument("manifest", type=Path)
     record_verdict.add_argument("partition", type=Path)
     record_verdict.add_argument("plan", type=Path)
     record_verdict.add_argument("assignment_id")
+    record_verdict.add_argument("--key", type=Path, required=True)
     record_verdict.add_argument("--verdict", choices=("approved", "rejected"), required=True)
     record_verdict.add_argument("--concern-tag", action="append", default=[])
     record_verdict.add_argument("--evidence-id", action="append", default=[])
@@ -435,6 +442,11 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
         statistics_contract_sha256 = (
             av1_validation_derivation_statistics_contract_sha256(manifest)
         )
+        (
+            _review_runner_path,
+            review_runner_canonical_path_sha256,
+            review_runner_binary_sha256,
+        ) = _review_runner_identity()
         if args.action == "create-derivation-plan":
             authorization = build_av1_validation_v2_derivation_authorization(
                 manifest=manifest,
@@ -443,6 +455,10 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
                 runtime_context_sha256=runtime_context_sha256,
                 execution_environment_sha256=execution_environment_sha256,
                 statistics_contract_sha256=statistics_contract_sha256,
+                review_runner_canonical_path_sha256=(
+                    review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=review_runner_binary_sha256,
                 authorized_at=_now_iso(),
                 valid_until=args.valid_until,
             )
@@ -467,6 +483,10 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
                 != execution_environment_sha256
                 or plan.authorization.statistics_contract_sha256
                 != statistics_contract_sha256
+                or plan.authorization.review_runner_canonical_path_sha256
+                != review_runner_canonical_path_sha256
+                or plan.authorization.review_runner_binary_sha256
+                != review_runner_binary_sha256
             ):
                 raise AV1ValidationDerivationError(
                     "AV1 derivation plan execution contract drifted"
@@ -561,9 +581,12 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
         return 0
 
     if args.action == "record-derivation-verdict":
-        for path in (args.partition, args.plan):
+        for path in (args.partition, args.plan, args.key):
             assert_private_artifact_path(path, repository_root=REPOSITORY_ROOT)
+        manifest = load_av1_validation_manifest_v2(args.manifest)
+        assert_preregistered_av1_validation_manifest_v2(manifest)
         partition = load_av1_validation_private_partition(args.partition)
+        token_key = load_av1_validation_partition_key(args.key)
         plan, artifact_root = _load_canonical_derivation_plan(
             plan_path=args.plan,
             config_path=args.config,
@@ -581,8 +604,10 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
             )
         terminal = record_av1_validation_derivation_visual_verdict(
             config_path=args.config,
+            manifest=manifest,
             plan=plan,
             partition=partition,
+            token_key=token_key,
             attempt=attempt,
             terminal_records_directory=artifact_root / "terminal-records",
             verdict=args.verdict,
@@ -665,15 +690,16 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
             plan=plan,
             cell_plan_id=args.cell_plan_id,
         )
-        reviewer_token, review_evidence, decision = _run_code_agent_review(
+        claim, review_evidence, decision = _run_code_agent_review(
+            artifact_root=artifact_root,
+            plan=plan,
             proposal=proposal,
             lane=args.lane,
         )
         review_evidence_sha256 = f"sha256:{hashlib.sha256(review_evidence).hexdigest()}"
         review = build_av1_validation_derivation_review_attestation(
             proposal=proposal,
-            lane=args.lane,
-            reviewer_token=reviewer_token,
+            claim=claim,
             review_evidence_sha256=review_evidence_sha256,
             decision=decision,
             reviewed_at=_now_iso(),
@@ -686,6 +712,7 @@ def _run_derivation_action(args: argparse.Namespace) -> int:
             artifact_root,
             plan=plan,
             proposal=proposal,
+            claim=claim,
             envelope=envelope,
         )
         _print_partition_payload(
@@ -823,7 +850,7 @@ def _load_canonical_derivation_plan(
     )
     if plan_path.expanduser().resolve() != (artifact_root / "plan.json").resolve():
         raise AV1ValidationDerivationError(
-            "AV1 derivation plan must use the plan-global canonical private state root"
+            "AV1 derivation plan must use the partition-global canonical private state root"
         )
     validate_av1_validation_derivation_artifact_root_binding(
         artifact_root,
@@ -832,22 +859,99 @@ def _load_canonical_derivation_plan(
     return plan, artifact_root
 
 
-def _run_code_agent_review(
-        *,
-        proposal: AV1ValidationDerivationCandidateProposal,
-        lane: str,
-) -> tuple[str, bytes, AV1ValidationDerivationReviewDecision]:
+def _review_runner_identity() -> tuple[Path, str, str]:
     code_binary = shutil.which("code")
     if code_binary is None:
         raise AV1ValidationDerivationError(
             "AV1 derivation review requires the Every Code executable"
         )
-    resolved_binary = Path(code_binary).resolve(strict=True)
+    try:
+        resolved_binary = Path(code_binary).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code executable is unavailable"
+        ) from exc
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(resolved_binary, flags)
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code executable is unavailable"
+        ) from exc
+    try:
+        descriptor_info = os.fstat(descriptor)
+        path_info = resolved_binary.lstat()
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+            or not os.access(resolved_binary, os.X_OK)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation Every Code executable identity is invalid"
+            )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            binary_bytes = handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    canonical_path_sha256 = (
+        f"sha256:{hashlib.sha256(str(resolved_binary).encode('utf-8')).hexdigest()}"
+    )
+    binary_sha256 = f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}"
+    return resolved_binary, canonical_path_sha256, binary_sha256
+
+
+def _authorized_review_runner_identity(
+        plan: AV1ValidationDerivationPlan,
+) -> tuple[Path, str, str]:
+    identity = _review_runner_identity()
+    if (
+        identity[1] != plan.authorization.review_runner_canonical_path_sha256
+        or identity[2] != plan.authorization.review_runner_binary_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code executable drifted from the authorization"
+        )
+    return identity
+
+
+def _run_code_agent_review(
+        *,
+        artifact_root: Path,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        lane: AV1ValidationDerivationReviewLane,
+) -> tuple[
+    AV1ValidationDerivationReviewClaim,
+    bytes,
+    AV1ValidationDerivationReviewDecision,
+]:
+    before_identity = _authorized_review_runner_identity(plan)
+    resolved_binary = before_identity[0]
     review_run_id = str(uuid.uuid4())
-    prompt = _agent_review_prompt(
+    claim = build_av1_validation_derivation_review_claim(
+        plan=plan,
         proposal=proposal,
         lane=lane,
         review_run_id=review_run_id,
+        review_runner_canonical_path_sha256=before_identity[1],
+        review_runner_binary_sha256=before_identity[2],
+        claimed_at=_now_iso(),
+    )
+    write_av1_validation_derivation_review_claim(
+        artifact_root,
+        plan=plan,
+        proposal=proposal,
+        claim=claim,
+    )
+    prompt = _agent_review_prompt(
+        proposal=proposal,
+        claim=claim,
     )
     command = [
         str(resolved_binary),
@@ -862,19 +966,26 @@ def _run_code_agent_review(
         "-",
     ]
     try:
-        completed = subprocess.run(
-            command,
-            cwd=REPOSITORY_ROOT,
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code review did not complete"
-        ) from exc
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation Every Code review did not complete"
+            ) from exc
+    finally:
+        after_identity = _authorized_review_runner_identity(plan)
+        if after_identity != before_identity:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation Every Code executable changed during review"
+            )
     if completed.returncode != 0:
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code review failed"
@@ -887,10 +998,8 @@ def _run_code_agent_review(
     decision = _agent_review_decision(
         final_message,
         proposal=proposal,
-        lane=lane,
-        review_run_id=review_run_id,
+        claim=claim,
     )
-    binary_sha256 = hashlib.sha256(resolved_binary.read_bytes()).hexdigest()
     evidence = json.dumps(
         {
             "schema": "mediaforce.av1_derivation_agent_review_run",
@@ -899,9 +1008,12 @@ def _run_code_agent_review(
             "reviewer_token": f"agent:{review_run_id}",
             "proposal_id": proposal.proposal_id,
             "proposal_payload_sha256": proposal.payload_sha256,
-            "lane": lane,
+            "review_claim_id": claim.claim_id,
+            "review_claim_payload_sha256": claim.payload_sha256,
+            "lane": claim.lane,
             "decision": decision,
-            "code_binary_sha256": f"sha256:{binary_sha256}",
+            "review_runner_canonical_path_sha256": before_identity[1],
+            "review_runner_binary_sha256": before_identity[2],
             "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
             "stdout": completed.stdout,
             "stderr": completed.stderr,
@@ -910,7 +1022,7 @@ def _run_code_agent_review(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"agent:{review_run_id}", evidence, decision
+    return claim, evidence, decision
 
 
 def _completed_agent_message(stdout: str) -> tuple[str | None, bool]:
@@ -945,8 +1057,7 @@ def _agent_review_decision(
         message: str,
         *,
         proposal: AV1ValidationDerivationCandidateProposal,
-        lane: str,
-        review_run_id: str,
+        claim: AV1ValidationDerivationReviewClaim,
 ) -> AV1ValidationDerivationReviewDecision:
     nonempty_lines = [line.strip() for line in message.splitlines() if line.strip()]
     marker_lines = [
@@ -971,6 +1082,8 @@ def _agent_review_decision(
         "lane",
         "proposal_id",
         "proposal_payload_sha256",
+        "review_claim_id",
+        "review_claim_payload_sha256",
         "review_run_id",
     }:
         raise AV1ValidationDerivationError(
@@ -980,8 +1093,10 @@ def _agent_review_decision(
     if (
         marker.get("proposal_id") != proposal.proposal_id
         or marker.get("proposal_payload_sha256") != proposal.payload_sha256
-        or marker.get("lane") != lane
-        or marker.get("review_run_id") != review_run_id
+        or marker.get("review_claim_id") != claim.claim_id
+        or marker.get("review_claim_payload_sha256") != claim.payload_sha256
+        or marker.get("lane") != claim.lane
+        or marker.get("review_run_id") != claim.review_run_id
         or decision not in {"approved", "rejected"}
     ):
         raise AV1ValidationDerivationError(
@@ -993,20 +1108,22 @@ def _agent_review_decision(
 def _agent_review_prompt(
         *,
         proposal: AV1ValidationDerivationCandidateProposal,
-        lane: str,
-        review_run_id: str,
+        claim: AV1ValidationDerivationReviewClaim,
 ) -> str:
     marker = {
         "decision": "approved|rejected",
-        "lane": lane,
+        "lane": claim.lane,
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
-        "review_run_id": review_run_id,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "review_run_id": claim.review_run_id,
     }
     return (
         "Perform one independent, read-only AV1 derivation candidate review. "
         "Do not modify files, invoke another agent, reveal opaque tokens, or infer private media identity. "
-        f"Review lane: {lane}. Review the repository implementation and this canonical proposal payload:\n"
+        f"Review lane: {claim.lane}. Review the repository implementation and this canonical proposal payload:\n"
+        f"Immutable review claim: {claim.claim_id} ({claim.payload_sha256}).\n"
         f"{json.dumps(proposal.to_payload(), sort_keys=True, separators=(',', ':'))}\n"
         "Reject on any actionable gate failure; otherwise approve. Explain findings concisely. "
         "End with exactly one final marker line using valid JSON and replace the decision placeholder:\n"

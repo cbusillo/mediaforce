@@ -167,15 +167,29 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         self.assertIn("held_out_series_reused", cell.blocking_reasons)
         self.assertIn("local_evidence_contamination", cell.blocking_reasons)
 
-    def test_wide_candidate_and_derivation_overlap_are_rejected(self) -> None:
+    def test_wide_candidate_is_rejected_at_the_type_boundary(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+
+        with self.assertRaisesRegex(
+            AV1ColdStartValidationError,
+            "CRF span is too wide",
+        ):
+            self._candidate_lock(
+                manifest,
+                plan.cell_plan_id,
+                ("animation",),
+                crf_lower=18.0,
+                crf_upper=45.0,
+            )
+
+    def test_derivation_overlap_is_rejected(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
         candidate_lock = self._candidate_lock(
             manifest,
             plan.cell_plan_id,
             ("animation",),
-            crf_lower=18.0,
-            crf_upper=45.0,
             derivation_source_tokens=(
                 "derivation.source.002",
                 "derivation.source.003",
@@ -192,7 +206,6 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         cell = self._cell_report(report, plan.name)
 
         self.assertEqual(cell.decision, "rejected")
-        self.assertIn("candidate_range_too_wide", cell.blocking_reasons)
         self.assertIn("derivation_holdout_source_overlap", cell.blocking_reasons)
 
     def test_duplicate_reviews_are_preregistered_independent_and_safety_bounded(self) -> None:
@@ -397,7 +410,7 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         self.assertEqual(first_report.cell_reports, second_report.cell_reports)
         self.assertNotEqual(first_report.report_id, second_report.report_id)
 
-    def test_stale_conflicting_low_confidence_derivation_is_rejected(self) -> None:
+    def test_conflicting_low_confidence_derivation_is_rejected(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
         candidate_lock = self._candidate_lock(
@@ -406,7 +419,6 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             ("animation",),
             confidence_level="limited",
             confidence_score=0.4,
-            derivation_oldest_recorded_at="2025-01-01T00:00:00Z",
             derivation_conflict_count=1,
         )
         results = self._candidate_results(manifest, plan.cell_plan_id, candidate_lock.candidate_lock_id)
@@ -415,8 +427,22 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
 
         self.assertEqual(cell.decision, "rejected")
         self.assertIn("candidate_confidence_insufficient", cell.blocking_reasons)
-        self.assertIn("derivation_evidence_stale", cell.blocking_reasons)
         self.assertIn("derivation_evidence_conflicting", cell.blocking_reasons)
+
+    def test_stale_derivation_is_rejected_at_the_type_boundary(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+
+        with self.assertRaisesRegex(
+            AV1ColdStartValidationError,
+            "derivation evidence is stale",
+        ):
+            self._candidate_lock(
+                manifest,
+                plan.cell_plan_id,
+                ("animation",),
+                derivation_oldest_recorded_at="2025-01-01T00:00:00Z",
+            )
 
     def test_oversized_json_number_uses_the_controlled_error_path(self) -> None:
         payload = self._manifest().to_payload()
@@ -521,7 +547,7 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
                 f"derivation.title.{index:03d}" for index in range(1, 13)
             ),
             derivation_series_tokens=tuple(
-                f"derivation.series.{index:03d}" for index in range(1, 7)
+                f"derivation.series.{index:03d}" for index in range(1, 13)
             ),
             derivation_source_group_tokens=tuple(
                 f"derivation.group.{index:03d}" for index in range(1, 7)
