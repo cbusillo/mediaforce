@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import replace
+import fcntl
 import hashlib
 import io
 import json
@@ -15,6 +16,9 @@ import unittest
 from unittest.mock import patch
 
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
+from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
@@ -66,10 +70,13 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     _assert_next_assignment,
     _current_derivation_review_artifact_fingerprint,
     _prepare_derivation_review_root,
+    _pinned_derivation_source,
     _recover_interrupted_derivation_state,
     _run_av1_validation_derivation_assignment_locked,
     _secure_derivation_review_media,
+    _write_all,
     assert_av1_validation_derivation_execution_contract,
+    assert_av1_validation_derivation_execution_environment,
     av1_validation_derivation_execution_environment_sha256,
     av1_validation_derivation_runtime_context_sha256,
     finalize_av1_validation_derivation_candidate_lock as finalize_runtime_av1_validation_derivation_candidate_lock,
@@ -114,6 +121,10 @@ SELECTED_AT = "2026-07-27T22:50:00Z"
 AUTHORIZED_AT = "2026-07-28T00:00:00Z"
 VALID_UNTIL = "2026-08-01T00:00:00Z"
 REVIEW_RUNNER_BYTES = b"\xcf\xfa\xed\xfe" + b"test-code-binary"
+
+
+def _source_sha256(source: AV1ValidationPartitionSource) -> str:
+    return f"sha256:{hashlib.sha256(source.source_identity.encode()).hexdigest()}"
 
 
 class AV1ValidationDerivationTests(unittest.TestCase):
@@ -164,6 +175,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             token_key=self.token_key,
             expected_token_key_id=av1_validation_partition_key_id(self.token_key),
             selected_at=SELECTED_AT,
+            source_sha256_resolver=_source_sha256,
         )
         runtime_context_sha256 = av1_validation_derivation_runtime_context_sha256(
             self.runtime_config
@@ -222,6 +234,46 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertTrue(summary["derivation_execution_authorized"])
         self.assertFalse(summary["holdout_execution_authorized"])
         self.assertFalse(summary["guided_probe_allowed"])
+
+    def test_source_digest_drift_invalidates_existing_authorization(self) -> None:
+        changed_item_id = self.partition.assignments[0].local_item_id
+
+        def changed_source_sha256(source: AV1ValidationPartitionSource) -> str:
+            if source.local_item_id == changed_item_id:
+                return f"sha256:{'f' * 64}"
+            return _source_sha256(source)
+
+        drifted_partition = build_av1_validation_private_partition(
+            manifest=self.manifest,
+            eligibility_attestation_id=self.manifest.eligibility_attestation_id,
+            eligibility_payload_sha256=self.manifest.eligibility_payload_sha256,
+            sources=self.sources,
+            expectations=self.expectations,
+            token_key=self.token_key,
+            expected_token_key_id=av1_validation_partition_key_id(self.token_key),
+            selected_at=SELECTED_AT,
+            source_sha256_resolver=changed_source_sha256,
+        )
+        with self.assertRaises(AV1ValidationDerivationError):
+            build_av1_validation_derivation_plan(
+                manifest=self.manifest,
+                partition=drifted_partition,
+                authorization=self.authorization,
+                runtime_context_sha256=self.plan.runtime_context_sha256,
+            )
+
+    def test_implementation_drift_invalidates_execution_environment(self) -> None:
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._av1_validation_derivation_implementation_sha256",
+                return_value=f"sha256:{'f' * 64}",
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "execution environment drifted",
+            ),
+        ):
+            assert_av1_validation_derivation_execution_environment(self.plan)
 
     def test_plan_binding_rejects_digest_valid_assignment_drift(self) -> None:
         assignments = list(self.plan.assignments)
@@ -1014,6 +1066,49 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 status="review_pending",
                 calibration_payload=calibration,
             )
+
+    def test_attempt_requires_pinned_source_evidence(self) -> None:
+        assignment = self.plan.assignments[0]
+        source_identity = _source_identity(self.partition, assignment)
+        mutations = (
+            ("missing digest", "source_snapshot_sha256", None),
+            (
+                "digest drift",
+                "source_snapshot_sha256",
+                f"sha256:{'b' * 64}",
+            ),
+            (
+                "identity drift",
+                "source_snapshot_content_version_fingerprint",
+                "unreserved-source",
+            ),
+            ("size drift", "source_snapshot_size_bytes", 1),
+        )
+        for label, field, value in mutations:
+            calibration = _calibration_payload(
+                assignment=assignment,
+                source_identity=source_identity,
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            )
+            sample_item = calibration["sample_item"]
+            assert isinstance(sample_item, dict)
+            if value is None:
+                sample_item.pop(field)
+            else:
+                sample_item[field] = value
+            with self.subTest(label=label), self.assertRaises(
+                AV1ValidationDerivationError
+            ):
+                build_av1_validation_derivation_attempt(
+                    plan=self.plan,
+                    partition=self.partition,
+                    assignment_id=assignment.assignment_id,
+                    started_at="2026-07-28T01:00:00Z",
+                    completed_at="2026-07-28T01:05:00Z",
+                    status="review_pending",
+                    calibration_payload=calibration,
+                )
 
     def test_review_claim_race_leaves_one_terminal_unresolved_claim(self) -> None:
         proposal = self._candidate_proposal()
@@ -1915,6 +2010,48 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(attempt.reason_code, "interrupted_claim")
         self.assertEqual(terminal.attempt_id, attempt.attempt_id)
 
+    def test_source_integrity_probe_fails_before_assignment_claim(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract"
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.probe_macos_file_integrity",
+                side_effect=FileIntegrityError("probe failed"),
+            ) as integrity_probe,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "probe failed before assignment claim",
+            ),
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-29T01:00:00Z",
+            )
+        integrity_probe.assert_called_once_with(self.runtime_artifact_root.resolve())
+        self.assertFalse(attempts_dir.exists())
+
     def test_fresh_authorization_timestamp_is_sampled_after_preflight(self) -> None:
         assignment = self.plan.assignments[0]
         attempts_dir = self.runtime_artifact_root / "attempts"
@@ -1972,6 +2109,438 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 mediaforce_runtime_lock_path(real_config),
                 mediaforce_runtime_lock_path(alias_config),
             )
+
+    def test_pinned_source_snapshot_survives_original_path_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            original_bytes = b"original-source" * 20_000
+            source_path.write_bytes(original_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(original_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(original_bytes),
+                    process_controller=ManagedProcessController(),
+                ) as pinned_source,
+            ):
+                moved_source = root / "moved-source.mkv"
+                source_path.rename(moved_source)
+                source_path.write_bytes(b"replacement-source" * 20_000)
+                self.assertEqual(pinned_source.path.read_bytes(), original_bytes)
+                self.assertEqual(
+                    pinned_source.content_version_fingerprint,
+                    source_identity,
+                )
+                self.assertEqual(pinned_source.size_bytes, len(original_bytes))
+                self.assertTrue(pinned_source.content_sha256.startswith("sha256:"))
+                self.assertEqual(pinned_source.path.stat().st_mode & 0o777, 0o400)
+                self.assertEqual(pinned_source.path.parent.stat().st_mode & 0o777, 0o500)
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_rejects_full_digest_mismatch_before_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            media_entered = False
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "source changed while its snapshot was created",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=f"sha256:{'f' * 64}",
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    media_entered = True
+            self.assertFalse(media_entered)
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_rejects_swap_before_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            registered_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(registered_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            replacement_bytes = b"unreserved-source" * 20_000
+            source_path.write_bytes(replacement_bytes)
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "source bytes drifted from the frozen reservation",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(registered_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(replacement_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    pass
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_detects_private_snapshot_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "pinned source changed during media execution",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ) as pinned_source:
+                    pinned_source.path.parent.chmod(0o700)
+                    pinned_source.path.chmod(0o600)
+                    pinned_source.path.write_bytes(b"mutated-source")
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_detects_transient_write_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "pinned source changed during media execution",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ) as pinned_source:
+                    pinned_source.path.chmod(0o600)
+                    pinned_source.path.write_bytes(b"transient-source")
+                    pinned_source.path.write_bytes(source_bytes)
+                    pinned_source.path.chmod(0o400)
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_detects_hardlink_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            link_path = root / "snapshot-alias"
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "pinned source changed during media execution",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ) as pinned_source:
+                    os.link(pinned_source.path, link_path)
+                    link_path.unlink()
+            self.assertFalse(link_path.exists())
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_detects_parent_swap_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "pinned source changed during media execution",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ) as pinned_source:
+                    assignment_root = pinned_source.path.parent
+                    moved_root = assignment_root.with_name(
+                        f"{assignment_root.name}-moved"
+                    )
+                    assignment_root.rename(moved_root)
+                    try:
+                        assignment_root.mkdir(mode=0o700)
+                        replacement_path = assignment_root / pinned_source.path.name
+                        replacement_path.write_bytes(b"replacement-source")
+                        replacement_path.chmod(0o400)
+                        assignment_root.chmod(0o500)
+                        self.assertEqual(
+                            pinned_source.path.read_bytes(),
+                            b"replacement-source",
+                        )
+                    finally:
+                        if assignment_root.exists():
+                            assignment_root.chmod(0o700)
+                            replacement_path = assignment_root / pinned_source.path.name
+                            if replacement_path.exists():
+                                replacement_path.chmod(0o600)
+                                replacement_path.unlink()
+                            assignment_root.rmdir()
+                        moved_root.rename(assignment_root)
+            self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_pinned_source_snapshot_guard_runs_when_body_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "pinned source changed during media execution",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ) as pinned_source:
+                    pinned_source.path.chmod(0o600)
+                    pinned_source.path.write_bytes(b"transient-source")
+                    pinned_source.path.write_bytes(source_bytes)
+                    pinned_source.path.chmod(0o400)
+                    raise RuntimeError("media body failed")
+
+    def test_pinned_source_snapshot_uses_read_only_monitored_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            access_modes: list[int] = []
+            original_guard = MacOSFileIntegrityGuard
+
+            def guard_factory(**kwargs: object) -> MacOSFileIntegrityGuard:
+                descriptor = int(kwargs["descriptor"])
+                access_modes.append(
+                    fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE
+                )
+                return original_guard(**kwargs)
+
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                    side_effect=guard_factory,
+                ),
+                _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ),
+            ):
+                pass
+            self.assertEqual(access_modes, [os.O_RDONLY])
+
+    def test_pinned_source_snapshot_rejects_mutation_during_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 400_000
+            source_path.write_bytes(source_bytes)
+            source_stat = source_path.stat()
+            source_identity = content_version_fingerprint(source_path, source_stat)
+            mutation_injected = False
+
+            def write_and_mutate(descriptor: int, payload: bytes) -> None:
+                nonlocal mutation_injected
+                _write_all(descriptor, payload)
+                if mutation_injected:
+                    return
+                mutation_injected = True
+                with source_path.open("r+b") as source_handle:
+                    source_handle.seek(1024 * 1024)
+                    source_handle.write(b"X")
+                os.utime(
+                    source_path,
+                    ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1_000_000_000),
+                )
+
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation._write_all",
+                    side_effect=write_and_mutate,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "source changed while its snapshot was created",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    pass
+            self.assertTrue(mutation_injected)
+            self.assertFalse((artifact_root / "source-snapshots").exists())
 
     def test_assignment_loader_allows_recovery_before_full_runtime_context_check(self) -> None:
         drifted_config = SimpleNamespace(
@@ -3572,6 +4141,7 @@ def _calibration_payload(
     artifact = f"artifact_{assignment.assignment_id}"
     duration_seconds = 3_600.0
     predicted_video_bytes = round((bitrate * duration_seconds) / 8)
+    source_size_bytes = predicted_video_bytes * 2
     candidate = {
         "attempt": 1,
         "role": "target_seed",
@@ -3605,6 +4175,10 @@ def _calibration_payload(
         "sample_item": {
             "library_item_id": assignment.local_item_id,
             "content_version_fingerprint": source_identity,
+            "source_size_bytes": source_size_bytes,
+            "source_snapshot_sha256": assignment.source_sha256,
+            "source_snapshot_size_bytes": source_size_bytes,
+            "source_snapshot_content_version_fingerprint": source_identity,
             "duration_seconds": duration_seconds,
             "stream_budget_ledger": {
                 "schema_version": 1,

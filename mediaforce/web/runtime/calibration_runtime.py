@@ -171,6 +171,11 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "source_fingerprint": sample_item.get("source_fingerprint"),
         "content_version_fingerprint": sample_item.get("content_version_fingerprint"),
         "source_size_bytes": sample_item.get("source_size_bytes"),
+        "source_snapshot_sha256": sample_item.get("source_snapshot_sha256"),
+        "source_snapshot_size_bytes": sample_item.get("source_snapshot_size_bytes"),
+        "source_snapshot_content_version_fingerprint": sample_item.get(
+            "source_snapshot_content_version_fingerprint"
+        ),
         "video_codec": sample_item.get("video_codec"),
         "video_bitrate": sample_item.get("video_bitrate"),
         "width": sample_item.get("width"),
@@ -630,17 +635,22 @@ def run_sampled_calibration(
         calibration_run_id: str,
         process_controller: ManagedProcessController,
         deps: CalibrationRunDeps,
+        source_path_override: Path | None = None,
         progress_callback: Any | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
-    controller_source_path = Path(sample_item["source_path"])
     quality_host = _quality_host_data(config, host_data)
-    quality_source_path = resolve_item_source_path(
-        config,
-        sample_item,
-        host=quality_host,
-        host_media_access_for_host=host_media_access_for_host,
-    )
+    if source_path_override is None:
+        controller_source_path = Path(sample_item["source_path"])
+        quality_source_path = resolve_item_source_path(
+            config,
+            sample_item,
+            host=quality_host,
+            host_media_access_for_host=host_media_access_for_host,
+        )
+    else:
+        controller_source_path = source_path_override
+        quality_source_path = source_path_override
     quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
     stream_budget = deps.resolve_stream_budget_ledger(

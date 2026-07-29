@@ -3973,6 +3973,15 @@ def _validate_calibration_payload(
     quality_score = float_value(sample_result.get("quality_score"))
     chosen_crf = float_value(sample_result.get("chosen_crf"))
     duration_seconds = float_value(sample_item.get("duration_seconds"))
+    source_size_bytes = int_value(sample_item.get("source_size_bytes"))
+    source_snapshot_size_bytes = int_value(
+        sample_item.get("source_snapshot_size_bytes")
+    )
+    source_snapshot_sha256 = _required_text(
+        sample_item.get("source_snapshot_sha256"),
+        "source snapshot digest",
+    )
+    _require_sha256(source_snapshot_sha256, "source snapshot digest")
     predicted_video_size_bytes = int_value(
         sample_result.get("predicted_video_size_bytes")
     )
@@ -3980,6 +3989,12 @@ def _validate_calibration_payload(
         int_value(sample_item.get("library_item_id")) != assignment.local_item_id
         or str(sample_item.get("content_version_fingerprint") or "")
         != source_identity
+        or str(
+            sample_item.get("source_snapshot_content_version_fingerprint") or ""
+        ) != source_identity
+        or source_snapshot_sha256 != assignment.source_sha256
+        or source_size_bytes <= 0
+        or source_snapshot_size_bytes != source_size_bytes
         or int_value(stream_budget_totals.get("remaining_video_bitrate_bps"))
         != assignment.target_video_bitrate_bps
         or str(sample_result.get("quality_metric") or "").casefold()
@@ -4177,7 +4192,7 @@ def _assignment_from_payload(payload: Mapping[str, Any]) -> AV1ValidationPartiti
     _require_exact_keys(payload, {
         "assignment_id", "role", "cell_plan_id", "ordinal", "local_item_id", "traits",
         "intent_level", "source_token", "title_token", "series_token", "source_group_token",
-        "compatibility_signature", "policy_signature", "target_video_bitrate_bps",
+        "compatibility_signature", "policy_signature", "source_sha256", "target_video_bitrate_bps",
         "quality_metric", "quality_target", "minimum_quality_score", "evidence_summary_sha256",
     }, "derivation assignment")
     return AV1ValidationPartitionAssignment(
@@ -4194,6 +4209,7 @@ def _assignment_from_payload(payload: Mapping[str, Any]) -> AV1ValidationPartiti
         source_group_token=_required_text(payload.get("source_group_token"), "source-group token"),
         compatibility_signature=_required_text(payload.get("compatibility_signature"), "compatibility signature"),
         policy_signature=_required_text(payload.get("policy_signature"), "policy signature"),
+        source_sha256=_required_text(payload.get("source_sha256"), "source digest"),
         target_video_bitrate_bps=int_value(payload.get("target_video_bitrate_bps")),
         quality_metric=_required_text(payload.get("quality_metric"), "quality metric"),
         quality_target=float_value(payload.get("quality_target")),

@@ -8224,6 +8224,40 @@ raise SystemExit(0)
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
 
+        pinned_source_path = self._create_source_file("pinned-source.mkv")
+        for mocked_operation in (
+            search_quality_mock,
+            sample_encode_mock,
+            recommend_timestamps_mock,
+            encode_preview_mock,
+            source_review_mock,
+            compare_preview_mock,
+        ):
+            mocked_operation.reset_mock()
+        web_app._run_sampled_calibration(
+            config=self.config,
+            prefix="tv/show",
+            action="baseline",
+            host_data=host,
+            notes="Use the pinned source snapshot.",
+            policy=policy,
+            seed_metadata=None,
+            sample_item=sample_item,
+            calibration_run_id="pinned-run",
+            process_controller=web_app.ManagedProcessController(),
+            source_path_override=pinned_source_path,
+        )
+        self.assertEqual(search_quality_mock.call_args.args[0], pinned_source_path)
+        self.assertEqual(sample_encode_mock.call_args.args[0], pinned_source_path)
+        self.assertEqual(
+            encode_preview_mock.call_args.kwargs["source_path"],
+            pinned_source_path,
+        )
+        self.assertEqual(
+            source_review_mock.call_args.kwargs["source_path"],
+            pinned_source_path,
+        )
+
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")

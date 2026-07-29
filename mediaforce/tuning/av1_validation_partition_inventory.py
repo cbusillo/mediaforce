@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import hashlib
 import json
 import math
+import os
+import stat
+import subprocess
 import unicodedata
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import select
 
@@ -13,13 +17,25 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.evidence import stable_json_hash
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    MacOSFileIntegrityGuard,
+)
 from mediaforce.core.type_defs import object_dict
+from mediaforce.core.utils import (
+    descriptor_content_version_fingerprint,
+    descriptor_sha256,
+    file_stat_signature,
+)
+from mediaforce.encoding.helpers import resolve_item_source_path
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
+from mediaforce.hosts.config import host_media_access_for_host
 from mediaforce.library.media_scopes import (
     media_group_scope_for_rel_path,
     normalize_scope_prefix,
     tv_series_scope_for_rel_path,
 )
+from mediaforce.library.probe import probe_evidence
 from mediaforce.tuning.av1_trait_projection import (
     AV1_COLD_START_TRAIT_PROJECTION_CONTRACT_VERSION,
     AV1ColdStartTraitProjectionError,
@@ -28,6 +44,7 @@ from mediaforce.tuning.av1_trait_projection import (
 from mediaforce.tuning.av1_validation_partition import (
     AV1_VALIDATION_PARTITION_CONTRACT_VERSION,
     AV1ValidationPartitionExpectations,
+    AV1ValidationPartitionError,
     AV1ValidationPartitionSource,
 )
 from mediaforce.tuning.stream_budget import (
@@ -58,6 +75,149 @@ class _EvidenceCompatibility:
             "analyzer_runtime_version": self.analyzer_runtime_version,
             "analyzer_policy_digest": self.analyzer_policy_digest,
         }
+
+
+def av1_validation_partition_source_sha256_resolver(
+    connection: DBClient,
+    *,
+    config: MediaforceConfig,
+    verify_evidence: bool = False,
+) -> Callable[[AV1ValidationPartitionSource], str]:
+    digest_by_item_id: dict[int, str] = {}
+
+    def resolve(source: AV1ValidationPartitionSource) -> str:
+        cached = digest_by_item_id.get(source.local_item_id)
+        if cached is not None:
+            return cached
+        row = connection.execute(
+            select(
+                library_items.c.id,
+                library_items.c.source_path,
+                library_items.c.rel_path,
+                library_items.c.media_root,
+                library_items.c.content_version_fingerprint,
+                library_items.c.size_bytes,
+            ).where(library_items.c.id == source.local_item_id)
+        ).mappings().one_or_none()
+        if row is None:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source is no longer in the inventory"
+            )
+        source_path = resolve_item_source_path(
+            config,
+            dict(row),
+            host=None,
+            host_media_access_for_host=host_media_access_for_host,
+        )
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise AV1ValidationPartitionError(
+                "AV1 partition secure source hashing is unavailable"
+            )
+        source_descriptor = -1
+        source_guard: MacOSFileIntegrityGuard | None = None
+        try:
+            source_descriptor = os.open(
+                source_path,
+                os.O_RDONLY | os.O_NOFOLLOW,
+            )
+            source_guard = MacOSFileIntegrityGuard(
+                path=source_path,
+                descriptor=source_descriptor,
+                require_single_link=False,
+            )
+            source_path = source_guard.path
+            source_initial = os.fstat(source_descriptor)
+            source_path_initial = source_path.lstat()
+            expected_size_bytes = int(row.get("size_bytes") or 0)
+            expected_content_version = str(
+                row.get("content_version_fingerprint") or ""
+            )
+            if (
+                expected_content_version != source.source_identity
+                or expected_size_bytes <= 0
+                or not stat.S_ISREG(source_initial.st_mode)
+                or not stat.S_ISREG(source_path_initial.st_mode)
+                or (source_initial.st_dev, source_initial.st_ino)
+                != (source_path_initial.st_dev, source_path_initial.st_ino)
+                or source_initial.st_size != expected_size_bytes
+                or descriptor_content_version_fingerprint(
+                    source_descriptor,
+                    size_bytes=source_initial.st_size,
+                ) != source.source_identity
+            ):
+                raise AV1ValidationPartitionError(
+                    "AV1 partition selected source drifted before full hashing"
+                )
+            source_sha256 = descriptor_sha256(source_descriptor)
+            source_guard.assert_quiet()
+            if verify_evidence:
+                summary = probe_evidence(
+                    source_path,
+                    MEDIA_FINGERPRINT_EVIDENCE_KIND,
+                )
+                summary_json = json.dumps(
+                    summary,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                summary_sha256 = (
+                    f"sha256:{hashlib.sha256(
+                        summary_json.encode(),
+                        usedforsecurity=False,
+                    ).hexdigest()}"
+                )
+                if summary_sha256 != source.evidence_summary_sha256:
+                    raise AV1ValidationPartitionError(
+                        "AV1 partition selected source evidence does not replay from its frozen bytes"
+                    )
+                source_guard.assert_quiet()
+            if descriptor_sha256(source_descriptor) != source_sha256:
+                raise AV1ValidationPartitionError(
+                    "AV1 partition selected source changed during evidence replay"
+                )
+            source_guard.assert_quiet()
+            source_final = os.fstat(source_descriptor)
+            source_path_final = source_path.lstat()
+            if (
+                file_stat_signature(source_initial)
+                != file_stat_signature(source_final)
+                or not stat.S_ISREG(source_path_final.st_mode)
+                or (source_final.st_dev, source_final.st_ino)
+                != (source_path_final.st_dev, source_path_final.st_ino)
+                or descriptor_content_version_fingerprint(
+                    source_descriptor,
+                    size_bytes=source_final.st_size,
+                ) != source.source_identity
+            ):
+                raise AV1ValidationPartitionError(
+                    "AV1 partition selected source changed during full hashing"
+                )
+        except FileIntegrityError as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source integrity monitoring failed"
+            ) from exc
+        except AV1ValidationPartitionError:
+            raise
+        except (
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.SubprocessError,
+        ) as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source could not be securely hashed"
+            ) from exc
+        finally:
+            if source_guard is not None:
+                source_guard.close()
+            if source_descriptor >= 0:
+                os.close(source_descriptor)
+        digest_by_item_id[source.local_item_id] = source_sha256
+        return source_sha256
+
+    return resolve
 
 
 def load_av1_validation_partition_inventory(

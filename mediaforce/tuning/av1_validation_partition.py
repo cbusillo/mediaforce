@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
@@ -189,6 +189,7 @@ class AV1ValidationPartitionAssignment:
     source_group_token: str
     compatibility_signature: str
     policy_signature: str
+    source_sha256: str
     target_video_bitrate_bps: int
     quality_metric: str
     quality_target: float
@@ -245,6 +246,7 @@ class AV1ValidationPartitionAssignment:
             raise AV1ValidationPartitionError(
                 "AV1 partition assignment quality floor exceeds target"
             )
+        _require_sha256(self.source_sha256, "assignment source digest")
         _require_sha256(self.evidence_summary_sha256, "assignment evidence digest")
 
     def token_payload(self) -> dict[str, Any]:
@@ -261,6 +263,7 @@ class AV1ValidationPartitionAssignment:
             "source_group_token": self.source_group_token,
             "compatibility_signature": self.compatibility_signature,
             "policy_signature": self.policy_signature,
+            "source_sha256": self.source_sha256,
             "target_video_bitrate_bps": self.target_video_bitrate_bps,
             "quality_metric": self.quality_metric,
             "quality_target": self.quality_target,
@@ -493,6 +496,7 @@ def build_av1_validation_private_partition(
     token_key: bytes,
     expected_token_key_id: str,
     selected_at: str,
+    source_sha256_resolver: Callable[[AV1ValidationPartitionSource], str],
 ) -> AV1ValidationPrivatePartition:
     assert_preregistered_av1_validation_manifest_v2(manifest)
     _assert_partition_criteria(manifest)
@@ -606,7 +610,12 @@ def build_av1_validation_private_partition(
         sorted(
             (
                 _assignment_for_source(
-                    slot, selected[slot.assignment_id], token_key=token_key
+                    slot,
+                    selected[slot.assignment_id],
+                    token_key=token_key,
+                    source_sha256=source_sha256_resolver(
+                        selected[slot.assignment_id]
+                    ),
                 )
                 for slot in slots
             ),
@@ -688,6 +697,7 @@ def validate_av1_validation_private_partition(
         token_key=token_key,
         expected_token_key_id=partition.token_key_id,
         selected_at=partition.selected_at,
+        source_sha256_resolver=_frozen_source_sha256_resolver(partition),
     )
     if rebuilt != partition:
         raise AV1ValidationPartitionError(
@@ -702,6 +712,7 @@ def validate_av1_validation_partition_current_inputs(
     sources: Sequence[AV1ValidationPartitionSource],
     expectations: AV1ValidationPartitionExpectations,
     token_key: bytes,
+    source_sha256_resolver: Callable[[AV1ValidationPartitionSource], str] | None = None,
 ) -> None:
     rebuilt = build_av1_validation_private_partition(
         manifest=manifest,
@@ -712,11 +723,34 @@ def validate_av1_validation_partition_current_inputs(
         token_key=token_key,
         expected_token_key_id=partition.token_key_id,
         selected_at=partition.selected_at,
+        source_sha256_resolver=(
+            source_sha256_resolver
+            or _frozen_source_sha256_resolver(partition)
+        ),
     )
     if rebuilt != partition:
         raise AV1ValidationPartitionError(
             "AV1 private partition does not match current inventory or policy inputs"
         )
+
+
+def _frozen_source_sha256_resolver(
+    partition: AV1ValidationPrivatePartition,
+) -> Callable[[AV1ValidationPartitionSource], str]:
+    source_sha256_by_item_id = {
+        assignment.local_item_id: assignment.source_sha256
+        for assignment in partition.assignments
+    }
+
+    def resolve(source: AV1ValidationPartitionSource) -> str:
+        source_sha256 = source_sha256_by_item_id.get(source.local_item_id)
+        if source_sha256 is None:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source lacks a frozen full digest"
+            )
+        return source_sha256
+
+    return resolve
 
 
 def serialize_av1_validation_private_partition(
@@ -1157,6 +1191,7 @@ def _assignment_for_source(
     source: AV1ValidationPartitionSource,
     *,
     token_key: bytes,
+    source_sha256: str,
 ) -> AV1ValidationPartitionAssignment:
     return AV1ValidationPartitionAssignment(
         assignment_id=slot.assignment_id,
@@ -1182,6 +1217,7 @@ def _assignment_for_source(
         policy_signature=_plan_policy_signature(
             source.base_policy_signature, slot.plan
         ),
+        source_sha256=source_sha256,
         target_video_bitrate_bps=source.target_video_bitrate_bps,
         quality_metric=source.quality_metric,
         quality_target=source.quality_target,
@@ -1917,6 +1953,7 @@ def _assignment_from_payload(
             "source_group_token",
             "compatibility_signature",
             "policy_signature",
+            "source_sha256",
             "target_video_bitrate_bps",
             "quality_metric",
             "quality_target",
@@ -1950,6 +1987,7 @@ def _assignment_from_payload(
         policy_signature=_required_text(
             data.get("policy_signature"), "policy signature"
         ),
+        source_sha256=_required_text(data.get("source_sha256"), "source digest"),
         target_video_bitrate_bps=int_value(data.get("target_video_bitrate_bps")),
         quality_metric=_required_text(data.get("quality_metric"), "quality metric"),
         quality_target=float_value(data.get("quality_target")),

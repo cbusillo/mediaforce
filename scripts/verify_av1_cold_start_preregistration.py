@@ -91,6 +91,7 @@ from mediaforce.tuning.av1_validation_partition import (
     write_av1_validation_private_partition,
 )
 from mediaforce.tuning.av1_validation_partition_inventory import (
+    av1_validation_partition_source_sha256_resolver,
     load_av1_validation_partition_inventory,
 )
 ValidationManifest: TypeAlias = (
@@ -394,16 +395,23 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                 connection,
                 config=config,
             )
-        partition = build_av1_validation_private_partition(
-            manifest=manifest,
-            eligibility_attestation_id=eligibility.attestation_id,
-            eligibility_payload_sha256=eligibility.payload_sha256,
-            sources=inventory.sources,
-            expectations=inventory.expectations,
-            token_key=token_key,
-            expected_token_key_id=args.expected_token_key_id,
-            selected_at=args.selected_at,
-        )
+            partition = build_av1_validation_private_partition(
+                manifest=manifest,
+                eligibility_attestation_id=eligibility.attestation_id,
+                eligibility_payload_sha256=eligibility.payload_sha256,
+                sources=inventory.sources,
+                expectations=inventory.expectations,
+                token_key=token_key,
+                expected_token_key_id=args.expected_token_key_id,
+                selected_at=args.selected_at,
+                source_sha256_resolver=(
+                    av1_validation_partition_source_sha256_resolver(
+                        connection,
+                        config=config,
+                        verify_evidence=True,
+                    )
+                ),
+            )
         write_av1_validation_private_partition(args.output, partition)
     else:
         assert_private_artifact_path(args.partition, repository_root=REPOSITORY_ROOT)
@@ -423,13 +431,19 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                 connection,
                 config=config,
             )
-        validate_av1_validation_partition_current_inputs(
-            partition,
-            manifest=manifest,
-            sources=inventory.sources,
-            expectations=inventory.expectations,
-            token_key=token_key,
-        )
+            validate_av1_validation_partition_current_inputs(
+                partition,
+                manifest=manifest,
+                sources=inventory.sources,
+                expectations=inventory.expectations,
+                token_key=token_key,
+                source_sha256_resolver=(
+                    av1_validation_partition_source_sha256_resolver(
+                        connection,
+                        config=config,
+                    )
+                ),
+            )
     _print_partition_payload(
         av1_validation_partition_public_summary(partition),
         json_output=args.json_output,
@@ -809,13 +823,19 @@ def _load_current_derivation_inputs(
     config = load_config(args.config)
     with open_readonly_db(config.paths.db_path) as connection:
         inventory = load_av1_validation_partition_inventory(connection, config=config)
-    validate_av1_validation_partition_current_inputs(
-        partition,
-        manifest=manifest,
-        sources=inventory.sources,
-        expectations=inventory.expectations,
-        token_key=token_key,
-    )
+        validate_av1_validation_partition_current_inputs(
+            partition,
+            manifest=manifest,
+            sources=inventory.sources,
+            expectations=inventory.expectations,
+            token_key=token_key,
+            source_sha256_resolver=(
+                av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=config,
+                )
+            ),
+        )
     return manifest, partition, token_key
 
 
@@ -836,13 +856,19 @@ def _load_derivation_partition_for_evaluation(
     config = load_config(config_path)
     with open_readonly_db(config.paths.db_path) as connection:
         inventory = load_av1_validation_partition_inventory(connection, config=config)
-    validate_av1_validation_partition_current_inputs(
-        partition,
-        manifest=manifest,
-        sources=inventory.sources,
-        expectations=inventory.expectations,
-        token_key=token_key,
-    )
+        validate_av1_validation_partition_current_inputs(
+            partition,
+            manifest=manifest,
+            sources=inventory.sources,
+            expectations=inventory.expectations,
+            token_key=token_key,
+            source_sha256_resolver=(
+                av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=config,
+                )
+            ),
+        )
     return partition
 
 

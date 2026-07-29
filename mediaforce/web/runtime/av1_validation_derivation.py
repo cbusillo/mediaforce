@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import copy, deepcopy
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import os
@@ -8,7 +10,8 @@ from pathlib import Path
 import platform
 import shutil
 import stat
-from typing import Any, Callable, Mapping, cast
+import sys
+from typing import Any, Callable, Iterator, Mapping, cast
 from urllib.parse import unquote, urlparse
 
 from sqlalchemy import select
@@ -17,8 +20,21 @@ from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    MACOS_FILE_INTEGRITY_CONTRACT_VERSION,
+    MacOSFileIntegrityGuard,
+    assert_macos_file_integrity_capability,
+    probe_macos_file_integrity,
+)
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.core.type_defs import float_value, mapping_dict, object_dict, object_list
+from mediaforce.core.type_defs import float_value, int_value, mapping_dict, object_dict, object_list
+from mediaforce.core.utils import (
+    descriptor_content_version_fingerprint,
+    descriptor_sha256,
+    file_stat_signature,
+)
+from mediaforce.encoding.helpers import resolve_item_source_path
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.execution import (
     build_svt_params,
@@ -29,6 +45,7 @@ from mediaforce.execution import (
 )
 from mediaforce.library.media_scopes import media_group_scope_for_rel_path
 from mediaforce.library.planner import build_manifest_item
+from mediaforce.hosts.config import host_media_access_for_host
 from mediaforce.review import (
     default_review_timestamps,
     encode_preview_clips,
@@ -110,6 +127,314 @@ from mediaforce.web.runtime_lock import (
 
 
 AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES = 5 * 1024 ** 3
+_AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY = "source-snapshots"
+_AV1_VALIDATION_DERIVATION_COPY_CHUNK_BYTES = 4 * 1024 * 1024
+_AV1_VALIDATION_DERIVATION_HOST_DATA = {
+    "key": "av1-derivation-local",
+    "label": "AV1 derivation local",
+    "mode": "local",
+    "media_access": "direct",
+}
+_AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FILES = (
+    "core/file_integrity.py",
+    "core/utils.py",
+    "tuning/av1_validation_partition.py",
+    "tuning/av1_validation_partition_inventory.py",
+    "tuning/av1_validation_derivation.py",
+    "web/runtime/av1_validation_derivation.py",
+    "web/runtime/calibration_runtime.py",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PinnedDerivationSource:
+    path: Path
+    content_version_fingerprint: str
+    content_sha256: str
+    size_bytes: int
+    device: int
+    inode: int
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        count = os.write(descriptor, view[written:])
+        if count <= 0:
+            raise OSError("AV1 derivation source snapshot write did not progress")
+        written += count
+
+
+def _prepare_owner_only_directory(path: Path, *, label: str) -> Path:
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    try:
+        path_info = path.lstat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation {label} directory is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(path_info.st_mode)
+        or path_info.st_uid != os.getuid()
+        or path_info.st_mode & 0o077
+    ):
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation {label} directory must be owner-only"
+        )
+    return path
+
+
+def _remove_owner_only_tree(path: Path) -> None:
+    try:
+        path_info = path.lstat()
+    except FileNotFoundError:
+        return
+    if path_info.st_uid != os.getuid():
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot tree must be owned by the current user"
+        )
+    if stat.S_ISREG(path_info.st_mode):
+        path.chmod(0o600, follow_symlinks=False)
+        path.unlink()
+        return
+    if not stat.S_ISDIR(path_info.st_mode):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot tree must not contain links or special files"
+        )
+    path.chmod(0o700, follow_symlinks=False)
+    for child in path.iterdir():
+        _remove_owner_only_tree(child)
+    path.rmdir()
+
+
+def _purge_derivation_source_snapshots(artifact_root: Path) -> None:
+    _remove_owner_only_tree(
+        artifact_root / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY
+    )
+
+
+def _assert_pinned_source_guard_quiet(
+        guard: MacOSFileIntegrityGuard,
+) -> None:
+    try:
+        guard.assert_quiet()
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation pinned source changed during media execution"
+        ) from exc
+
+
+def _validate_pinned_derivation_source(
+        pinned: _PinnedDerivationSource,
+        *,
+        descriptor: int,
+        process_controller: ManagedProcessController,
+) -> None:
+    descriptor_info = os.fstat(descriptor)
+    try:
+        path_info = pinned.path.lstat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation pinned source path is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISREG(descriptor_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or path_info.st_uid != os.getuid()
+        or path_info.st_mode & 0o377
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (pinned.device, pinned.inode)
+        or (path_info.st_dev, path_info.st_ino)
+        != (pinned.device, pinned.inode)
+        or descriptor_info.st_nlink != 1
+        or path_info.st_nlink != 1
+        or descriptor_info.st_size != pinned.size_bytes
+        or descriptor_content_version_fingerprint(
+            descriptor,
+            size_bytes=pinned.size_bytes,
+        ) != pinned.content_version_fingerprint
+        or descriptor_sha256(
+            descriptor,
+            check_cancelled=process_controller.throw_if_cancelled,
+        ) != pinned.content_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation pinned source changed during media execution"
+        )
+
+
+@contextmanager
+def _pinned_derivation_source(
+        *,
+        artifact_root: Path,
+        assignment_id: str,
+        source_path: Path,
+        expected_content_version_fingerprint: str,
+        expected_source_sha256: str,
+        expected_size_bytes: int,
+        process_controller: ManagedProcessController,
+) -> Iterator[_PinnedDerivationSource]:
+    snapshot_root = _prepare_owner_only_directory(
+        artifact_root / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY,
+        label="source-snapshot",
+    )
+    assignment_root = snapshot_root / assignment_id
+    if assignment_root.exists():
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot already exists for this assignment"
+        )
+    _prepare_owner_only_directory(
+        assignment_root,
+        label="assignment source-snapshot",
+    )
+    snapshot_path = assignment_root / "source-media"
+    source_descriptor = -1
+    snapshot_descriptor = -1
+    snapshot_guard: MacOSFileIntegrityGuard | None = None
+    try:
+        source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            source_descriptor = os.open(source_path, source_flags)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source could not be opened without following links"
+            ) from exc
+        source_initial = os.fstat(source_descriptor)
+        try:
+            source_path_info = source_path.lstat()
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source path could not be verified"
+            ) from exc
+        if (
+            not stat.S_ISREG(source_initial.st_mode)
+            or not stat.S_ISREG(source_path_info.st_mode)
+            or (source_initial.st_dev, source_initial.st_ino)
+            != (source_path_info.st_dev, source_path_info.st_ino)
+            or source_initial.st_size != expected_size_bytes
+            or expected_size_bytes <= 0
+            or descriptor_content_version_fingerprint(
+                source_descriptor,
+                size_bytes=source_initial.st_size,
+            ) != expected_content_version_fingerprint
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source bytes drifted from the frozen reservation"
+            )
+        if (
+            shutil.disk_usage(snapshot_root).free
+            < source_initial.st_size + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
+        ):
+            raise OSError("AV1 derivation source snapshot storage floor is not available")
+        snapshot_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        snapshot_flags |= getattr(os, "O_NOFOLLOW", 0)
+        snapshot_descriptor = os.open(snapshot_path, snapshot_flags, 0o600)
+        digest = hashlib.sha256()
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        while True:
+            process_controller.throw_if_cancelled()
+            chunk = os.read(
+                source_descriptor,
+                _AV1_VALIDATION_DERIVATION_COPY_CHUNK_BYTES,
+            )
+            if not chunk:
+                break
+            digest.update(chunk)
+            _write_all(snapshot_descriptor, chunk)
+        os.fsync(snapshot_descriptor)
+        source_final = os.fstat(source_descriptor)
+        try:
+            source_path_final = source_path.lstat()
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source path changed during snapshot creation"
+            ) from exc
+        snapshot_info = os.fstat(snapshot_descriptor)
+        copied_sha256 = f"sha256:{digest.hexdigest()}"
+        if (
+            file_stat_signature(source_initial)
+            != file_stat_signature(source_final)
+            or (source_final.st_dev, source_final.st_ino)
+            != (source_path_final.st_dev, source_path_final.st_ino)
+            or not stat.S_ISREG(source_path_final.st_mode)
+            or snapshot_info.st_size != source_initial.st_size
+            or descriptor_content_version_fingerprint(
+                snapshot_descriptor,
+                size_bytes=snapshot_info.st_size,
+            ) != expected_content_version_fingerprint
+            or descriptor_sha256(
+                snapshot_descriptor,
+                check_cancelled=process_controller.throw_if_cancelled,
+            ) != copied_sha256
+            or copied_sha256 != expected_source_sha256
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source changed while its snapshot was created"
+            )
+        os.fchmod(snapshot_descriptor, 0o400)
+        os.fsync(snapshot_descriptor)
+        assignment_root.chmod(0o500, follow_symlinks=False)
+        os.close(snapshot_descriptor)
+        snapshot_descriptor = os.open(
+            snapshot_path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        reopened_snapshot_info = os.fstat(snapshot_descriptor)
+        if (
+            reopened_snapshot_info.st_dev != snapshot_info.st_dev
+            or reopened_snapshot_info.st_ino != snapshot_info.st_ino
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source snapshot changed before monitoring"
+            )
+        try:
+            snapshot_guard = MacOSFileIntegrityGuard(
+                path=snapshot_path,
+                descriptor=snapshot_descriptor,
+                require_single_link=True,
+            )
+        except FileIntegrityError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source snapshot monitoring is unavailable"
+            ) from exc
+        pinned = _PinnedDerivationSource(
+            path=snapshot_guard.path,
+            content_version_fingerprint=expected_content_version_fingerprint,
+            content_sha256=copied_sha256,
+            size_bytes=int(snapshot_info.st_size),
+            device=int(snapshot_info.st_dev),
+            inode=int(snapshot_info.st_ino),
+        )
+        _validate_pinned_derivation_source(
+            pinned,
+            descriptor=snapshot_descriptor,
+            process_controller=process_controller,
+        )
+        _assert_pinned_source_guard_quiet(snapshot_guard)
+        try:
+            yield pinned
+        finally:
+            _assert_pinned_source_guard_quiet(snapshot_guard)
+            _validate_pinned_derivation_source(
+                pinned,
+                descriptor=snapshot_descriptor,
+                process_controller=process_controller,
+            )
+            _assert_pinned_source_guard_quiet(snapshot_guard)
+    finally:
+        if snapshot_guard is not None:
+            snapshot_guard.close()
+        if snapshot_descriptor >= 0:
+            os.close(snapshot_descriptor)
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        _purge_derivation_source_snapshots(artifact_root)
 
 
 def av1_validation_derivation_runtime_context_sha256(
@@ -123,10 +448,39 @@ def av1_validation_derivation_runtime_context_sha256(
     return f"sha256:{hashlib.sha256(canonical_json_bytes(payload)).hexdigest()}"
 
 
+def _av1_validation_derivation_implementation_sha256() -> str:
+    package_root = Path(__file__).resolve().parents[2]
+    try:
+        file_digests = {
+            relative_path: f"sha256:{hashlib.sha256(
+                (package_root / relative_path).read_bytes()
+            ).hexdigest()}"
+            for relative_path in _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FILES
+        }
+        python_sha256 = f"sha256:{hashlib.sha256(
+            Path(sys.executable).resolve(strict=True).read_bytes()
+        ).hexdigest()}"
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation implementation identity is unavailable"
+        ) from exc
+    return f"sha256:{hashlib.sha256(canonical_json_bytes({
+        'files': file_digests,
+        'python_sha256': python_sha256,
+        'python_version': platform.python_version(),
+    })).hexdigest()}"
+
+
 def av1_validation_derivation_execution_environment_sha256(
         *,
         quality_metric: str,
 ) -> str:
+    try:
+        assert_macos_file_integrity_capability()
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source-integrity monitoring is unavailable"
+        ) from exc
     toolchain = quality_toolchain_identity(quality_metric=quality_metric)
     if toolchain.get("status") != "available":
         raise AV1ValidationDerivationError(
@@ -139,7 +493,9 @@ def av1_validation_derivation_execution_environment_sha256(
             "machine": platform.machine(),
             "node": platform.node(),
         },
+        "implementation_sha256": _av1_validation_derivation_implementation_sha256(),
         "quality_metric": quality_metric.strip().casefold(),
+        "source_integrity_contract": MACOS_FILE_INTEGRITY_CONTRACT_VERSION,
         "toolchain": toolchain,
     }
     return f"sha256:{hashlib.sha256(canonical_json_bytes(payload)).hexdigest()}"
@@ -173,7 +529,7 @@ def assert_av1_validation_derivation_execution_environment(
         != plan.authorization.execution_environment_sha256
     ):
         raise AV1ValidationDerivationError(
-            "AV1 derivation machine or toolchain drifted after authorization"
+            "AV1 derivation execution environment drifted after authorization"
         )
 
 
@@ -419,13 +775,15 @@ def _run_av1_validation_derivation_assignment_locked(
         )
     clock = now_iso or _now_iso
     recovery_completed_at = clock()
-    if _recover_interrupted_derivation_state(
+    interrupted_state_recovered = _recover_interrupted_derivation_state(
         plan=plan,
         partition=partition,
         attempts_directory=attempts_directory,
         terminal_records_directory=terminal_records_directory,
         completed_at=recovery_completed_at,
-    ):
+    )
+    _purge_derivation_source_snapshots(artifact_root)
+    if interrupted_state_recovered:
         raise AV1ValidationDerivationError(
             "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
         )
@@ -449,6 +807,12 @@ def _run_av1_validation_derivation_assignment_locked(
     )
     if source is None:
         raise AV1ValidationDerivationError("AV1 derivation source is absent from the partition")
+    try:
+        probe_macos_file_integrity(artifact_root)
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source-integrity probe failed before assignment claim"
+        ) from exc
     _assert_next_assignment(
         plan=plan,
         assignment_id=assignment.assignment_id,
@@ -500,28 +864,45 @@ def _run_av1_validation_derivation_assignment_locked(
                 run_deps.staged_artifact_columns,
             )
             staged_snapshot_taken = True
+        host_data = dict(_AV1_VALIDATION_DERIVATION_HOST_DATA)
+        source_path = resolve_item_source_path(
+            config,
+            sample_item,
+            host=host_data,
+            host_media_access_for_host=host_media_access_for_host,
+        )
         prefix = _derivation_prefix(config, sample_item)
         calibration_run_id = _run_id(plan.plan_id, assignment.assignment_id, started_at)
         review_root = _prepare_derivation_review_root(artifact_root)
         calibration_config = _config_with_review_directory(config, review_root)
-        payload, _ = run_sampled_calibration(
-            config=calibration_config,
-            prefix=prefix,
-            action="av1_derivation",
-            host_data={
-                "key": "av1-derivation-local",
-                "label": "AV1 derivation local",
-                "mode": "local",
-                "media_access": "direct",
-            },
-            notes="Bounded AV1 v2 derivation observation",
-            policy=object_dict(sample_item.get("resolved_policy")),
-            seed_metadata=None,
-            sample_item=sample_item,
-            calibration_run_id=calibration_run_id,
+        with _pinned_derivation_source(
+            artifact_root=artifact_root,
+            assignment_id=assignment.assignment_id,
+            source_path=source_path,
+            expected_content_version_fingerprint=source.source_identity,
+            expected_source_sha256=assignment.source_sha256,
+            expected_size_bytes=int_value(sample_item.get("source_size_bytes")),
             process_controller=controller,
-            deps=run_deps,
-        )
+        ) as pinned_source:
+            sample_item["source_snapshot_sha256"] = pinned_source.content_sha256
+            sample_item["source_snapshot_size_bytes"] = pinned_source.size_bytes
+            sample_item["source_snapshot_content_version_fingerprint"] = (
+                pinned_source.content_version_fingerprint
+            )
+            payload, _ = run_sampled_calibration(
+                config=calibration_config,
+                prefix=prefix,
+                action="av1_derivation",
+                host_data=host_data,
+                notes="Bounded AV1 v2 derivation observation",
+                policy=object_dict(sample_item.get("resolved_policy")),
+                seed_metadata=None,
+                sample_item=sample_item,
+                calibration_run_id=calibration_run_id,
+                process_controller=controller,
+                deps=run_deps,
+                source_path_override=pinned_source.path,
+            )
         assert_av1_validation_derivation_execution_contract(manifest, plan)
         _secure_derivation_review_media(review_root)
         current_review_fingerprint = _current_derivation_review_artifact_fingerprint(

@@ -236,10 +236,42 @@ review clips are redirected beneath the partition-global private artifact root;
 their directory is `0700`, files are `0600`, and verdict-time identity checks
 use no-follow file descriptors:
 
+Private partition creation first performs logical selection without hashing the
+broader eligible library. It then handles only the selected holdout and
+derivation sources: each selected file is opened with no-follow semantics,
+guarded together with its canonical pathname ancestors, fully SHA-256 hashed,
+and re-analyzed with the current media-fingerprint toolchain. The fresh
+canonical fingerprint summary must exactly reproduce the immutable evidence
+digest used for selection. A changed unsampled byte therefore cannot preserve
+stale traits while acquiring a new frozen digest. The selected source SHA-256
+is private assignment data and contributes to the inventory lock, derivation
+partition, authorization, and plan digests; public summaries never expose it.
+Older private partitions without this binding fail closed.
+
+After the immutable assignment claim and before crop, search, encode, or review
+work, the runtime opens the assigned source with no-follow semantics, verifies
+its inode, size, sampled identity, and frozen full SHA-256, and copies the
+complete file into a private owner-only snapshot under the canonical artifact
+root. It records the snapshot's full SHA-256 and size in the immutable
+calibration payload, closes the writable descriptor, reopens the snapshot
+read-only, and routes every source read through that canonical snapshot path
+rather than the mutable library path. A macOS kqueue guard watches the snapshot
+vnode and every canonical pathname ancestor throughout media work; write,
+extend, attribute, hardlink, delete, rename, or revoke activity is latched even
+if bytes or names are later restored. The snapshot must keep one link, the
+source and snapshot identities are rechecked, and final guard validation runs
+even when media work raises. Creating the snapshot requires free space for the
+complete source plus the existing five-gibibyte safety floor. Snapshots are
+removed after the attempt; crash leftovers are purged under the runtime lock
+when interruption recovery terminalizes the owned assignment.
+
 The authorization binds the resolved database, review, and state roots together
-with the current machine, AV1 encoder/metric toolchain, and merged statistical
-contract. It also binds SHA-256 digests of the canonical Every Code executable
-path and binary without persisting or printing the private path. Assignment
+with the current machine, Python executable, relevant Mediaforce implementation
+files, AV1 encoder/metric toolchain, source-integrity guard contract, and merged
+statistical contract. It also binds SHA-256 digests of the canonical Every Code
+executable path and binary without persisting or printing the private path. A
+real same-filesystem kqueue mutation probe must pass before the immutable
+assignment claim is written. Assignment
 execution holds the same exclusive runtime lock as
 `mediaforce-web`, so web, staging, database, and cleanup work cannot overlap the
 bounded derivation case. Machine or toolchain drift before the claim or after

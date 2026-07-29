@@ -4373,6 +4373,7 @@ def _run_sampled_calibration(
         sample_item: dict[str, Any],
         calibration_run_id: str,
         process_controller: ManagedProcessController,
+        source_path_override: Path | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     return runtime_run_sampled_calibration(
         config=config,
@@ -4386,6 +4387,7 @@ def _run_sampled_calibration(
         calibration_run_id=calibration_run_id,
         process_controller=process_controller,
         deps=_calibration_run_deps(),
+        source_path_override=source_path_override,
     )
 
 
