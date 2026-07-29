@@ -15,7 +15,12 @@ import tempfile
 from typing import cast, Iterator, Sequence, TypeAlias
 import uuid
 
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
+from mediaforce.core.config import (
+    DEFAULT_CONFIG_PATH,
+    MediaforceConfig,
+    load_config,
+    migrate_config_state,
+)
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
@@ -94,7 +99,7 @@ from mediaforce.tuning.av1_validation_partition import (
     av1_validation_partition_key_id,
     av1_validation_partition_public_summary,
     build_av1_validation_private_partition,
-    create_av1_validation_partition_key,
+    ensure_av1_validation_partition_key,
     load_av1_validation_partition_key,
     load_av1_validation_private_partition,
     validate_av1_validation_partition_current_inputs,
@@ -102,6 +107,7 @@ from mediaforce.tuning.av1_validation_partition import (
     write_av1_validation_private_partition,
 )
 from mediaforce.tuning.av1_validation_partition_inventory import (
+    AV1ValidationPartitionSourceSHA256Session,
     av1_validation_partition_source_sha256_resolver,
     load_av1_validation_partition_inventory,
 )
@@ -177,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create one owner-only machine-local key for the private v2 source partition",
     )
     create_key.add_argument("key", type=Path)
+    create_key.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     create_key.add_argument("--json", action="store_true", dest="json_output")
 
     build_partition = actions.add_parser(
@@ -322,9 +329,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.action == "create-partition-key":
             assert_private_artifact_path(args.key, repository_root=REPOSITORY_ROOT)
-            token_key_id = create_av1_validation_partition_key(args.key)
+            config = load_config(args.config)
+            try:
+                with exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "av1-partition-key-create"},
+                ):
+                    migrate_config_state(config)
+                    token_key_id, created = ensure_av1_validation_partition_key(
+                        args.key
+                    )
+            except MediaforceRuntimeBusyError as exc:
+                raise AV1ValidationPartitionError(
+                    "AV1 partition key creation requires the Mediaforce runtime to be paused"
+                ) from exc
             payload = {
-                "created": True,
+                "created": created,
                 "token_key_id": token_key_id,
                 "runtime_execution_authorized": False,
                 "derivation_execution_authorized": False,
@@ -410,10 +430,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         AV1ValidationPartitionError,
         AV1ValidationV2Error,
         json.JSONDecodeError,
-        TypeError,
-        ValueError,
     ) as exc:
         print(f"AV1 cold-start validation failed: {exc}", file=sys.stderr)
+        return 1
+    except (TypeError, ValueError):
+        print(
+            "AV1 cold-start validation failed: private or repository input is invalid",
+            file=sys.stderr,
+        )
         return 1
 
 
@@ -428,28 +452,43 @@ def _run_partition_action(args: argparse.Namespace) -> int:
     if args.action == "build-partition":
         assert_private_artifact_path(args.output, repository_root=REPOSITORY_ROOT)
         config = load_config(args.config)
-        with open_readonly_db(config.paths.db_path) as connection:
-            inventory = load_av1_validation_partition_inventory(
-                connection,
-                config=config,
-            )
-            with av1_validation_partition_source_sha256_resolver(
-                connection,
-                config=config,
-                verify_evidence=True,
-            ) as source_sha256_resolver:
-                partition = build_av1_validation_private_partition(
-                    manifest=manifest,
-                    eligibility_attestation_id=eligibility.attestation_id,
-                    eligibility_payload_sha256=eligibility.payload_sha256,
-                    sources=inventory.sources,
-                    expectations=inventory.expectations,
-                    token_key=token_key,
-                    expected_token_key_id=args.expected_token_key_id,
-                    selected_at=args.selected_at,
-                    source_sha256_resolver=source_sha256_resolver,
-                )
-                write_av1_validation_private_partition(args.output, partition)
+        try:
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "av1-partition-build"},
+            ):
+                migrate_config_state(config)
+                with open_readonly_db(config.paths.db_path) as connection:
+                    inventory = load_av1_validation_partition_inventory(
+                        connection,
+                        config=config,
+                    )
+                    with av1_validation_partition_source_sha256_resolver(
+                        connection,
+                        config=config,
+                        verify_evidence=True,
+                    ) as source_sha256_resolver:
+                        partition = build_av1_validation_private_partition(
+                            manifest=manifest,
+                            eligibility_attestation_id=eligibility.attestation_id,
+                            eligibility_payload_sha256=eligibility.payload_sha256,
+                            sources=inventory.sources,
+                            expectations=inventory.expectations,
+                            token_key=token_key,
+                            expected_token_key_id=args.expected_token_key_id,
+                            selected_at=args.selected_at,
+                            source_sha256_resolver=source_sha256_resolver,
+                        )
+                        source_sha256_resolver.verify()
+                        write_av1_validation_private_partition(
+                            args.output,
+                            partition,
+                            before_publish=source_sha256_resolver.assert_quiet,
+                        )
+        except MediaforceRuntimeBusyError as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition build requires the Mediaforce runtime to be paused"
+            ) from exc
     else:
         assert_private_artifact_path(args.partition, repository_root=REPOSITORY_ROOT)
         partition = load_av1_validation_private_partition(args.partition)
@@ -480,6 +519,7 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                     token_key=token_key,
                     source_sha256_resolver=source_sha256_resolver,
                 )
+                source_sha256_resolver.verify()
     _print_partition_payload(
         av1_validation_partition_public_summary(partition),
         json_output=args.json_output,
@@ -506,6 +546,7 @@ def _run_derivation_action(
                     "action": str(args.action),
                 },
             ):
+                migrate_config_state(config)
                 return _run_derivation_action_body(
                     args,
                     locked_config=config,
@@ -764,7 +805,7 @@ def _run_derivation_plan_action(
     with _load_current_derivation_inputs(
         args,
         config=config,
-    ) as (manifest, partition, _token_key):
+    ) as (manifest, partition, _token_key, source_sha256_session):
         runtime_context_sha256 = (
             av1_validation_derivation_runtime_context_sha256(config)
         )
@@ -792,60 +833,87 @@ def _run_derivation_plan_action(
             _review_runner_bytes,
         ) = _review_runner_identity()
         if args.action == "create-derivation-plan":
-            authorization = build_av1_validation_v2_derivation_authorization(
-                manifest=manifest,
-                selection_lock_sha256=partition.selection_lock_sha256,
-                derivation_partition_sha256=partition.derivation_partition_sha256,
-                runtime_context_sha256=runtime_context_sha256,
-                execution_environment_sha256=execution_environment_sha256,
-                statistics_contract_sha256=statistics_contract_sha256,
-                review_runner_canonical_path_sha256=(
-                    review_runner_canonical_path_sha256
-                ),
-                review_runner_binary_sha256=review_runner_binary_sha256,
-                authorized_at=_now_iso(),
-                valid_until=args.valid_until,
+            artifact_root = (
+                config.paths.web_state_dir
+                / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+                / partition.partition_id
+            ).expanduser().resolve()
+            assert_private_artifact_path(
+                artifact_root,
+                repository_root=REPOSITORY_ROOT,
             )
-            plan = build_av1_validation_derivation_plan(
-                manifest=manifest,
-                partition=partition,
-                authorization=authorization,
-                runtime_context_sha256=runtime_context_sha256,
-            )
-            artifact_root = _derivation_artifact_root_for_plan(
-                config=config,
-                plan=plan,
-            )
-            write_av1_validation_derivation_plan(artifact_root, plan)
+            existing_plan_path = artifact_root / "plan.json"
+            if existing_plan_path.exists() or existing_plan_path.is_symlink():
+                plan = load_av1_validation_derivation_plan(existing_plan_path)
+                if plan.authorization.valid_until != args.valid_until:
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation plan retry changed the authorization window"
+                    )
+            else:
+                root_binding_path = artifact_root / ".binding"
+                if root_binding_path.exists() or root_binding_path.is_symlink():
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation root binding exists without its immutable plan"
+                    )
+                authorization = build_av1_validation_v2_derivation_authorization(
+                    manifest=manifest,
+                    selection_lock_sha256=partition.selection_lock_sha256,
+                    derivation_partition_sha256=partition.derivation_partition_sha256,
+                    runtime_context_sha256=runtime_context_sha256,
+                    execution_environment_sha256=execution_environment_sha256,
+                    statistics_contract_sha256=statistics_contract_sha256,
+                    review_runner_canonical_path_sha256=(
+                        review_runner_canonical_path_sha256
+                    ),
+                    review_runner_binary_sha256=review_runner_binary_sha256,
+                    authorized_at=_now_iso(),
+                    valid_until=args.valid_until,
+                )
+                plan = build_av1_validation_derivation_plan(
+                    manifest=manifest,
+                    partition=partition,
+                    authorization=authorization,
+                    runtime_context_sha256=runtime_context_sha256,
+                )
+                artifact_root = _derivation_artifact_root_for_plan(
+                    config=config,
+                    plan=plan,
+                )
         else:
             plan, _artifact_root = _load_canonical_derivation_plan(
                 plan_path=args.plan,
                 config_path=args.config,
                 config=config,
             )
-            if (
-                plan.authorization.execution_environment_sha256
-                != execution_environment_sha256
-                or plan.authorization.statistics_contract_sha256
-                != statistics_contract_sha256
-                or plan.authorization.review_runner_canonical_path_sha256
-                != review_runner_canonical_path_sha256
-                or plan.authorization.review_runner_binary_sha256
-                != review_runner_binary_sha256
-            ):
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation plan execution contract drifted"
-                )
-            rebuilt = build_av1_validation_derivation_plan(
-                manifest=manifest,
-                partition=partition,
-                authorization=plan.authorization,
-                runtime_context_sha256=runtime_context_sha256,
+        if (
+            plan.authorization.execution_environment_sha256
+            != execution_environment_sha256
+            or plan.authorization.statistics_contract_sha256
+            != statistics_contract_sha256
+            or plan.authorization.review_runner_canonical_path_sha256
+            != review_runner_canonical_path_sha256
+            or plan.authorization.review_runner_binary_sha256
+            != review_runner_binary_sha256
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation plan execution contract drifted"
             )
-            if rebuilt != plan:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation plan does not match current locked inputs"
-                )
+        rebuilt = build_av1_validation_derivation_plan(
+            manifest=manifest,
+            partition=partition,
+            authorization=plan.authorization,
+            runtime_context_sha256=runtime_context_sha256,
+        )
+        if rebuilt != plan:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation plan does not match current locked inputs"
+            )
+        if args.action == "create-derivation-plan":
+            write_av1_validation_derivation_plan(
+                artifact_root,
+                plan,
+                before_publish=source_sha256_session.assert_quiet,
+            )
         _print_partition_payload(
             av1_validation_derivation_plan_public_summary(plan),
             json_output=args.json_output,
@@ -872,7 +940,7 @@ def _run_derivation_proposal_action(
         key_path=args.key,
         config_path=args.config,
         config=config,
-    ) as partition:
+    ) as (partition, source_sha256_session):
         plan, artifact_root = _load_canonical_derivation_plan(
             plan_path=args.plan,
             config_path=args.config,
@@ -912,6 +980,7 @@ def _run_derivation_proposal_action(
             artifact_root,
             plan=plan,
             proposal=evaluation.proposal,
+            before_publish=source_sha256_session.assert_quiet,
         )
         return 0
 
@@ -921,7 +990,12 @@ def _load_current_derivation_inputs(
         args: argparse.Namespace,
         *,
         config: MediaforceConfig | None = None,
-) -> Iterator[tuple[AV1ValidationManifestV2, AV1ValidationPrivatePartition, bytes]]:
+) -> Iterator[tuple[
+    AV1ValidationManifestV2,
+    AV1ValidationPrivatePartition,
+    bytes,
+    AV1ValidationPartitionSourceSHA256Session,
+]]:
     for path in (args.eligibility, args.partition, args.key):
         assert_private_artifact_path(path, repository_root=REPOSITORY_ROOT)
     manifest = load_av1_validation_manifest_v2(args.manifest)
@@ -953,7 +1027,8 @@ def _load_current_derivation_inputs(
                 token_key=token_key,
                 source_sha256_resolver=source_sha256_resolver,
             )
-            yield manifest, partition, token_key
+            source_sha256_resolver.verify()
+            yield manifest, partition, token_key, source_sha256_resolver
 
 
 @contextmanager
@@ -964,7 +1039,10 @@ def _load_derivation_partition_for_evaluation(
         key_path: Path,
         config_path: Path,
         config: MediaforceConfig | None = None,
-) -> Iterator[AV1ValidationPrivatePartition]:
+) -> Iterator[tuple[
+    AV1ValidationPrivatePartition,
+    AV1ValidationPartitionSourceSHA256Session,
+]]:
     partition = load_av1_validation_private_partition(partition_path)
     token_key = load_av1_validation_partition_key(key_path)
     validate_av1_validation_private_partition(
@@ -990,7 +1068,8 @@ def _load_derivation_partition_for_evaluation(
                 token_key=token_key,
                 source_sha256_resolver=source_sha256_resolver,
             )
-            yield partition
+            source_sha256_resolver.verify()
+            yield partition, source_sha256_resolver
 
 
 def _derivation_artifact_root_for_plan(

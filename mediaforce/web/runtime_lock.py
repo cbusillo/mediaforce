@@ -17,7 +17,7 @@ class MediaforceRuntimeBusyError(RuntimeError):
 
 
 _RUNTIME_NAMESPACE_PORT_MIN = 20_000
-_RUNTIME_NAMESPACE_PORT_SPAN = 45_000
+_RUNTIME_NAMESPACE_PORT_SPAN = 29_000
 
 
 def mediaforce_runtime_lock_path(config: MediaforceConfig) -> Path:

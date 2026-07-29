@@ -7,7 +7,12 @@ from typing import Any, Sequence
 
 from sqlalchemy import select
 
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
+from mediaforce.core.config import (
+    DEFAULT_CONFIG_PATH,
+    MediaforceConfig,
+    load_config,
+    migrate_config_state,
+)
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
@@ -294,7 +299,7 @@ def _run_locked_command(
         args: argparse.Namespace,
         config: MediaforceConfig,
 ) -> int:
-
+    migrate_config_state(config)
     purge_transient_artifacts(config)
     default_review_dir = config.paths.review_dir
 

@@ -840,12 +840,16 @@ class MovieWorkflowTests(unittest.TestCase):
         def purge(_config: MediaforceConfig) -> None:
             self.assertTrue(lock_held)
 
+        def migrate(_config: MediaforceConfig) -> None:
+            self.assertTrue(lock_held)
+
         with (
             patch("mediaforce.cli.load_config", return_value=self.config),
             patch(
                 "mediaforce.cli.exclusive_mediaforce_runtime_lock",
                 side_effect=runtime_lock,
             ),
+            patch("mediaforce.cli.migrate_config_state", side_effect=migrate),
             patch("mediaforce.cli.purge_transient_artifacts", side_effect=purge),
         ):
             exit_code = cli_main([

@@ -42,8 +42,8 @@ from mediaforce.tuning.quality_shadow import (
     quality_shadow_public_view,
     select_latest_quality_shadow_observation,
 )
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, update_runtime_settings, \
-    update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
+from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
+    update_runtime_settings, update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
@@ -2215,6 +2215,7 @@ def main(argv: list[str] | None = None) -> None:
     settings = _web_startup_settings(args)
     config = load_config(settings.config_path)
     with _exclusive_web_server_lock(config, settings):
+        migrate_config_state(config)
         if settings.reload_enabled:
             os.environ["MEDIAFORCE_CONFIG_PATH"] = str(config.paths.config_path)
             uvicorn.run(
@@ -2306,11 +2307,6 @@ def _web_server_lock_payload(config: MediaforceConfig, settings: WebStartupSetti
 
 def _web_server_lock_owner(lock_path: Path) -> str | None:
     return mediaforce_runtime_lock_owner(lock_path)
-
-
-def _remove_web_server_lock(lock_path: Path) -> None:
-    if lock_path.exists():
-        lock_path.write_text("", encoding="utf-8")
 
 
 def create_reloadable_app() -> FastAPI:

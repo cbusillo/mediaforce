@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import ctypes
 from dataclasses import dataclass
+import errno
+import fcntl
 import os
 from pathlib import Path
 import platform
 import secrets
 import select as select_module
 import stat
+import sys
 from typing import Any
 
 
@@ -30,6 +34,54 @@ _REQUIRED_KQUEUE_NAMES = (
 
 class FileIntegrityError(RuntimeError):
     pass
+
+
+def fsync_durable_file(descriptor: int) -> None:
+    os.fsync(descriptor)
+    if sys.platform == "darwin":
+        full_fsync = getattr(fcntl, "F_FULLFSYNC", None)
+        if full_fsync is None:
+            raise OSError(errno.ENOTSUP, "full artifact fsync is unavailable")
+        fcntl.fcntl(descriptor, full_fsync)
+
+
+def rename_exclusive(
+        *,
+        source_directory_descriptor: int,
+        source_name: str,
+        destination_directory_descriptor: int,
+        destination_name: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename_function = getattr(libc, "renameatx_np", None)
+        rename_flags = 0x00000004
+    elif sys.platform.startswith("linux"):
+        rename_function = getattr(libc, "renameat2", None)
+        rename_flags = 0x00000001
+    else:
+        rename_function = None
+        rename_flags = 0
+    if rename_function is None:
+        raise OSError(errno.ENOTSUP, "exclusive atomic rename is unavailable")
+    rename_function.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename_function.restype = ctypes.c_int
+    result = rename_function(
+        source_directory_descriptor,
+        os.fsencode(source_name),
+        destination_directory_descriptor,
+        os.fsencode(destination_name),
+        rename_flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
 
 
 @dataclass(frozen=True, slots=True)

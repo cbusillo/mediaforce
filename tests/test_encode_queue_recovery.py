@@ -13,8 +13,9 @@ import tempfile
 import threading
 import tomllib
 import unittest
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -6349,6 +6350,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
         self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
+
+    def test_main_migrates_state_after_web_server_lock(self) -> None:
+        lock_held = False
+
+        @contextmanager
+        def runtime_lock(
+                _config: MediaforceConfig,
+                _settings: web_app.WebStartupSettings,
+        ) -> Iterator[None]:
+            nonlocal lock_held
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+        def migrate(_config: MediaforceConfig) -> None:
+            self.assertTrue(lock_held)
+
+        with (
+            patch.dict(os.environ, {"MEDIAFORCE_WEB_RELOAD": "false"}, clear=True),
+            patch("mediaforce.web.app.load_config", return_value=self.config),
+            patch(
+                "mediaforce.web.app._exclusive_web_server_lock",
+                side_effect=runtime_lock,
+            ),
+            patch("mediaforce.web.app.migrate_config_state", side_effect=migrate),
+            patch("mediaforce.web.app.create_app", return_value=object()),
+            patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock,
+        ):
+            web_app.main([])
+
+        uvicorn_run_mock.assert_called_once()
+        self.assertFalse(lock_held)
 
     def test_main_uses_cli_config_path_for_reload_app(self) -> None:
         config = self.config

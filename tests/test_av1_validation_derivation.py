@@ -14,7 +14,7 @@ import stat
 import tempfile
 import threading
 from types import SimpleNamespace
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 import unittest
 from unittest.mock import call, patch
 
@@ -148,12 +148,35 @@ def _source_sha256(source: AV1ValidationPartitionSource) -> str:
     return f"sha256:{hashlib.sha256(source.source_identity.encode()).hexdigest()}"
 
 
+class _SourceSHA256Session:
+    def __init__(
+            self,
+            on_verify: Callable[[], None] | None = None,
+            on_quiet: Callable[[], None] | None = None,
+    ) -> None:
+        self._on_verify = on_verify
+        self._on_quiet = on_quiet
+
+    def __call__(self, source: AV1ValidationPartitionSource) -> str:
+        return _source_sha256(source)
+
+    def verify(self) -> None:
+        if self._on_verify is not None:
+            self._on_verify()
+
+    def assert_quiet(self) -> None:
+        if self._on_quiet is not None:
+            self._on_quiet()
+
+
 @contextmanager
 def _source_sha256_resolver_context(
         *_args: object,
         **_kwargs: object,
 ) -> Iterator[object]:
-    yield _source_sha256
+    session = _SourceSHA256Session()
+    yield session
+    session.assert_quiet()
 
 
 @contextmanager
@@ -228,6 +251,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         source_resolver_patcher.start()
         self.addCleanup(source_resolver_patcher.stop)
+        for migration_patcher in (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.migrate_config_state",
+            ),
+            patch(
+                "scripts.verify_av1_cold_start_preregistration.migrate_config_state",
+            ),
+        ):
+            migration_patcher.start()
+            self.addCleanup(migration_patcher.stop)
         for integrity_patcher in (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.assert_macos_file_integrity_capability",
@@ -542,8 +575,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 load_av1_validation_derivation_plan(plan_path)
             hardlink_path.unlink()
-            with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
-                write_av1_validation_derivation_plan(artifact_root, self.plan)
+            write_av1_validation_derivation_plan(artifact_root, self.plan)
 
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
@@ -559,14 +591,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             attempts_dir = root / "attempts"
             write_av1_validation_derivation_attempt(attempts_dir, attempt)
             self.assertEqual(load_av1_validation_derivation_attempts(attempts_dir), (attempt,))
-            with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
-                write_av1_validation_derivation_attempt(attempts_dir, attempt)
+            write_av1_validation_derivation_attempt(attempts_dir, attempt)
 
             records_dir = root / "records"
             write_av1_validation_derivation_terminal_record(records_dir, record)
             self.assertEqual(load_av1_validation_derivation_terminal_records(records_dir), (record,))
-            with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
-                write_av1_validation_derivation_terminal_record(records_dir, record)
+            write_av1_validation_derivation_terminal_record(records_dir, record)
 
     def test_artifact_root_rejects_final_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -579,7 +609,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             artifact_root.symlink_to(outside, target_is_directory=True)
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
-                "created safely",
+                "created safely|directory is unsafe",
             ):
                 write_av1_validation_derivation_plan(
                     artifact_root,
@@ -1073,7 +1103,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             nonlocal directory_fsyncs
             if stat.S_ISDIR(os.fstat(descriptor).st_mode):
                 directory_fsyncs += 1
-                if directory_fsyncs == 2:
+                if directory_fsyncs == 3:
                     raise OSError(errno.EIO, "directory fsync failed")
             real_fsync(descriptor)
 
@@ -2703,7 +2733,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
-            "another artifact set",
+            "another artifact set|immutable existing plan",
         ):
             write_av1_validation_derivation_plan(
                 self.runtime_artifact_root,
@@ -5117,7 +5147,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             finally:
                 events.append("db-exit")
 
-        def fail_terminal_intent(*_args: object) -> None:
+        def fail_terminal_intent(*_args: object, **_kwargs: object) -> None:
             events.append("observed-terminal-intent")
             raise AV1ValidationDerivationError("terminal write failed")
 
@@ -5616,8 +5646,23 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             events.append(label)
 
         def validate_current_inputs(*_args: object, **kwargs: object) -> None:
-            self.assertIs(kwargs.get("source_sha256_resolver"), _source_sha256)
+            self.assertIsInstance(
+                kwargs.get("source_sha256_resolver"),
+                _SourceSHA256Session,
+            )
             record_event("partition-current")
+
+        @contextmanager
+        def source_sha256_resolver_context(
+                *_args: object,
+                **_kwargs: object,
+        ) -> Iterator[object]:
+            session = _SourceSHA256Session(
+                on_verify=lambda: record_event("source-verify"),
+                on_quiet=lambda: record_event("source-quiet"),
+            )
+            yield session
+            session.assert_quiet()
 
         with (
             patch(
@@ -5642,6 +5687,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs",
                 side_effect=validate_current_inputs,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_partition_source_sha256_resolver",
+                side_effect=source_sha256_resolver_context,
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
@@ -5679,7 +5728,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_intent",
-                side_effect=lambda *_args, **_kwargs: record_event("terminal-intent"),
+                side_effect=lambda *_args, **kwargs: (
+                    kwargs["before_publish"]()
+                    or record_event("terminal-intent")
+                ),
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation",
@@ -5687,7 +5739,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record",
-                side_effect=lambda *_args, **_kwargs: record_event("terminal-record"),
+                side_effect=lambda *_args, **kwargs: (
+                    kwargs["before_publish"]()
+                    or record_event("terminal-record")
+                ),
             ),
         ):
             terminal = record_av1_validation_derivation_visual_verdict(
@@ -5717,8 +5772,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "verdict-intent",
             "db-append",
             "execution-contract",
+            "source-verify",
+            "source-quiet",
             "terminal-intent",
+            "source-quiet",
             "terminal-record",
+            "source-quiet",
             "db-exit",
             "lock-exit",
         ])
@@ -6508,15 +6567,31 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
             )
             stdout = io.StringIO()
+            retry_stdout = io.StringIO()
+            current_inputs = (
+                self.manifest,
+                self.partition,
+                self.token_key,
+                _SourceSHA256Session(),
+            )
+            argv = [
+                "create-derivation-plan",
+                str(V2_MANIFEST_PATH),
+                str(root / "eligibility.json"),
+                str(root / "partition.json"),
+                "--key",
+                str(root / "partition.key"),
+                "--valid-until",
+                VALID_UNTIL,
+                "--json",
+            ]
             with (
                 patch.object(
                     verify_av1_cold_start_preregistration,
                     "_load_current_derivation_inputs",
-                    return_value=_context_value((
-                        self.manifest,
-                        self.partition,
-                        self.token_key,
-                    )),
+                    side_effect=lambda *_args, **_kwargs: _context_value(
+                        current_inputs
+                    ),
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration,
@@ -6527,7 +6602,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     verify_av1_cold_start_preregistration,
                     "_now_iso",
                     return_value=AUTHORIZED_AT,
-                ),
+                ) as now_iso,
                 patch.object(
                     verify_av1_cold_start_preregistration,
                     "_review_runner_identity",
@@ -6538,21 +6613,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         REVIEW_RUNNER_BYTES,
                     ),
                 ),
-                redirect_stdout(stdout),
             ):
-                exit_code = verify_av1_cold_start_preregistration.main([
-                    "create-derivation-plan",
-                    str(V2_MANIFEST_PATH),
-                    str(root / "eligibility.json"),
-                    str(root / "partition.json"),
-                    "--key",
-                    str(root / "partition.key"),
-                    "--valid-until",
-                    VALID_UNTIL,
-                    "--json",
-                ])
+                with redirect_stdout(stdout):
+                    exit_code = verify_av1_cold_start_preregistration.main(argv)
+                with redirect_stdout(retry_stdout):
+                    retry_exit_code = verify_av1_cold_start_preregistration.main(argv)
             self.assertEqual(exit_code, 0)
+            self.assertEqual(retry_exit_code, 0)
+            now_iso.assert_called_once_with()
             payload = json.loads(stdout.getvalue())
+            self.assertEqual(json.loads(retry_stdout.getvalue()), payload)
             self.assertEqual(payload["derivation_assignment_count"], 24)
             plan_path = (
                 runtime_config.paths.web_state_dir
@@ -6561,6 +6631,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 / "plan.json"
             )
             self.assertTrue(plan_path.is_file())
+            self.assertEqual(
+                load_av1_validation_derivation_plan(plan_path).authorization.authorized_at,
+                AUTHORIZED_AT,
+            )
             serialized = json.dumps(payload)
             self.assertNotIn("local_item_id", serialized)
             self.assertNotIn("source_token", serialized)

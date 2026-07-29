@@ -18,7 +18,7 @@ from urllib.parse import unquote, urlparse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from mediaforce.core.config import MediaforceConfig, load_config
+from mediaforce.core.config import MediaforceConfig, load_config, migrate_config_state
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.core.evidence import canonical_json_bytes
@@ -105,6 +105,7 @@ from mediaforce.tuning.av1_validation_derivation import (
 from mediaforce.tuning.av1_validation_partition import (
     AV1ValidationPartitionError,
     AV1ValidationPrivatePartition,
+    av1_validation_partition_frozen_source_sha256_resolver,
     validate_av1_validation_partition_current_inputs,
     validate_av1_validation_private_partition,
 )
@@ -842,6 +843,7 @@ def run_av1_validation_derivation_assignment(
                 "assignment_id": assignment_id,
             },
         ):
+            migrate_config_state(config)
             return _run_av1_validation_derivation_assignment_locked(
                 config=config,
                 manifest=manifest,
@@ -952,6 +954,9 @@ def _run_av1_validation_derivation_assignment_locked(
         sources=inventory.sources,
         expectations=inventory.expectations,
         token_key=token_key,
+        source_sha256_resolver=(
+            av1_validation_partition_frozen_source_sha256_resolver(partition)
+        ),
     )
     source = next(
         (item for item in partition.inventory_sources if item.local_item_id == assignment.local_item_id),
@@ -1286,6 +1291,7 @@ def finalize_av1_validation_derivation_candidate_lock(
                 "cell_plan_id": cell_plan_id,
             },
         ):
+            migrate_config_state(config)
             artifact_root = _validated_av1_validation_derivation_artifact_root(
                 config=config,
                 plan=plan,
@@ -1319,9 +1325,7 @@ def finalize_av1_validation_derivation_candidate_lock(
                 cell_plan_id=cell_plan_id,
                 clock=clock,
             )
-            with ExitStack() as source_stack, open_db(
-                config.paths.db_path
-            ) as connection:
+            with open_db(config.paths.db_path) as connection, ExitStack() as source_stack:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 inventory = load_av1_validation_partition_inventory(
                     connection,
@@ -1360,6 +1364,7 @@ def finalize_av1_validation_derivation_candidate_lock(
                     manifest,
                     plan,
                 )
+                source_sha256_resolver.verify()
                 return _finalize_and_write_av1_validation_derivation_candidate_lock(
                     artifact_root,
                     plan=plan,
@@ -1368,6 +1373,7 @@ def finalize_av1_validation_derivation_candidate_lock(
                     review_envelopes=review_envelopes,
                     current_evaluation=current_evaluation,
                     locked_at=locked_at,
+                    before_publish=source_sha256_resolver.assert_quiet,
                 )
     except MediaforceRuntimeBusyError as exc:
         raise AV1ValidationDerivationError(
@@ -1427,6 +1433,7 @@ def load_verified_av1_validation_derivation_candidate_lock(
                 "cell_plan_id": cell_plan_id,
             },
         ):
+            migrate_config_state(config)
             artifact_root = _validated_av1_validation_derivation_artifact_root(
                 config=config,
                 plan=plan,
@@ -1459,9 +1466,7 @@ def load_verified_av1_validation_derivation_candidate_lock(
                 plan=plan,
                 cell_plan_id=cell_plan_id,
             )
-            with ExitStack() as source_stack, open_db(
-                config.paths.db_path
-            ) as connection:
+            with open_db(config.paths.db_path) as connection, ExitStack() as source_stack:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 inventory = load_av1_validation_partition_inventory(
                     connection,
@@ -1500,6 +1505,7 @@ def load_verified_av1_validation_derivation_candidate_lock(
                     manifest,
                     plan,
                 )
+                source_sha256_resolver.verify()
                 return _load_verified_av1_validation_derivation_candidate_lock(
                     artifact_root,
                     plan=plan,
@@ -1540,6 +1546,7 @@ def record_av1_validation_derivation_visual_verdict(
                 "assignment_id": attempt.assignment_id,
             },
         ):
+            migrate_config_state(config)
             try:
                 return _record_av1_validation_derivation_visual_verdict_locked(
                     config=config,
@@ -1691,9 +1698,7 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             ) from exc
     terminal_publication_started = False
     try:
-        with ExitStack() as source_stack, open_db(
-            config.paths.db_path
-        ) as connection:
+        with open_db(config.paths.db_path) as connection, ExitStack() as source_stack:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             inventory = load_av1_validation_partition_inventory(
                 connection,
@@ -1791,14 +1796,17 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                         "AV1 derivation visual observation conflicts with existing evidence"
                     ) from exc
             assert_av1_validation_derivation_execution_contract(manifest, plan)
+            source_sha256_resolver.verify()
             terminal_publication_started = True
             ensure_av1_validation_derivation_terminal_intent(
                 artifact_root / "terminal-intents",
                 terminal,
+                before_publish=source_sha256_resolver.assert_quiet,
             )
             ensure_av1_validation_derivation_terminal_record(
                 terminal_records_directory,
                 terminal,
+                before_publish=source_sha256_resolver.assert_quiet,
             )
     except _AV1ValidationDerivationVerdictSafetyStop:
         raise

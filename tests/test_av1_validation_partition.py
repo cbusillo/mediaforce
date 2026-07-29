@@ -1,5 +1,6 @@
 import copy
-from contextlib import redirect_stdout
+from collections.abc import Iterator
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from mediaforce.core.file_integrity import FileIntegrityError
+from mediaforce.core.file_integrity import FileIntegrityError, rename_exclusive
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_partition import (
     AV1ValidationPartitionError,
@@ -29,6 +30,7 @@ from mediaforce.tuning.av1_validation_partition import (
     av1_validation_partition_public_summary,
     build_av1_validation_private_partition,
     create_av1_validation_partition_key,
+    ensure_av1_validation_partition_key,
     load_av1_validation_partition_key,
     load_av1_validation_private_partition,
     validate_av1_validation_partition_current_inputs,
@@ -160,6 +162,174 @@ class AV1ValidationPartitionTests(unittest.TestCase):
         self.assertNotEqual(actual.partition_id, expected.partition_id)
         self.assertNotEqual(actual.payload_sha256, expected.payload_sha256)
 
+    def test_partition_publication_checks_sources_before_atomic_visibility(self) -> None:
+        partition = self._build()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partition.json"
+
+            def reject_publication() -> None:
+                raise AV1ValidationPartitionError(
+                    "AV1 partition selected source changed after verification"
+                )
+
+            with self.assertRaisesRegex(
+                AV1ValidationPartitionError,
+                "changed after verification",
+            ):
+                write_av1_validation_private_partition(
+                    path,
+                    partition,
+                    before_publish=reject_publication,
+                )
+
+            self.assertFalse(path.exists())
+            self.assertEqual(list(path.parent.glob(".*.tmp")), [])
+
+    def test_partition_publication_recovers_visible_matching_artifact(self) -> None:
+        partition = self._build()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partition.json"
+
+            def publish_then_fail(**kwargs: object) -> None:
+                rename_exclusive(**kwargs)
+                raise OSError("simulated post-rename durability failure")
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_partition.rename_exclusive",
+                    side_effect=publish_then_fail,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationPartitionError,
+                    "could not be written safely",
+                ),
+            ):
+                write_av1_validation_private_partition(path, partition)
+
+            self.assertEqual(
+                load_av1_validation_private_partition(path),
+                partition,
+            )
+            write_av1_validation_private_partition(path, partition)
+
+    def test_partition_key_recovers_visible_valid_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partition.key"
+
+            def publish_then_fail(**kwargs: object) -> None:
+                rename_exclusive(**kwargs)
+                raise OSError("simulated post-rename durability failure")
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_partition.rename_exclusive",
+                    side_effect=publish_then_fail,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationPartitionError,
+                    "could not be written safely",
+                ),
+            ):
+                create_av1_validation_partition_key(path)
+
+            expected_key_id = av1_validation_partition_key_id(
+                load_av1_validation_partition_key(path)
+            )
+            self.assertEqual(
+                create_av1_validation_partition_key(path),
+                expected_key_id,
+            )
+            recovered_key_id, created = ensure_av1_validation_partition_key(path)
+            self.assertEqual(recovered_key_id, expected_key_id)
+            self.assertFalse(created)
+
+    def test_partition_key_collision_reports_existing_key_not_created(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partition.key"
+            competing_key = b"c" * 32
+
+            def publish_competing_key(**kwargs: object) -> None:
+                descriptor = os.open(
+                    str(kwargs["destination_name"]),
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=int(kwargs["destination_directory_descriptor"]),
+                )
+                try:
+                    os.write(descriptor, competing_key)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                raise FileExistsError
+
+            with patch(
+                "mediaforce.tuning.av1_validation_partition.rename_exclusive",
+                side_effect=publish_competing_key,
+            ):
+                token_key_id, created = ensure_av1_validation_partition_key(path)
+
+            self.assertFalse(created)
+            self.assertEqual(
+                token_key_id,
+                av1_validation_partition_key_id(competing_key),
+            )
+
+    def test_partition_key_read_rejects_visible_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "partition.key"
+            replacement = root / "replacement.key"
+            path.write_bytes(b"a" * 32)
+            replacement.write_bytes(b"b" * 32)
+            path.chmod(0o600)
+            replacement.chmod(0o600)
+            real_read = os.read
+            replaced = False
+
+            def read_then_replace(descriptor: int, size: int) -> bytes:
+                nonlocal replaced
+                chunk = real_read(descriptor, size)
+                if not replaced:
+                    os.replace(replacement, path)
+                    replaced = True
+                return chunk
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_partition.os.read",
+                    side_effect=read_then_replace,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationPartitionError,
+                    "stable single-link|changed while it was read",
+                ),
+            ):
+                load_av1_validation_partition_key(path)
+
+    def test_partition_cleanup_failure_is_not_suppressed(self) -> None:
+        partition = self._build()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partition.json"
+
+            def reject_publication() -> None:
+                raise AV1ValidationPartitionError("simulated source drift")
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_partition.os.unlink",
+                    side_effect=OSError("simulated unlink failure"),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationPartitionError,
+                    "cleanup failed",
+                ),
+            ):
+                write_av1_validation_private_partition(
+                    path,
+                    partition,
+                    before_publish=reject_publication,
+                )
+
     def test_partition_without_frozen_source_digest_fails_closed(self) -> None:
         payload = copy.deepcopy(self._build().to_payload())
         del payload["assignments"][0]["source_sha256"]
@@ -201,6 +371,7 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             sources=self.sources,
             expectations=self.expectations,
             token_key=self.token_key,
+            source_sha256_resolver=_source_sha256,
         )
 
     def test_partition_rejects_selection_outside_manifest_window(self) -> None:
@@ -344,6 +515,7 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 sources=self.sources,
                 expectations=self.expectations,
                 token_key=self.token_key,
+                source_sha256_resolver=_source_sha256,
             )
 
     def test_exact_candidate_selector_rejects_trait_supersets(self) -> None:
@@ -609,6 +781,7 @@ class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
                     verify_evidence=True,
                 ) as resolver:
                     source_sha256 = resolver(source)
+                    resolver.verify()
             self.assertEqual(
                 source_sha256,
                 f"sha256:{hashlib.sha256(source_bytes).hexdigest()}",
@@ -718,9 +891,140 @@ class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
                     first_path.write_bytes(b"changed-source" * 80_000)
                     first_path.write_bytes(first_bytes)
                     resolver(second_source)
+                    resolver.verify()
+
+    def test_selected_source_mutation_after_verification_fails_context_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.mkv"
+            source_bytes = b"registered-source" * 80_000
+            source_path.write_bytes(source_bytes)
+            source = _digest_test_source(
+                source_identity=content_version_fingerprint(
+                    source_path,
+                    source_path.stat(),
+                ),
+                evidence_summary_sha256=f"sha256:{'1' * 64}",
+            )
+            connection = _digest_test_connection(
+                source=source,
+                source_path=source_path,
+                source_size_bytes=len(source_bytes),
+            )
+
+            with self.assertRaisesRegex(
+                AV1ValidationPartitionError,
+                "cohort validation|integrity monitoring failed",
+            ):
+                with av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=SimpleNamespace(),
+                ) as resolver:
+                    resolver(source)
+                    resolver.verify()
+                    source_path.write_bytes(b"Z" * len(source_bytes))
+
+    def test_selected_source_exit_validation_runs_when_publication_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "source.mkv"
+            source_bytes = b"registered-source" * 80_000
+            source_path.write_bytes(source_bytes)
+            source = _digest_test_source(
+                source_identity=content_version_fingerprint(
+                    source_path,
+                    source_path.stat(),
+                ),
+                evidence_summary_sha256=f"sha256:{'1' * 64}",
+            )
+            connection = _digest_test_connection(
+                source=source,
+                source_path=source_path,
+                source_size_bytes=len(source_bytes),
+            )
+
+            with self.assertRaisesRegex(
+                AV1ValidationPartitionError,
+                "cohort validation|integrity monitoring failed",
+            ):
+                with av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=SimpleNamespace(),
+                ) as resolver:
+                    resolver(source)
+                    resolver.verify()
+                    source_path.write_bytes(b"Z" * len(source_bytes))
+                    raise RuntimeError("simulated publication failure")
 
 
 class AV1ValidationPartitionCliTests(unittest.TestCase):
+    def test_create_partition_key_holds_runtime_lock(self) -> None:
+        lock_held = False
+        config = SimpleNamespace()
+
+        @contextmanager
+        def runtime_lock(
+                current_config: object,
+                *,
+                owner_payload: dict[str, object],
+        ) -> Iterator[None]:
+            nonlocal lock_held
+            self.assertIs(current_config, config)
+            self.assertEqual(owner_payload["purpose"], "av1-partition-key-create")
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+        def migrate(current_config: object) -> None:
+            self.assertIs(current_config, config)
+            self.assertTrue(lock_held)
+
+        def create_key(_path: Path) -> tuple[str, bool]:
+            self.assertTrue(lock_held)
+            return "av1vkey1_test", True
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = io.StringIO()
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "load_config",
+                    return_value=config,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "exclusive_mediaforce_runtime_lock",
+                    side_effect=runtime_lock,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "migrate_config_state",
+                    side_effect=migrate,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "ensure_av1_validation_partition_key",
+                    side_effect=create_key,
+                ),
+                redirect_stdout(output),
+            ):
+                exit_code = verify_av1_cold_start_preregistration.main([
+                    "create-partition-key",
+                    str(root / "partition.key"),
+                    "--config",
+                    str(root / "config.toml"),
+                    "--json",
+                ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(lock_held)
+        self.assertEqual(
+            json.loads(output.getvalue())["token_key_id"],
+            "av1vkey1_test",
+        )
+        self.assertTrue(json.loads(output.getvalue())["created"])
+
     def test_validate_eligibility_output_is_count_free(self) -> None:
         expected = {
             "eligibility_valid": True,

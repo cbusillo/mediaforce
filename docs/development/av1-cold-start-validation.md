@@ -93,12 +93,18 @@ HMAC key once:
 
 ```bash
 uv run python scripts/verify_av1_cold_start_preregistration.py \
-  create-partition-key /private/owner-only/av1-v2/partition.key --json
+  create-partition-key /private/owner-only/av1-v2/partition.key \
+  --config config/defaults.toml --json
 ```
 
 The command emits an opaque `token_key_id`. Record that ID on issue `#286`
 before reading the private inventory. The later build requires the same ID, so
 replacing or rerolling the HMAC key after its durable commitment fails closed.
+Key creation and partition construction both acquire the same exclusive runtime
+lock as `mediaforce-web`; they fail closed unless Mediaforce is paused.
+Key publication uses a hidden owner-only temporary file, durable file sync,
+exclusive atomic rename, and parent-directory sync. Retrying the same path
+validates the existing key and returns the same ID with `created=false`.
 
 Build the immutable private partition from the checked-in manifest, pinned
 machine-local eligibility attestation, current measured fingerprint inventory,
@@ -197,7 +203,12 @@ private state root derived from `web_state_dir`; there is no caller-selected
 plan path. The root is keyed by the frozen private partition and immutably bound
 to the first authorization and plan, so a second authorization cannot rerun the
 same reservations under another plan ID.
-Its authorization timestamp comes from the runtime clock. The plan binds a
+The canonical `plan.json` is published before its root binding. A retry loads
+and validates that exact plan, requires the same authorization window, reuses
+its original `authorized_at`, and then creates or verifies the binding; the
+runtime clock is sampled only for the first successful plan payload. A binding
+without its plan is an explicit interrupted-state failure, not permission to
+mint another authorization. The plan binds a
 privacy-safe digest of the resolved database, review, and web-state locations;
 every later command must use that same machine-local runtime context. Every
 execution, proposal, and finalization also re-compares the plan's complete
@@ -244,10 +255,11 @@ progress. A surviving orphaned claim is terminalized by that recovery rather
 than resuming the claimed action. A retry that finds an identical published
 artifact re-fsyncs its parent directory before accepting it, so a prior
 directory-sync error cannot be downgraded to an unsynced idempotent success. A
-hard interruption before
-the rename leaves only an ignored temporary; after the rename, the canonical
-name contains a complete payload, but progress still waits for the parent
-directory sync. Reads require one owner-owned link, exact `0400` mode, stable
+normal pre-publication failure durably removes its temporary and surfaces any
+unlink, close, or cleanup-sync failure. A hard interruption before the rename
+leaves only an ignored temporary; after the rename, the canonical name contains
+a complete payload, but progress still waits for the parent directory sync.
+Reads require one owner-owned link, exact `0400` mode, stable
 descriptor/path identity, and unchanged size, timestamps, and inode before and
 after the complete read.
 On the next runtime-lock-held invocation, an orphaned assignment claim is
@@ -294,8 +306,15 @@ during partition creation, re-analyzes it with the current media-fingerprint
 toolchain. Every descriptor and path-chain guard remains open while the other
 selected sources are processed. A cohort-wide second hash pass and final quiet,
 path, inode, timestamp, and sampled-identity checks complete only after every
-source is pinned; the session stays active through the immutable artifact write
-or database commit that consumes the result. The fresh
+source is pinned. Publication payloads are first written and fsynced under a
+hidden owner-only temporary name. The active source session performs another
+quiet and identity check immediately before exclusive atomic rename, remains
+active through publication, and performs its exit check before any database
+transaction can commit. Exit validation also runs when publication raises, so
+post-rename durability failures cannot skip the final source check. A retry
+accepts only the exact canonical key or partition already visible at the final
+path, re-synchronizes its parent directory, and rejects any conflicting or
+malformed artifact. The fresh
 canonical fingerprint summary must exactly reproduce the immutable evidence
 digest used for selection. A changed unsampled byte therefore cannot preserve
 stale traits while acquiring a new frozen digest. The selected source SHA-256
@@ -368,9 +387,11 @@ review execution follows the same rule: each private copied Every Code runner
 is retained after its lane and retired only out of band while Mediaforce is
 stopped. Assignment execution holds the same exclusive runtime lock as
 `mediaforce-web`. Every write-capable `mediaforce` CLI command and each direct
-derivation artifact-publication action acquires that lock too, so web, staging,
-database, cleanup, proposal, and review-publication work cannot overlap the
-bounded derivation case. Machine or toolchain drift before the claim or after
+partition-key, partition-build, and derivation artifact-publication action
+acquires that lock too, so web, staging, database, cleanup, proposal, and
+review-publication work cannot overlap the bounded derivation case. Config
+loading itself is read-only; legacy state-path migration runs only after the
+exclusive lock is held. Machine or toolchain drift before the claim or after
 measurement is a safety stop rather than a newly compatible cohort.
 The shared lock uses a stable parent-directory guard in addition to the metadata
 file. It also holds deterministic loopback kernel-namespace reservations keyed
@@ -681,10 +702,12 @@ digest, and is the only publication-safe output. Rebuilding a different
 self-consistent manifest is insufficient: reporting requires exact equality
 with the checked-in issue #277 preregistration.
 
-No database migration is required. The protocol, partition contract, and report
-builder are pure Python and do not import database, scheduler, web-runtime,
-subprocess, or media probing code. The partition inventory adapter is a separate
-read-only database/config boundary and does not open a writable connection.
+No database schema migration is required. The protocol, partition contract, and
+report builder are pure Python and do not import database, scheduler,
+web-runtime, subprocess, or media probing code. The partition inventory adapter
+is a separate read-only database/config boundary and does not open a writable
+connection. Any one-time legacy state-path migration is operational startup
+work and occurs only inside the shared runtime lock.
 
 ## Paired holdout contract
 

@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+from pathlib import Path
 import stat
 import subprocess
 import unicodedata
@@ -88,13 +89,56 @@ class _GuardedPartitionSource:
     initial_stat_signature: tuple[int, int, int, int, int]
 
 
+class AV1ValidationPartitionSourceSHA256Session:
+    def __init__(
+            self,
+            *,
+            resolve: Callable[[AV1ValidationPartitionSource], str],
+            verify: Callable[[], None],
+            assert_quiet: Callable[[], None],
+    ) -> None:
+        self._resolve = resolve
+        self._verify = verify
+        self._assert_quiet = assert_quiet
+        self._verified = False
+
+    def __call__(self, source: AV1ValidationPartitionSource) -> str:
+        if self._verified:
+            raise AV1ValidationPartitionError(
+                "AV1 partition source cohort is already verified"
+            )
+        return self._resolve(source)
+
+    def verify(self) -> None:
+        if self._verified:
+            raise AV1ValidationPartitionError(
+                "AV1 partition source cohort is already verified"
+            )
+        self._verify()
+        self._verified = True
+
+    def assert_verified(self) -> None:
+        if not self._verified:
+            raise AV1ValidationPartitionError(
+                "AV1 partition source cohort was not verified before publication"
+            )
+
+    @property
+    def verified(self) -> bool:
+        return self._verified
+
+    def assert_quiet(self) -> None:
+        self.assert_verified()
+        self._assert_quiet()
+
+
 @contextmanager
 def av1_validation_partition_source_sha256_resolver(
     connection: DBClient,
     *,
     config: MediaforceConfig,
     verify_evidence: bool = False,
-) -> Iterator[Callable[[AV1ValidationPartitionSource], str]]:
+) -> Iterator[AV1ValidationPartitionSourceSHA256Session]:
     digest_by_item_id: dict[int, str] = {}
     guarded_sources: list[_GuardedPartitionSource] = []
 
@@ -235,40 +279,70 @@ def av1_validation_partition_source_sha256_resolver(
         digest_by_item_id[source.local_item_id] = source_sha256
         return source_sha256
 
+    def assert_quiet() -> None:
+        try:
+            for guarded in guarded_sources:
+                guarded.guard.assert_quiet()
+                source_final = os.fstat(guarded.descriptor)
+                source_path_final = guarded.path.lstat()
+                if (
+                    guarded.initial_stat_signature
+                    != file_stat_signature(source_final)
+                    or not stat.S_ISREG(source_path_final.st_mode)
+                    or (source_final.st_dev, source_final.st_ino)
+                    != (source_path_final.st_dev, source_path_final.st_ino)
+                    or descriptor_content_version_fingerprint(
+                        guarded.descriptor,
+                        size_bytes=source_final.st_size,
+                    ) != guarded.source.source_identity
+                ):
+                    raise AV1ValidationPartitionError(
+                        "AV1 partition selected source changed during cohort validation"
+                    )
+        except FileIntegrityError as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source integrity monitoring failed"
+            ) from exc
+        except OSError as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source could not be securely hashed"
+            ) from exc
+
+    def verify() -> None:
+        try:
+            for guarded in guarded_sources:
+                guarded.guard.assert_quiet()
+                if descriptor_sha256(guarded.descriptor) != guarded.source_sha256:
+                    raise AV1ValidationPartitionError(
+                        "AV1 partition selected source changed during cohort validation"
+                    )
+            assert_quiet()
+        except FileIntegrityError as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source integrity monitoring failed"
+            ) from exc
+        except OSError as exc:
+            raise AV1ValidationPartitionError(
+                "AV1 partition selected source could not be securely hashed"
+            ) from exc
+
+    session = AV1ValidationPartitionSourceSHA256Session(
+        resolve=resolve,
+        verify=verify,
+        assert_quiet=assert_quiet,
+    )
     try:
-        yield resolve
-        for guarded in guarded_sources:
-            guarded.guard.assert_quiet()
-            if descriptor_sha256(guarded.descriptor) != guarded.source_sha256:
-                raise AV1ValidationPartitionError(
-                    "AV1 partition selected source changed during cohort validation"
-                )
-        for guarded in guarded_sources:
-            guarded.guard.assert_quiet()
-            source_final = os.fstat(guarded.descriptor)
-            source_path_final = guarded.path.lstat()
-            if (
-                guarded.initial_stat_signature
-                != file_stat_signature(source_final)
-                or not stat.S_ISREG(source_path_final.st_mode)
-                or (source_final.st_dev, source_final.st_ino)
-                != (source_path_final.st_dev, source_path_final.st_ino)
-                or descriptor_content_version_fingerprint(
-                    guarded.descriptor,
-                    size_bytes=source_final.st_size,
-                ) != guarded.source.source_identity
-            ):
-                raise AV1ValidationPartitionError(
-                    "AV1 partition selected source changed during cohort validation"
-                )
-    except FileIntegrityError as exc:
-        raise AV1ValidationPartitionError(
-            "AV1 partition selected source integrity monitoring failed"
-        ) from exc
-    except OSError as exc:
-        raise AV1ValidationPartitionError(
-            "AV1 partition selected source could not be securely hashed"
-        ) from exc
+        try:
+            yield session
+        except BaseException as exc:
+            if session.verified:
+                try:
+                    session.assert_quiet()
+                except BaseException as integrity_exc:
+                    raise integrity_exc from exc
+            raise
+        else:
+            session.assert_quiet()
     finally:
         for guarded in reversed(guarded_sources):
             guarded.guard.close()

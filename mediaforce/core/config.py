@@ -316,8 +316,11 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
         review_dir=_resolve_path(project_root, state.get("review_dir", "state/review")),
         runtime_settings_path=runtime_settings_path,
     )
-    _migrate_project_state(project_root, paths)
     return MediaforceConfig(raw=raw, paths=paths)
+
+
+def migrate_config_state(config: MediaforceConfig) -> None:
+    _migrate_project_state(config.paths.project_root, config.paths)
 
 
 def load_runtime_settings(path: Path) -> dict[str, Any]:

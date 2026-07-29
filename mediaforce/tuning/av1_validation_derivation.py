@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-import ctypes
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-import errno
-import fcntl
 import hashlib
 import json
 import math
@@ -15,14 +12,15 @@ import re
 import secrets
 import stat
 from statistics import median
-import sys
-from typing import Any, Literal, Mapping, Sequence, cast
+from typing import Any, Callable, Literal, Mapping, Sequence, cast
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
     FileIntegrityError,
     ensure_owner_only_directory,
+    fsync_durable_file,
     open_stable_directory,
+    rename_exclusive,
     stable_absolute_path,
 )
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
@@ -2025,6 +2023,7 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         review_envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         locked_at: str,
+        before_publish: Callable[[], None] | None = None,
 ) -> AV1ValidationDerivationCandidateLockEnvelope:
     reviews = tuple(envelope.review for envelope in review_envelopes)
     candidate_lock = finalize_av1_validation_derivation_candidate_lock(
@@ -2105,7 +2104,11 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
     )
     path = directory / f"{candidate_lock.cell_plan_id}.json"
     try:
-        _write_owner_only(path, canonical_json_bytes(envelope.to_payload()))
+        _write_owner_only(
+            path,
+            canonical_json_bytes(envelope.to_payload()),
+            before_publish=before_publish,
+        )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         existing = _load_av1_validation_derivation_candidate_lock_envelope(
             root,
@@ -2300,11 +2303,26 @@ def validate_av1_validation_derivation_artifact_root_binding(
 def write_av1_validation_derivation_plan(
         artifact_root: Path,
         plan: AV1ValidationDerivationPlan,
+        *,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
-    root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
+    root = _av1_validation_derivation_artifact_root_path(artifact_root, plan)
     path = root / "plan.json"
-    _write_owner_only(path, canonical_json_bytes(plan.to_payload()))
-    return path
+    try:
+        _write_owner_only(
+            path,
+            canonical_json_bytes(plan.to_payload()),
+            before_publish=before_publish,
+        )
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        existing = load_av1_validation_derivation_plan(path)
+        if existing != plan:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation plan conflicts with an immutable existing plan"
+            )
+        _fsync_owner_only_parent(path, "derivation plan")
+    bound_root = _bind_av1_validation_derivation_artifact_root(root, plan)
+    return bound_root / "plan.json"
 
 
 def load_av1_validation_derivation_plan(path: Path) -> AV1ValidationDerivationPlan:
@@ -2323,7 +2341,19 @@ def write_av1_validation_derivation_attempt(
         binding_digest=attempt.authorization_id,
     )
     path = directory / f"{attempt.assignment_id}.json"
-    _write_owner_only(path, canonical_json_bytes(attempt.to_payload()))
+    try:
+        _write_owner_only(path, canonical_json_bytes(attempt.to_payload()))
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        payload, raw = _load_owner_only_json(path, "derivation attempt")
+        existing = av1_validation_derivation_attempt_from_payload(
+            payload,
+            raw=raw,
+        )
+        if existing != attempt:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation attempt conflicts with an immutable existing attempt"
+            )
+        _fsync_owner_only_parent(path, "derivation attempt")
     return path
 
 
@@ -2361,19 +2391,34 @@ def write_av1_validation_derivation_terminal_record(
         binding_digest=record.authorization_id,
     )
     path = directory / f"{record.assignment_id}.json"
-    _write_owner_only(path, canonical_json_bytes(record.to_payload()))
+    try:
+        _write_owner_only(path, canonical_json_bytes(record.to_payload()))
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        payload, raw = _load_owner_only_json(path, "derivation terminal record")
+        existing = av1_validation_derivation_terminal_record_from_payload(
+            payload,
+            raw=raw,
+        )
+        if existing != record:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation terminal record conflicts with the immutable artifact"
+            )
+        _fsync_owner_only_parent(path, "derivation terminal record")
     return path
 
 
 def ensure_av1_validation_derivation_terminal_intent(
         directory: Path,
         record: AV1ValidationDerivationTerminalRecord,
+        *,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     return _ensure_av1_validation_derivation_terminal_artifact(
         directory,
         kind="terminal_intents",
         label="terminal intent",
         record=record,
+        before_publish=before_publish,
     )
 
 
@@ -2730,12 +2775,15 @@ def _validate_av1_validation_derivation_verdict_intent(
 def ensure_av1_validation_derivation_terminal_record(
         directory: Path,
         record: AV1ValidationDerivationTerminalRecord,
+        *,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     return _ensure_av1_validation_derivation_terminal_artifact(
         directory,
         kind="terminal_records",
         label="terminal record",
         record=record,
+        before_publish=before_publish,
     )
 
 
@@ -2869,6 +2917,7 @@ def write_av1_validation_derivation_candidate_proposal(
         *,
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
     if (
@@ -2891,7 +2940,11 @@ def write_av1_validation_derivation_candidate_proposal(
         binding_digest=plan.authorization.authorization_id,
     )
     path = directory / f"{proposal.cell_plan_id}.json"
-    _write_owner_only(path, canonical_json_bytes(proposal.to_payload()))
+    _write_owner_only(
+        path,
+        canonical_json_bytes(proposal.to_payload()),
+        before_publish=before_publish,
+    )
     return path
 
 
@@ -3360,7 +3413,11 @@ def _completed_code_review_message(stdout: str) -> tuple[str, str]:
 
 
 def _code_review_marker(message: str) -> dict[str, Any]:
-    nonempty_lines = [line.strip() for line in message.splitlines() if line.strip()]
+    nonempty_lines = [
+        line.removesuffix("\r").strip()
+        for line in message.split("\n")
+        if line.removesuffix("\r").strip()
+    ]
     marker_lines = [
         line
         for line in nonempty_lines
@@ -4587,7 +4644,12 @@ def _load_owner_only_json(path: Path, label: str) -> tuple[dict[str, Any], bytes
         raise AV1ValidationDerivationError(f"AV1 {label} is not valid JSON") from exc
 
 
-def _write_owner_only(path: Path, data: bytes) -> None:
+def _write_owner_only(
+        path: Path,
+        data: bytes,
+        *,
+        before_publish: Callable[[], None] | None = None,
+) -> None:
     if not path.name or path.name in {".", ".."}:
         raise AV1ValidationDerivationError(
             "AV1 private derivation artifact name is invalid"
@@ -4600,7 +4662,6 @@ def _write_owner_only(path: Path, data: bytes) -> None:
     descriptor = -1
     temporary_created = False
     published = False
-    completed = False
     try:
         _, parent_descriptor = ensure_owner_only_directory(path.parent)
         descriptor = os.open(
@@ -4653,6 +4714,8 @@ def _write_owner_only(path: Path, data: bytes) -> None:
             raise AV1ValidationDerivationError(
                 "AV1 private derivation artifact changed during publication"
             )
+        if before_publish is not None:
+            before_publish()
         try:
             _rename_owner_only_exclusive(
                 parent_descriptor=parent_descriptor,
@@ -4684,7 +4747,6 @@ def _write_owner_only(path: Path, data: bytes) -> None:
                 "AV1 private derivation artifact changed during publication"
             )
         os.fsync(parent_descriptor)
-        completed = True
     except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(
             "AV1 private derivation artifact directory is unsafe"
@@ -4695,13 +4757,20 @@ def _write_owner_only(path: Path, data: bytes) -> None:
         ) from exc
     finally:
         cleanup_error: OSError | None = None
+        temporary_unlinked = False
         if parent_descriptor >= 0 and temporary_created and not published:
             try:
                 os.unlink(temporary_name, dir_fd=parent_descriptor)
+                temporary_unlinked = True
             except FileNotFoundError:
                 pass
             except OSError as exc:
                 cleanup_error = exc
+        if parent_descriptor >= 0 and temporary_unlinked:
+            try:
+                os.fsync(parent_descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
         if descriptor >= 0:
             try:
                 os.close(descriptor)
@@ -4712,7 +4781,7 @@ def _write_owner_only(path: Path, data: bytes) -> None:
                 os.close(parent_descriptor)
             except OSError as exc:
                 cleanup_error = cleanup_error or exc
-        if cleanup_error is not None and completed:
+        if cleanup_error is not None:
             raise AV1ValidationDerivationError(
                 "AV1 private derivation artifact cleanup failed"
             ) from cleanup_error
@@ -4724,48 +4793,16 @@ def _rename_owner_only_exclusive(
         source_name: str,
         destination_name: str,
 ) -> None:
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin":
-        rename_function = getattr(libc, "renameatx_np", None)
-        rename_flags = 0x00000004
-    elif sys.platform.startswith("linux"):
-        rename_function = getattr(libc, "renameat2", None)
-        rename_flags = 0x00000001
-    else:
-        rename_function = None
-        rename_flags = 0
-    if rename_function is None:
-        raise OSError(
-            errno.ENOTSUP,
-            "exclusive atomic rename is unavailable",
-        )
-    rename_function.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
+    rename_exclusive(
+        source_directory_descriptor=parent_descriptor,
+        source_name=source_name,
+        destination_directory_descriptor=parent_descriptor,
+        destination_name=destination_name,
     )
-    rename_function.restype = ctypes.c_int
-    result = rename_function(
-        parent_descriptor,
-        os.fsencode(source_name),
-        parent_descriptor,
-        os.fsencode(destination_name),
-        rename_flags,
-    )
-    if result != 0:
-        error_number = ctypes.get_errno()
-        raise OSError(error_number, os.strerror(error_number))
 
 
 def _fsync_owner_only_artifact(descriptor: int) -> None:
-    os.fsync(descriptor)
-    if sys.platform == "darwin":
-        full_fsync = getattr(fcntl, "F_FULLFSYNC", None)
-        if full_fsync is None:
-            raise OSError(errno.ENOTSUP, "full artifact fsync is unavailable")
-        fcntl.fcntl(descriptor, full_fsync)
+    fsync_durable_file(descriptor)
 
 
 def _fsync_owner_only_parent(path: Path, label: str) -> None:
@@ -4988,6 +5025,7 @@ def _ensure_av1_validation_derivation_terminal_artifact(
         kind: str,
         label: str,
         record: AV1ValidationDerivationTerminalRecord,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     _bind_owner_only_directory(
         directory,
@@ -5009,7 +5047,11 @@ def _ensure_av1_validation_derivation_terminal_artifact(
         _fsync_owner_only_parent(path, f"derivation {label}")
         return path
     try:
-        _write_owner_only(path, canonical_json_bytes(record.to_payload()))
+        _write_owner_only(
+            path,
+            canonical_json_bytes(record.to_payload()),
+            before_publish=before_publish,
+        )
         return path
     except _AV1ValidationDerivationArtifactAlreadyExists:
         payload, raw = _load_owner_only_json(path, f"derivation {label}")
