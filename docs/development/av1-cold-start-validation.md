@@ -234,11 +234,16 @@ the existing sampled calibration path to leave the cold-start planner absent,
 and preserves an owner-only attempt artifact plus review media. Derivation
 review clips are redirected beneath the partition-global private artifact root;
 the calibration subprocess tree inherits an owner-only `0077` umask, directories
-are `0700`, and files are `0600` or more restrictive. Post-run validation walks
-the tree through no-follow directory descriptors, rejects links, hard links,
-permission drift, ownership drift, and identity substitution, and performs no
-pathname chmod. Verdict-time identity checks also use no-follow file
-descriptors:
+are `0700`, and generated files begin owner-only. Before the first provenance
+fingerprint, post-run validation walks the tree through no-follow directory
+descriptors, rejects links, hard links, permission drift, ownership drift, and
+identity substitution, and seals every regular file to `0400` through its held
+descriptor. It performs no pathname chmod. The `cira2` review fingerprint binds
+content, a one-way canonical-path digest, device, inode, modification/change
+times, mode, and link count. Verdict-time identity checks recompute that binding
+one clip at a time so descriptor pressure cannot depend on clip count or become
+an unfavorable observation. Resource or integrity failure is an affected-cell
+`safety_stop`, not `media_unavailable` or measured evidence.
 
 Private partition creation first performs logical selection without hashing the
 broader eligible library. It then handles only the selected holdout and
@@ -300,8 +305,9 @@ statistical contract. It also binds SHA-256 digests of the canonical Every Code
 executable path and binary without persisting or printing the private path. A
 real same-filesystem kqueue mutation probe must pass before the immutable
 assignment claim is written. The probe creates a private owner-only file,
-mutates only its original `O_EXCL` descriptor, and retains the tiny probe
-directory instead of recursively deleting a mutable pathname. Independent
+sets its pathname mode to `0400` from creation, mutates only its original
+`O_EXCL | O_RDWR` descriptor, and retains the tiny probe directory instead of
+recursively deleting a mutable pathname. Independent
 review execution follows the same rule: each private copied Every Code runner
 is retained after its lane and retired only out of band while Mediaforce is
 stopped. Assignment execution holds the same exclusive runtime lock as
@@ -335,14 +341,17 @@ are active evidence for the bound candidate snapshot but are explicitly marked
 ineligible for local personalization, so later planning and holdout execution
 cannot consume them as warm-start evidence. The complete derivation terminal is
 preceded by an immutable verdict intent that freezes the first human input and
-runtime timestamp. The terminal is then validated and written as an immutable
-terminal intent before the observation is appended. After a successful append,
-the immutable terminal record is written before the database transaction can
-commit. An append conflict therefore cannot create a false terminal, while a
-terminal-record write failure rolls back the database append. If the database
-commit fails after the immutable record exists, an interrupted retry reuses the
-frozen verdict timestamp and idempotently completes the same observation without
-replacing or duplicating evidence. Review-media identity is freshly recomputed
+runtime timestamp. The validated observation is appended inside the immediate
+database transaction, then the execution contract is checked one final time.
+Only after both succeed are the immutable terminal intent and terminal record
+written, still before the database transaction can commit. An append conflict
+or late contract drift therefore rolls back the observation and produces the
+separate stopped `safety_stop` terminal rather than a false observed terminal.
+A terminal-intent or terminal-record write failure also rolls back the database
+append. If the database commit fails after the immutable record exists, an
+interrupted retry reuses the frozen verdict timestamp and idempotently completes
+the same observation without replacing or duplicating evidence. Review-media
+identity is freshly recomputed
 immediately before the verdict and must still match the frozen attempt. The
 complete media recheck, immutable verdict intent, immediate database transaction,
 observation append, and terminal-intent/terminal-record path holds the shared
@@ -368,6 +377,11 @@ cannot be replaced. The next reservation cannot run until every prior technical
 attempt has its human terminal. In accordance with the preregistered
 `safety_stop_scope=affected_cell`, a terminal unsuccessful attempt or
 unfavorable reviewed record permanently stops only that candidate cell. The
+same immutable stopped terminal is written when current-input drift,
+execution-contract drift, review-media identity failure, descriptor/resource
+failure, or observation conflict prevents a pending human verdict from being
+published; those failures cannot be retried as a more favorable review.
+The
 global immutable assignment order remains authoritative: later assignments in
 the stopped cell are never allowed, while the next assignment in another cell
 may proceed only at its original canonical position. Because each candidate has

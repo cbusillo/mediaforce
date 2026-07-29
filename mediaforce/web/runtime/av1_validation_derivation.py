@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+import errno
 import hashlib
 import os
 from pathlib import Path
@@ -25,7 +26,10 @@ from mediaforce.core.file_integrity import (
     MACOS_FILE_INTEGRITY_CONTRACT_VERSION,
     MacOSFileIntegrityGuard,
     assert_macos_file_integrity_capability,
+    ensure_owner_only_directory,
+    open_stable_directory,
     probe_macos_file_integrity,
+    stable_absolute_path,
 )
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, mapping_dict, object_dict, object_list
@@ -56,7 +60,8 @@ from mediaforce.review import (
     review_moment_payload,
 )
 from mediaforce.reviewing.artifact_identity import (
-    reviewed_artifact_fingerprint_from_descriptors,
+    reviewed_artifact_clip_payload_from_descriptor,
+    reviewed_artifact_fingerprint_from_payloads,
 )
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.av1_validation_derivation import (
@@ -159,6 +164,10 @@ class _PinnedDerivationSource:
     inode: int
 
 
+class _AV1ValidationDerivationVerdictSafetyStop(AV1ValidationDerivationError):
+    pass
+
+
 def _write_all(descriptor: int, payload: bytes) -> None:
     view = memoryview(payload)
     written = 0
@@ -186,63 +195,33 @@ def _owner_only_umask() -> Iterator[None]:
 
 def _prepare_owner_only_directory(path: Path, *, label: str) -> Path:
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    try:
-        path_info = path.lstat()
-    except OSError as exc:
+        normalized, descriptor = ensure_owner_only_directory(path)
+    except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(
-            f"AV1 derivation {label} directory is unavailable"
+            f"AV1 derivation {label} directory could not be safely prepared"
         ) from exc
-    if (
-        not stat.S_ISDIR(path_info.st_mode)
-        or path_info.st_uid != os.getuid()
-        or path_info.st_mode & 0o077
-    ):
-        raise AV1ValidationDerivationError(
-            f"AV1 derivation {label} directory must be owner-only"
-        )
-    return path
+    os.close(descriptor)
+    return normalized
 
 
 def _open_owner_only_directory_descriptor(path: Path, *, label: str) -> int:
-    directory = _prepare_owner_only_directory(path, label=label)
-    return _bind_owner_only_directory_descriptor(directory, label=label)
+    try:
+        _, descriptor = ensure_owner_only_directory(path)
+        return descriptor
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation {label} directory could not be safely prepared"
+        ) from exc
 
 
 def _bind_owner_only_directory_descriptor(path: Path, *, label: str) -> int:
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise AV1ValidationDerivationError(
-            f"AV1 derivation {label} directory binding is unavailable"
-        )
-    descriptor = -1
     try:
-        descriptor = os.open(
+        _, descriptor = open_stable_directory(
             path,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            require_owner_only=True,
         )
-        descriptor_info = os.fstat(descriptor)
-        path_info = path.lstat()
-        if (
-            not stat.S_ISDIR(descriptor_info.st_mode)
-            or not stat.S_ISDIR(path_info.st_mode)
-            or descriptor_info.st_uid != os.getuid()
-            or descriptor_info.st_mode & 0o077
-            or (descriptor_info.st_dev, descriptor_info.st_ino)
-            != (path_info.st_dev, path_info.st_ino)
-        ):
-            raise AV1ValidationDerivationError(
-                f"AV1 derivation {label} directory must be owner-only and stable"
-            )
         return descriptor
-    except AV1ValidationDerivationError:
-        if descriptor >= 0:
-            os.close(descriptor)
-        raise
-    except OSError as exc:
-        if descriptor >= 0:
-            os.close(descriptor)
+    except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(
             f"AV1 derivation {label} directory could not be safely bound"
         ) from exc
@@ -503,13 +482,6 @@ def _pinned_derivation_source(
             )
             _assert_pinned_source_guard_quiet(snapshot_guard)
     finally:
-        retained_snapshot_seal_cause: OSError | None = None
-        if snapshot_write_descriptor >= 0:
-            try:
-                os.fchmod(snapshot_write_descriptor, 0o400)
-                os.fsync(snapshot_write_descriptor)
-            except OSError as exc:
-                retained_snapshot_seal_cause = exc
         if snapshot_guard is not None:
             snapshot_guard.close()
         if snapshot_descriptor >= 0:
@@ -520,10 +492,6 @@ def _pinned_derivation_source(
             os.close(source_descriptor)
         if snapshot_root_descriptor >= 0:
             os.close(snapshot_root_descriptor)
-        if retained_snapshot_seal_cause is not None:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation retained source snapshot could not be sealed"
-            ) from retained_snapshot_seal_cause
 
 
 def av1_validation_derivation_runtime_context_sha256(
@@ -963,6 +931,12 @@ def _run_av1_validation_derivation_assignment_locked(
         calibration_run_id = _run_id(plan.plan_id, assignment.assignment_id, started_at)
         review_root = _prepare_derivation_review_root(artifact_root)
         calibration_config = _config_with_review_directory(config, review_root)
+        run_deps = replace(
+            run_deps,
+            secure_review_artifacts=(
+                lambda *_clips: _secure_derivation_review_media(review_root)
+            ),
+        )
         with _pinned_derivation_source(
             artifact_root=artifact_root,
             assignment_id=assignment.assignment_id,
@@ -1003,7 +977,7 @@ def _run_av1_validation_derivation_assignment_locked(
             or current_review_fingerprint
             != str(payload.get("review_artifact_fingerprint") or "")
         ):
-            raise TargetSizeSearchError(
+            raise AV1ValidationDerivationError(
                 "AV1 derivation review media could not be secured without identity drift"
             )
         payload["job_id"] = f"av1vdjob1_{calibration_run_id}"
@@ -1381,20 +1355,38 @@ def record_av1_validation_derivation_visual_verdict(
                 "assignment_id": attempt.assignment_id,
             },
         ):
-            return _record_av1_validation_derivation_visual_verdict_locked(
-                config=config,
-                manifest=manifest,
-                plan=plan,
-                partition=partition,
-                token_key=token_key,
-                attempt=attempt,
-                terminal_records_directory=terminal_records_directory,
-                verdict=verdict,
-                concern_tags=concern_tags,
-                evidence_ids=evidence_ids,
-                moment_indexes=moment_indexes,
-                recorded_at=recorded_at,
-            )
+            try:
+                return _record_av1_validation_derivation_visual_verdict_locked(
+                    config=config,
+                    manifest=manifest,
+                    plan=plan,
+                    partition=partition,
+                    token_key=token_key,
+                    attempt=attempt,
+                    terminal_records_directory=terminal_records_directory,
+                    verdict=verdict,
+                    concern_tags=concern_tags,
+                    evidence_ids=evidence_ids,
+                    moment_indexes=moment_indexes,
+                    recorded_at=recorded_at,
+                )
+            except _AV1ValidationDerivationVerdictSafetyStop:
+                terminal = build_av1_validation_derivation_terminal_record(
+                    plan=plan,
+                    partition=partition,
+                    attempt=attempt,
+                    review_failure_reason_code="safety_stop",
+                )
+                ensure_av1_validation_derivation_terminal_intent(
+                    av1_validation_derivation_artifact_root(config, plan)
+                    / "terminal-intents",
+                    terminal,
+                )
+                ensure_av1_validation_derivation_terminal_record(
+                    terminal_records_directory,
+                    terminal,
+                )
+                return terminal
     except MediaforceRuntimeBusyError as exc:
         raise AV1ValidationDerivationError(
             "AV1 derivation verdict requires the Mediaforce runtime to be paused"
@@ -1475,28 +1467,39 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             connection,
             config=config,
         )
-        validate_av1_validation_partition_current_inputs(
-            partition,
-            manifest=manifest,
-            sources=inventory.sources,
-            expectations=inventory.expectations,
-            token_key=token_key,
-        )
-        assert_av1_validation_derivation_execution_contract(manifest, plan)
-        review_root = _prepare_derivation_review_root(artifact_root)
-        _secure_derivation_review_media(review_root)
-        current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
-            review_root=review_root,
-            calibration=calibration,
-        )
+        try:
+            validate_av1_validation_partition_current_inputs(
+                partition,
+                manifest=manifest,
+                sources=inventory.sources,
+                expectations=inventory.expectations,
+                token_key=token_key,
+            )
+            assert_av1_validation_derivation_execution_contract(manifest, plan)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            _secure_derivation_review_media(review_root)
+            current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration=calibration,
+            )
+        except AV1ValidationDerivationError as exc:
+            raise _AV1ValidationDerivationVerdictSafetyStop(
+                "AV1 derivation pre-verdict verification stopped the affected cell"
+            ) from exc
         if (
             current_review_fingerprint is None
             or current_review_fingerprint
             != str(calibration.get("review_artifact_fingerprint") or "")
         ):
-            raise AV1ValidationDerivationError(
+            raise _AV1ValidationDerivationVerdictSafetyStop(
                 "AV1 derivation review media is unavailable or changed"
             )
+        try:
+            assert_av1_validation_derivation_execution_contract(manifest, plan)
+        except AV1ValidationDerivationError as exc:
+            raise _AV1ValidationDerivationVerdictSafetyStop(
+                "AV1 derivation execution contract changed before verdict publication"
+            ) from exc
         verdict_intent = resolve_av1_validation_derivation_verdict_intent(
             artifact_root / "verdict-intents",
             plan=plan,
@@ -1542,20 +1545,12 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 attempt=attempt,
                 observation_exclusion_reason="content_intent_observation_excluded",
             )
-            ensure_av1_validation_derivation_terminal_intent(
-                artifact_root / "terminal-intents",
-                terminal,
-            )
         else:
             terminal = build_av1_validation_derivation_terminal_record(
                 plan=plan,
                 partition=partition,
                 attempt=attempt,
                 observation=result.observation,
-            )
-            ensure_av1_validation_derivation_terminal_intent(
-                artifact_root / "terminal-intents",
-                terminal,
             )
         if result.observation is not None:
             try:
@@ -1564,14 +1559,23 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                     result.observation,
                 )
             except ContentIntentObservationConflictError as exc:
-                raise AV1ValidationDerivationError(
+                raise _AV1ValidationDerivationVerdictSafetyStop(
                     "AV1 derivation visual observation conflicts with existing evidence"
                 ) from exc
+        try:
+            assert_av1_validation_derivation_execution_contract(manifest, plan)
+        except AV1ValidationDerivationError as exc:
+            raise _AV1ValidationDerivationVerdictSafetyStop(
+                "AV1 derivation execution contract changed before terminal publication"
+            ) from exc
+        ensure_av1_validation_derivation_terminal_intent(
+            artifact_root / "terminal-intents",
+            terminal,
+        )
         ensure_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
         )
-    assert_av1_validation_derivation_execution_contract(manifest, plan)
     return terminal
 
 
@@ -1881,15 +1885,13 @@ def _current_derivation_review_artifact_fingerprint(
         calibration: dict[str, Any],
 ) -> str | None:
     root_descriptor = -1
-    descriptors: list[int] = []
-    guards: list[MacOSFileIntegrityGuard] = []
-    clips: list[tuple[str, int, float, float]] = []
+    clip_payloads: list[dict[str, object]] = []
     try:
-        resolved_review_root = review_root.expanduser().resolve(strict=True)
         root_descriptor = _bind_owner_only_directory_descriptor(
-            resolved_review_root,
+            review_root,
             label="review-media",
         )
+        resolved_review_root = stable_absolute_path(review_root)
         for role, key in (("preview", "preview_clips"), ("source", "source_clips")):
             for value in calibration.get(key, []):
                 clip = object_dict(value)
@@ -1900,10 +1902,9 @@ def _current_derivation_review_artifact_fingerprint(
                 if not candidate_path.is_absolute():
                     return None
                 try:
-                    candidate_info = candidate_path.lstat()
-                    if stat.S_ISLNK(candidate_info.st_mode):
+                    if stat.S_ISLNK(candidate_path.lstat().st_mode):
                         return None
-                    canonical_candidate_path = candidate_path.resolve(strict=True)
+                    canonical_candidate_path = stable_absolute_path(candidate_path)
                     relative_path = canonical_candidate_path.relative_to(
                         resolved_review_root
                     )
@@ -1918,56 +1919,50 @@ def _current_derivation_review_artifact_fingerprint(
                     root_descriptor,
                     relative_path,
                 )
-                descriptors.append(descriptor)
-                guard = MacOSFileIntegrityGuard(
-                    path=canonical_candidate_path,
-                    descriptor=descriptor,
-                    require_single_link=True,
-                )
-                guards.append(guard)
-                guard.assert_quiet()
-                clips.append((
-                    role,
-                    descriptor,
-                    float_value(clip.get("timestamp_seconds")),
-                    float_value(clip.get("duration_seconds")),
-                ))
-        fingerprint = reviewed_artifact_fingerprint_from_descriptors(clips)
-        for guard in guards:
-            guard.assert_quiet()
-        return fingerprint
-    except (AV1ValidationDerivationError, FileIntegrityError, OSError):
+                guard: MacOSFileIntegrityGuard | None = None
+                try:
+                    guard = MacOSFileIntegrityGuard(
+                        path=canonical_candidate_path,
+                        descriptor=descriptor,
+                        require_single_link=True,
+                    )
+                    guard.assert_quiet()
+                    clip_payload = reviewed_artifact_clip_payload_from_descriptor(
+                        role=role,
+                        path=canonical_candidate_path,
+                        descriptor=descriptor,
+                        timestamp_seconds=float_value(clip.get("timestamp_seconds")),
+                        duration_seconds=float_value(clip.get("duration_seconds")),
+                    )
+                    guard.assert_quiet()
+                finally:
+                    if guard is not None:
+                        guard.close()
+                    os.close(descriptor)
+                if clip_payload is None:
+                    return None
+                clip_payloads.append(clip_payload)
+        return reviewed_artifact_fingerprint_from_payloads(clip_payloads)
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review-media integrity verification failed"
+        ) from exc
+    except OSError as exc:
+        if exc.errno in {errno.EMFILE, errno.ENFILE, errno.ENOMEM}:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review-media verification resources are unavailable"
+            ) from exc
         return None
     finally:
-        for guard in reversed(guards):
-            guard.close()
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
         if root_descriptor >= 0:
             os.close(root_descriptor)
 
 
 def _prepare_derivation_review_root(artifact_root: Path) -> Path:
-    review_root = artifact_root / "review-media"
-    try:
-        review_root.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    try:
-        root_info = review_root.lstat()
-    except OSError as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review-media directory is unavailable"
-        ) from exc
-    if (
-        not stat.S_ISDIR(root_info.st_mode)
-        or root_info.st_uid != os.getuid()
-        or root_info.st_mode & 0o077
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review-media directory must be owner-only"
-        )
-    return review_root
+    return _prepare_owner_only_directory(
+        artifact_root / "review-media",
+        label="review-media",
+    )
 
 
 def _secure_derivation_review_media(review_root: Path) -> None:
@@ -2114,7 +2109,7 @@ def _validate_owner_only_review_media_file(
         if (
             not stat.S_ISREG(descriptor_info.st_mode)
             or descriptor_info.st_uid != os.getuid()
-            or descriptor_info.st_mode & 0o077
+            or descriptor_info.st_mode & 0o177
             or descriptor_info.st_nlink != 1
             or (descriptor_info.st_dev, descriptor_info.st_ino)
             != (initial_info.st_dev, initial_info.st_ino)
@@ -2123,6 +2118,26 @@ def _validate_owner_only_review_media_file(
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation review media changed during validation"
+            )
+        if stat.S_IMODE(descriptor_info.st_mode) != 0o400:
+            os.fchmod(descriptor, 0o400)
+            os.fsync(descriptor)
+        sealed_info = os.fstat(descriptor)
+        sealed_path_info = os.stat(
+            entry_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            stat.S_IMODE(sealed_info.st_mode) != 0o400
+            or sealed_info.st_nlink != 1
+            or (sealed_info.st_dev, sealed_info.st_ino)
+            != (descriptor_info.st_dev, descriptor_info.st_ino)
+            or (sealed_path_info.st_dev, sealed_path_info.st_ino)
+            != (sealed_info.st_dev, sealed_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review media could not be sealed read-only"
             )
     except AV1ValidationDerivationError:
         raise

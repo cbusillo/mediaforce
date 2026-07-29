@@ -69,6 +69,7 @@ class CalibrationRunDeps:
     quality_toolchain_identity: Any | None = None
     select_quality_metric: Any | None = None
     plan_av1_cold_start: Any | None = None
+    secure_review_artifacts: Any | None = None
 
 
 class _CalibrationTelemetry:
@@ -883,6 +884,8 @@ def run_sampled_calibration(
         output_dir=output_dir,
         process_controller=process_controller,
     )
+    if deps.secure_review_artifacts is not None:
+        deps.secure_review_artifacts(preview_clips, source_clips, compare_clips)
     review_artifact_fingerprint = _review_artifact_fingerprint(preview_clips, source_clips)
     review_artifact_size_bytes = sum(max(0, int_value(getattr(clip, "size_bytes", None))) for clip in preview_clips)
     if progress_callback is not None:

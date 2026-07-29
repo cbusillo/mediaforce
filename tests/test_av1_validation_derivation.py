@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from dataclasses import replace
+import errno
 import fcntl
 import hashlib
 import io
@@ -21,9 +22,6 @@ from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.core.utils import content_version_fingerprint
-from mediaforce.reviewing.artifact_identity import (
-    reviewed_artifact_fingerprint_from_descriptors,
-)
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
@@ -40,6 +38,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     _derivation_id,
     _payload_sha256,
     _terminal_semantic_payload,
+    _write_owner_only,
     assert_av1_validation_derivation_authorization_active,
     av1_validation_derivation_plan_public_summary,
     av1_validation_derivation_statistics_contract_sha256,
@@ -426,7 +425,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 artifact_root,
                 self.plan,
             )
-            self.assertEqual(os.stat(plan_path).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(plan_path).st_mode & 0o777, 0o400)
             self.assertEqual(load_av1_validation_derivation_plan(plan_path), self.plan)
             with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
                 write_av1_validation_derivation_plan(artifact_root, self.plan)
@@ -454,13 +453,63 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
                 write_av1_validation_derivation_terminal_record(records_dir, record)
 
+    def test_artifact_root_rejects_final_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_parent = root / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            artifact_parent.mkdir(mode=0o700)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            artifact_root = artifact_parent / self.plan.partition_id
+            artifact_root.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "created safely",
+            ):
+                write_av1_validation_derivation_plan(
+                    artifact_root,
+                    self.plan,
+                )
+
+    def test_immutable_write_cleanup_preserves_primary_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.os.link",
+                    side_effect=RuntimeError("publish failed"),
+                ),
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.os.unlink",
+                    side_effect=OSError(errno.EPERM, "cleanup failed"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "publish failed"),
+            ):
+                _write_owner_only(root / "artifact.json", b"{}")
+
     def test_assignment_and_review_claim_directories_are_fsynced_through_parents(self) -> None:
+        original_fsync = os.fsync
+
+        def fsynced_directory_identities() -> tuple[set[tuple[int, int]], object]:
+            identities: set[tuple[int, int]] = set()
+
+            def track_fsync(descriptor: int) -> None:
+                info = os.fstat(descriptor)
+                if stat.S_ISDIR(info.st_mode):
+                    identities.add((int(info.st_dev), int(info.st_ino)))
+                original_fsync(descriptor)
+
+            return identities, track_fsync
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             attempts_directory = root / "nested" / "claims" / "attempts"
+            fsynced_identities, track_fsync = fsynced_directory_identities()
             with patch(
-                "mediaforce.tuning.av1_validation_derivation._fsync_directory"
-            ) as fsync_directory:
+                "mediaforce.core.file_integrity.os.fsync",
+                side_effect=track_fsync,
+            ):
                 write_av1_validation_derivation_assignment_claim(
                     attempts_directory,
                     assignment_id=self.plan.assignments[0].assignment_id,
@@ -468,15 +517,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     authorization_id=self.plan.authorization.authorization_id,
                     claimed_at="2026-07-28T01:00:00Z",
                 )
-            fsynced_paths = {
-                call.args[0] for call in fsync_directory.call_args_list
+            expected_identities = {
+                (int(path.stat().st_dev), int(path.stat().st_ino))
+                for path in (
+                    root,
+                    root / "nested",
+                    root / "nested" / "claims",
+                    attempts_directory,
+                )
             }
-            self.assertTrue({
-                root,
-                root / "nested",
-                root / "nested" / "claims",
-                attempts_directory,
-            }.issubset(fsynced_paths))
+            self.assertTrue(expected_identities.issubset(fsynced_identities))
 
         proposal = self._candidate_proposal()
         claim = build_av1_validation_derivation_review_claim(
@@ -492,28 +542,27 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             claimed_at="2026-07-28T03:00:01Z",
         )
+        fsynced_identities, track_fsync = fsynced_directory_identities()
         with patch(
-            "mediaforce.tuning.av1_validation_derivation._fsync_directory"
-        ) as fsync_directory:
+            "mediaforce.core.file_integrity.os.fsync",
+            side_effect=track_fsync,
+        ):
             write_av1_validation_derivation_review_claim(
                 self.runtime_artifact_root,
                 plan=self.plan,
                 proposal=proposal,
                 claim=claim,
             )
-        fsynced_paths = {
-            call.args[0] for call in fsync_directory.call_args_list
-        }
         resolved_artifact_root = self.runtime_artifact_root.resolve()
-        self.assertTrue({
-            resolved_artifact_root,
-            resolved_artifact_root / "review-claims",
-            (
-                resolved_artifact_root
-                / "review-claims"
-                / proposal.proposal_id
-            ),
-        }.issubset(fsynced_paths))
+        expected_identities = {
+            (int(path.stat().st_dev), int(path.stat().st_ino))
+            for path in (
+                resolved_artifact_root,
+                resolved_artifact_root / "review-claims",
+                resolved_artifact_root / "review-claims" / proposal.proposal_id,
+            )
+        }
+        self.assertTrue(expected_identities.issubset(fsynced_identities))
 
     def test_review_attestation_identity_comes_from_code_managed_result(self) -> None:
         agent_id = "12345678-1234-1234-1234-123456789abc"
@@ -2262,6 +2311,110 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         integrity_probe.assert_called_once_with(self.runtime_artifact_root.resolve())
         self.assertFalse(attempts_dir.exists())
 
+    def test_assignment_review_identity_drift_is_safety_stop(self) -> None:
+        assignment = self.plan.assignments[0]
+        source = next(
+            item
+            for item in self.partition.inventory_sources
+            if item.local_item_id == assignment.local_item_id
+        )
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        sample_item = {
+            "library_item_id": assignment.local_item_id,
+            "source_size_bytes": 1,
+            "resolved_policy": {},
+        }
+        pinned_source = SimpleNamespace(
+            path=self.runtime_artifact_root / "source-snapshots" / "source.mkv",
+            content_sha256=assignment.source_sha256,
+            size_bytes=1,
+            content_version_fingerprint=source.source_identity,
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                return_value=SimpleNamespace(free=100 * 1024 ** 3),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.purge_transient_artifacts",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(SimpleNamespace()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_sample_item",
+                return_value=sample_item,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._bind_derivation_intent",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._validate_bound_sample_item",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.snapshot_staged_artifact",
+                return_value=None,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.restore_staged_artifact",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.resolve_item_source_path",
+                return_value=Path("/private/source.mkv"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._pinned_derivation_source",
+                return_value=nullcontext(pinned_source),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.run_sampled_calibration",
+                return_value=({"review_artifact_fingerprint": "cira2_expected"}, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._secure_derivation_review_media",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value="cira2_changed",
+            ),
+        ):
+            attempt = _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-29T01:00:00Z",
+            )
+        self.assertEqual(attempt.status, "stopped")
+        self.assertEqual(attempt.reason_code, "safety_stop")
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+
     def test_fresh_authorization_timestamp_is_sampled_after_preflight(self) -> None:
         assignment = self.plan.assignments[0]
         attempts_dir = self.runtime_artifact_root / "attempts"
@@ -3208,7 +3361,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
             self.assertEqual(review_root.stat().st_mode & 0o777, 0o700)
             self.assertEqual(clip_directory.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(clip_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(clip_path.stat().st_mode & 0o777, 0o400)
             calibration = {
                 "preview_clips": [{
                     "path": clip_path.as_uri(),
@@ -3217,12 +3370,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 }],
                 "source_clips": [],
             }
-            self.assertIsNotNone(
-                _current_derivation_review_artifact_fingerprint(
-                    review_root=review_root,
-                    calibration=calibration,
-                )
+            fingerprint = _current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration=calibration,
             )
+            self.assertIsNotNone(fingerprint)
+            assert fingerprint is not None
+            self.assertTrue(fingerprint.startswith("cira2_"))
 
             linked_clip = clip_directory / "linked.mp4"
             linked_clip.symlink_to(clip_path)
@@ -3263,7 +3417,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(outside_path.read_bytes(), b"outside-review-media")
             self.assertEqual(outside_path.stat().st_mode & 0o777, outside_mode)
 
-    def test_review_fingerprint_rejects_matching_path_replacement(self) -> None:
+    def test_review_fingerprint_binds_matching_path_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             artifact_root = Path(directory) / "artifact-root"
             artifact_root.mkdir(mode=0o700)
@@ -3284,33 +3438,155 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "source_clips": [],
             }
 
-            self.assertIsNotNone(
+            original_fingerprint = _current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration=calibration,
+            )
+            self.assertIsNotNone(original_fingerprint)
+
+            clip_path.rename(moved_clip_path)
+            clip_path.write_bytes(clip_bytes)
+            clip_path.chmod(0o400)
+            replacement_fingerprint = _current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration=calibration,
+            )
+            self.assertIsNotNone(replacement_fingerprint)
+            self.assertNotEqual(replacement_fingerprint, original_fingerprint)
+            self.assertEqual(clip_path.read_bytes(), clip_bytes)
+            self.assertEqual(moved_clip_path.read_bytes(), clip_bytes)
+
+    @unittest.skipUnless(
+        hasattr(__import__("select"), "kqueue"),
+        "requires macOS kqueue",
+    )
+    def test_review_fingerprint_processes_one_real_guard_at_a_time(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifact-root"
+            artifact_root.mkdir(mode=0o700)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            run_directory = review_root / "run"
+            run_directory.mkdir(mode=0o700)
+            clip_paths = []
+            for index in range(3):
+                clip_path = run_directory / f"encoded-{index:02d}.mp4"
+                clip_path.write_bytes(f"review-{index}".encode())
+                clip_path.chmod(0o400)
+                clip_paths.append(clip_path)
+            calibration = {
+                "preview_clips": [
+                    {
+                        "path": clip_path.as_uri(),
+                        "timestamp_seconds": float(index),
+                        "duration_seconds": 8.0,
+                    }
+                    for index, clip_path in enumerate(clip_paths)
+                ],
+                "source_clips": [],
+            }
+            active_guards = 0
+            maximum_active_guards = 0
+
+            class CountingGuard:
+                def __init__(
+                        self,
+                        *,
+                        path: Path,
+                        descriptor: int,
+                        require_single_link: bool,
+                ) -> None:
+                    nonlocal active_guards, maximum_active_guards
+                    self._guard = MacOSFileIntegrityGuard(
+                        path=path,
+                        descriptor=descriptor,
+                        require_single_link=require_single_link,
+                    )
+                    self._closed = False
+                    active_guards += 1
+                    maximum_active_guards = max(
+                        maximum_active_guards,
+                        active_guards,
+                    )
+
+                def assert_quiet(self, *, timeout_seconds: float = 0.0) -> None:
+                    self._guard.assert_quiet(timeout_seconds=timeout_seconds)
+
+                def close(self) -> None:
+                    nonlocal active_guards
+                    if not self._closed:
+                        self._closed = True
+                        self._guard.close()
+                        active_guards -= 1
+
+            with patch(
+                "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                new=CountingGuard,
+            ):
+                fingerprint = _current_derivation_review_artifact_fingerprint(
+                    review_root=review_root,
+                    calibration=calibration,
+                )
+            self.assertIsNotNone(fingerprint)
+            self.assertEqual(maximum_active_guards, 1)
+            self.assertEqual(active_guards, 0)
+
+    def test_review_fingerprint_resource_exhaustion_is_safety_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifact-root"
+            artifact_root.mkdir(mode=0o700)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            clip_path = review_root / "encoded-01.mp4"
+            clip_path.write_bytes(b"review")
+            clip_path.chmod(0o400)
+            calibration = {
+                "preview_clips": [{
+                    "path": clip_path.as_uri(),
+                    "timestamp_seconds": 0.0,
+                    "duration_seconds": 8.0,
+                }],
+                "source_clips": [],
+            }
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation._open_owner_only_review_media_relative_file",
+                    side_effect=OSError(errno.EMFILE, "too many open files"),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "verification resources are unavailable",
+                ),
+            ):
                 _current_derivation_review_artifact_fingerprint(
                     review_root=review_root,
                     calibration=calibration,
                 )
-            )
 
-            def fingerprint_with_replacement(
-                    clips: Sequence[tuple[str, int, float, float]],
-            ) -> str | None:
-                clip_path.rename(moved_clip_path)
-                clip_path.write_bytes(clip_bytes)
-                clip_path.chmod(0o600)
-                return reviewed_artifact_fingerprint_from_descriptors(clips)
-
-            with patch(
-                "mediaforce.web.runtime.av1_validation_derivation.reviewed_artifact_fingerprint_from_descriptors",
-                side_effect=fingerprint_with_replacement,
+    def test_review_fingerprint_rejects_symlinked_review_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real_review_root = root / "real-review"
+            real_review_root.mkdir(mode=0o700)
+            clip_path = real_review_root / "encoded-01.mp4"
+            clip_path.write_bytes(b"review")
+            clip_path.chmod(0o400)
+            symlinked_review_root = root / "review-media"
+            symlinked_review_root.symlink_to(real_review_root, target_is_directory=True)
+            calibration = {
+                "preview_clips": [{
+                    "path": clip_path.as_uri(),
+                    "timestamp_seconds": 0.0,
+                    "duration_seconds": 8.0,
+                }],
+                "source_clips": [],
+            }
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "could not be safely bound",
             ):
-                self.assertIsNone(
-                    _current_derivation_review_artifact_fingerprint(
-                        review_root=review_root,
-                        calibration=calibration,
-                    )
+                _current_derivation_review_artifact_fingerprint(
+                    review_root=symlinked_review_root,
+                    calibration=calibration,
                 )
-            self.assertEqual(clip_path.read_bytes(), clip_bytes)
-            self.assertEqual(moved_clip_path.read_bytes(), clip_bytes)
 
     def test_owner_only_umask_restores_previous_value(self) -> None:
         with patch(
@@ -3424,7 +3700,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
         )
 
-    def test_derivation_verdict_does_not_write_terminal_on_observation_conflict(self) -> None:
+    def test_derivation_verdict_terminalizes_observation_conflict_as_safety_stop(self) -> None:
         assignment = self.plan.assignments[0]
         source_identity = _source_identity(self.partition, assignment)
         observation = _observation(
@@ -3488,12 +3764,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record"
             ) as write_terminal,
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "conflicts with existing evidence",
-            ),
         ):
-            record_av1_validation_derivation_visual_verdict(
+            terminal = record_av1_validation_derivation_visual_verdict(
                 config_path=Path("unused.toml"),
                 manifest=self.manifest,
                 plan=self.plan,
@@ -3509,9 +3781,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 moment_indexes=[],
                 recorded_at="2026-07-28T01:06:00Z",
             )
-        write_terminal.assert_not_called()
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        write_terminal.assert_called_once()
+        self.assertEqual(write_terminal.call_args.args[1], terminal)
 
-    def test_derivation_verdict_rejects_changed_review_media(self) -> None:
+    def test_derivation_verdict_terminalizes_changed_review_media(self) -> None:
         assignment = self.plan.assignments[0]
         attempt = build_av1_validation_derivation_attempt(
             plan=self.plan,
@@ -3561,12 +3836,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation"
             ) as build_observation,
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "review media is unavailable or changed",
-            ),
         ):
-            record_av1_validation_derivation_visual_verdict(
+            terminal = record_av1_validation_derivation_visual_verdict(
                 config_path=Path("unused.toml"),
                 manifest=self.manifest,
                 plan=self.plan,
@@ -3580,6 +3851,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 moment_indexes=[],
                 recorded_at="2026-07-28T01:06:00Z",
             )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
         build_observation.assert_not_called()
 
     def test_derivation_verdict_holds_runtime_lock_through_terminal_commit(self) -> None:
@@ -3738,16 +4011,17 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "partition-current",
             "execution-contract",
             "media-recheck",
+            "execution-contract",
             "verdict-intent",
-            "terminal-intent",
             "db-append",
+            "execution-contract",
+            "terminal-intent",
             "terminal-record",
             "db-exit",
-            "execution-contract",
             "lock-exit",
         ])
 
-    def test_derivation_verdict_fails_closed_on_current_input_drift(self) -> None:
+    def test_derivation_verdict_terminalizes_current_input_drift(self) -> None:
         assignment = self.plan.assignments[0]
         attempt = build_av1_validation_derivation_attempt(
             plan=self.plan,
@@ -3804,12 +4078,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record"
             ) as write_terminal,
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "current inputs drifted",
-            ),
         ):
-            record_av1_validation_derivation_visual_verdict(
+            terminal = record_av1_validation_derivation_visual_verdict(
                 config_path=Path("unused.toml"),
                 manifest=self.manifest,
                 plan=self.plan,
@@ -3825,10 +4095,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 moment_indexes=[],
                 recorded_at="2026-07-28T01:06:00Z",
             )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
         review_fingerprint.assert_not_called()
         verdict_intent.assert_not_called()
         append_observation.assert_not_called()
-        write_terminal.assert_not_called()
+        write_terminal.assert_called_once()
+        self.assertEqual(write_terminal.call_args.args[1], terminal)
 
     def test_derivation_observation_is_not_replay_eligible(self) -> None:
         assignment = self.plan.assignments[0]

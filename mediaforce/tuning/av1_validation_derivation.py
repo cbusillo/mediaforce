@@ -15,6 +15,12 @@ from statistics import median
 from typing import Any, Literal, Mapping, Sequence, cast
 
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    ensure_owner_only_directory,
+    open_stable_directory,
+    stable_absolute_path,
+)
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_cold_start_evaluation import (
@@ -1188,6 +1194,7 @@ def build_av1_validation_derivation_terminal_record(
         attempt: AV1ValidationDerivationAttempt,
         observation: ContentIntentBoundaryObservation | None = None,
         observation_exclusion_reason: str | None = None,
+        review_failure_reason_code: str | None = None,
 ) -> AV1ValidationDerivationTerminalRecord:
     validate_av1_validation_derivation_attempt_binding(
         plan=plan,
@@ -1212,6 +1219,13 @@ def build_av1_validation_derivation_terminal_record(
         elif observation is None and observation_exclusion_reason == "content_intent_observation_excluded":
             status = "excluded"
             reason_code = observation_exclusion_reason
+        elif (
+                observation is None
+                and observation_exclusion_reason is None
+                and review_failure_reason_code == "safety_stop"
+        ):
+            status = "stopped"
+            reason_code = review_failure_reason_code
         else:
             raise AV1ValidationDerivationError(
                 "AV1 review-pending attempt requires one observation outcome"
@@ -2180,7 +2194,7 @@ def _av1_validation_derivation_artifact_root_path(
         artifact_root: Path,
         plan: AV1ValidationDerivationPlan,
 ) -> Path:
-    root = artifact_root.expanduser().resolve()
+    root = Path(os.path.abspath(os.fspath(artifact_root.expanduser())))
     if (
         root.name != plan.partition_id
         or root.parent.name != AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
@@ -2202,7 +2216,7 @@ def _bind_av1_validation_derivation_artifact_root(
         binding_id=plan.plan_id,
         binding_digest=plan.authorization.authorization_id,
     )
-    return root
+    return stable_absolute_path(root)
 
 
 def _assert_av1_validation_derivation_artifact_root_binding(
@@ -2221,7 +2235,7 @@ def _assert_av1_validation_derivation_artifact_root_binding(
         raise AV1ValidationDerivationError(
             "AV1 derivation artifact-root binding drifted"
         )
-    return root
+    return stable_absolute_path(root)
 
 
 def validate_av1_validation_derivation_artifact_root_binding(
@@ -4264,69 +4278,68 @@ def _load_owner_only_json(path: Path, label: str) -> tuple[dict[str, Any], bytes
 
 
 def _write_owner_only(path: Path, data: bytes) -> None:
-    _ensure_owner_only_directory(path.parent)
-    temporary_path = path.parent / (
-        f".{path.name}.{secrets.token_hex(12)}.tmp"
-    )
+    if not path.name or path.name in {".", ".."}:
+        raise AV1ValidationDerivationError(
+            "AV1 private derivation artifact name is invalid"
+        )
+    parent_descriptor = -1
+    temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(temporary_path, flags, 0o600)
+    descriptor = -1
     try:
+        _, parent_descriptor = ensure_owner_only_directory(path.parent)
+        descriptor = os.open(
+            temporary_name,
+            flags,
+            0o400,
+            dir_fd=parent_descriptor,
+        )
         with os.fdopen(descriptor, "wb") as handle:
             descriptor = -1
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         try:
-            os.link(temporary_path, path, follow_symlinks=False)
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
         except FileExistsError as exc:
             raise AV1ValidationDerivationError(
                 "AV1 private derivation artifact already exists"
             ) from exc
-        _fsync_directory(path.parent)
-        temporary_path.unlink()
-        _fsync_directory(path.parent)
+        os.fsync(parent_descriptor)
+        os.unlink(temporary_name, dir_fd=parent_descriptor)
+        os.fsync(parent_descriptor)
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 private derivation artifact directory is unsafe"
+        ) from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        temporary_path.unlink(missing_ok=True)
+        if parent_descriptor >= 0:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+            except OSError:
+                pass
+            finally:
+                os.close(parent_descriptor)
 
 
 def _ensure_owner_only_directory(path: Path) -> None:
-    missing: list[Path] = []
-    current = path
-    while True:
-        try:
-            current.lstat()
-            break
-        except FileNotFoundError:
-            missing.append(current)
-            parent = current.parent
-            if parent == current:
-                raise AV1ValidationDerivationError(
-                    "AV1 private derivation directory is unavailable"
-                )
-            current = parent
-        except OSError as exc:
-            raise AV1ValidationDerivationError(
-                "AV1 private derivation directory is unavailable"
-            ) from exc
-    for directory in reversed(missing):
-        created = False
-        try:
-            os.mkdir(directory, mode=0o700)
-            created = True
-        except FileExistsError:
-            pass
-        except OSError as exc:
-            raise AV1ValidationDerivationError(
-                "AV1 private derivation directory could not be created"
-            ) from exc
-        _assert_owner_only_directory(directory)
-        if created:
-            _fsync_directory(directory.parent)
-    _assert_owner_only_directory(path)
+    try:
+        _, descriptor = ensure_owner_only_directory(path)
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 private derivation directory could not be created safely"
+        ) from exc
+    os.close(descriptor)
 
 
 def bind_av1_validation_derivation_attempt_directory(
@@ -4360,14 +4373,17 @@ def _bind_owner_only_directory(
         "binding_digest": binding_digest,
     }
     binding_path = path / ".binding"
-    if not binding_path.exists() and not binding_path.is_symlink():
+    try:
+        _write_owner_only(binding_path, canonical_json_bytes(payload))
+        return
+    except AV1ValidationDerivationError as write_error:
         try:
-            _write_owner_only(binding_path, canonical_json_bytes(payload))
-            return
+            current, raw = _load_owner_only_json(
+                binding_path,
+                "derivation directory binding",
+            )
         except AV1ValidationDerivationError:
-            if not binding_path.exists():
-                raise
-    current, raw = _load_owner_only_json(binding_path, "derivation directory binding")
+            raise write_error
     if current != payload or raw != canonical_json_bytes(payload):
         raise AV1ValidationDerivationError("AV1 derivation directory is bound to another artifact set")
 
@@ -4403,35 +4419,60 @@ def _load_owner_only_directory_binding(
 
 def _assert_owner_only_directory(path: Path) -> None:
     try:
-        info = path.lstat()
-    except OSError as exc:
-        raise AV1ValidationDerivationError("AV1 private derivation directory is unavailable") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise AV1ValidationDerivationError("AV1 private derivation directory is invalid")
-    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
-        raise AV1ValidationDerivationError("AV1 private derivation directory must be owner-only")
+        _, descriptor = open_stable_directory(
+            path,
+            require_owner_only=True,
+        )
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 private derivation directory must be owner-only and stable"
+        ) from exc
+    os.close(descriptor)
 
 
 def _read_owner_only_bytes(path: Path, label: str) -> bytes:
+    parent_descriptor = -1
+    descriptor = -1
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
-        descriptor = os.open(path, flags)
-    except OSError as exc:
-        raise AV1ValidationDerivationError(f"AV1 {label} is unavailable") from exc
-    try:
+        _, parent_descriptor = open_stable_directory(
+            path.parent,
+            require_owner_only=True,
+        )
+        descriptor = os.open(
+            path.name,
+            flags,
+            dir_fd=parent_descriptor,
+        )
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode):
+        path_info = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+                not stat.S_ISREG(info.st_mode)
+                or not stat.S_ISREG(path_info.st_mode)
+                or (info.st_dev, info.st_ino)
+                != (path_info.st_dev, path_info.st_ino)
+        ):
             raise AV1ValidationDerivationError(f"AV1 {label} must be a regular file")
         if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise AV1ValidationDerivationError(f"AV1 {label} must be owner-only")
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
             return handle.read()
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(f"AV1 {label} is unavailable") from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(f"AV1 {label} is unavailable") from exc
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
 def _ensure_av1_validation_derivation_terminal_artifact(
@@ -4461,18 +4502,6 @@ def _ensure_av1_validation_derivation_terminal_artifact(
         return path
     _write_owner_only(path, canonical_json_bytes(record.to_payload()))
     return path
-
-
-def _fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    descriptor = os.open(path, flags)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
 
 def _derivation_id(kind: str, payload: Mapping[str, Any]) -> str:
     prefixes = {

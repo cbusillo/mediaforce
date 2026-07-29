@@ -4,9 +4,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import platform
+import secrets
 import select as select_module
 import stat
-import tempfile
 from typing import Any
 
 
@@ -49,7 +49,8 @@ class MacOSFileIntegrityGuard:
             require_single_link: bool,
     ) -> None:
         assert_macos_file_integrity_capability()
-        self._path = path.expanduser().resolve(strict=True)
+        _reject_existing_final_symlink(path)
+        self._path = stable_absolute_path(path)
         self._descriptor = descriptor
         self._require_single_link = require_single_link
         self._directory_bindings: list[_PathBinding] = []
@@ -93,28 +94,43 @@ class MacOSFileIntegrityGuard:
 
     def _open_directory_bindings(self) -> None:
         directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        for directory in self._path.parents:
-            descriptor = os.open(directory, directory_flags)
-            descriptor_info = os.fstat(descriptor)
+        directory = Path(self._path.anchor)
+        descriptor = os.open(directory, directory_flags)
+        try:
+            self._append_directory_binding(directory, descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        for component in self._path.parent.parts[1:]:
+            parent_descriptor = descriptor
+            directory /= component
+            descriptor = os.open(
+                component,
+                directory_flags,
+                dir_fd=parent_descriptor,
+            )
             try:
-                path_info = directory.lstat()
+                self._append_directory_binding(directory, descriptor)
             except BaseException:
                 os.close(descriptor)
                 raise
-            if (
-                not stat.S_ISDIR(descriptor_info.st_mode)
-                or not stat.S_ISDIR(path_info.st_mode)
-                or (descriptor_info.st_dev, descriptor_info.st_ino)
-                != (path_info.st_dev, path_info.st_ino)
-            ):
-                os.close(descriptor)
-                raise FileIntegrityError("guarded path contains an unstable directory")
-            self._directory_bindings.append(_PathBinding(
-                path=directory,
-                descriptor=descriptor,
-                device=int(descriptor_info.st_dev),
-                inode=int(descriptor_info.st_ino),
-            ))
+
+    def _append_directory_binding(self, path: Path, descriptor: int) -> None:
+        descriptor_info = os.fstat(descriptor)
+        path_info = path.lstat()
+        if (
+            not stat.S_ISDIR(descriptor_info.st_mode)
+            or not stat.S_ISDIR(path_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            raise FileIntegrityError("guarded path contains an unstable directory")
+        self._directory_bindings.append(_PathBinding(
+            path=path,
+            descriptor=descriptor,
+            device=int(descriptor_info.st_dev),
+            inode=int(descriptor_info.st_ino),
+        ))
 
     def _register_watchers(self) -> None:
         watcher = self._watcher
@@ -199,17 +215,186 @@ def assert_macos_file_integrity_capability() -> None:
         raise FileIntegrityError("macOS file-integrity monitoring is unavailable")
 
 
+def stable_absolute_path(path: Path) -> Path:
+    absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+    if absolute == Path(absolute.anchor):
+        return absolute
+    return Path(os.path.realpath(absolute.parent)) / absolute.name
+
+
+def open_stable_directory(
+        path: Path,
+        *,
+        require_owner_only: bool = False,
+) -> tuple[Path, int]:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise FileIntegrityError("stable directory binding is unavailable")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        _reject_existing_final_symlink(path)
+        normalized = stable_absolute_path(path)
+        descriptor = os.open(normalized.anchor, flags)
+        for component in normalized.parts[1:]:
+            next_descriptor = os.open(
+                component,
+                flags,
+                dir_fd=descriptor,
+            )
+            try:
+                _validate_directory_entry(
+                    parent_descriptor=descriptor,
+                    entry_name=component,
+                    descriptor=next_descriptor,
+                )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+        descriptor_info = os.fstat(descriptor)
+        if (
+                require_owner_only
+                and (
+                    descriptor_info.st_uid != os.getuid()
+                    or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+                )
+        ):
+            raise FileIntegrityError("directory must be owner-only")
+        return normalized, descriptor
+    except BaseException as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if isinstance(exc, FileIntegrityError):
+            raise
+        raise FileIntegrityError("stable directory binding failed") from exc
+
+
+def ensure_owner_only_directory(path: Path) -> tuple[Path, int]:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise FileIntegrityError("stable directory creation is unavailable")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        _reject_existing_final_symlink(path, allow_missing=True)
+        normalized = stable_absolute_path(path)
+        descriptor = os.open(normalized.anchor, flags)
+        for index, component in enumerate(normalized.parts[1:], start=1):
+            created = False
+            try:
+                next_descriptor = os.open(
+                    component,
+                    flags,
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                os.fsync(descriptor)
+                created = True
+                next_descriptor = os.open(
+                    component,
+                    flags,
+                    dir_fd=descriptor,
+                )
+            try:
+                descriptor_info = _validate_directory_entry(
+                    parent_descriptor=descriptor,
+                    entry_name=component,
+                    descriptor=next_descriptor,
+                )
+                if (
+                        (created or index == len(normalized.parts) - 1)
+                        and (
+                            descriptor_info.st_uid != os.getuid()
+                            or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+                        )
+                ):
+                    raise FileIntegrityError("directory must be owner-only")
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+        descriptor_info = os.fstat(descriptor)
+        if (
+                descriptor_info.st_uid != os.getuid()
+                or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+        ):
+            raise FileIntegrityError("directory must be owner-only")
+        return normalized, descriptor
+    except BaseException as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if isinstance(exc, FileIntegrityError):
+            raise
+        raise FileIntegrityError("owner-only directory creation failed") from exc
+
+
+def _validate_directory_entry(
+        *,
+        parent_descriptor: int,
+        entry_name: str,
+        descriptor: int,
+) -> os.stat_result:
+    descriptor_info = os.fstat(descriptor)
+    entry_info = os.stat(
+        entry_name,
+        dir_fd=parent_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+            not stat.S_ISDIR(descriptor_info.st_mode)
+            or not stat.S_ISDIR(entry_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (entry_info.st_dev, entry_info.st_ino)
+    ):
+        raise FileIntegrityError("directory path is unstable")
+    return descriptor_info
+
+
+def _reject_existing_final_symlink(
+        path: Path,
+        *,
+        allow_missing: bool = False,
+) -> None:
+    absolute = Path(os.path.abspath(os.fspath(path.expanduser())))
+    try:
+        info = absolute.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return
+        raise FileIntegrityError("path identity is unavailable")
+    except OSError as exc:
+        raise FileIntegrityError("path identity is unavailable") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise FileIntegrityError("path must not be a symbolic link")
+
+
 def probe_macos_file_integrity(root: Path) -> None:
     assert_macos_file_integrity_capability()
-    probe_directory = Path(tempfile.mkdtemp(prefix=".mediaforce-integrity-", dir=root))
+    root_path, root_descriptor = open_stable_directory(
+        root,
+        require_owner_only=True,
+    )
+    probe_directory_name = f".mediaforce-integrity-{secrets.token_hex(8)}"
+    probe_directory = root_path / probe_directory_name
     probe_path = probe_directory / "probe"
+    probe_directory_descriptor = -1
     descriptor = -1
     guard: MacOSFileIntegrityGuard | None = None
     try:
+        os.mkdir(probe_directory_name, mode=0o700, dir_fd=root_descriptor)
+        os.fsync(root_descriptor)
+        probe_directory_descriptor = os.open(
+            probe_directory_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=root_descriptor,
+        )
         descriptor = os.open(
-            probe_path,
+            "probe",
             os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600,
+            0o400,
+            dir_fd=probe_directory_descriptor,
         )
         os.write(descriptor, b"clean")
         os.fsync(descriptor)
@@ -226,8 +411,15 @@ def probe_macos_file_integrity(root: Path) -> None:
         except FileIntegrityError:
             return
         raise FileIntegrityError("macOS file-integrity probe missed a mutation")
+    except FileIntegrityError:
+        raise
+    except OSError as exc:
+        raise FileIntegrityError("macOS file-integrity probe failed") from exc
     finally:
         if guard is not None:
             guard.close()
         if descriptor >= 0:
             os.close(descriptor)
+        if probe_directory_descriptor >= 0:
+            os.close(probe_directory_descriptor)
+        os.close(root_descriptor)

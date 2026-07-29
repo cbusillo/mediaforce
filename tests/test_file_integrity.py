@@ -1,3 +1,4 @@
+import errno
 import os
 from pathlib import Path
 import platform
@@ -10,6 +11,7 @@ from mediaforce.core.file_integrity import (
     FileIntegrityError,
     MacOSFileIntegrityGuard,
     assert_macos_file_integrity_capability,
+    open_stable_directory,
     probe_macos_file_integrity,
 )
 
@@ -32,6 +34,15 @@ class FileIntegrityCapabilityTests(unittest.TestCase):
     def test_macos_capability_is_available(self) -> None:
         assert_macos_file_integrity_capability()
 
+    def test_missing_directory_binding_raises_file_integrity_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing"
+            with self.assertRaisesRegex(
+                FileIntegrityError,
+                "path identity is unavailable",
+            ):
+                open_stable_directory(missing)
+
 
 @unittest.skipUnless(KQUEUE_AVAILABLE, "requires macOS kqueue")
 class MacOSFileIntegrityGuardTests(unittest.TestCase):
@@ -44,6 +55,10 @@ class MacOSFileIntegrityGuardTests(unittest.TestCase):
             self.assertEqual(
                 (probe_directories[0] / "probe").read_bytes(),
                 b"Xlean",
+            )
+            self.assertEqual(
+                (probe_directories[0] / "probe").stat().st_mode & 0o777,
+                0o400,
             )
 
     def test_probe_mutation_preserves_path_replacement(self) -> None:
@@ -92,6 +107,35 @@ class MacOSFileIntegrityGuardTests(unittest.TestCase):
                 ),
             ):
                 probe_macos_file_integrity(Path(directory))
+
+    def test_probe_setup_failure_closes_root_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root_descriptor = os.open(
+                root,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            original_close = os.close
+            with (
+                patch(
+                    "mediaforce.core.file_integrity.open_stable_directory",
+                    return_value=(root, root_descriptor),
+                ),
+                patch(
+                    "mediaforce.core.file_integrity.os.mkdir",
+                    side_effect=OSError(errno.ENOSPC, "no space"),
+                ),
+                patch(
+                    "mediaforce.core.file_integrity.os.close",
+                    wraps=original_close,
+                ) as close_descriptor,
+                self.assertRaisesRegex(
+                    FileIntegrityError,
+                    "probe failed",
+                ),
+            ):
+                probe_macos_file_integrity(root)
+            close_descriptor.assert_any_call(root_descriptor)
 
     def test_guard_detects_transient_write_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
