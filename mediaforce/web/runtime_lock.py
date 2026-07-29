@@ -14,10 +14,13 @@ class MediaforceRuntimeBusyError(RuntimeError):
 
 
 def mediaforce_runtime_lock_path(config: MediaforceConfig) -> Path:
-    return (
-        config.paths.web_state_dir.expanduser().resolve().parent
-        / "mediaforce-web.lock"
+    return mediaforce_runtime_lock_path_for_web_state_dir(
+        config.paths.web_state_dir
     )
+
+
+def mediaforce_runtime_lock_path_for_web_state_dir(web_state_dir: Path) -> Path:
+    return web_state_dir.expanduser().resolve().parent / "mediaforce-web.lock"
 
 
 def mediaforce_runtime_lock_owner(lock_path: Path) -> str | None:

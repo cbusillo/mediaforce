@@ -213,7 +213,21 @@ candidate-lock artifacts live under the partition-global canonical private
 state root derived from `web_state_dir`; callers cannot select alternate
 artifact directories. Each
 directory carries an immutable binding to one plan or proposal, so artifacts
-cannot be mixed across authorization windows or review sets. Newly created
+cannot be mixed across authorization windows or review sets. The canonical
+artifact-root binding also carries a one-way digest of its resolved state-root
+path. Moving the private tree to a location that selects a different
+runtime-lock domain therefore fails before recovery can write. Recovery derives
+the lock domain from the canonical artifact tree and requires it to match the
+lock path selected from current config, so aliasing only the artifact subtree
+beneath a state root in another runtime-lock domain fails at the same boundary.
+Candidate-lock finalization and visual-verdict publication repeat the same check
+after taking the runtime lock, canonicalize all subsequent artifact access to
+the bound tree, and fail before any artifact or database write when the domains
+differ. Aliases that resolve to the same canonical tree and select the same lock
+file remain in the same lock domain. Artifact roots created before the
+path-bound digest existed are not migrated in place; discard and regenerate
+those private preregistration artifacts from the merged implementation before
+creating execution authorization. Newly created
 claim files and newly created parent directories are fsynced before work can
 continue, so a power loss cannot silently erase assignment or review ownership.
 Every private JSON artifact is completed under a random dot-prefixed

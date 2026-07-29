@@ -2227,7 +2227,10 @@ def _bind_av1_validation_derivation_artifact_root(
         root,
         kind="artifact_root",
         binding_id=plan.plan_id,
-        binding_digest=plan.authorization.authorization_id,
+        binding_digest=_av1_validation_derivation_artifact_root_binding_digest(
+            root,
+            plan,
+        ),
     )
     return stable_absolute_path(root)
 
@@ -2243,12 +2246,32 @@ def _assert_av1_validation_derivation_artifact_root_binding(
     )
     if (
         binding["binding_id"] != plan.plan_id
-        or binding["binding_digest"] != plan.authorization.authorization_id
+        or binding["binding_digest"]
+        != _av1_validation_derivation_artifact_root_binding_digest(root, plan)
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation artifact-root binding drifted"
         )
     return stable_absolute_path(root)
+
+
+def _av1_validation_derivation_artifact_root_binding_digest(
+        root: Path,
+        plan: AV1ValidationDerivationPlan,
+) -> str:
+    canonical_root = stable_absolute_path(root)
+    canonical_root_sha256 = (
+        "sha256:"
+        + hashlib.sha256(
+            os.fsencode(os.fspath(canonical_root)),
+        ).hexdigest()
+    )
+    return _payload_sha256({
+        "kind": "artifact_root",
+        "plan_id": plan.plan_id,
+        "authorization_id": plan.authorization.authorization_id,
+        "canonical_root_sha256": canonical_root_sha256,
+    })
 
 
 def validate_av1_validation_derivation_artifact_root_binding(
@@ -4412,7 +4435,7 @@ def _validate_calibration_execution(calibration: Mapping[str, Any]) -> None:
         or compatibility.get("assessment_contract") != BOUNDARY_ASSESSMENT_CONTRACT
         or not math.isfinite(chosen_crf)
         or not 0 <= chosen_crf <= 63
-        or not review_fingerprint
+        or not review_fingerprint.startswith("cira3_")
         or calibration.get("current_review_artifact_fingerprint") != review_fingerprint
         or calibration.get("review_media_ready") is not True
         or calibration.get("boundary_review_media_ready") is not True

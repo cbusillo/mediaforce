@@ -136,6 +136,8 @@ from mediaforce.web.runtime.calibration_runtime import (
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
+    mediaforce_runtime_lock_path,
+    mediaforce_runtime_lock_path_for_web_state_dir,
 )
 
 
@@ -670,9 +672,10 @@ def _load_canonical_av1_validation_derivation_plan(
         raise AV1ValidationDerivationError(
             "AV1 derivation plan must use the config-derived canonical root"
         )
-    validate_av1_validation_derivation_artifact_root_binding(
-        artifact_root,
-        plan,
+    artifact_root = _validated_av1_validation_derivation_artifact_root(
+        config=config,
+        plan=plan,
+        artifact_root=artifact_root,
     )
     return plan, artifact_root
 
@@ -863,18 +866,13 @@ def _run_av1_validation_derivation_assignment_locked(
         raise AV1ValidationDerivationError(
             "AV1 derivation runtime artifacts must use the partition-global canonical directory"
         )
-    expected_state_root = _av1_validation_derivation_state_root(
-        config,
-        plan,
-    ).expanduser().resolve()
-    if artifact_root != expected_state_root:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation recovery requires the canonical runtime state root"
-        )
-    validate_av1_validation_derivation_artifact_root_binding(
-        artifact_root,
-        plan,
+    artifact_root = _validated_av1_validation_derivation_artifact_root(
+        config=config,
+        plan=plan,
+        artifact_root=artifact_root,
     )
+    attempts_directory = artifact_root / "attempts"
+    terminal_records_directory = artifact_root / "terminal-records"
     if load_av1_validation_derivation_plan(artifact_root / "plan.json") != plan:
         raise AV1ValidationDerivationError(
             "AV1 derivation runtime plan does not match the frozen artifact root"
@@ -894,7 +892,9 @@ def _run_av1_validation_derivation_assignment_locked(
             "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
         )
     assert_av1_validation_derivation_execution_contract(manifest, plan)
-    if av1_validation_derivation_artifact_root(config, plan).resolve() != artifact_root:
+    if stable_absolute_path(
+        av1_validation_derivation_artifact_root(config, plan)
+    ) != artifact_root:
         raise AV1ValidationDerivationError(
             "AV1 derivation runtime artifacts drifted from the immutable runtime context"
         )
@@ -1187,6 +1187,35 @@ def _run_av1_validation_derivation_assignment_locked(
     return attempt
 
 
+def _validated_av1_validation_derivation_artifact_root(
+        *,
+        config: MediaforceConfig,
+        plan: AV1ValidationDerivationPlan,
+        artifact_root: Path,
+) -> Path:
+    canonical_artifact_root = stable_absolute_path(artifact_root)
+    expected_artifact_root = stable_absolute_path(
+        _av1_validation_derivation_state_root(config, plan)
+    )
+    if canonical_artifact_root != expected_artifact_root:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation recovery requires the canonical runtime state root"
+        )
+    canonical_web_state_dir = canonical_artifact_root.parent.parent
+    bound_lock_path = mediaforce_runtime_lock_path_for_web_state_dir(
+        canonical_web_state_dir
+    )
+    if bound_lock_path != mediaforce_runtime_lock_path(config):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation runtime-lock domain drifted"
+        )
+    validate_av1_validation_derivation_artifact_root_binding(
+        canonical_artifact_root,
+        plan,
+    )
+    return canonical_artifact_root
+
+
 def finalize_av1_validation_derivation_candidate_lock(
         *,
         config_path: Path,
@@ -1222,6 +1251,11 @@ def finalize_av1_validation_derivation_candidate_lock(
                 "cell_plan_id": cell_plan_id,
             },
         ):
+            artifact_root = _validated_av1_validation_derivation_artifact_root(
+                config=config,
+                plan=plan,
+                artifact_root=artifact_root,
+            )
             proposal = load_av1_validation_derivation_candidate_proposal(
                 artifact_root,
                 plan=plan,
@@ -1325,6 +1359,11 @@ def load_verified_av1_validation_derivation_candidate_lock(
                 "cell_plan_id": cell_plan_id,
             },
         ):
+            artifact_root = _validated_av1_validation_derivation_artifact_root(
+                config=config,
+                plan=plan,
+                artifact_root=artifact_root,
+            )
             proposal = load_av1_validation_derivation_candidate_proposal(
                 artifact_root,
                 plan=plan,
@@ -1440,6 +1479,20 @@ def record_av1_validation_derivation_visual_verdict(
                     recorded_at=recorded_at,
                 )
             except _AV1ValidationDerivationVerdictSafetyStop:
+                artifact_root = _validated_av1_validation_derivation_artifact_root(
+                    config=config,
+                    plan=plan,
+                    artifact_root=av1_validation_derivation_artifact_root(config, plan),
+                )
+                canonical_terminal_records_directory = (
+                    artifact_root / "terminal-records"
+                )
+                if terminal_records_directory.resolve() != (
+                    canonical_terminal_records_directory.resolve()
+                ):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation terminal artifacts must use the partition-global canonical directory"
+                    )
                 terminal = build_av1_validation_derivation_terminal_record(
                     plan=plan,
                     partition=partition,
@@ -1447,12 +1500,11 @@ def record_av1_validation_derivation_visual_verdict(
                     review_failure_reason_code="safety_stop",
                 )
                 ensure_av1_validation_derivation_terminal_intent(
-                    av1_validation_derivation_artifact_root(config, plan)
-                    / "terminal-intents",
+                    artifact_root / "terminal-intents",
                     terminal,
                 )
                 ensure_av1_validation_derivation_terminal_record(
-                    terminal_records_directory,
+                    canonical_terminal_records_directory,
                     terminal,
                 )
                 return terminal
@@ -1496,10 +1548,10 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         partition=partition,
         attempt=attempt,
     )
-    artifact_root = av1_validation_derivation_artifact_root(config, plan)
-    validate_av1_validation_derivation_artifact_root_binding(
-        artifact_root,
-        plan,
+    artifact_root = _validated_av1_validation_derivation_artifact_root(
+        config=config,
+        plan=plan,
+        artifact_root=av1_validation_derivation_artifact_root(config, plan),
     )
     persisted_plan = load_av1_validation_derivation_plan(
         artifact_root / "plan.json"
@@ -1528,6 +1580,7 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         raise AV1ValidationDerivationError(
             "AV1 derivation terminal artifacts must use the partition-global canonical directory"
         )
+    terminal_records_directory = artifact_root / "terminal-records"
     calibration = attempt.calibration_payload()
     sample_item = object_dict(calibration.get("sample_item"))
     claim_created = ensure_av1_validation_derivation_verdict_claim(

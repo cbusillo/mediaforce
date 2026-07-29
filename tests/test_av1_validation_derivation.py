@@ -78,6 +78,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     write_av1_validation_derivation_terminal_record,
 )
 from mediaforce.web.runtime.av1_validation_derivation import (
+    _AV1ValidationDerivationVerdictSafetyStop,
     _assert_next_assignment,
     _assert_derivation_terminal_observations_current,
     _current_derivation_review_artifact_fingerprint,
@@ -87,6 +88,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     _recover_interrupted_derivation_state,
     _run_av1_validation_derivation_assignment_locked,
     _secure_derivation_review_media,
+    _validated_av1_validation_derivation_artifact_root,
     _write_all,
     assert_av1_validation_derivation_execution_contract,
     assert_av1_validation_derivation_execution_environment,
@@ -314,6 +316,33 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
         )
 
+    def _cross_domain_artifact_alias(self) -> tuple[SimpleNamespace, Path]:
+        alias_state_root = (
+            self.runtime_config.paths.web_state_dir.parent
+            / "alias-runtime"
+            / "alias-state"
+        )
+        alias_state_root.mkdir(mode=0o700, parents=True)
+        (
+            alias_state_root / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+        ).symlink_to(
+            self.runtime_artifact_root.parent,
+            target_is_directory=True,
+        )
+        alias_config = SimpleNamespace(
+            paths=SimpleNamespace(
+                db_path=self.runtime_config.paths.db_path,
+                review_dir=self.runtime_config.paths.review_dir,
+                web_state_dir=alias_state_root,
+            )
+        )
+        return (
+            alias_config,
+            alias_state_root
+            / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            / self.plan.partition_id,
+        )
+
     def test_execution_environment_rejects_unavailable_source_integrity(self) -> None:
         with (
             patch(
@@ -511,6 +540,251 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     artifact_root,
                     self.plan,
                 )
+
+    def test_relocated_state_root_is_rejected_before_recovery_writes(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        write_av1_validation_derivation_assignment_claim(
+            attempts_directory,
+            assignment_id=assignment.assignment_id,
+            plan_id=self.plan.plan_id,
+            authorization_id=self.plan.authorization.authorization_id,
+            claimed_at="2026-07-28T01:00:00Z",
+        )
+        relocated_state_root = (
+            self.runtime_config.paths.web_state_dir.parent / "relocated-state"
+        )
+        relocated_state_root.mkdir(mode=0o700)
+        shutil.move(
+            self.runtime_artifact_root.parent,
+            relocated_state_root / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
+        )
+        relocated_artifact_root = (
+            relocated_state_root
+            / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            / self.plan.partition_id
+        )
+        relocated_config = SimpleNamespace(
+            paths=SimpleNamespace(
+                db_path=self.runtime_config.paths.db_path,
+                review_dir=self.runtime_config.paths.review_dir,
+                web_state_dir=relocated_state_root,
+            )
+        )
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "artifact-root binding drifted",
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=relocated_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=relocated_artifact_root / "attempts",
+                terminal_records_directory=(
+                    relocated_artifact_root / "terminal-records"
+                ),
+            )
+        self.assertEqual(
+            list((relocated_artifact_root / "attempts").glob("*.json")),
+            [],
+        )
+        self.assertFalse((relocated_artifact_root / "terminal-records").exists())
+
+    def test_symlinked_artifact_tree_is_rejected_before_recovery_writes(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        write_av1_validation_derivation_assignment_claim(
+            attempts_directory,
+            assignment_id=assignment.assignment_id,
+            plan_id=self.plan.plan_id,
+            authorization_id=self.plan.authorization.authorization_id,
+            claimed_at="2026-07-28T01:00:00Z",
+        )
+        alias_config, aliased_artifact_root = self._cross_domain_artifact_alias()
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "runtime-lock domain drifted",
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=alias_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=aliased_artifact_root / "attempts",
+                terminal_records_directory=(
+                    aliased_artifact_root / "terminal-records"
+                ),
+            )
+        self.assertEqual(
+            list((self.runtime_artifact_root / "attempts").glob("*.json")),
+            [],
+        )
+        self.assertFalse((self.runtime_artifact_root / "terminal-records").exists())
+
+    def test_candidate_lock_apis_reject_cross_domain_artifact_alias(self) -> None:
+        alias_config, aliased_artifact_root = self._cross_domain_artifact_alias()
+        for operation in (
+            finalize_runtime_av1_validation_derivation_candidate_lock,
+            load_verified_runtime_av1_validation_derivation_candidate_lock,
+        ):
+            with self.subTest(operation=operation.__name__):
+                with (
+                    patch(
+                        "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                        return_value=alias_config,
+                    ),
+                    patch(
+                        "mediaforce.web.runtime.av1_validation_derivation._load_canonical_av1_validation_derivation_plan",
+                        return_value=(self.plan, aliased_artifact_root),
+                    ),
+                    patch(
+                        "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                        return_value=nullcontext(),
+                    ),
+                    patch(
+                        "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_candidate_proposal",
+                    ) as load_proposal,
+                    self.assertRaisesRegex(
+                        AV1ValidationDerivationError,
+                        "runtime-lock domain drifted",
+                    ),
+                ):
+                    operation(
+                        config_path=Path("unused.toml"),
+                        manifest=self.manifest,
+                        partition=self.partition,
+                        token_key=self.token_key,
+                        plan_path=aliased_artifact_root / "plan.json",
+                        cell_plan_id=self.plan.assignments[0].cell_plan_id,
+                    )
+                load_proposal.assert_not_called()
+        self.assertFalse((self.runtime_artifact_root / "candidate-locks").exists())
+
+    def test_visual_verdict_rejects_cross_domain_alias_before_claim(self) -> None:
+        alias_config, aliased_artifact_root = self._cross_domain_artifact_alias()
+        attempt = self._review_pending_attempt()
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=alias_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_derivation_artifact_root",
+                return_value=aliased_artifact_root,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "runtime-lock domain drifted",
+            ),
+        ):
+            record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    aliased_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        for directory_name in (
+            "verdict-claims",
+            "verdict-intents",
+            "terminal-intents",
+            "terminal-records",
+        ):
+            self.assertFalse((self.runtime_artifact_root / directory_name).exists())
+
+    def test_visual_verdict_safety_fallback_rechecks_lock_domain(self) -> None:
+        alias_config, aliased_artifact_root = self._cross_domain_artifact_alias()
+        attempt = self._review_pending_attempt()
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=alias_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._record_av1_validation_derivation_visual_verdict_locked",
+                side_effect=_AV1ValidationDerivationVerdictSafetyStop(
+                    "fixture safety stop"
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_derivation_artifact_root",
+                return_value=aliased_artifact_root,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "runtime-lock domain drifted",
+            ),
+        ):
+            record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    aliased_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertFalse((self.runtime_artifact_root / "terminal-intents").exists())
+        self.assertFalse((self.runtime_artifact_root / "terminal-records").exists())
+
+    def test_same_domain_web_state_alias_uses_canonical_artifact_root(self) -> None:
+        alias_state_root = (
+            self.runtime_config.paths.web_state_dir.parent / "state-alias"
+        )
+        alias_state_root.symlink_to(
+            self.runtime_config.paths.web_state_dir,
+            target_is_directory=True,
+        )
+        alias_config = SimpleNamespace(
+            paths=SimpleNamespace(
+                db_path=self.runtime_config.paths.db_path,
+                review_dir=self.runtime_config.paths.review_dir,
+                web_state_dir=alias_state_root,
+            )
+        )
+        self.assertEqual(
+            _validated_av1_validation_derivation_artifact_root(
+                config=alias_config,
+                plan=self.plan,
+                artifact_root=(
+                    alias_state_root
+                    / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+                    / self.plan.partition_id
+                ),
+            ),
+            self.runtime_artifact_root.resolve(),
+        )
 
     def test_immutable_write_failure_cleans_unpublished_temporary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2128,6 +2402,30 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 completed_at="2026-07-28T01:05:00Z",
                 status="review_pending",
                 calibration_payload=payload,
+            )
+
+    def test_attempt_requires_cira3_review_artifact_binding(self) -> None:
+        assignment = self.plan.assignments[0]
+        calibration = _calibration_payload(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            compatibility=_compatibility(assignment),
+        )
+        calibration["review_artifact_fingerprint"] = "cira2_legacy"
+        calibration["current_review_artifact_fingerprint"] = "cira2_legacy"
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "unchanged measured full search",
+        ):
+            build_av1_validation_derivation_attempt(
+                plan=self.plan,
+                partition=self.partition,
+                assignment_id=assignment.assignment_id,
+                started_at="2026-07-28T01:00:00Z",
+                completed_at="2026-07-28T01:05:00Z",
+                status="review_pending",
+                calibration_payload=calibration,
             )
 
     def test_attempt_rejects_incomplete_full_search_trace(self) -> None:
@@ -6202,7 +6500,7 @@ def _observation(
         source_event_kind="post_test_review",
         source_event_id=f"event_{assignment.assignment_id}",
         job_id=f"job_{assignment.assignment_id}",
-        artifact_fingerprint=f"artifact_{assignment.assignment_id}",
+        artifact_fingerprint=f"cira3_{assignment.assignment_id}",
         source_evidence_ids=("evidence_test",),
         observation_kind="visual_approval" if acceptable else "visual_rejection",
         verdict="acceptable" if acceptable else "unacceptable",
@@ -6269,7 +6567,7 @@ def _calibration_payload(
         compatibility: ContentIntentBoundaryCompatibilityV1,
         bitrate: int = 1_000_000,
 ) -> dict[str, object]:
-    artifact = f"artifact_{assignment.assignment_id}"
+    artifact = f"cira3_{assignment.assignment_id}"
     duration_seconds = 3_600.0
     predicted_video_bytes = round((bitrate * duration_seconds) / 8)
     source_size_bytes = predicted_video_bytes * 2
