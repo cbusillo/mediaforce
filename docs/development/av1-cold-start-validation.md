@@ -265,6 +265,15 @@ complete source plus the existing five-gibibyte safety floor. Snapshots are
 removed after the attempt; crash leftovers are purged under the runtime lock
 when interruption recovery terminalizes the owned assignment.
 
+The repository keeps the full protocol suite active on Linux with test-only
+seams for macOS capability admission, the same-filesystem mutation probe, and
+kqueue event delivery. Descriptor/path identity checks and all protocol logic
+remain active in those fixtures. A focused `file-integrity-macos` CI lane
+separately runs the real kqueue capability, probe, transient-write, hardlink,
+path-chain, partition, and derivation tests. Production capability admission
+and runtime monitoring remain fail closed and are never bypassed by these test
+seams.
+
 The authorization binds the resolved database, review, and state roots together
 with the current machine, Python executable, relevant Mediaforce implementation
 files, AV1 encoder/metric toolchain, source-integrity guard contract, and merged

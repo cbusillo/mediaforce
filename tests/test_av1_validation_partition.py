@@ -7,11 +7,13 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from mediaforce.core.file_integrity import FileIntegrityError
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_partition import (
     AV1ValidationPartitionError,
@@ -51,6 +53,38 @@ def _source_sha256(source: AV1ValidationPartitionSource) -> str:
 def _summary_sha256(summary: object) -> str:
     payload = json.dumps(summary, separators=(",", ":"), sort_keys=True)
     return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
+
+
+class _DescriptorBindingFileIntegrityGuard:
+    def __init__(
+            self,
+            *,
+            path: Path,
+            descriptor: int,
+            require_single_link: bool,
+    ) -> None:
+        self.path = path.expanduser().resolve(strict=True)
+        self._descriptor = descriptor
+        self._require_single_link = require_single_link
+        self.assert_quiet()
+
+    def assert_quiet(self, *, timeout_seconds: float = 0.0) -> None:
+        descriptor_info = os.fstat(self._descriptor)
+        path_info = self.path.lstat()
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+            or (
+                self._require_single_link
+                and (descriptor_info.st_nlink != 1 or path_info.st_nlink != 1)
+            )
+        ):
+            raise FileIntegrityError("guarded file or path changed")
+
+    def close(self) -> None:
+        pass
 
 
 class AV1ValidationPartitionTests(unittest.TestCase):
@@ -532,6 +566,16 @@ class AV1ValidationPartitionTests(unittest.TestCase):
 
 
 class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        if hasattr(__import__("select"), "kqueue"):
+            return
+        integrity_guard_patcher = patch(
+            "mediaforce.tuning.av1_validation_partition_inventory.MacOSFileIntegrityGuard",
+            new=_DescriptorBindingFileIntegrityGuard,
+        )
+        integrity_guard_patcher.start()
+        self.addCleanup(integrity_guard_patcher.stop)
+
     def test_selected_source_digest_replays_exact_fingerprint_evidence(self) -> None:
         summary = {
             "schema_version": 1,

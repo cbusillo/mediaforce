@@ -27,6 +27,7 @@
     "test": {
       "backendCi": "uv run --with pytest pytest -q -k \"not test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues and not test_bootstrap_remote_macos_routes_xcode_issue_to_request_helper and not test_remote_host_status_targets_current_machine_without_ssh_probe and not test_ffmpeg_hwaccel_included_when_videotoolbox_available\"",
       "backendFull": "uv run --with pytest pytest",
+      "fileIntegrityMacos": "uv run --with pytest pytest -q tests/test_file_integrity.py tests/test_av1_validation_partition.py tests/test_av1_validation_derivation.py",
       "frontend": "npm --prefix frontend test"
     },
     "lint": {
@@ -68,7 +69,7 @@
     "Dependency Graph",
     "Dependabot Updates"
   ],
-  "requiredStatusChecks": ["acceptance"],
+  "requiredStatusChecks": ["acceptance", "file-integrity-macos"],
   "codeScanningMergeProtection": {
     "ruleset": "Require code scanning results",
     "tool": "CodeQL",

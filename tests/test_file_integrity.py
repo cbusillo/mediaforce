@@ -1,0 +1,148 @@
+import os
+from pathlib import Path
+import platform
+import select
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    MacOSFileIntegrityGuard,
+    assert_macos_file_integrity_capability,
+    probe_macos_file_integrity,
+)
+
+
+KQUEUE_AVAILABLE = platform.system() == "Darwin" and hasattr(select, "kqueue")
+
+
+class FileIntegrityCapabilityTests(unittest.TestCase):
+    def test_non_macos_capability_fails_closed(self) -> None:
+        with (
+            patch("mediaforce.core.file_integrity.platform.system", return_value="Linux"),
+            self.assertRaisesRegex(
+                FileIntegrityError,
+                "macOS file-integrity monitoring is unavailable",
+            ),
+        ):
+            assert_macos_file_integrity_capability()
+
+    @unittest.skipUnless(KQUEUE_AVAILABLE, "requires macOS kqueue")
+    def test_macos_capability_is_available(self) -> None:
+        assert_macos_file_integrity_capability()
+
+
+@unittest.skipUnless(KQUEUE_AVAILABLE, "requires macOS kqueue")
+class MacOSFileIntegrityGuardTests(unittest.TestCase):
+    def test_probe_detects_same_filesystem_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            probe_macos_file_integrity(Path(directory))
+
+    def test_guard_detects_transient_write_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "guarded"
+            original_bytes = b"registered-source"
+            path.write_bytes(original_bytes)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            guard = MacOSFileIntegrityGuard(
+                path=path,
+                descriptor=descriptor,
+                require_single_link=True,
+            )
+            try:
+                mutation_descriptor = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+                try:
+                    os.write(mutation_descriptor, b"transient-source")
+                    os.ftruncate(mutation_descriptor, len(b"transient-source"))
+                    os.fsync(mutation_descriptor)
+                    os.lseek(mutation_descriptor, 0, os.SEEK_SET)
+                    os.write(mutation_descriptor, original_bytes)
+                    os.ftruncate(mutation_descriptor, len(original_bytes))
+                    os.fsync(mutation_descriptor)
+                finally:
+                    os.close(mutation_descriptor)
+                with self.assertRaisesRegex(
+                    FileIntegrityError,
+                    "guarded file or path changed",
+                ):
+                    guard.assert_quiet(timeout_seconds=0.1)
+            finally:
+                guard.close()
+                os.close(descriptor)
+
+    def test_guard_detects_hardlink_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "guarded"
+            link_path = root / "alias"
+            path.write_bytes(b"registered-source")
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            guard = MacOSFileIntegrityGuard(
+                path=path,
+                descriptor=descriptor,
+                require_single_link=True,
+            )
+            try:
+                os.link(path, link_path)
+                link_path.unlink()
+                with self.assertRaisesRegex(
+                    FileIntegrityError,
+                    "guarded file or path changed",
+                ):
+                    guard.assert_quiet(timeout_seconds=0.1)
+            finally:
+                guard.close()
+                os.close(descriptor)
+
+    def test_guard_detects_parent_swap_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent = root / "parent"
+            parent.mkdir()
+            path = parent / "guarded"
+            path.write_bytes(b"registered-source")
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            guard = MacOSFileIntegrityGuard(
+                path=path,
+                descriptor=descriptor,
+                require_single_link=True,
+            )
+            moved_parent = root / "moved-parent"
+            try:
+                parent.rename(moved_parent)
+                parent.mkdir()
+                replacement = parent / path.name
+                replacement.write_bytes(b"replacement-source")
+                replacement.unlink()
+                parent.rmdir()
+                moved_parent.rename(parent)
+                with self.assertRaisesRegex(
+                    FileIntegrityError,
+                    "guarded file or path changed",
+                ):
+                    guard.assert_quiet(timeout_seconds=0.1)
+            finally:
+                guard.close()
+                os.close(descriptor)
+
+    def test_guard_rejects_existing_hardlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "guarded"
+            link_path = root / "alias"
+            path.write_bytes(b"registered-source")
+            os.link(path, link_path)
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                with self.assertRaisesRegex(
+                    FileIntegrityError,
+                    "guarded file or path changed",
+                ):
+                    MacOSFileIntegrityGuard(
+                        path=path,
+                        descriptor=descriptor,
+                        require_single_link=True,
+                    )
+            finally:
+                os.close(descriptor)

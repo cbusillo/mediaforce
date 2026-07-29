@@ -78,3 +78,27 @@ jobs:
 
       - name: Run web route smoke
         run: npm --prefix frontend run smoke:web
+
+  file-integrity-macos:
+    name: file-integrity-macos
+    runs-on: macos-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Run macOS file-integrity tests
+        run: >-
+          uv run --with pytest pytest -q
+          tests/test_file_integrity.py
+          tests/test_av1_validation_partition.py
+          tests/test_av1_validation_derivation.py

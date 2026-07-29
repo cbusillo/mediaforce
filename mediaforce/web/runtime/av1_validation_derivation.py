@@ -381,6 +381,7 @@ def _pinned_derivation_source(
         os.fsync(snapshot_descriptor)
         assignment_root.chmod(0o500, follow_symlinks=False)
         os.close(snapshot_descriptor)
+        snapshot_descriptor = -1
         snapshot_descriptor = os.open(
             snapshot_path,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),

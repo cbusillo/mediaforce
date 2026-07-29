@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -127,6 +128,55 @@ def _source_sha256(source: AV1ValidationPartitionSource) -> str:
     return f"sha256:{hashlib.sha256(source.source_identity.encode()).hexdigest()}"
 
 
+class _DescriptorBindingFileIntegrityGuard:
+    def __init__(
+            self,
+            *,
+            path: Path,
+            descriptor: int,
+            require_single_link: bool,
+    ) -> None:
+        self.path = path.expanduser().resolve(strict=True)
+        self._descriptor = descriptor
+        self._require_single_link = require_single_link
+        self.assert_quiet()
+
+    def assert_quiet(self, *, timeout_seconds: float = 0.0) -> None:
+        descriptor_info = os.fstat(self._descriptor)
+        path_info = self.path.lstat()
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+            or (
+                self._require_single_link
+                and (descriptor_info.st_nlink != 1 or path_info.st_nlink != 1)
+            )
+        ):
+            raise FileIntegrityError("guarded file or path changed")
+
+    def close(self) -> None:
+        pass
+
+
+class _QuietKqueue:
+    def control(
+            self,
+            changes: object,
+            max_events: int,
+            timeout: float,
+    ) -> list[object]:
+        return []
+
+    def close(self) -> None:
+        pass
+
+
+def _quiet_kevent(*args: object, **kwargs: object) -> object:
+    return object()
+
+
 class AV1ValidationDerivationTests(unittest.TestCase):
     def setUp(self) -> None:
         runtime_directory = tempfile.TemporaryDirectory()
@@ -156,6 +206,41 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         toolchain_patcher.start()
         self.addCleanup(toolchain_patcher.stop)
+        for integrity_patcher in (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_macos_file_integrity_capability",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.probe_macos_file_integrity",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                new=_DescriptorBindingFileIntegrityGuard,
+            ),
+        ):
+            integrity_patcher.start()
+            self.addCleanup(integrity_patcher.stop)
+        if not hasattr(verify_av1_cold_start_preregistration.select, "kqueue"):
+            for name, value in (
+                ("kqueue", _QuietKqueue),
+                ("kevent", _quiet_kevent),
+                ("KQ_FILTER_VNODE", 1),
+                ("KQ_EV_ADD", 2),
+                ("KQ_EV_CLEAR", 4),
+                ("KQ_NOTE_WRITE", 8),
+                ("KQ_NOTE_DELETE", 16),
+                ("KQ_NOTE_RENAME", 32),
+                ("KQ_NOTE_LINK", 64),
+                ("KQ_NOTE_REVOKE", 128),
+            ):
+                kqueue_patcher = patch.object(
+                    verify_av1_cold_start_preregistration.select,
+                    name,
+                    value,
+                    create=True,
+                )
+                kqueue_patcher.start()
+                self.addCleanup(kqueue_patcher.stop)
         self.manifest = load_av1_validation_manifest_v2(V2_MANIFEST_PATH)
         self.expectations = AV1ValidationPartitionExpectations(
             compatibility_signature="av1vcompat1_test_contract",
@@ -216,6 +301,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.runtime_artifact_root,
             self.plan,
         )
+
+    def test_execution_environment_rejects_unavailable_source_integrity(self) -> None:
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_macos_file_integrity_capability",
+                side_effect=FileIntegrityError("fixture unavailable"),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "source-integrity monitoring is unavailable",
+            ),
+        ):
+            av1_validation_derivation_execution_environment_sha256(
+                quality_metric=self.expectations.quality_metric,
+            )
 
     def test_plan_contains_only_exact_reserved_derivation_assignments(self) -> None:
         self.assertEqual(len(self.plan.assignments), 24)
@@ -2265,6 +2365,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     pinned_source.path.write_bytes(b"mutated-source")
             self.assertFalse((artifact_root / "source-snapshots").exists())
 
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_detects_transient_write_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2278,6 +2379,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 source_path.stat(),
             )
             with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                    new=MacOSFileIntegrityGuard,
+                ),
                 patch(
                     "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
                     return_value=SimpleNamespace(free=100 * 1024 ** 3),
@@ -2304,6 +2409,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     pinned_source.path.chmod(0o400)
             self.assertFalse((artifact_root / "source-snapshots").exists())
 
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_detects_hardlink_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2318,6 +2424,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             link_path = root / "snapshot-alias"
             with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                    new=MacOSFileIntegrityGuard,
+                ),
                 patch(
                     "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
                     return_value=SimpleNamespace(free=100 * 1024 ** 3),
@@ -2343,6 +2453,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertFalse(link_path.exists())
             self.assertFalse((artifact_root / "source-snapshots").exists())
 
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_detects_parent_swap_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2356,6 +2467,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 source_path.stat(),
             )
             with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                    new=MacOSFileIntegrityGuard,
+                ),
                 patch(
                     "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
                     return_value=SimpleNamespace(free=100 * 1024 ** 3),
@@ -2402,6 +2517,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         moved_root.rename(assignment_root)
             self.assertFalse((artifact_root / "source-snapshots").exists())
 
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_guard_runs_when_body_raises(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2415,6 +2531,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 source_path.stat(),
             )
             with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                    new=MacOSFileIntegrityGuard,
+                ),
                 patch(
                     "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
                     return_value=SimpleNamespace(free=100 * 1024 ** 3),
@@ -2454,9 +2574,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 source_path.stat(),
             )
             access_modes: list[int] = []
-            original_guard = MacOSFileIntegrityGuard
+            original_guard = _DescriptorBindingFileIntegrityGuard
 
-            def guard_factory(**kwargs: object) -> MacOSFileIntegrityGuard:
+            def guard_factory(**kwargs: object) -> _DescriptorBindingFileIntegrityGuard:
                 descriptor = int(kwargs["descriptor"])
                 access_modes.append(
                     fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE
@@ -2486,6 +2606,76 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 pass
             self.assertEqual(access_modes, [os.O_RDONLY])
+
+    def test_pinned_source_snapshot_reopen_failure_does_not_double_close(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            original_open = os.open
+            original_close = os.close
+            snapshot_descriptor = -1
+            snapshot_open_count = 0
+            close_counts: dict[int, int] = {}
+
+            def open_with_reopen_failure(
+                    path: os.PathLike[str] | str,
+                    flags: int,
+                    mode: int = 0o777,
+            ) -> int:
+                nonlocal snapshot_descriptor, snapshot_open_count
+                candidate = Path(path)
+                is_snapshot = candidate.parent.parent.name == "source-snapshots"
+                if is_snapshot:
+                    snapshot_open_count += 1
+                    if snapshot_open_count == 2:
+                        raise OSError("fixture snapshot reopen failure")
+                descriptor = original_open(path, flags, mode)
+                if is_snapshot and snapshot_open_count == 1:
+                    snapshot_descriptor = descriptor
+                return descriptor
+
+            def tracked_close(descriptor: int) -> None:
+                close_counts[descriptor] = close_counts.get(descriptor, 0) + 1
+                original_close(descriptor)
+
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.os.open",
+                    side_effect=open_with_reopen_failure,
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.os.close",
+                    side_effect=tracked_close,
+                ),
+                self.assertRaisesRegex(OSError, "fixture snapshot reopen failure"),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    pass
+            self.assertGreaterEqual(snapshot_descriptor, 0)
+            self.assertEqual(close_counts[snapshot_descriptor], 1)
+            self.assertFalse((artifact_root / "source-snapshots").exists())
 
     def test_pinned_source_snapshot_rejects_mutation_during_copy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
