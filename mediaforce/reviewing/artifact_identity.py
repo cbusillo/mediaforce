@@ -100,6 +100,20 @@ def reviewed_artifact_fingerprint_from_payloads(
 ) -> str | None:
     if not clip_payloads:
         return None
+    if schema_version == 1:
+        clip_payloads = [
+            {
+                key: clip[key]
+                for key in (
+                    "role",
+                    "timestamp_seconds",
+                    "duration_seconds",
+                    "size_bytes",
+                    "content_sha256",
+                )
+            }
+            for clip in clip_payloads
+        ]
     clip_payloads.sort(
         key=lambda clip: (
             str(clip["role"]),

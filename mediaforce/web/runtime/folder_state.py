@@ -117,6 +117,8 @@ def _current_review_artifact_fingerprint(
         schema_version = 3
     elif stored_review_artifact_fingerprint.startswith("cira2_"):
         schema_version = 2
+    elif stored_review_artifact_fingerprint.startswith("cira1_"):
+        schema_version = 1
     else:
         return None
     clips: list[tuple[str, Path, float, float]] = []

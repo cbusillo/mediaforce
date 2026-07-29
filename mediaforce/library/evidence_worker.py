@@ -62,12 +62,13 @@ def default_evidence_worker_deps() -> EvidenceWorkerDeps:
 def process_evidence_queue_once(
         *,
         config_path: Path,
+        config: MediaforceConfig | None = None,
         deps: EvidenceWorkerDeps | None = None,
 ) -> bool:
     runtime_deps = deps or default_evidence_worker_deps()
-    config = runtime_deps.load_config(config_path)
+    current_config = config or runtime_deps.load_config(config_path)
     worker_id = _evidence_worker_id()
-    with open_db(config.paths.db_path) as connection:
+    with open_db(current_config.paths.db_path) as connection:
         recover_evidence_queue(connection, reclaim_all_running=False)
         claim = claim_next_evidence_work(
             connection,
@@ -77,7 +78,7 @@ def process_evidence_queue_once(
     if claim is None:
         return False
     _run_evidence_claim(
-        config=config,
+        config=current_config,
         claim=claim,
         deps=runtime_deps,
     )
@@ -87,6 +88,7 @@ def process_evidence_queue_once(
 def run_evidence_queue_until_blocked(
         *,
         config_path: Path,
+        config: MediaforceConfig | None = None,
         deps: EvidenceWorkerDeps | None = None,
         max_work_items: int = 1,
         max_seconds: float | None = None,
@@ -96,7 +98,7 @@ def run_evidence_queue_until_blocked(
     if max_seconds is not None and max_seconds <= 0:
         raise ValueError("Evidence worker time budget must be greater than zero.")
     runtime_deps = deps or default_evidence_worker_deps()
-    config = runtime_deps.load_config(config_path)
+    current_config = config or runtime_deps.load_config(config_path)
     processed = 0
     started_at = time.monotonic()
     stop_reason = "blocked"
@@ -104,12 +106,16 @@ def run_evidence_queue_until_blocked(
         if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
             stop_reason = "time_budget"
             break
-        if not process_evidence_queue_once(config_path=config_path, deps=runtime_deps):
+        if not process_evidence_queue_once(
+            config_path=config_path,
+            config=current_config,
+            deps=runtime_deps,
+        ):
             break
         processed += 1
         if processed >= max_work_items:
             stop_reason = "item_budget"
-    with open_db(config.paths.db_path) as connection:
+    with open_db(current_config.paths.db_path) as connection:
         summary = evidence_queue_summary(connection)
     summary["processed_count"] = processed
     summary["stop_reason"] = stop_reason

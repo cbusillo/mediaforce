@@ -18,6 +18,7 @@ from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.evidence import stable_source_id
+from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.tuning.av1_cold_start import (
     load_packaged_av1_cold_start_bundle,
     plan_av1_cold_start,
@@ -387,6 +388,78 @@ class ContentIntentObservationTests(unittest.TestCase):
             artifact_fingerprint,
         )
         compare_path.write_bytes(b"changed legacy compare")
+        compare_changed = load_calibration_state(
+            deps,
+            Mock(),
+            "tv/show",
+            calibration_path,
+            verify_boundary_artifact=True,
+        )
+        assert compare_changed is not None
+        self.assertTrue(compare_changed["boundary_review_media_ready"])
+        self.assertEqual(
+            compare_changed["current_review_artifact_fingerprint"],
+            artifact_fingerprint,
+        )
+
+    def test_calibration_load_preserves_legacy_cira1_review_binding(self) -> None:
+        preview_path = Path(self.temp_dir.name) / "legacy-cira1-preview.mkv"
+        source_path = Path(self.temp_dir.name) / "legacy-cira1-source.mkv"
+        compare_path = Path(self.temp_dir.name) / "legacy-cira1-compare.mkv"
+        preview_path.write_bytes(b"legacy cira1 preview")
+        source_path.write_bytes(b"legacy cira1 source")
+        compare_path.write_bytes(b"legacy cira1 compare")
+        artifact_fingerprint = reviewed_artifact_fingerprint(
+            [
+                ("preview", preview_path, 30.0, 8.0),
+                ("source", source_path, 30.0, 8.0),
+            ],
+            schema_version=1,
+        )
+        assert artifact_fingerprint is not None
+        self.assertTrue(artifact_fingerprint.startswith("cira1_"))
+        calibration_path = Path(self.temp_dir.name) / "legacy-cira1-calibration.json"
+        calibration_path.write_text(json.dumps({
+            "mode": "sample",
+            "review_artifact_fingerprint": artifact_fingerprint,
+            "preview_clips": [{
+                "path": str(preview_path),
+                "timestamp_seconds": 30.0,
+                "duration_seconds": 8.0,
+            }],
+            "source_clips": [{
+                "path": str(source_path),
+                "timestamp_seconds": 30.0,
+                "duration_seconds": 8.0,
+            }],
+            "compare_clips": [{
+                "path": str(compare_path),
+                "timestamp_seconds": 30.0,
+                "duration_seconds": 8.0,
+            }],
+        }))
+        deps = FolderStateDeps(
+            review_file_from_url=lambda _config, value: Path(value),
+            load_advice_state=lambda *_args: None,
+            calibration_draft_hash=lambda _payload: "draft",
+            tuning_policy_focus=lambda *_args: {},
+            pending_proposal_trace_public_view=lambda *_args: {},
+        )
+
+        loaded = load_calibration_state(
+            deps,
+            Mock(),
+            "tv/show",
+            calibration_path,
+            verify_boundary_artifact=True,
+        )
+        assert loaded is not None
+        self.assertTrue(loaded["boundary_review_media_ready"])
+        self.assertEqual(
+            loaded["current_review_artifact_fingerprint"],
+            artifact_fingerprint,
+        )
+        compare_path.write_bytes(b"changed legacy cira1 compare")
         compare_changed = load_calibration_state(
             deps,
             Mock(),

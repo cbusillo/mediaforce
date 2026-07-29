@@ -603,12 +603,12 @@ class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
                 "mediaforce.tuning.av1_validation_partition_inventory.probe_evidence",
                 return_value=summary,
             ) as probe:
-                resolver = av1_validation_partition_source_sha256_resolver(
+                with av1_validation_partition_source_sha256_resolver(
                     connection,
                     config=SimpleNamespace(),
                     verify_evidence=True,
-                )
-                source_sha256 = resolver(source)
+                ) as resolver:
+                    source_sha256 = resolver(source)
             self.assertEqual(
                 source_sha256,
                 f"sha256:{hashlib.sha256(source_bytes).hexdigest()}",
@@ -659,12 +659,65 @@ class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
                     "evidence does not replay from its frozen bytes",
                 ),
             ):
-                resolver = av1_validation_partition_source_sha256_resolver(
+                with av1_validation_partition_source_sha256_resolver(
                     connection,
                     config=SimpleNamespace(),
                     verify_evidence=True,
-                )
-                resolver(source)
+                ) as resolver:
+                    resolver(source)
+
+    def test_selected_sources_remain_guarded_as_one_cohort(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "first.mkv"
+            second_path = root / "second.mkv"
+            first_bytes = b"first-source" * 80_000
+            second_bytes = b"second-source" * 80_000
+            first_path.write_bytes(first_bytes)
+            second_path.write_bytes(second_bytes)
+            first_source = _digest_test_source(
+                local_item_id=1,
+                source_identity=content_version_fingerprint(
+                    first_path,
+                    first_path.stat(),
+                ),
+                evidence_summary_sha256=f"sha256:{'1' * 64}",
+            )
+            second_source = _digest_test_source(
+                local_item_id=2,
+                source_identity=content_version_fingerprint(
+                    second_path,
+                    second_path.stat(),
+                ),
+                evidence_summary_sha256=f"sha256:{'2' * 64}",
+            )
+            first_connection = _digest_test_connection(
+                source=first_source,
+                source_path=first_path,
+                source_size_bytes=len(first_bytes),
+            )
+            second_connection = _digest_test_connection(
+                source=second_source,
+                source_path=second_path,
+                source_size_bytes=len(second_bytes),
+            )
+            connection = Mock()
+            connection.execute.side_effect = [
+                first_connection.execute.return_value,
+                second_connection.execute.return_value,
+            ]
+            with self.assertRaisesRegex(
+                AV1ValidationPartitionError,
+                "cohort validation|integrity monitoring failed",
+            ):
+                with av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=SimpleNamespace(),
+                ) as resolver:
+                    resolver(first_source)
+                    first_path.write_bytes(b"changed-source" * 80_000)
+                    first_path.write_bytes(first_bytes)
+                    resolver(second_source)
 
 
 class AV1ValidationPartitionCliTests(unittest.TestCase):
@@ -748,11 +801,12 @@ def _partition_sources(
 
 def _digest_test_source(
     *,
+    local_item_id: int = 1,
     source_identity: str,
     evidence_summary_sha256: str,
 ) -> AV1ValidationPartitionSource:
     return AV1ValidationPartitionSource(
-        local_item_id=1,
+        local_item_id=local_item_id,
         source_identity=source_identity,
         title_identity="title-digest-test",
         series_identity="series-digest-test",

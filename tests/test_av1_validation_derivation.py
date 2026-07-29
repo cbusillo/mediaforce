@@ -82,6 +82,8 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     _assert_next_assignment,
     _assert_derivation_terminal_observations_current,
     _current_derivation_review_artifact_fingerprint,
+    _av1_validation_derivation_candidate_locked_at,
+    _av1_validation_derivation_implementation_files,
     _owner_only_umask,
     _prepare_derivation_review_root,
     _pinned_derivation_source,
@@ -99,7 +101,10 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     record_av1_validation_derivation_visual_verdict,
     run_av1_validation_derivation_assignment,
 )
-from mediaforce.web.runtime_lock import mediaforce_runtime_lock_path
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    mediaforce_runtime_lock_path,
+)
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
     build_av1_cold_start_validation_candidate_lock,
@@ -141,6 +146,19 @@ REVIEW_RUNNER_BYTES = b"\xcf\xfa\xed\xfe" + b"test-code-binary"
 
 def _source_sha256(source: AV1ValidationPartitionSource) -> str:
     return f"sha256:{hashlib.sha256(source.source_identity.encode()).hexdigest()}"
+
+
+@contextmanager
+def _source_sha256_resolver_context(
+        *_args: object,
+        **_kwargs: object,
+) -> Iterator[object]:
+    yield _source_sha256
+
+
+@contextmanager
+def _context_value(value: object) -> Iterator[object]:
+    yield value
 
 
 class _DescriptorBindingFileIntegrityGuard:
@@ -204,6 +222,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         toolchain_patcher.start()
         self.addCleanup(toolchain_patcher.stop)
+        source_resolver_patcher = patch(
+            "mediaforce.web.runtime.av1_validation_derivation.av1_validation_partition_source_sha256_resolver",
+            side_effect=_source_sha256_resolver_context,
+        )
+        source_resolver_patcher.start()
+        self.addCleanup(source_resolver_patcher.stop)
         for integrity_patcher in (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.assert_macos_file_integrity_capability",
@@ -415,6 +439,27 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
         ):
             assert_av1_validation_derivation_execution_environment(self.plan)
+
+    def test_implementation_identity_covers_complete_runtime_tree(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        relative_paths = {
+            relative_path
+            for relative_path, _path in (
+                _av1_validation_derivation_implementation_files(repository_root)
+            )
+        }
+        self.assertTrue({
+            "mediaforce/execution.py",
+            "mediaforce/encoding/quality.py",
+            "mediaforce/review.py",
+            "mediaforce/tuning/av1_cold_start_evaluation.py",
+            "mediaforce/tuning/content_intent_observations.py",
+            "pyproject.toml",
+            "scripts/verify_av1_cold_start_preregistration.py",
+            "uv.lock",
+        }.issubset(relative_paths))
+        self.assertFalse(any("__pycache__" in path for path in relative_paths))
+        self.assertFalse(any(path.endswith((".pyc", ".pyo")) for path in relative_paths))
 
     def test_plan_binding_rejects_digest_valid_assignment_drift(self) -> None:
         assignments = list(self.plan.assignments)
@@ -785,6 +830,134 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             self.runtime_artifact_root.resolve(),
         )
+
+    def test_direct_derivation_artifact_write_holds_runtime_lock(self) -> None:
+        lock_held = False
+
+        @contextmanager
+        def runtime_lock(_config: object, *, owner_payload: dict[str, object]):
+            nonlocal lock_held
+            self.assertEqual(owner_payload["purpose"], "av1-derivation-tooling")
+            self.assertEqual(owner_payload["action"], "record-derivation-review")
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+        def stop_inside_lock(**kwargs: object) -> tuple[object, Path]:
+            self.assertTrue(lock_held)
+            self.assertIs(kwargs.get("config"), self.runtime_config)
+            raise RuntimeError("stopped inside runtime lock")
+
+        args = SimpleNamespace(
+            action="record-derivation-review",
+            config=Path("unused.toml"),
+            plan=self.runtime_artifact_root / "plan.json",
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_config",
+                return_value=self.runtime_config,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "exclusive_mediaforce_runtime_lock",
+                side_effect=runtime_lock,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                side_effect=stop_inside_lock,
+            ),
+            self.assertRaisesRegex(RuntimeError, "inside runtime lock"),
+        ):
+            verify_av1_cold_start_preregistration._run_derivation_action(args)
+        self.assertFalse(lock_held)
+
+    def test_direct_derivation_artifact_write_rejects_busy_runtime(self) -> None:
+        args = SimpleNamespace(
+            action="record-derivation-review",
+            config=Path("unused.toml"),
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_config",
+                return_value=self.runtime_config,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "exclusive_mediaforce_runtime_lock",
+                side_effect=MediaforceRuntimeBusyError(
+                    "Mediaforce runtime is already active"
+                ),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "runtime to be paused",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._run_derivation_action(args)
+
+    def test_copied_preregistration_runner_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied_runner = Path(directory) / "verify_av1.py"
+            copied_runner.write_text("# copied runner\n", encoding="utf-8")
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "__file__",
+                    str(copied_runner),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "not the canonical repository file",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._assert_canonical_preregistration_runner()
+
+    def test_derivation_review_checks_environment_before_claim(self) -> None:
+        args = SimpleNamespace(
+            action="record-derivation-review",
+            config=Path("unused.toml"),
+            plan=self.runtime_artifact_root / "plan.json",
+            cell_plan_id=self.plan.assignments[0].cell_plan_id,
+            lane="architecture",
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_av1_validation_derivation_execution_environment",
+                side_effect=AV1ValidationDerivationError(
+                    "execution environment drifted"
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_derivation_candidate_proposal",
+            ) as load_proposal,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_run_code_agent_review",
+            ) as run_review,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "execution environment drifted",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._run_derivation_action_body(
+                args,
+                locked_config=self.runtime_config,
+            )
+        load_proposal.assert_not_called()
+        run_review.assert_not_called()
 
     def test_immutable_write_failure_cleans_unpublished_temporary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -5442,6 +5615,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertTrue(lock_held)
             events.append(label)
 
+        def validate_current_inputs(*_args: object, **kwargs: object) -> None:
+            self.assertIs(kwargs.get("source_sha256_resolver"), _source_sha256)
+            record_event("partition-current")
+
         with (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.load_config",
@@ -5464,9 +5641,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs",
-                side_effect=lambda *_args, **_kwargs: record_event(
-                    "partition-current"
-                ),
+                side_effect=validate_current_inputs,
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
@@ -6063,16 +6238,99 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 },
                 {review.attestation_id for review in reviews},
             )
-            persisted_envelope = finalize_and_write_av1_validation_derivation_candidate_lock(
-                artifact_root,
-                plan=self.plan,
-                proposal=evaluation.proposal,
-                review_claims=loaded_claims,
-                review_envelopes=loaded_envelopes,
-                current_evaluation=current_evaluation,
-                locked_at=locked_at,
+            candidate_lock_directory = artifact_root / "candidate-locks"
+            _bind_owner_only_directory(
+                candidate_lock_directory,
+                kind="candidate_locks",
+                binding_id=self.plan.plan_id,
+                binding_digest=self.plan.authorization.authorization_id,
             )
+            lock_path = (
+                candidate_lock_directory / f"{cell_plan_id}.json"
+            ).resolve()
+            candidate_published = False
+            real_fsync = os.fsync
+            real_rename = _rename_owner_only_exclusive
+
+            def fail_candidate_publish_fsync(descriptor: int) -> None:
+                if (
+                    candidate_published
+                    and stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                ):
+                    raise OSError(errno.EIO, "directory fsync failed")
+                real_fsync(descriptor)
+
+            def track_candidate_publish(
+                    *,
+                    parent_descriptor: int,
+                    source_name: str,
+                    destination_name: str,
+            ) -> None:
+                nonlocal candidate_published
+                real_rename(
+                    parent_descriptor=parent_descriptor,
+                    source_name=source_name,
+                    destination_name=destination_name,
+                )
+                if destination_name == f"{cell_plan_id}.json":
+                    candidate_published = True
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._rename_owner_only_exclusive",
+                    side_effect=track_candidate_publish,
+                ),
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.os.fsync",
+                    side_effect=fail_candidate_publish_fsync,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "could not be written safely",
+                ),
+            ):
+                finalize_and_write_av1_validation_derivation_candidate_lock(
+                    artifact_root,
+                    plan=self.plan,
+                    proposal=evaluation.proposal,
+                    review_claims=loaded_claims,
+                    review_envelopes=loaded_envelopes,
+                    current_evaluation=current_evaluation,
+                    locked_at=locked_at,
+                )
+            self.assertTrue(lock_path.exists())
+            recovered_parent_sync = False
+
+            def track_recovery_fsync(descriptor: int) -> None:
+                nonlocal recovered_parent_sync
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    recovered_parent_sync = True
+                real_fsync(descriptor)
+
+            with patch(
+                "mediaforce.tuning.av1_validation_derivation.os.fsync",
+                side_effect=track_recovery_fsync,
+            ):
+                persisted_envelope = finalize_and_write_av1_validation_derivation_candidate_lock(
+                    artifact_root,
+                    plan=self.plan,
+                    proposal=evaluation.proposal,
+                    review_claims=loaded_claims,
+                    review_envelopes=loaded_envelopes,
+                    current_evaluation=current_evaluation,
+                    locked_at=locked_at,
+                )
+            self.assertTrue(recovered_parent_sync)
             self.assertEqual(persisted_envelope.candidate_lock, lock)
+            self.assertEqual(
+                _av1_validation_derivation_candidate_locked_at(
+                    artifact_root=artifact_root,
+                    plan=self.plan,
+                    cell_plan_id=cell_plan_id,
+                    clock=lambda: "2026-07-28T04:00:00Z",
+                ),
+                locked_at,
+            )
             self.assertEqual(
                 load_verified_av1_validation_derivation_candidate_lock(
                     artifact_root,
@@ -6085,9 +6343,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ),
                 persisted_envelope,
             )
-            lock_path = (
-                artifact_root / "candidate-locks" / f"{cell_plan_id}.json"
-            ).resolve()
             self.assertEqual(
                 lock_path,
                 (artifact_root / "candidate-locks" / f"{cell_plan_id}.json").resolve(),
@@ -6257,7 +6512,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 patch.object(
                     verify_av1_cold_start_preregistration,
                     "_load_current_derivation_inputs",
-                    return_value=(self.manifest, self.partition, self.token_key),
+                    return_value=_context_value((
+                        self.manifest,
+                        self.partition,
+                        self.token_key,
+                    )),
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration,

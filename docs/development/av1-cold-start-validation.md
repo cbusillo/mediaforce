@@ -278,9 +278,9 @@ no pathname chmod. One macOS path-chain guard per reviewed clip is then kept
 active until every clip payload is hashed and every guard passes a final quiet
 check. The `cira3` review fingerprint binds all three clip roles, content, a
 one-way canonical-path digest, device, inode, modification/change times, mode,
-and link count. Existing non-derivation `cira2` records retain their original
-preview/source-only recomputation contract; new compare-aware records and every
-derivation attempt use `cira3`. Verdict-time identity checks use the same
+and link count. Existing non-derivation `cira1` and `cira2` records retain their
+original preview/source-only recomputation contracts; new compare-aware records
+and every derivation attempt use `cira3`. Verdict-time identity checks use the same
 all-clips-held procedure, closing the earlier-clip mutation window.
 Descriptor/resource or integrity failure is an affected-cell `safety_stop`, not
 `media_unavailable` or measured evidence.
@@ -288,14 +288,24 @@ Descriptor/resource or integrity failure is an affected-cell `safety_stop`, not
 Private partition creation first performs logical selection without hashing the
 broader eligible library. It then handles only the selected holdout and
 derivation sources: each selected file is opened with no-follow semantics,
-guarded together with its canonical pathname ancestors, fully SHA-256 hashed,
-and re-analyzed with the current media-fingerprint toolchain. The fresh
+guarded together with its canonical pathname ancestors, and retained as one
+source-integrity cohort. The first pass fully SHA-256 hashes each source and,
+during partition creation, re-analyzes it with the current media-fingerprint
+toolchain. Every descriptor and path-chain guard remains open while the other
+selected sources are processed. A cohort-wide second hash pass and final quiet,
+path, inode, timestamp, and sampled-identity checks complete only after every
+source is pinned; the session stays active through the immutable artifact write
+or database commit that consumes the result. The fresh
 canonical fingerprint summary must exactly reproduce the immutable evidence
 digest used for selection. A changed unsampled byte therefore cannot preserve
 stale traits while acquiring a new frozen digest. The selected source SHA-256
 is private assignment data and contributes to the inventory lock, derivation
 partition, authorization, and plan digests; public summaries never expose it.
-Older private partitions without this binding fail closed.
+Older private partitions without this binding fail closed. Candidate proposal
+construction, candidate-lock finalization and verification, and visual-verdict
+publication each re-open and fully hash every selected source against those
+frozen digests while their database transaction is active. They never substitute
+the frozen digest for a current byte-level check.
 
 After the immutable assignment claim and before crop, search, encode, or review
 work, the runtime opens the assigned source with no-follow semantics, verifies
@@ -339,10 +349,16 @@ and runtime monitoring remain fail closed and are never bypassed by these test
 seams.
 
 The authorization binds the resolved database, review, and state roots together
-with the current machine, Python executable, relevant Mediaforce implementation
-files, AV1 encoder/metric toolchain, source-integrity guard contract, and merged
-statistical contract. It also binds SHA-256 digests of the canonical Every Code
-executable path and binary without persisting or printing the private path. A
+with the current machine, Python executable, every regular non-cache file under
+the Mediaforce package tree, the repository-owned preregistration runner,
+`pyproject.toml`, `uv.lock`, the shared CLI/runtime-lock implementation, AV1
+encoder/metric toolchain, source-integrity guard contract, and merged
+statistical contract. Adding, removing, or changing any bound implementation
+file changes the execution-environment digest. It also binds SHA-256 digests of
+the canonical Every Code executable path and binary without persisting or
+printing the private path. Proposal and review publication require the
+executing verifier to be that canonical repository file and re-check the bound
+execution environment immediately before each immutable write. A
 real same-filesystem kqueue mutation probe must pass before the immutable
 assignment claim is written. The probe creates a private owner-only file,
 sets its pathname mode to `0400` from creation, mutates only its original
@@ -351,14 +367,23 @@ recursively deleting a mutable pathname. Independent
 review execution follows the same rule: each private copied Every Code runner
 is retained after its lane and retired only out of band while Mediaforce is
 stopped. Assignment execution holds the same exclusive runtime lock as
-`mediaforce-web`, so web, staging, database, and cleanup work cannot overlap the
+`mediaforce-web`. Every write-capable `mediaforce` CLI command and each direct
+derivation artifact-publication action acquires that lock too, so web, staging,
+database, cleanup, proposal, and review-publication work cannot overlap the
 bounded derivation case. Machine or toolchain drift before the claim or after
 measurement is a safety stop rather than a newly compatible cohort.
 The shared lock uses a stable parent-directory guard in addition to the metadata
-file, so unlinking and recreating `mediaforce-web.lock` cannot create a second
-lock inode for another compliant runtime. The lock path resolves
-`web_state_dir` symlinks before choosing that parent, so aliases cannot create a
-second lock domain. Fresh execution samples its authorization timestamp only
+file. It also holds deterministic loopback kernel-namespace reservations keyed
+independently by the canonical config path, database path, and lock path. A
+supported runtime that observes an atomically replaced config therefore still
+shares at least the config reservation with the previous runtime; separate
+configs that address one database share the database reservation; and lock-file
+or parent replacement remains covered by the lock-path reservation. Unlinking
+the lock file, changing configured state paths, or renaming and replacing its
+parent cannot create a second lock domain for another compliant runtime.
+Lock-file access remains descriptor-relative to the pinned parent. The lock path
+resolves `web_state_dir` symlinks before choosing that domain, so aliases cannot
+create a second one. Fresh execution samples its authorization timestamp only
 after all preflight checks and immediately before the immutable claim.
 `scripts/mediaforce-dev.sh` leaves that persistent lock path in place when
 stopping the backend.
@@ -542,7 +567,12 @@ root from config, reloads the full chain, and rechecks current database evidence
 inside an immediate transaction. These owner-local hashes detect
 stale, copied, mixed, and partially replaced artifacts; they do not claim to
 authenticate against a malicious machine owner who changes code and rebuilds a
-fully self-consistent private evidence tree.
+fully self-consistent private evidence tree. The coordination and runner checks
+apply to documented Mediaforce CLI and web entrypoints. Importing private Python
+helpers, replacing the interpreter or verifier, or modifying source while
+deliberately bypassing those entrypoints is outside the owner-local threat
+model; such activity invalidates the review and requires discarding the private
+evidence tree and restarting from the merged protocol.
 
 ## Trait reachability preflight
 

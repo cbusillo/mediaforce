@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -22,6 +23,7 @@ from mediaforce.web.runtime.folder_actions import _reset_stale_prefix_encoding_i
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action, queue_folder_encode_action, \
     validate_folder_outputs_action
 from mediaforce.web.runtime.folder_cards import list_folder_cards
+from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
 
 
 class MovieWorkflowTests(unittest.TestCase):
@@ -820,6 +822,71 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertTrue(any("Target size exceeds the 80% source cap" in str(call) for call in print_line.call_args_list))
         write_manifest.assert_not_called()
+
+    def test_cli_holds_runtime_lock_before_cleanup(self) -> None:
+        lock_held = False
+
+        @contextmanager
+        def runtime_lock(_config: MediaforceConfig, *, owner_payload: dict[str, object]):
+            nonlocal lock_held
+            self.assertEqual(owner_payload["purpose"], "mediaforce-cli")
+            self.assertEqual(owner_payload["command"], "report")
+            lock_held = True
+            try:
+                yield
+            finally:
+                lock_held = False
+
+        def purge(_config: MediaforceConfig) -> None:
+            self.assertTrue(lock_held)
+
+        with (
+            patch("mediaforce.cli.load_config", return_value=self.config),
+            patch(
+                "mediaforce.cli.exclusive_mediaforce_runtime_lock",
+                side_effect=runtime_lock,
+            ),
+            patch("mediaforce.cli.purge_transient_artifacts", side_effect=purge),
+        ):
+            exit_code = cli_main([
+                "--config",
+                str(self.config.paths.config_path),
+                "report",
+                "--limit",
+                "0",
+            ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(lock_held)
+
+    def test_cli_blocks_writes_when_runtime_lock_is_busy(self) -> None:
+        with (
+            patch("mediaforce.cli.load_config", return_value=self.config),
+            patch(
+                "mediaforce.cli.exclusive_mediaforce_runtime_lock",
+                side_effect=MediaforceRuntimeBusyError(
+                    "Mediaforce runtime is already active"
+                ),
+            ),
+            patch("mediaforce.cli.purge_transient_artifacts") as purge,
+            patch("builtins.print") as print_line,
+        ):
+            exit_code = cli_main([
+                "--config",
+                str(self.config.paths.config_path),
+                "report",
+                "--limit",
+                "0",
+            ])
+
+        self.assertEqual(exit_code, 2)
+        purge.assert_not_called()
+        self.assertTrue(
+            any(
+                "Mediaforce command blocked" in str(item)
+                for item in print_line.call_args_list
+            )
+        )
 
     def test_title_queue_does_not_recover_an_active_exact_extra_job(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

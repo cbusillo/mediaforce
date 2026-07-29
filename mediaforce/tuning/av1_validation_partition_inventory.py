@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -9,7 +10,7 @@ import os
 import stat
 import subprocess
 import unicodedata
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from sqlalchemy import select
 
@@ -77,13 +78,25 @@ class _EvidenceCompatibility:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class _GuardedPartitionSource:
+    source: AV1ValidationPartitionSource
+    path: Path
+    descriptor: int
+    guard: MacOSFileIntegrityGuard
+    source_sha256: str
+    initial_stat_signature: tuple[int, int, int, int, int]
+
+
+@contextmanager
 def av1_validation_partition_source_sha256_resolver(
     connection: DBClient,
     *,
     config: MediaforceConfig,
     verify_evidence: bool = False,
-) -> Callable[[AV1ValidationPartitionSource], str]:
+) -> Iterator[Callable[[AV1ValidationPartitionSource], str]]:
     digest_by_item_id: dict[int, str] = {}
+    guarded_sources: list[_GuardedPartitionSource] = []
 
     def resolve(source: AV1ValidationPartitionSource) -> str:
         cached = digest_by_item_id.get(source.local_item_id)
@@ -171,11 +184,6 @@ def av1_validation_partition_source_sha256_resolver(
                         "AV1 partition selected source evidence does not replay from its frozen bytes"
                     )
                 source_guard.assert_quiet()
-            if descriptor_sha256(source_descriptor) != source_sha256:
-                raise AV1ValidationPartitionError(
-                    "AV1 partition selected source changed during evidence replay"
-                )
-            source_guard.assert_quiet()
             source_final = os.fstat(source_descriptor)
             source_path_final = source_path.lstat()
             if (
@@ -192,6 +200,16 @@ def av1_validation_partition_source_sha256_resolver(
                 raise AV1ValidationPartitionError(
                     "AV1 partition selected source changed during full hashing"
                 )
+            guarded_sources.append(_GuardedPartitionSource(
+                source=source,
+                path=source_path,
+                descriptor=source_descriptor,
+                guard=source_guard,
+                source_sha256=source_sha256,
+                initial_stat_signature=file_stat_signature(source_initial),
+            ))
+            source_descriptor = -1
+            source_guard = None
         except FileIntegrityError as exc:
             raise AV1ValidationPartitionError(
                 "AV1 partition selected source integrity monitoring failed"
@@ -217,7 +235,44 @@ def av1_validation_partition_source_sha256_resolver(
         digest_by_item_id[source.local_item_id] = source_sha256
         return source_sha256
 
-    return resolve
+    try:
+        yield resolve
+        for guarded in guarded_sources:
+            guarded.guard.assert_quiet()
+            if descriptor_sha256(guarded.descriptor) != guarded.source_sha256:
+                raise AV1ValidationPartitionError(
+                    "AV1 partition selected source changed during cohort validation"
+                )
+        for guarded in guarded_sources:
+            guarded.guard.assert_quiet()
+            source_final = os.fstat(guarded.descriptor)
+            source_path_final = guarded.path.lstat()
+            if (
+                guarded.initial_stat_signature
+                != file_stat_signature(source_final)
+                or not stat.S_ISREG(source_path_final.st_mode)
+                or (source_final.st_dev, source_final.st_ino)
+                != (source_path_final.st_dev, source_path_final.st_ino)
+                or descriptor_content_version_fingerprint(
+                    guarded.descriptor,
+                    size_bytes=source_final.st_size,
+                ) != guarded.source.source_identity
+            ):
+                raise AV1ValidationPartitionError(
+                    "AV1 partition selected source changed during cohort validation"
+                )
+    except FileIntegrityError as exc:
+        raise AV1ValidationPartitionError(
+            "AV1 partition selected source integrity monitoring failed"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationPartitionError(
+            "AV1 partition selected source could not be securely hashed"
+        ) from exc
+    finally:
+        for guarded in reversed(guarded_sources):
+            guarded.guard.close()
+            os.close(guarded.descriptor)
 
 
 def load_av1_validation_partition_inventory(

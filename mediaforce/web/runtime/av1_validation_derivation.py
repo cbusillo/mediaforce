@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -109,6 +109,7 @@ from mediaforce.tuning.av1_validation_partition import (
     validate_av1_validation_private_partition,
 )
 from mediaforce.tuning.av1_validation_partition_inventory import (
+    av1_validation_partition_source_sha256_resolver,
     load_av1_validation_partition_inventory,
 )
 from mediaforce.tuning.av1_validation_v2 import (
@@ -150,15 +151,10 @@ _AV1_VALIDATION_DERIVATION_HOST_DATA = {
     "mode": "local",
     "media_access": "direct",
 }
-_AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FILES = (
-    "core/file_integrity.py",
-    "core/utils.py",
-    "reviewing/artifact_identity.py",
-    "tuning/av1_validation_partition.py",
-    "tuning/av1_validation_partition_inventory.py",
-    "tuning/av1_validation_derivation.py",
-    "web/runtime/av1_validation_derivation.py",
-    "web/runtime/calibration_runtime.py",
+_AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FIXED_FILES = (
+    "pyproject.toml",
+    "scripts/verify_av1_cold_start_preregistration.py",
+    "uv.lock",
 )
 
 
@@ -530,13 +526,15 @@ def av1_validation_derivation_runtime_context_sha256(
 
 
 def _av1_validation_derivation_implementation_sha256() -> str:
-    package_root = Path(__file__).resolve().parents[2]
+    repository_root = Path(__file__).resolve().parents[3]
     try:
         file_digests = {
             relative_path: f"sha256:{hashlib.sha256(
-                (package_root / relative_path).read_bytes()
+                path.read_bytes()
             ).hexdigest()}"
-            for relative_path in _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FILES
+            for relative_path, path in (
+                _av1_validation_derivation_implementation_files(repository_root)
+            )
         }
         python_sha256 = f"sha256:{hashlib.sha256(
             Path(sys.executable).resolve(strict=True).read_bytes()
@@ -550,6 +548,42 @@ def _av1_validation_derivation_implementation_sha256() -> str:
         'python_sha256': python_sha256,
         'python_version': platform.python_version(),
     })).hexdigest()}"
+
+
+def _av1_validation_derivation_implementation_files(
+        repository_root: Path,
+) -> tuple[tuple[str, Path], ...]:
+    package_root = repository_root / "mediaforce"
+    paths = list(package_root.rglob("*"))
+    paths.extend(
+        repository_root / relative_path
+        for relative_path in _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FIXED_FILES
+    )
+    files: list[tuple[str, Path]] = []
+    try:
+        for path in paths:
+            if (
+                "__pycache__" in path.parts
+                or path.name == ".DS_Store"
+                or path.suffix in {".pyc", ".pyo"}
+            ):
+                continue
+            path_info = path.lstat()
+            if stat.S_ISLNK(path_info.st_mode):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation implementation contains a symbolic link"
+                )
+            if not stat.S_ISREG(path_info.st_mode):
+                continue
+            files.append((
+                path.relative_to(repository_root).as_posix(),
+                path,
+            ))
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation implementation identity is unavailable"
+        ) from exc
+    return tuple(sorted(files))
 
 
 def av1_validation_derivation_execution_environment_sha256(
@@ -734,10 +768,11 @@ def _assert_derivation_terminal_observations_current(
 def load_current_av1_validation_derivation_observations(
         *,
         config_path: Path,
+        config: MediaforceConfig | None = None,
         records: tuple[AV1ValidationDerivationTerminalRecord, ...],
 ) -> dict[str, ContentIntentBoundaryObservation]:
-    config = load_config(config_path)
-    with open_readonly_db(config.paths.db_path) as connection:
+    current_config = config or load_config(config_path)
+    with open_readonly_db(current_config.paths.db_path) as connection:
         return _load_current_derivation_observations_from_connection(
             connection=connection,
             records=records,
@@ -1278,12 +1313,25 @@ def finalize_av1_validation_derivation_candidate_lock(
                 proposal=proposal,
                 claims=review_claims,
             )
-            locked_at = clock()
-            with open_db(config.paths.db_path) as connection:
+            locked_at = _av1_validation_derivation_candidate_locked_at(
+                artifact_root=artifact_root,
+                plan=plan,
+                cell_plan_id=cell_plan_id,
+                clock=clock,
+            )
+            with ExitStack() as source_stack, open_db(
+                config.paths.db_path
+            ) as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 inventory = load_av1_validation_partition_inventory(
                     connection,
                     config=config,
+                )
+                source_sha256_resolver = source_stack.enter_context(
+                    av1_validation_partition_source_sha256_resolver(
+                        connection,
+                        config=config,
+                    )
                 )
                 validate_av1_validation_partition_current_inputs(
                     partition,
@@ -1291,6 +1339,7 @@ def finalize_av1_validation_derivation_candidate_lock(
                     sources=inventory.sources,
                     expectations=inventory.expectations,
                     token_key=token_key,
+                    source_sha256_resolver=source_sha256_resolver,
                 )
                 current_evaluation = evaluate_av1_validation_derivation_candidate(
                     manifest=manifest,
@@ -1324,6 +1373,25 @@ def finalize_av1_validation_derivation_candidate_lock(
         raise AV1ValidationDerivationError(
             "AV1 derivation finalization requires the Mediaforce runtime to be paused"
         ) from exc
+
+
+def _av1_validation_derivation_candidate_locked_at(
+        *,
+        artifact_root: Path,
+        plan: AV1ValidationDerivationPlan,
+        cell_plan_id: str,
+        clock: Callable[[], str],
+) -> str:
+    candidate_lock_path = (
+        artifact_root / "candidate-locks" / f"{cell_plan_id}.json"
+    )
+    if not candidate_lock_path.exists() and not candidate_lock_path.is_symlink():
+        return clock()
+    return _load_av1_validation_derivation_candidate_lock_envelope(
+        artifact_root,
+        plan=plan,
+        cell_plan_id=cell_plan_id,
+    ).candidate_lock.locked_at
 
 
 def load_verified_av1_validation_derivation_candidate_lock(
@@ -1391,11 +1459,19 @@ def load_verified_av1_validation_derivation_candidate_lock(
                 plan=plan,
                 cell_plan_id=cell_plan_id,
             )
-            with open_db(config.paths.db_path) as connection:
+            with ExitStack() as source_stack, open_db(
+                config.paths.db_path
+            ) as connection:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 inventory = load_av1_validation_partition_inventory(
                     connection,
                     config=config,
+                )
+                source_sha256_resolver = source_stack.enter_context(
+                    av1_validation_partition_source_sha256_resolver(
+                        connection,
+                        config=config,
+                    )
                 )
                 validate_av1_validation_partition_current_inputs(
                     partition,
@@ -1403,6 +1479,7 @@ def load_verified_av1_validation_derivation_candidate_lock(
                     sources=inventory.sources,
                     expectations=inventory.expectations,
                     token_key=token_key,
+                    source_sha256_resolver=source_sha256_resolver,
                 )
                 current_evaluation = evaluate_av1_validation_derivation_candidate(
                     manifest=manifest,
@@ -1614,11 +1691,19 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             ) from exc
     terminal_publication_started = False
     try:
-        with open_db(config.paths.db_path) as connection:
+        with ExitStack() as source_stack, open_db(
+            config.paths.db_path
+        ) as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             inventory = load_av1_validation_partition_inventory(
                 connection,
                 config=config,
+            )
+            source_sha256_resolver = source_stack.enter_context(
+                av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=config,
+                )
             )
             validate_av1_validation_partition_current_inputs(
                 partition,
@@ -1626,6 +1711,7 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 sources=inventory.sources,
                 expectations=inventory.expectations,
                 token_key=token_key,
+                source_sha256_resolver=source_sha256_resolver,
             )
             assert_av1_validation_derivation_execution_contract(manifest, plan)
             review_root = _prepare_derivation_review_root(artifact_root)

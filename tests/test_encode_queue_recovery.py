@@ -18,6 +18,7 @@ from concurrent.futures import Future
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, cast
 from unittest.mock import Mock, patch
 
@@ -6449,6 +6450,148 @@ raise SystemExit(0)
             owner_payload={"purpose": "post-recreation-probe"},
         ):
             self.assertIn("post-recreation-probe", lock_path.read_text())
+
+    def test_runtime_lock_survives_parent_directory_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active_parent = root / "active-runtime"
+            web_state_dir = active_parent / "state"
+            web_state_dir.mkdir(parents=True)
+            config = SimpleNamespace(
+                paths=SimpleNamespace(web_state_dir=web_state_dir),
+            )
+            retired_parent = root / "retired-runtime"
+            child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(web_state_dir=Path(sys.argv[1])),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-parent-replacement-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "parent-replacement-probe"},
+            ):
+                active_parent.rename(retired_parent)
+                web_state_dir.mkdir(parents=True)
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(web_state_dir),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+                shutil.rmtree(active_parent)
+                retired_parent.rename(active_parent)
+
+    def test_runtime_lock_reserves_config_and_database_namespaces(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-namespace-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = (
+                (
+                    "shared-config",
+                    root / "shared.toml",
+                    root / "parent.sqlite3",
+                    root / "parent" / "state",
+                    root / "shared.toml",
+                    root / "child.sqlite3",
+                    root / "child" / "state",
+                ),
+                (
+                    "shared-database",
+                    root / "parent.toml",
+                    root / "shared.sqlite3",
+                    root / "parent-db" / "state",
+                    root / "child.toml",
+                    root / "shared.sqlite3",
+                    root / "child-db" / "state",
+                ),
+            )
+            for (
+                name,
+                parent_config_path,
+                parent_db_path,
+                parent_web_state_dir,
+                child_config_path,
+                child_db_path,
+                child_web_state_dir,
+            ) in cases:
+                with self.subTest(name=name):
+                    parent_config = SimpleNamespace(
+                        paths=SimpleNamespace(
+                            config_path=parent_config_path,
+                            db_path=parent_db_path,
+                            web_state_dir=parent_web_state_dir,
+                        ),
+                    )
+                    with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                        parent_config,
+                        owner_payload={"purpose": f"parent-{name}-probe"},
+                    ):
+                        completed = subprocess.run(
+                            [
+                                sys.executable,
+                                "-c",
+                                child,
+                                str(child_config_path),
+                                str(child_db_path),
+                                str(child_web_state_dir),
+                            ],
+                            cwd=Path.cwd(),
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(completed.returncode, 23, completed.stderr)
 
     def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
         script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")

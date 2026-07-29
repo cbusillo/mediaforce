@@ -914,6 +914,7 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_worker.assert_called_once_with(
             config_path=self.config.paths.config_path,
+            config=self.config,
             max_work_items=1,
             max_seconds=None,
         )

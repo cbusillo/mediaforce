@@ -2104,7 +2104,20 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         }),
     )
     path = directory / f"{candidate_lock.cell_plan_id}.json"
-    _write_owner_only(path, canonical_json_bytes(envelope.to_payload()))
+    try:
+        _write_owner_only(path, canonical_json_bytes(envelope.to_payload()))
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        existing = _load_av1_validation_derivation_candidate_lock_envelope(
+            root,
+            plan=plan,
+            cell_plan_id=candidate_lock.cell_plan_id,
+        )
+        if existing != envelope:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation candidate lock conflicts with an immutable existing lock"
+            )
+        _fsync_owner_only_parent(path, "derivation candidate-lock envelope")
+        return existing
     return envelope
 
 
