@@ -216,6 +216,26 @@ directory carries an immutable binding to one plan or proposal, so artifacts
 cannot be mixed across authorization windows or review sets. Newly created
 claim files and newly created parent directories are fsynced before work can
 continue, so a power loss cannot silently erase assignment or review ownership.
+Every private JSON artifact is completed under a random dot-prefixed
+descriptor-relative temporary name with
+`O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` and
+pathname mode `0400`, fsynced, then atomically moved to its final name with the
+platform's no-replace rename primitive (`renameatx_np(RENAME_EXCL)` on macOS).
+macOS file payloads also receive `F_FULLFSYNC`, and the parent directory is
+fsynced after publication. Only an exclusive-name collision is treated as an
+idempotent concurrent publish; a write, full-sync, verification, close, or
+directory-sync failure propagates even when the final name is visible and must
+be re-entered through the runtime-lock-held retry or recovery path before
+progress. A surviving orphaned claim is terminalized by that recovery rather
+than resuming the claimed action. A retry that finds an identical published
+artifact re-fsyncs its parent directory before accepting it, so a prior
+directory-sync error cannot be downgraded to an unsynced idempotent success. A
+hard interruption before
+the rename leaves only an ignored temporary; after the rename, the canonical
+name contains a complete payload, but progress still waits for the parent
+directory sync. Reads require one owner-owned link, exact `0400` mode, stable
+descriptor/path identity, and unchanged size, timestamps, and inode before and
+after the complete read.
 On the next runtime-lock-held invocation, an orphaned assignment claim is
 terminalized as an unfavorable `interrupted_claim` without rerunning media, and
 a persisted non-review attempt missing its terminal record is idempotently
@@ -235,15 +255,21 @@ and preserves an owner-only attempt artifact plus review media. Derivation
 review clips are redirected beneath the partition-global private artifact root;
 the calibration subprocess tree inherits an owner-only `0077` umask, directories
 are `0700`, and generated files begin owner-only. Before the first provenance
-fingerprint, post-run validation walks the tree through no-follow directory
-descriptors, rejects links, hard links, permission drift, ownership drift, and
-identity substitution, and seals every regular file to `0400` through its held
-descriptor. It performs no pathname chmod. The `cira2` review fingerprint binds
-content, a one-way canonical-path digest, device, inode, modification/change
-times, mode, and link count. Verdict-time identity checks recompute that binding
-one clip at a time so descriptor pressure cannot depend on clip count or become
-an unfavorable observation. Resource or integrity failure is an affected-cell
-`safety_stop`, not `media_unavailable` or measured evidence.
+fingerprint, the derivation callback opens and pins every preview, source, and
+compare clip through the no-follow review-root descriptor. While those
+descriptors remain open, post-run validation walks the complete tree, rejects
+links, hard links, permission drift, ownership drift, and identity substitution,
+and seals every regular file to `0400` through its held descriptor. It performs
+no pathname chmod. One macOS path-chain guard per reviewed clip is then kept
+active until every clip payload is hashed and every guard passes a final quiet
+check. The `cira3` review fingerprint binds all three clip roles, content, a
+one-way canonical-path digest, device, inode, modification/change times, mode,
+and link count. Existing non-derivation `cira2` records retain their original
+preview/source-only recomputation contract; new compare-aware records and every
+derivation attempt use `cira3`. Verdict-time identity checks use the same
+all-clips-held procedure, closing the earlier-clip mutation window.
+Descriptor/resource or integrity failure is an affected-cell `safety_stop`, not
+`media_unavailable` or measured evidence.
 
 Private partition creation first performs logical selection without hashing the
 broader eligible library. It then handles only the selected holdout and
@@ -340,25 +366,43 @@ explicit visual verdict. The verdict path appends the existing current-contract
 are active evidence for the bound candidate snapshot but are explicitly marked
 ineligible for local personalization, so later planning and holdout execution
 cannot consume them as warm-start evidence. The complete derivation terminal is
-preceded by an immutable verdict intent that freezes the first human input and
-runtime timestamp. The validated observation is appended inside the immediate
-database transaction, then the execution contract is checked one final time.
+preceded first by an immutable verdict claim. The claim exists before database
+open, `BEGIN IMMEDIATE`, inventory reload, current-input validation, or review
+media verification; a hard interruption before the later verdict intent is
+recovered as the affected cell's immutable `safety_stop`, never as a retryable
+human verdict. A first verdict submitted after authorization expiry still
+creates that claim and then terminalizes the affected cell before database open;
+an already-frozen in-window verdict remains eligible for an idempotent retry
+after expiry. After those checks, an immutable verdict intent freezes the first
+human input and runtime timestamp. The validated observation is appended inside
+the immediate database transaction, then the execution contract is checked one
+final time.
 Only after both succeed are the immutable terminal intent and terminal record
 written, still before the database transaction can commit. An append conflict
 or late contract drift therefore rolls back the observation and produces the
 separate stopped `safety_stop` terminal rather than a false observed terminal.
+A database-open, transaction-begin, inventory-load, current-input, contract,
+review-media, or other pre-publication failure uses the same conversion; when a
+transaction exists, rollback completes before the stopped terminal is
+published.
 A terminal-intent or terminal-record write failure also rolls back the database
 append. If the database commit fails after the immutable record exists, an
 interrupted retry reuses the frozen verdict timestamp and idempotently completes
-the same observation without replacing or duplicating evidence. Review-media
+the same observation without replacing or duplicating evidence. If interruption
+occurs after the terminal intent but before its terminal record, recovery copies
+that exact immutable intent into the canonical terminal-record directory before
+considering any later assignment. An observed terminal whose database projection
+is still absent continues to block progress until the frozen verdict retry
+idempotently commits it. The recovered terminal record does not prevent that
+same frozen verdict from running again; it prevents only later assignments from
+advancing around the missing database projection. Review-media
 identity is freshly recomputed
 immediately before the verdict and must still match the frozen attempt. The
-complete media recheck, immutable verdict intent, immediate database transaction,
-observation append, and terminal-intent/terminal-record path holds the shared
-runtime lock.
+complete verdict claim, media recheck, immutable verdict intent, immediate
+database transaction, observation append, and terminal-intent/terminal-record
+path holds the shared runtime lock.
 Inside that lock it reloads the canonical plan and attempt, revalidates the
-current partition inputs and execution contract, and fails closed before any
-verdict or terminal mutation on drift.
+current partition inputs and execution contract, and fails closed on drift.
 
 ```bash
 uv run python scripts/verify_av1_cold_start_preregistration.py \

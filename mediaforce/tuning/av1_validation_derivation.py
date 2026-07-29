@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from collections import Counter
+import ctypes
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -12,6 +15,7 @@ import re
 import secrets
 import stat
 from statistics import median
+import sys
 from typing import Any, Literal, Mapping, Sequence, cast
 
 from mediaforce.core.evidence import canonical_json_bytes
@@ -57,6 +61,9 @@ AV1_VALIDATION_DERIVATION_ATTEMPT_SCHEMA = "mediaforce.av1_cold_start_derivation
 AV1_VALIDATION_DERIVATION_TERMINAL_SCHEMA = "mediaforce.av1_cold_start_derivation_terminal_record"
 AV1_VALIDATION_DERIVATION_VERDICT_INTENT_SCHEMA = (
     "mediaforce.av1_cold_start_derivation_verdict_intent"
+)
+AV1_VALIDATION_DERIVATION_VERDICT_CLAIM_SCHEMA = (
+    "mediaforce.av1_cold_start_derivation_verdict_claim"
 )
 AV1_VALIDATION_DERIVATION_PROPOSAL_SCHEMA = "mediaforce.av1_cold_start_derivation_candidate_proposal"
 AV1_VALIDATION_DERIVATION_REVIEW_SCHEMA = "mediaforce.av1_cold_start_derivation_candidate_review"
@@ -140,6 +147,12 @@ if (
 
 
 class AV1ValidationDerivationError(ValueError):
+    pass
+
+
+class _AV1ValidationDerivationArtifactAlreadyExists(
+        AV1ValidationDerivationError,
+):
     pass
 
 
@@ -2328,6 +2341,146 @@ def ensure_av1_validation_derivation_terminal_intent(
     )
 
 
+def ensure_av1_validation_derivation_verdict_claim(
+        directory: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        attempt: AV1ValidationDerivationAttempt,
+        claimed_at: str,
+) -> bool:
+    if attempt.plan_id != plan.plan_id or attempt.status != "review_pending":
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict claim is bound to another attempt"
+        )
+    _bind_owner_only_directory(
+        directory,
+        kind="verdict_claims",
+        binding_id=plan.plan_id,
+        binding_digest=plan.authorization.authorization_id,
+    )
+    path = directory / f"{attempt.assignment_id}.json"
+    if path.exists() or path.is_symlink():
+        existing, raw = _load_owner_only_json(path, "derivation verdict claim")
+        _validate_av1_validation_derivation_verdict_claim(
+            existing,
+            raw=raw,
+            plan=plan,
+            attempt=attempt,
+        )
+        _fsync_owner_only_parent(path, "derivation verdict claim")
+        return False
+    timestamp = _parse_timestamp(claimed_at, "verdict claim timestamp")
+    payload = {
+        "schema": AV1_VALIDATION_DERIVATION_VERDICT_CLAIM_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+        "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+        "plan_id": plan.plan_id,
+        "authorization_id": plan.authorization.authorization_id,
+        "attempt_id": attempt.attempt_id,
+        "attempt_payload_sha256": attempt.payload_sha256,
+        "assignment_id": attempt.assignment_id,
+        "claimed_at": _utc_timestamp(timestamp),
+    }
+    _validate_av1_validation_derivation_verdict_claim(
+        payload,
+        raw=canonical_json_bytes(payload),
+        plan=plan,
+        attempt=attempt,
+    )
+    try:
+        _write_owner_only(path, canonical_json_bytes(payload))
+        return True
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        if not path.exists():
+            raise
+    existing, raw = _load_owner_only_json(path, "derivation verdict claim")
+    _validate_av1_validation_derivation_verdict_claim(
+        existing,
+        raw=raw,
+        plan=plan,
+        attempt=attempt,
+    )
+    _fsync_owner_only_parent(path, "derivation verdict claim")
+    return False
+
+
+def load_av1_validation_derivation_verdict_claims(
+        directory: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        attempts: Sequence[AV1ValidationDerivationAttempt],
+) -> tuple[dict[str, Any], ...]:
+    if not directory.exists():
+        return ()
+    binding = _load_owner_only_directory_binding(
+        directory,
+        expected_kind="verdict_claims",
+    )
+    attempts_by_assignment = {
+        attempt.assignment_id: attempt
+        for attempt in attempts
+    }
+    claims: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        payload, raw = _load_owner_only_json(path, "derivation verdict claim")
+        assignment_id = _required_text(
+            payload.get("assignment_id"),
+            "assignment ID",
+        )
+        attempt = attempts_by_assignment.get(assignment_id)
+        if attempt is None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation verdict claim has no matching attempt"
+            )
+        _validate_av1_validation_derivation_verdict_claim(
+            payload,
+            raw=raw,
+            plan=plan,
+            attempt=attempt,
+        )
+        claims.append(payload)
+    if (
+        binding["binding_id"] != plan.plan_id
+        or binding["binding_digest"] != plan.authorization.authorization_id
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict-claim directory binding drifted"
+        )
+    return tuple(claims)
+
+
+def load_av1_validation_derivation_verdict_intent(
+        directory: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        attempt: AV1ValidationDerivationAttempt,
+) -> dict[str, Any] | None:
+    if not directory.exists():
+        return None
+    binding = _load_owner_only_directory_binding(
+        directory,
+        expected_kind="verdict_intents",
+    )
+    if (
+        binding["binding_id"] != plan.plan_id
+        or binding["binding_digest"] != plan.authorization.authorization_id
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict-intent directory binding drifted"
+        )
+    path = directory / f"{attempt.assignment_id}.json"
+    if not path.exists() and not path.is_symlink():
+        return None
+    payload, raw = _load_owner_only_json(path, "derivation verdict intent")
+    _validate_av1_validation_derivation_verdict_intent(
+        payload,
+        raw=raw,
+        plan=plan,
+        attempt=attempt,
+    )
+    return payload
+
+
 def resolve_av1_validation_derivation_verdict_intent(
         directory: Path,
         *,
@@ -2355,11 +2508,17 @@ def resolve_av1_validation_derivation_verdict_intent(
         for value in evidence_ids
         if str(value).strip()
     })
-    normalized_moments = sorted({
-        int(value)
-        for value in moment_indexes
-        if int(value) > 0
-    })
+    try:
+        parsed_moments = [int(value) for value in moment_indexes]
+    except (TypeError, ValueError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict moment indexes are invalid"
+        ) from exc
+    if any(value <= 0 for value in parsed_moments):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict moment indexes are invalid"
+        )
+    normalized_moments = sorted(set(parsed_moments))
     timestamp = _parse_timestamp(recorded_at, "verdict timestamp")
     semantic_payload = {
         "schema": AV1_VALIDATION_DERIVATION_VERDICT_INTENT_SCHEMA,
@@ -2402,49 +2561,134 @@ def resolve_av1_validation_derivation_verdict_intent(
         try:
             _write_owner_only(path, canonical_json_bytes(payload))
             return payload
-        except AV1ValidationDerivationError:
+        except _AV1ValidationDerivationArtifactAlreadyExists:
             if not path.exists():
                 raise
     existing, raw = _load_owner_only_json(path, "derivation verdict intent")
-    _require_exact_keys(existing, set(payload), "derivation verdict intent")
-    if (
-        existing.get("schema") != AV1_VALIDATION_DERIVATION_VERDICT_INTENT_SCHEMA
-        or existing.get("schema_version")
-        != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
-        or existing.get("contract_version")
-        != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
-        or existing.get("payload_sha256")
-        != _payload_sha256({
-            key: value
-            for key, value in existing.items()
-            if key != "payload_sha256"
-        })
-        or raw != canonical_json_bytes(existing)
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation verdict intent integrity is invalid"
-        )
+    _validate_av1_validation_derivation_verdict_intent(
+        existing,
+        raw=raw,
+        plan=plan,
+        attempt=attempt,
+    )
     stable_keys = set(payload) - {"recorded_at", "payload_sha256"}
     if any(existing.get(key) != payload.get(key) for key in stable_keys):
         raise AV1ValidationDerivationError(
             "AV1 derivation verdict retry does not match its immutable intent"
         )
-    existing_timestamp = _parse_timestamp(
-        str(existing.get("recorded_at") or ""),
+    _fsync_owner_only_parent(path, "derivation verdict intent")
+    return existing
+
+
+def _validate_av1_validation_derivation_verdict_claim(
+        payload: Mapping[str, Any],
+        *,
+        raw: bytes,
+        plan: AV1ValidationDerivationPlan,
+        attempt: AV1ValidationDerivationAttempt,
+) -> None:
+    _require_exact_keys(payload, {
+        "schema", "schema_version", "contract_version", "plan_id",
+        "authorization_id", "attempt_id", "attempt_payload_sha256",
+        "assignment_id", "claimed_at",
+    }, "derivation verdict claim")
+    claimed_at = _parse_timestamp(
+        str(payload.get("claimed_at") or ""),
+        "verdict claim timestamp",
+    )
+    if (
+        payload.get("schema") != AV1_VALIDATION_DERIVATION_VERDICT_CLAIM_SCHEMA
+        or int_value(payload.get("schema_version"))
+        != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
+        or payload.get("contract_version")
+        != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
+        or payload.get("plan_id") != plan.plan_id
+        or payload.get("authorization_id")
+        != plan.authorization.authorization_id
+        or payload.get("attempt_id") != attempt.attempt_id
+        or payload.get("attempt_payload_sha256") != attempt.payload_sha256
+        or payload.get("assignment_id") != attempt.assignment_id
+        or raw != canonical_json_bytes(payload)
+        or claimed_at
+        < _parse_timestamp(attempt.completed_at, "attempt completion")
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict claim integrity is invalid"
+        )
+
+
+def _validate_av1_validation_derivation_verdict_intent(
+        payload: Mapping[str, Any],
+        *,
+        raw: bytes,
+        plan: AV1ValidationDerivationPlan,
+        attempt: AV1ValidationDerivationAttempt,
+) -> None:
+    _require_exact_keys(payload, {
+        "schema", "schema_version", "contract_version", "plan_id",
+        "authorization_id", "attempt_id", "attempt_payload_sha256",
+        "assignment_id", "verdict", "concern_tags", "evidence_ids",
+        "moment_indexes", "recorded_at", "payload_sha256",
+    }, "derivation verdict intent")
+    timestamp = _parse_timestamp(
+        str(payload.get("recorded_at") or ""),
         "verdict timestamp",
     )
-    if not (
-        _parse_timestamp(attempt.completed_at, "attempt completion")
-        <= existing_timestamp
-        < _parse_timestamp(
-            plan.authorization.valid_until,
-            "derivation authorization expiration",
+    normalized_concerns = sorted({
+        str(value).strip().lower()
+        for value in object_list(payload.get("concern_tags"))
+        if str(value).strip()
+    })
+    normalized_evidence_ids = sorted({
+        str(value).strip()
+        for value in object_list(payload.get("evidence_ids"))
+        if str(value).strip()
+    })
+    try:
+        normalized_moments = sorted({
+            int(value)
+            for value in object_list(payload.get("moment_indexes"))
+            if int(value) > 0
+        })
+    except (TypeError, ValueError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation verdict intent moment indexes are invalid"
+        ) from exc
+    if (
+        payload.get("schema") != AV1_VALIDATION_DERIVATION_VERDICT_INTENT_SCHEMA
+        or int_value(payload.get("schema_version"))
+        != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
+        or payload.get("contract_version")
+        != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
+        or payload.get("plan_id") != plan.plan_id
+        or payload.get("authorization_id")
+        != plan.authorization.authorization_id
+        or payload.get("attempt_id") != attempt.attempt_id
+        or payload.get("attempt_payload_sha256") != attempt.payload_sha256
+        or payload.get("assignment_id") != attempt.assignment_id
+        or payload.get("verdict") not in {"approved", "rejected"}
+        or payload.get("concern_tags") != normalized_concerns
+        or payload.get("evidence_ids") != normalized_evidence_ids
+        or payload.get("moment_indexes") != normalized_moments
+        or payload.get("payload_sha256")
+        != _payload_sha256({
+            key: value
+            for key, value in payload.items()
+            if key != "payload_sha256"
+        })
+        or raw != canonical_json_bytes(payload)
+        or not (
+            _parse_timestamp(attempt.completed_at, "attempt completion")
+            <= timestamp
+            < _parse_timestamp(
+                plan.authorization.valid_until,
+                "derivation authorization expiration",
+            )
         )
     ):
         raise AV1ValidationDerivationError(
-            "AV1 derivation verdict intent chronology is invalid"
+            "AV1 derivation verdict intent integrity is invalid"
         )
-    return existing
 
 
 def ensure_av1_validation_derivation_terminal_record(
@@ -2552,6 +2796,36 @@ def load_av1_validation_derivation_terminal_records(
     ):
         raise AV1ValidationDerivationError("AV1 derivation terminal directory binding drifted")
     return records
+
+
+def load_av1_validation_derivation_terminal_intents(
+        directory: Path,
+) -> tuple[AV1ValidationDerivationTerminalRecord, ...]:
+    binding = _load_owner_only_directory_binding(
+        directory,
+        expected_kind="terminal_intents",
+    )
+    intents_list: list[AV1ValidationDerivationTerminalRecord] = []
+    for path in sorted(directory.glob("*.json")):
+        payload, raw = _load_owner_only_json(path, "derivation terminal intent")
+        intents_list.append(
+            av1_validation_derivation_terminal_record_from_payload(payload, raw=raw)
+        )
+    intents = tuple(intents_list)
+    assignment_ids = [intent.assignment_id for intent in intents]
+    if len(assignment_ids) != len(set(assignment_ids)):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation terminal-intent directory repeats an assignment"
+        )
+    if any(
+        intent.plan_id != binding["binding_id"]
+        or intent.authorization_id != binding["binding_digest"]
+        for intent in intents
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation terminal-intent directory binding drifted"
+        )
+    return intents
 
 
 def write_av1_validation_derivation_candidate_proposal(
@@ -4288,6 +4562,9 @@ def _write_owner_only(path: Path, data: bytes) -> None:
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = -1
+    temporary_created = False
+    published = False
+    completed = False
     try:
         _, parent_descriptor = ensure_owner_only_directory(path.parent)
         descriptor = os.open(
@@ -4296,40 +4573,192 @@ def _write_owner_only(path: Path, data: bytes) -> None:
             0o400,
             dir_fd=parent_descriptor,
         )
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
+        temporary_created = True
+        initial_info = os.fstat(descriptor)
+        initial_path_info = os.stat(
+            temporary_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(initial_info.st_mode)
+            or initial_info.st_uid != os.getuid()
+            or stat.S_IMODE(initial_info.st_mode) != 0o400
+            or initial_info.st_nlink != 1
+            or (initial_info.st_dev, initial_info.st_ino)
+            != (initial_path_info.st_dev, initial_path_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 private derivation artifact could not be created immutably"
+            )
+        offset = 0
+        while offset < len(data):
+            count = os.write(descriptor, data[offset:])
+            if count <= 0:
+                raise OSError("AV1 private derivation artifact write did not progress")
+            offset += count
+        _fsync_owner_only_artifact(descriptor)
+        completed_info = os.fstat(descriptor)
+        completed_path_info = os.stat(
+            temporary_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            completed_info.st_uid != os.getuid()
+            or stat.S_IMODE(completed_info.st_mode) != 0o400
+            or completed_info.st_nlink != 1
+            or completed_info.st_size != len(data)
+            or (completed_info.st_dev, completed_info.st_ino)
+            != (initial_info.st_dev, initial_info.st_ino)
+            or (completed_path_info.st_dev, completed_path_info.st_ino)
+            != (completed_info.st_dev, completed_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 private derivation artifact changed during publication"
+            )
         try:
-            os.link(
-                temporary_name,
-                path.name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-                follow_symlinks=False,
+            _rename_owner_only_exclusive(
+                parent_descriptor=parent_descriptor,
+                source_name=temporary_name,
+                destination_name=path.name,
             )
         except FileExistsError as exc:
-            raise AV1ValidationDerivationError(
+            raise _AV1ValidationDerivationArtifactAlreadyExists(
                 "AV1 private derivation artifact already exists"
             ) from exc
+        published = True
+        final_info = os.fstat(descriptor)
+        final_path_info = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            final_info.st_uid != os.getuid()
+            or stat.S_IMODE(final_info.st_mode) != 0o400
+            or final_info.st_nlink != 1
+            or final_info.st_size != len(data)
+            or (final_info.st_dev, final_info.st_ino)
+            != (completed_info.st_dev, completed_info.st_ino)
+            or (final_path_info.st_dev, final_path_info.st_ino)
+            != (final_info.st_dev, final_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 private derivation artifact changed during publication"
+            )
         os.fsync(parent_descriptor)
-        os.unlink(temporary_name, dir_fd=parent_descriptor)
-        os.fsync(parent_descriptor)
+        completed = True
     except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(
             "AV1 private derivation artifact directory is unsafe"
         ) from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 private derivation artifact could not be written safely"
+        ) from exc
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if parent_descriptor >= 0:
+        cleanup_error: OSError | None = None
+        if parent_descriptor >= 0 and temporary_created and not published:
             try:
                 os.unlink(temporary_name, dir_fd=parent_descriptor)
-            except OSError:
+            except FileNotFoundError:
                 pass
-            finally:
+            except OSError as exc:
+                cleanup_error = exc
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if parent_descriptor >= 0:
+            try:
                 os.close(parent_descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and completed:
+            raise AV1ValidationDerivationError(
+                "AV1 private derivation artifact cleanup failed"
+            ) from cleanup_error
+
+
+def _rename_owner_only_exclusive(
+        *,
+        parent_descriptor: int,
+        source_name: str,
+        destination_name: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename_function = getattr(libc, "renameatx_np", None)
+        rename_flags = 0x00000004
+    elif sys.platform.startswith("linux"):
+        rename_function = getattr(libc, "renameat2", None)
+        rename_flags = 0x00000001
+    else:
+        rename_function = None
+        rename_flags = 0
+    if rename_function is None:
+        raise OSError(
+            errno.ENOTSUP,
+            "exclusive atomic rename is unavailable",
+        )
+    rename_function.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename_function.restype = ctypes.c_int
+    result = rename_function(
+        parent_descriptor,
+        os.fsencode(source_name),
+        parent_descriptor,
+        os.fsencode(destination_name),
+        rename_flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _fsync_owner_only_artifact(descriptor: int) -> None:
+    os.fsync(descriptor)
+    if sys.platform == "darwin":
+        full_fsync = getattr(fcntl, "F_FULLFSYNC", None)
+        if full_fsync is None:
+            raise OSError(errno.ENOTSUP, "full artifact fsync is unavailable")
+        fcntl.fcntl(descriptor, full_fsync)
+
+
+def _fsync_owner_only_parent(path: Path, label: str) -> None:
+    parent_descriptor = -1
+    completed = False
+    try:
+        _, parent_descriptor = open_stable_directory(
+            path.parent,
+            require_owner_only=True,
+        )
+        os.fsync(parent_descriptor)
+        completed = True
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 {label} directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 {label} directory could not be synced safely"
+        ) from exc
+    finally:
+        if parent_descriptor >= 0:
+            try:
+                os.close(parent_descriptor)
+            except OSError as exc:
+                if completed:
+                    raise AV1ValidationDerivationError(
+                        f"AV1 {label} directory cleanup failed"
+                    ) from exc
 
 
 def _ensure_owner_only_directory(path: Path) -> None:
@@ -4376,7 +4805,7 @@ def _bind_owner_only_directory(
     try:
         _write_owner_only(binding_path, canonical_json_bytes(payload))
         return
-    except AV1ValidationDerivationError as write_error:
+    except _AV1ValidationDerivationArtifactAlreadyExists as write_error:
         try:
             current, raw = _load_owner_only_json(
                 binding_path,
@@ -4386,6 +4815,7 @@ def _bind_owner_only_directory(
             raise write_error
     if current != payload or raw != canonical_json_bytes(payload):
         raise AV1ValidationDerivationError("AV1 derivation directory is bound to another artifact set")
+    _fsync_owner_only_parent(binding_path, "derivation directory binding")
 
 
 def _load_owner_only_directory_binding(
@@ -4433,6 +4863,7 @@ def _assert_owner_only_directory(path: Path) -> None:
 def _read_owner_only_bytes(path: Path, label: str) -> bytes:
     parent_descriptor = -1
     descriptor = -1
+    completed = False
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -4459,20 +4890,60 @@ def _read_owner_only_bytes(path: Path, label: str) -> bytes:
                 != (path_info.st_dev, path_info.st_ino)
         ):
             raise AV1ValidationDerivationError(f"AV1 {label} must be a regular file")
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
-            raise AV1ValidationDerivationError(f"AV1 {label} must be owner-only")
-        with os.fdopen(descriptor, "rb") as handle:
-            descriptor = -1
-            return handle.read()
+        if (
+            info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o400
+            or info.st_nlink != 1
+        ):
+            raise AV1ValidationDerivationError(
+                f"AV1 {label} must be immutable and owner-only"
+            )
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        final_info = os.fstat(descriptor)
+        final_path_info = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            final_info.st_dev != info.st_dev
+            or final_info.st_ino != info.st_ino
+            or final_info.st_size != info.st_size
+            or final_info.st_mtime_ns != info.st_mtime_ns
+            or final_info.st_ctime_ns != info.st_ctime_ns
+            or stat.S_IMODE(final_info.st_mode) != 0o400
+            or final_info.st_nlink != 1
+            or (final_path_info.st_dev, final_path_info.st_ino)
+            != (final_info.st_dev, final_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                f"AV1 {label} changed while it was being read"
+            )
+        result = b"".join(chunks)
+        completed = True
+        return result
     except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(f"AV1 {label} is unavailable") from exc
     except OSError as exc:
         raise AV1ValidationDerivationError(f"AV1 {label} is unavailable") from exc
     finally:
+        cleanup_error: OSError | None = None
         if descriptor >= 0:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                cleanup_error = exc
         if parent_descriptor >= 0:
-            os.close(parent_descriptor)
+            try:
+                os.close(parent_descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and completed:
+            raise AV1ValidationDerivationError(
+                f"AV1 {label} cleanup failed"
+            ) from cleanup_error
 
 
 def _ensure_av1_validation_derivation_terminal_artifact(
@@ -4499,9 +4970,23 @@ def _ensure_av1_validation_derivation_terminal_artifact(
             raise AV1ValidationDerivationError(
                 f"AV1 derivation {label} conflicts with the immutable artifact"
             )
+        _fsync_owner_only_parent(path, f"derivation {label}")
         return path
-    _write_owner_only(path, canonical_json_bytes(record.to_payload()))
-    return path
+    try:
+        _write_owner_only(path, canonical_json_bytes(record.to_payload()))
+        return path
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        payload, raw = _load_owner_only_json(path, f"derivation {label}")
+        existing = av1_validation_derivation_terminal_record_from_payload(
+            payload,
+            raw=raw,
+        )
+        if existing != record:
+            raise AV1ValidationDerivationError(
+                f"AV1 derivation {label} conflicts with the immutable artifact"
+            )
+        _fsync_owner_only_parent(path, f"derivation {label}")
+        return path
 
 def _derivation_id(kind: str, payload: Mapping[str, Any]) -> str:
     prefixes = {

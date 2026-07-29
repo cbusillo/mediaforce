@@ -12,6 +12,8 @@ from mediaforce.core.type_defs import float_value
 
 def reviewed_artifact_fingerprint(
         clips: Sequence[tuple[str, Path, float, float]],
+        *,
+        schema_version: int = 2,
 ) -> str | None:
     clip_payloads: list[dict[str, object]] = []
     for role, path, timestamp_seconds, duration_seconds in clips:
@@ -33,7 +35,10 @@ def reviewed_artifact_fingerprint(
         if clip_payload is None:
             return None
         clip_payloads.append(clip_payload)
-    return reviewed_artifact_fingerprint_from_payloads(clip_payloads)
+    return reviewed_artifact_fingerprint_from_payloads(
+        clip_payloads,
+        schema_version=schema_version,
+    )
 
 
 def reviewed_artifact_clip_payload_from_descriptor(
@@ -90,6 +95,8 @@ def reviewed_artifact_clip_payload_from_descriptor(
 
 def reviewed_artifact_fingerprint_from_payloads(
         clip_payloads: list[dict[str, object]],
+        *,
+        schema_version: int = 2,
 ) -> str | None:
     if not clip_payloads:
         return None
@@ -101,7 +108,10 @@ def reviewed_artifact_fingerprint_from_payloads(
             str(clip["content_sha256"]),
         )
     )
-    return f"cira2_{stable_json_hash({'schema_version': 2, 'clips': clip_payloads})[:32]}"
+    return (
+        f"cira{schema_version}_"
+        f"{stable_json_hash({'schema_version': schema_version, 'clips': clip_payloads})[:32]}"
+    )
 
 
 def _file_sha256(descriptor: int) -> str:

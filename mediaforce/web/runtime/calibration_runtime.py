@@ -300,6 +300,7 @@ def _content_intent_compatibility_payload(
 def _review_artifact_fingerprint(
         preview_clips: list[Any],
         source_clips: list[Any] | None = None,
+        compare_clips: list[Any] | None = None,
 ) -> str | None:
     fingerprint = reviewed_artifact_fingerprint(
         [
@@ -309,9 +310,14 @@ def _review_artifact_fingerprint(
                 float_value(getattr(clip, "timestamp_seconds", None)),
                 float_value(getattr(clip, "duration_seconds", None)),
             )
-            for role, clips in (("preview", preview_clips), ("source", source_clips or []))
+            for role, clips in (
+                ("preview", preview_clips),
+                ("source", source_clips or []),
+                ("compare", compare_clips or []),
+            )
             for clip in clips
-        ]
+        ],
+        schema_version=3 if compare_clips is not None else 2,
     )
     if fingerprint is None:
         LOGGER.info("Review artifact fingerprint unavailable: no preview clips were produced")
@@ -885,8 +891,17 @@ def run_sampled_calibration(
         process_controller=process_controller,
     )
     if deps.secure_review_artifacts is not None:
-        deps.secure_review_artifacts(preview_clips, source_clips, compare_clips)
-    review_artifact_fingerprint = _review_artifact_fingerprint(preview_clips, source_clips)
+        review_artifact_fingerprint = deps.secure_review_artifacts(
+            preview_clips,
+            source_clips,
+            compare_clips,
+        )
+    else:
+        review_artifact_fingerprint = _review_artifact_fingerprint(
+            preview_clips,
+            source_clips,
+            compare_clips,
+        )
     review_artifact_size_bytes = sum(max(0, int_value(getattr(clip, "size_bytes", None))) for clip in preview_clips)
     if progress_callback is not None:
         progress_callback("building_review", completed=3, total=3)

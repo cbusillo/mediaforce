@@ -267,7 +267,7 @@ def load_av1_validation_partition_inventory(
     ]
     evidence_cohorts = Counter(compatible_evidence)
     if not evidence_cohorts:
-        raise ValueError(
+        raise AV1ValidationPartitionError(
             "AV1 partition inventory has no compatible measured fingerprint evidence"
         )
     expected_evidence = min(
@@ -417,7 +417,9 @@ def _expectations(
 ) -> AV1ValidationPartitionExpectations:
     quality_contract = _quality_contract(policy)
     if quality_contract is None:
-        raise ValueError("AV1 partition default quality contract is incomplete")
+        raise AV1ValidationPartitionError(
+            "AV1 partition default quality contract is incomplete"
+        )
     quality_metric, quality_target, minimum_quality_score = quality_contract
     return AV1ValidationPartitionExpectations(
         compatibility_signature=_compatibility_signature(

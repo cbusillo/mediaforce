@@ -18,6 +18,8 @@ from typing import Literal, Sequence
 import unittest
 from unittest.mock import call, patch
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
 from mediaforce.core.process_control import ManagedProcessController
@@ -33,10 +35,13 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationTerminalRecord,
     _attempt_semantic_payload,
+    _bind_owner_only_directory,
     _code_review_marker,
     _completed_code_review_message,
     _derivation_id,
     _payload_sha256,
+    _read_owner_only_bytes,
+    _rename_owner_only_exclusive,
     _terminal_semantic_payload,
     _write_owner_only,
     assert_av1_validation_derivation_authorization_active,
@@ -49,6 +54,8 @@ from mediaforce.tuning.av1_validation_derivation import (
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
     build_av1_validation_derivation_terminal_record,
+    ensure_av1_validation_derivation_verdict_claim,
+    ensure_av1_validation_derivation_terminal_intent,
     evaluate_av1_validation_derivation_candidate,
     _finalize_and_write_av1_validation_derivation_candidate_lock as finalize_and_write_av1_validation_derivation_candidate_lock,
     finalize_av1_validation_derivation_candidate_lock,
@@ -72,6 +79,7 @@ from mediaforce.tuning.av1_validation_derivation import (
 )
 from mediaforce.web.runtime.av1_validation_derivation import (
     _assert_next_assignment,
+    _assert_derivation_terminal_observations_current,
     _current_derivation_review_artifact_fingerprint,
     _owner_only_umask,
     _prepare_derivation_review_root,
@@ -95,6 +103,7 @@ from mediaforce.tuning.av1_cold_start_evaluation import (
     build_av1_cold_start_validation_candidate_lock,
 )
 from mediaforce.tuning.av1_validation_partition import (
+    AV1ValidationPartitionError,
     AV1ValidationPartitionAssignment,
     AV1ValidationPartitionExpectations,
     AV1ValidationPartitionSource,
@@ -288,6 +297,23 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             / f"{assignment_id}.source-media"
         )
 
+    def _review_pending_attempt(self) -> AV1ValidationDerivationAttempt:
+        assignment = self.plan.assignments[0]
+        return build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="review_pending",
+            calibration_payload=_calibration_payload(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            ),
+        )
+
     def test_execution_environment_rejects_unavailable_source_integrity(self) -> None:
         with (
             patch(
@@ -427,6 +453,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             self.assertEqual(os.stat(plan_path).st_mode & 0o777, 0o400)
             self.assertEqual(load_av1_validation_derivation_plan(plan_path), self.plan)
+            plan_path.chmod(0o600)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "immutable and owner-only",
+            ):
+                load_av1_validation_derivation_plan(plan_path)
+            plan_path.chmod(0o400)
+            hardlink_path = root / "plan-hardlink.json"
+            os.link(plan_path, hardlink_path)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "immutable and owner-only",
+            ):
+                load_av1_validation_derivation_plan(plan_path)
+            hardlink_path.unlink()
             with self.assertRaisesRegex(AV1ValidationDerivationError, "already exists"):
                 write_av1_validation_derivation_plan(artifact_root, self.plan)
 
@@ -471,22 +512,259 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     self.plan,
                 )
 
-    def test_immutable_write_cleanup_preserves_primary_error(self) -> None:
+    def test_immutable_write_failure_cleans_unpublished_temporary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             root.chmod(0o700)
             with (
                 patch(
-                    "mediaforce.tuning.av1_validation_derivation.os.link",
-                    side_effect=RuntimeError("publish failed"),
+                    "mediaforce.tuning.av1_validation_derivation.os.write",
+                    side_effect=OSError(errno.EIO, "write failed"),
                 ),
-                patch(
-                    "mediaforce.tuning.av1_validation_derivation.os.unlink",
-                    side_effect=OSError(errno.EPERM, "cleanup failed"),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "could not be written safely",
                 ),
-                self.assertRaisesRegex(RuntimeError, "publish failed"),
             ):
                 _write_owner_only(root / "artifact.json", b"{}")
+            artifact_path = root / "artifact.json"
+            self.assertFalse(artifact_path.exists())
+            self.assertEqual(list(root.glob(".*.tmp")), [])
+
+    def test_immutable_write_publishes_complete_file_with_exclusive_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            artifact_path = root / "artifact.json"
+            payload = b'{"complete":true}'
+
+            def inspect_then_rename(
+                    *,
+                    parent_descriptor: int,
+                    source_name: str,
+                    destination_name: str,
+            ) -> None:
+                self.assertFalse(artifact_path.exists())
+                temporary_path = root / source_name
+                self.assertEqual(temporary_path.read_bytes(), payload)
+                self.assertEqual(temporary_path.stat().st_mode & 0o777, 0o400)
+                _rename_owner_only_exclusive(
+                    parent_descriptor=parent_descriptor,
+                    source_name=source_name,
+                    destination_name=destination_name,
+                )
+
+            with patch(
+                "mediaforce.tuning.av1_validation_derivation._rename_owner_only_exclusive",
+                side_effect=inspect_then_rename,
+            ):
+                _write_owner_only(artifact_path, payload)
+            self.assertEqual(artifact_path.read_bytes(), payload)
+            self.assertEqual(artifact_path.stat().st_mode & 0o777, 0o400)
+            self.assertEqual(list(root.glob(".*.tmp")), [])
+
+    def test_immutable_write_temporary_collision_is_not_publish_idempotence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            artifact_path = root / "artifact.json"
+            temporary_path = root / ".artifact.json.collision.tmp"
+            temporary_path.write_bytes(b"occupied")
+            temporary_path.chmod(0o400)
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.secrets.token_hex",
+                    return_value="collision",
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "could not be written safely",
+                ),
+            ):
+                _write_owner_only(artifact_path, b"{}")
+            self.assertFalse(artifact_path.exists())
+            self.assertEqual(temporary_path.read_bytes(), b"occupied")
+
+    def test_binding_does_not_accept_post_publish_durability_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            binding_directory = Path(directory) / "bindings"
+            binding_directory.mkdir(mode=0o700)
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._fsync_owner_only_artifact"
+                ),
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.os.fsync",
+                    side_effect=OSError(errno.EIO, "directory fsync failed"),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "could not be written safely",
+                ),
+            ):
+                _bind_owner_only_directory(
+                    binding_directory,
+                    kind="test",
+                    binding_id="binding1_immutable",
+                    binding_digest="sha256:" + "1" * 64,
+                )
+            self.assertTrue((binding_directory / ".binding").exists())
+
+    def test_verdict_claim_does_not_accept_post_publish_durability_failure(self) -> None:
+        attempt = self._review_pending_attempt()
+        claims_directory = self.runtime_artifact_root / "verdict-claims"
+        _bind_owner_only_directory(
+            claims_directory,
+            kind="verdict_claims",
+            binding_id=self.plan.plan_id,
+            binding_digest=self.plan.authorization.authorization_id,
+        )
+        directory_fsyncs = 0
+        real_fsync = os.fsync
+
+        def tracked_failure(descriptor: int) -> None:
+            nonlocal directory_fsyncs
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                directory_fsyncs += 1
+                if directory_fsyncs == 2:
+                    raise OSError(errno.EIO, "directory fsync failed")
+            real_fsync(descriptor)
+
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation._fsync_owner_only_artifact"
+            ),
+            patch(
+                "mediaforce.tuning.av1_validation_derivation.os.fsync",
+                side_effect=tracked_failure,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "could not be written safely",
+            ),
+        ):
+            ensure_av1_validation_derivation_verdict_claim(
+                claims_directory,
+                plan=self.plan,
+                attempt=attempt,
+                claimed_at="2026-07-28T01:06:00Z",
+            )
+        self.assertTrue(
+            (claims_directory / f"{attempt.assignment_id}.json").exists()
+        )
+        synced_directory = False
+        real_fsync = os.fsync
+
+        def track_fsync(descriptor: int) -> None:
+            nonlocal synced_directory
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                synced_directory = True
+            real_fsync(descriptor)
+
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation.os.fsync",
+            side_effect=track_fsync,
+        ):
+            self.assertFalse(ensure_av1_validation_derivation_verdict_claim(
+                claims_directory,
+                plan=self.plan,
+                attempt=attempt,
+                claimed_at="2026-07-28T01:06:00Z",
+            ))
+        self.assertTrue(synced_directory)
+
+    def test_immutable_read_rejects_matching_content_path_substitution(self) -> None:
+        plan_path = self.runtime_artifact_root / "plan.json"
+        original_path = self.runtime_artifact_root / "plan-original.json"
+        original_read = os.read
+        path_swapped = False
+
+        def swap_path_then_read(descriptor: int, size: int) -> bytes:
+            nonlocal path_swapped
+            if not path_swapped:
+                path_swapped = True
+                plan_bytes = plan_path.read_bytes()
+                plan_path.rename(original_path)
+                plan_path.write_bytes(plan_bytes)
+                plan_path.chmod(0o400)
+            return original_read(descriptor, size)
+
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation.os.read",
+                side_effect=swap_path_then_read,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "changed while it was being read",
+            ),
+        ):
+            load_av1_validation_derivation_plan(plan_path)
+
+    def test_immutable_read_preserves_primary_error_when_close_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            artifact_path = root / "artifact.json"
+            _write_owner_only(artifact_path, b"{}")
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            real_close = os.close
+
+            def close_then_fail(descriptor: int) -> None:
+                real_close(descriptor)
+                raise OSError(errno.EIO, "close failed")
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.open_stable_directory",
+                    return_value=(root, parent_descriptor),
+                ),
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.os.read",
+                    side_effect=OSError(errno.EIO, "read failed"),
+                ),
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation.os.close",
+                    side_effect=close_then_fail,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "is unavailable",
+                ),
+            ):
+                _read_owner_only_bytes(artifact_path, "test artifact")
+
+    def test_immutable_read_reports_close_failure_inside_outer_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            artifact_path = root / "artifact.json"
+            _write_owner_only(artifact_path, b"{}")
+            parent_descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            real_close = os.close
+
+            def close_then_fail(descriptor: int) -> None:
+                real_close(descriptor)
+                raise OSError(errno.EIO, "close failed")
+
+            try:
+                raise RuntimeError("outer failure")
+            except RuntimeError:
+                with (
+                    patch(
+                        "mediaforce.tuning.av1_validation_derivation.open_stable_directory",
+                        return_value=(root, parent_descriptor),
+                    ),
+                    patch(
+                        "mediaforce.tuning.av1_validation_derivation.os.close",
+                        side_effect=close_then_fail,
+                    ),
+                    self.assertRaisesRegex(
+                        AV1ValidationDerivationError,
+                        "cleanup failed",
+                    ),
+                ):
+                    _read_owner_only_bytes(artifact_path, "test artifact")
 
     def test_assignment_and_review_claim_directories_are_fsynced_through_parents(self) -> None:
         original_fsync = os.fsync
@@ -1644,10 +1922,30 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=["evidence_test"],
                 moment_indexes=[1],
-                recorded_at="2026-07-28T01:07:00Z",
+                recorded_at=VALID_UNTIL,
             )
             self.assertEqual(retry, first)
             self.assertEqual(retry["recorded_at"], "2026-07-28T01:06:00Z")
+
+    def test_verdict_intent_rejects_nonpositive_moment_indexes(self) -> None:
+        attempt = self._review_pending_attempt()
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "moment indexes are invalid",
+            ),
+        ):
+            resolve_av1_validation_derivation_verdict_intent(
+                Path(directory) / "verdict-intents",
+                plan=self.plan,
+                attempt=attempt,
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[0],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
 
     def test_candidate_blocks_missing_failed_and_unacceptable_records(self) -> None:
         cell_plan_id = self.plan.assignments[0].cell_plan_id
@@ -2202,6 +2500,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertTrue(_recover_interrupted_derivation_state(
                 plan=self.plan,
                 partition=self.partition,
+                artifact_root=root,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
                 completed_at="2026-07-28T01:01:00Z",
@@ -2331,6 +2630,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             size_bytes=1,
             content_version_fingerprint=source.source_identity,
         )
+
+        def run_calibration(**kwargs: object) -> tuple[dict[str, object], None]:
+            secure_review_artifacts = kwargs["deps"].secure_review_artifacts
+            self.assertIsNotNone(secure_review_artifacts)
+            fingerprint = secure_review_artifacts(
+                [SimpleNamespace(
+                    output_path=Path("/private/preview.mp4"),
+                    timestamp_seconds=0.0,
+                    duration_seconds=8.0,
+                )],
+                [SimpleNamespace(
+                    output_path=Path("/private/source.mp4"),
+                    timestamp_seconds=0.0,
+                    duration_seconds=8.0,
+                )],
+                [SimpleNamespace(
+                    output_path=Path("/private/compare.mp4"),
+                    timestamp_seconds=0.0,
+                    duration_seconds=8.0,
+                )],
+            )
+            return {"review_artifact_fingerprint": fingerprint}, None
+
         with (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
@@ -2388,14 +2710,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.run_sampled_calibration",
-                return_value=({"review_artifact_fingerprint": "cira2_expected"}, None),
+                side_effect=run_calibration,
             ),
             patch(
-                "mediaforce.web.runtime.av1_validation_derivation._secure_derivation_review_media",
-            ),
+                "mediaforce.web.runtime.av1_validation_derivation._secure_and_fingerprint_derivation_review_clips",
+                return_value="cira3_expected",
+            ) as secure_and_fingerprint,
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
-                return_value="cira2_changed",
+                return_value="cira3_changed",
             ),
         ):
             attempt = _run_av1_validation_derivation_assignment_locked(
@@ -2414,6 +2737,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
         self.assertEqual(terminal.status, "stopped")
         self.assertEqual(terminal.reason_code, "safety_stop")
+        secured_roles = {
+            clip.role
+            for clip in secure_and_fingerprint.call_args.kwargs["clips"]
+        }
+        self.assertEqual(secured_roles, {"preview", "source", "compare"})
 
     def test_fresh_authorization_timestamp_is_sampled_after_preflight(self) -> None:
         assignment = self.plan.assignments[0]
@@ -3268,12 +3596,277 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertTrue(_recover_interrupted_derivation_state(
                 plan=self.plan,
                 partition=self.partition,
+                artifact_root=root,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
                 completed_at="2026-07-28T01:01:00Z",
             ))
             terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
             self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_interrupted_verdict_claim_is_recovered_as_safety_stop(self) -> None:
+        attempt = self._review_pending_attempt()
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        self.assertTrue(ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        ))
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-07-28T01:07:00Z",
+        ))
+
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_frozen_verdict_intent_remains_retryable_after_interruption(self) -> None:
+        attempt = self._review_pending_attempt()
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=[],
+            evidence_ids=[],
+            moment_indexes=[],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+
+        self.assertFalse(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-07-28T01:07:00Z",
+        ))
+        self.assertFalse(records_dir.exists())
+
+    def test_interrupted_terminal_publication_is_completed_from_intent(self) -> None:
+        attempt = self._review_pending_attempt()
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=[],
+            evidence_ids=[],
+            moment_indexes=[],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+            review_failure_reason_code="safety_stop",
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            self.runtime_artifact_root / "terminal-intents",
+            terminal,
+        )
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-07-28T01:07:00Z",
+        ))
+        self.assertEqual(
+            load_av1_validation_derivation_terminal_records(records_dir),
+            (terminal,),
+        )
+
+    def test_recovered_observed_terminal_allows_frozen_verdict_retry(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        observation = _observation(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=[],
+            evidence_ids=[],
+            moment_indexes=[],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+            observation=observation,
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            self.runtime_artifact_root / "terminal-intents",
+            terminal,
+        )
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-07-28T01:07:00Z",
+        ))
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_current_content_intent_boundary_observations",
+                return_value=[],
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "idempotent verdict retry",
+            ),
+        ):
+            _assert_derivation_terminal_observations_current(
+                connection=SimpleNamespace(),
+                records=(terminal,),
+            )
+
+        @contextmanager
+        def database(_path: Path) -> Iterator[SimpleNamespace]:
+            yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation"
+            ) as append_observation,
+        ):
+            retried_terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=records_dir,
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(retried_terminal, terminal)
+        append_observation.assert_called_once()
+        current_observation = self._current_observations([terminal])[
+            terminal.assignment_id
+        ]
+        with patch(
+            "mediaforce.web.runtime.av1_validation_derivation.load_current_content_intent_boundary_observations",
+            return_value=[current_observation.values()],
+        ):
+            _assert_derivation_terminal_observations_current(
+                connection=SimpleNamespace(),
+                records=(terminal,),
+            )
+
+    def test_observed_terminal_blocks_progress_until_database_commit_is_present(self) -> None:
+        record = self._observed_record(
+            self.plan.assignments[0].assignment_id,
+            crf=28.0,
+        )
+        current_observation = self._current_observations([record])[
+            record.assignment_id
+        ]
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_current_content_intent_boundary_observations",
+                return_value=[],
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "idempotent verdict retry",
+            ),
+        ):
+            _assert_derivation_terminal_observations_current(
+                connection=SimpleNamespace(),
+                records=(record,),
+            )
+        with patch(
+            "mediaforce.web.runtime.av1_validation_derivation.load_current_content_intent_boundary_observations",
+            return_value=[current_observation.values()],
+        ):
+            _assert_derivation_terminal_observations_current(
+                connection=SimpleNamespace(),
+                records=(record,),
+            )
 
     def test_runtime_rejects_noncanonical_artifact_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3319,7 +3912,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             plan_path = Path(directory) / "plan.json"
             plan_path.write_bytes(canonical_json_bytes(self.plan.to_payload()))
-            plan_path.chmod(0o600)
+            plan_path.chmod(0o400)
             for operation in (
                 finalize_runtime_av1_validation_derivation_candidate_lock,
                 load_verified_runtime_av1_validation_derivation_candidate_lock,
@@ -3376,22 +3969,19 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             self.assertIsNotNone(fingerprint)
             assert fingerprint is not None
-            self.assertTrue(fingerprint.startswith("cira2_"))
+            self.assertTrue(fingerprint.startswith("cira3_"))
 
             linked_clip = clip_directory / "linked.mp4"
             linked_clip.symlink_to(clip_path)
             calibration["preview_clips"][0]["path"] = linked_clip.as_uri()
-            self.assertIsNone(
-                _current_derivation_review_artifact_fingerprint(
-                    review_root=review_root,
-                    calibration=calibration,
-                )
-            )
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
                 "must not contain links",
             ):
-                _secure_derivation_review_media(review_root)
+                _current_derivation_review_artifact_fingerprint(
+                    review_root=review_root,
+                    calibration=calibration,
+                )
             linked_clip.unlink()
 
             clip_path.chmod(0o640)
@@ -3416,6 +4006,42 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 _secure_derivation_review_media(review_root)
             self.assertEqual(outside_path.read_bytes(), b"outside-review-media")
             self.assertEqual(outside_path.stat().st_mode & 0o777, outside_mode)
+
+    def test_review_fingerprint_binds_compare_clip_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifact-root"
+            artifact_root.mkdir(mode=0o700)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            clip_paths = {
+                role: review_root / f"{role}.mp4"
+                for role in ("preview", "source", "compare")
+            }
+            for role, clip_path in clip_paths.items():
+                clip_path.write_bytes(f"{role}-review".encode())
+                clip_path.chmod(0o400)
+            calibration = {
+                f"{role}_clips": [{
+                    "path": clip_path.as_uri(),
+                    "timestamp_seconds": 0.0,
+                    "duration_seconds": 8.0,
+                }]
+                for role, clip_path in clip_paths.items()
+            }
+            first_fingerprint = _current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration=calibration,
+            )
+            compare_path = clip_paths["compare"]
+            compare_path.chmod(0o600)
+            compare_path.write_bytes(b"changed-compare-review")
+            compare_path.chmod(0o400)
+            second_fingerprint = _current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration=calibration,
+            )
+            self.assertIsNotNone(first_fingerprint)
+            self.assertIsNotNone(second_fingerprint)
+            self.assertNotEqual(first_fingerprint, second_fingerprint)
 
     def test_review_fingerprint_binds_matching_path_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3460,7 +4086,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         hasattr(__import__("select"), "kqueue"),
         "requires macOS kqueue",
     )
-    def test_review_fingerprint_processes_one_real_guard_at_a_time(self) -> None:
+    def test_review_fingerprint_holds_all_real_guards_until_final_hash(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             artifact_root = Path(directory) / "artifact-root"
             artifact_root.mkdir(mode=0o700)
@@ -3527,7 +4153,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     calibration=calibration,
                 )
             self.assertIsNotNone(fingerprint)
-            self.assertEqual(maximum_active_guards, 1)
+            self.assertEqual(maximum_active_guards, len(clip_paths))
             self.assertEqual(active_guards, 0)
 
     def test_review_fingerprint_resource_exhaustion_is_safety_stop(self) -> None:
@@ -3560,6 +4186,52 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     review_root=review_root,
                     calibration=calibration,
                 )
+
+    def test_review_fingerprint_reports_cleanup_failure_inside_outer_handler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifact-root"
+            artifact_root.mkdir(mode=0o700)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            clip_path = review_root / "encoded-01.mp4"
+            clip_path.write_bytes(b"review")
+            clip_path.chmod(0o400)
+            calibration = {
+                "preview_clips": [{
+                    "path": clip_path.as_uri(),
+                    "timestamp_seconds": 0.0,
+                    "duration_seconds": 8.0,
+                }],
+                "source_clips": [],
+                "compare_clips": [],
+            }
+
+            class CloseFailGuard:
+                def __init__(self, **_kwargs: object) -> None:
+                    pass
+
+                def assert_quiet(self, *, timeout_seconds: float = 0.0) -> None:
+                    pass
+
+                def close(self) -> None:
+                    raise OSError(errno.EIO, "guard close failed")
+
+            try:
+                raise RuntimeError("outer failure")
+            except RuntimeError:
+                with (
+                    patch(
+                        "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
+                        new=CloseFailGuard,
+                    ),
+                    self.assertRaisesRegex(
+                        AV1ValidationDerivationError,
+                        "verification cleanup failed",
+                    ),
+                ):
+                    _current_derivation_review_artifact_fingerprint(
+                        review_root=review_root,
+                        calibration=calibration,
+                    )
 
     def test_review_fingerprint_rejects_symlinked_review_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3598,6 +4270,563 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(
             umask.call_args_list,
             [call(0o077), call(0o022)],
+        )
+
+    def test_derivation_verdict_terminalizes_preexisting_claim_without_intent(self) -> None:
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db"
+            ) as open_database,
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:07:00Z",
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        open_database.assert_not_called()
+
+    def test_derivation_verdict_terminalizes_database_open_failure(self) -> None:
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=OSError("database unavailable"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint"
+            ) as review_fingerprint,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation"
+            ) as append_observation,
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        review_fingerprint.assert_not_called()
+        append_observation.assert_not_called()
+        self.assertFalse((self.runtime_artifact_root / "verdict-intents").exists())
+
+    def test_derivation_verdict_terminalizes_expired_first_verdict_after_claim(self) -> None:
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db"
+            ) as open_database,
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at=VALID_UNTIL,
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        open_database.assert_not_called()
+        self.assertTrue(
+            (
+                self.runtime_artifact_root
+                / "verdict-claims"
+                / f"{attempt.assignment_id}.json"
+            ).exists()
+        )
+        self.assertFalse((self.runtime_artifact_root / "verdict-intents").exists())
+
+    def test_derivation_verdict_terminalizes_transaction_begin_failure(self) -> None:
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        connection = SimpleNamespace(
+            exec_driver_sql=lambda _sql: (_ for _ in ()).throw(
+                SQLAlchemyError("database is locked")
+            )
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(connection),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory"
+            ) as load_inventory,
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        load_inventory.assert_not_called()
+
+    def test_derivation_verdict_terminalizes_inventory_load_failure(self) -> None:
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(connection),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                side_effect=OSError("inventory unavailable"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs"
+            ) as validate_current_inputs,
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        validate_current_inputs.assert_not_called()
+
+    def test_derivation_verdict_rolls_back_before_safety_terminal_publication(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        observation = _observation(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        events: list[str] = []
+
+        @contextmanager
+        def database(_path: Path) -> Iterator[SimpleNamespace]:
+            events.append("db-enter")
+            connection = SimpleNamespace(
+                exec_driver_sql=lambda _sql: events.append("begin")
+            )
+            try:
+                yield connection
+            except BaseException:
+                events.append("rollback")
+                raise
+            finally:
+                events.append("db-exit")
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation",
+                side_effect=lambda *_args: (
+                    events.append("append")
+                    or (_ for _ in ()).throw(
+                        ContentIntentObservationConflictError("conflict")
+                    )
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_intent",
+                side_effect=lambda *_args: events.append("safety-terminal-intent"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record",
+                side_effect=lambda *_args: events.append("safety-terminal-record"),
+            ),
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        self.assertEqual(events, [
+            "db-enter",
+            "begin",
+            "append",
+            "rollback",
+            "db-exit",
+            "safety-terminal-intent",
+            "safety-terminal-record",
+        ])
+
+    def test_derivation_verdict_terminal_write_failure_is_retryable(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        observation = _observation(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        events: list[str] = []
+
+        @contextmanager
+        def database(_path: Path) -> Iterator[SimpleNamespace]:
+            events.append("db-enter")
+            connection = SimpleNamespace(
+                exec_driver_sql=lambda _sql: events.append("begin")
+            )
+            try:
+                yield connection
+            except BaseException:
+                events.append("rollback")
+                raise
+            finally:
+                events.append("db-exit")
+
+        def fail_terminal_intent(*_args: object) -> None:
+            events.append("observed-terminal-intent")
+            raise AV1ValidationDerivationError("terminal write failed")
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation",
+                side_effect=lambda *_args: events.append("append"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_intent",
+                side_effect=fail_terminal_intent,
+            ) as write_terminal_intent,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record"
+            ) as write_terminal_record,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "terminal write failed",
+            ),
+        ):
+            record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(write_terminal_intent.call_count, 1)
+        self.assertEqual(write_terminal_intent.call_args.args[1].status, "observed")
+        write_terminal_record.assert_not_called()
+        self.assertEqual(events, [
+            "db-enter",
+            "begin",
+            "append",
+            "observed-terminal-intent",
+            "rollback",
+            "db-exit",
+        ])
+
+    def test_derivation_verdict_retries_after_post_publication_commit_failure(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        observation = _observation(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        database_calls = 0
+
+        @contextmanager
+        def database(_path: Path) -> Iterator[SimpleNamespace]:
+            nonlocal database_calls
+            database_calls += 1
+            yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
+            if database_calls == 1:
+                raise SQLAlchemyError("commit failed")
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation"
+            ) as append_observation,
+        ):
+            with self.assertRaisesRegex(SQLAlchemyError, "commit failed"):
+                record_av1_validation_derivation_visual_verdict(
+                    config_path=Path("unused.toml"),
+                    manifest=self.manifest,
+                    plan=self.plan,
+                    partition=self.partition,
+                    token_key=self.token_key,
+                    attempt=attempt,
+                    terminal_records_directory=(
+                        self.runtime_artifact_root / "terminal-records"
+                    ),
+                    verdict="approved",
+                    concern_tags=[],
+                    evidence_ids=[],
+                    moment_indexes=[],
+                    recorded_at="2026-07-28T01:06:00Z",
+                )
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+        self.assertEqual(database_calls, 2)
+        self.assertEqual(append_observation.call_count, 2)
+        self.assertEqual(terminal.status, "observed")
+        self.assertEqual(
+            load_av1_validation_derivation_terminal_records(
+                self.runtime_artifact_root / "terminal-records"
+            ),
+            (terminal,),
         )
 
     def test_derivation_verdict_validates_terminal_before_database_append(self) -> None:
@@ -4064,7 +5293,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs",
-                side_effect=AV1ValidationDerivationError("current inputs drifted"),
+                side_effect=AV1ValidationPartitionError("current inputs drifted"),
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint"

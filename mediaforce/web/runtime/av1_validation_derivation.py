@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator, Mapping, cast
 from urllib.parse import unquote, urlparse
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig, load_config
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
@@ -79,13 +80,17 @@ from mediaforce.tuning.av1_validation_derivation import (
     evaluate_av1_validation_derivation_candidate,
     ensure_av1_validation_derivation_terminal_intent,
     ensure_av1_validation_derivation_terminal_record,
+    ensure_av1_validation_derivation_verdict_claim,
     load_av1_validation_derivation_assignment_claims,
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_plan,
     load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelopes,
+    load_av1_validation_derivation_terminal_intents,
     load_av1_validation_derivation_terminal_records,
+    load_av1_validation_derivation_verdict_claims,
+    load_av1_validation_derivation_verdict_intent,
     _finalize_and_write_av1_validation_derivation_candidate_lock,
     _load_av1_validation_derivation_candidate_lock_envelope,
     _load_verified_av1_validation_derivation_candidate_lock,
@@ -98,6 +103,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     write_av1_validation_derivation_terminal_record,
 )
 from mediaforce.tuning.av1_validation_partition import (
+    AV1ValidationPartitionError,
     AV1ValidationPrivatePartition,
     validate_av1_validation_partition_current_inputs,
     validate_av1_validation_private_partition,
@@ -162,6 +168,22 @@ class _PinnedDerivationSource:
     size_bytes: int
     device: int
     inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivationReviewClip:
+    role: str
+    path: Path
+    timestamp_seconds: float
+    duration_seconds: float
+
+
+@dataclass(slots=True)
+class _HeldDerivationReviewClip:
+    clip: _DerivationReviewClip
+    canonical_path: Path
+    descriptor: int
+    guard: MacOSFileIntegrityGuard | None = None
 
 
 class _AV1ValidationDerivationVerdictSafetyStop(AV1ValidationDerivationError):
@@ -679,6 +701,33 @@ def _load_current_derivation_observations_from_connection(
     return current_observations
 
 
+def _assert_derivation_terminal_observations_current(
+        *,
+        connection: DBClient,
+        records: tuple[AV1ValidationDerivationTerminalRecord, ...],
+) -> None:
+    if not records:
+        return
+    current_observations = _load_current_derivation_observations_from_connection(
+        connection=connection,
+        records=records,
+    )
+    for record in records:
+        projection = record.observation
+        if projection is None:
+            continue
+        current = current_observations.get(record.assignment_id)
+        if (
+            current is None
+            or current.observation_id != projection.observation_id
+            or f"sha256:{current.payload_sha256}"
+            != projection.observation_payload_sha256
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation observed terminal requires an idempotent verdict retry"
+            )
+
+
 def load_current_av1_validation_derivation_observations(
         *,
         config_path: Path,
@@ -835,6 +884,7 @@ def _run_av1_validation_derivation_assignment_locked(
     interrupted_state_recovered = _recover_interrupted_derivation_state(
         plan=plan,
         partition=partition,
+        artifact_root=artifact_root,
         attempts_directory=attempts_directory,
         terminal_records_directory=terminal_records_directory,
         completed_at=recovery_completed_at,
@@ -850,6 +900,17 @@ def _run_av1_validation_derivation_assignment_locked(
         )
     with open_readonly_db(config.paths.db_path) as connection:
         inventory = load_av1_validation_partition_inventory(connection, config=config)
+        terminal_records = (
+            load_av1_validation_derivation_terminal_records(
+                terminal_records_directory
+            )
+            if terminal_records_directory.exists()
+            else ()
+        )
+        _assert_derivation_terminal_observations_current(
+            connection=connection,
+            records=terminal_records,
+        )
     validate_av1_validation_partition_current_inputs(
         partition,
         manifest=manifest,
@@ -934,7 +995,16 @@ def _run_av1_validation_derivation_assignment_locked(
         run_deps = replace(
             run_deps,
             secure_review_artifacts=(
-                lambda *_clips: _secure_derivation_review_media(review_root)
+                lambda preview_clips, source_clips, compare_clips: (
+                    _secure_and_fingerprint_derivation_review_clips(
+                        review_root=review_root,
+                        clips=_derivation_review_clips_from_generated_artifacts(
+                            preview_clips=preview_clips,
+                            source_clips=source_clips,
+                            compare_clips=compare_clips,
+                        ),
+                    )
+                )
             ),
         )
         with _pinned_derivation_source(
@@ -967,7 +1037,6 @@ def _run_av1_validation_derivation_assignment_locked(
                     source_path_override=pinned_source.path,
                 )
         assert_av1_validation_derivation_execution_contract(manifest, plan)
-        _secure_derivation_review_media(review_root)
         current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
             review_root=review_root,
             calibration=payload,
@@ -1461,13 +1530,43 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         )
     calibration = attempt.calibration_payload()
     sample_item = object_dict(calibration.get("sample_item"))
-    with open_db(config.paths.db_path) as connection:
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-        inventory = load_av1_validation_partition_inventory(
-            connection,
-            config=config,
+    claim_created = ensure_av1_validation_derivation_verdict_claim(
+        artifact_root / "verdict-claims",
+        plan=plan,
+        attempt=attempt,
+        claimed_at=recorded_at,
+    )
+    existing_verdict_intent = (
+        None
+        if claim_created
+        else load_av1_validation_derivation_verdict_intent(
+            artifact_root / "verdict-intents",
+            plan=plan,
+            attempt=attempt,
         )
+    )
+    if not claim_created and existing_verdict_intent is None:
+        raise _AV1ValidationDerivationVerdictSafetyStop(
+            "AV1 derivation interrupted verdict claim stopped the affected cell"
+        )
+    if claim_created:
         try:
+            assert_av1_validation_derivation_authorization_active(
+                plan,
+                at=recorded_at,
+            )
+        except AV1ValidationDerivationError as exc:
+            raise _AV1ValidationDerivationVerdictSafetyStop(
+                "AV1 derivation verdict arrived outside its authorization window"
+            ) from exc
+    terminal_publication_started = False
+    try:
+        with open_db(config.paths.db_path) as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            inventory = load_av1_validation_partition_inventory(
+                connection,
+                config=config,
+            )
             validate_av1_validation_partition_current_inputs(
                 partition,
                 manifest=manifest,
@@ -1477,105 +1576,104 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             )
             assert_av1_validation_derivation_execution_contract(manifest, plan)
             review_root = _prepare_derivation_review_root(artifact_root)
-            _secure_derivation_review_media(review_root)
             current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
                 review_root=review_root,
                 calibration=calibration,
             )
-        except AV1ValidationDerivationError as exc:
-            raise _AV1ValidationDerivationVerdictSafetyStop(
-                "AV1 derivation pre-verdict verification stopped the affected cell"
-            ) from exc
-        if (
-            current_review_fingerprint is None
-            or current_review_fingerprint
-            != str(calibration.get("review_artifact_fingerprint") or "")
-        ):
-            raise _AV1ValidationDerivationVerdictSafetyStop(
-                "AV1 derivation review media is unavailable or changed"
-            )
-        try:
-            assert_av1_validation_derivation_execution_contract(manifest, plan)
-        except AV1ValidationDerivationError as exc:
-            raise _AV1ValidationDerivationVerdictSafetyStop(
-                "AV1 derivation execution contract changed before verdict publication"
-            ) from exc
-        verdict_intent = resolve_av1_validation_derivation_verdict_intent(
-            artifact_root / "verdict-intents",
-            plan=plan,
-            attempt=attempt,
-            verdict=verdict,
-            concern_tags=concern_tags,
-            evidence_ids=evidence_ids,
-            moment_indexes=moment_indexes,
-            recorded_at=recorded_at,
-        )
-        frozen_verdict = str(verdict_intent["verdict"])
-        frozen_concern_tags = [
-            str(value) for value in object_list(verdict_intent["concern_tags"])
-        ]
-        frozen_evidence_ids = [
-            str(value) for value in object_list(verdict_intent["evidence_ids"])
-        ]
-        frozen_moment_indexes = [
-            int(value) for value in object_list(verdict_intent["moment_indexes"])
-        ]
-        frozen_recorded_at = str(verdict_intent["recorded_at"])
-        calibration["current_review_artifact_fingerprint"] = (
-            current_review_fingerprint
-        )
-        result = build_visual_content_intent_observation(
-            prefix=_derivation_prefix(config, sample_item),
-            sample_item=sample_item,
-            calibration=calibration,
-            verdict=frozen_verdict,
-            concern_tags=frozen_concern_tags,
-            evidence_ids=frozen_evidence_ids,
-            moment_indexes=frozen_moment_indexes,
-            recorded_at=frozen_recorded_at,
-            personalization_eligible=False,
-            personalization_exclusion_reason=(
-                AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
-            ),
-        )
-        if result.observation is None:
-            terminal = build_av1_validation_derivation_terminal_record(
-                plan=plan,
-                partition=partition,
-                attempt=attempt,
-                observation_exclusion_reason="content_intent_observation_excluded",
-            )
-        else:
-            terminal = build_av1_validation_derivation_terminal_record(
-                plan=plan,
-                partition=partition,
-                attempt=attempt,
-                observation=result.observation,
-            )
-        if result.observation is not None:
-            try:
-                append_content_intent_boundary_observation(
-                    connection,
-                    result.observation,
-                )
-            except ContentIntentObservationConflictError as exc:
+            if (
+                current_review_fingerprint is None
+                or current_review_fingerprint
+                != str(calibration.get("review_artifact_fingerprint") or "")
+            ):
                 raise _AV1ValidationDerivationVerdictSafetyStop(
-                    "AV1 derivation visual observation conflicts with existing evidence"
-                ) from exc
-        try:
+                    "AV1 derivation review media is unavailable or changed"
+                )
             assert_av1_validation_derivation_execution_contract(manifest, plan)
-        except AV1ValidationDerivationError as exc:
-            raise _AV1ValidationDerivationVerdictSafetyStop(
-                "AV1 derivation execution contract changed before terminal publication"
-            ) from exc
-        ensure_av1_validation_derivation_terminal_intent(
-            artifact_root / "terminal-intents",
-            terminal,
-        )
-        ensure_av1_validation_derivation_terminal_record(
-            terminal_records_directory,
-            terminal,
-        )
+            verdict_intent = resolve_av1_validation_derivation_verdict_intent(
+                artifact_root / "verdict-intents",
+                plan=plan,
+                attempt=attempt,
+                verdict=verdict,
+                concern_tags=concern_tags,
+                evidence_ids=evidence_ids,
+                moment_indexes=moment_indexes,
+                recorded_at=recorded_at,
+            )
+            frozen_verdict = str(verdict_intent["verdict"])
+            frozen_concern_tags = [
+                str(value) for value in object_list(verdict_intent["concern_tags"])
+            ]
+            frozen_evidence_ids = [
+                str(value) for value in object_list(verdict_intent["evidence_ids"])
+            ]
+            frozen_moment_indexes = [
+                int(value) for value in object_list(verdict_intent["moment_indexes"])
+            ]
+            frozen_recorded_at = str(verdict_intent["recorded_at"])
+            calibration["current_review_artifact_fingerprint"] = (
+                current_review_fingerprint
+            )
+            result = build_visual_content_intent_observation(
+                prefix=_derivation_prefix(config, sample_item),
+                sample_item=sample_item,
+                calibration=calibration,
+                verdict=frozen_verdict,
+                concern_tags=frozen_concern_tags,
+                evidence_ids=frozen_evidence_ids,
+                moment_indexes=frozen_moment_indexes,
+                recorded_at=frozen_recorded_at,
+                personalization_eligible=False,
+                personalization_exclusion_reason=(
+                    AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
+                ),
+            )
+            if result.observation is None:
+                terminal = build_av1_validation_derivation_terminal_record(
+                    plan=plan,
+                    partition=partition,
+                    attempt=attempt,
+                    observation_exclusion_reason="content_intent_observation_excluded",
+                )
+            else:
+                terminal = build_av1_validation_derivation_terminal_record(
+                    plan=plan,
+                    partition=partition,
+                    attempt=attempt,
+                    observation=result.observation,
+                )
+            if result.observation is not None:
+                try:
+                    append_content_intent_boundary_observation(
+                        connection,
+                        result.observation,
+                    )
+                except ContentIntentObservationConflictError as exc:
+                    raise _AV1ValidationDerivationVerdictSafetyStop(
+                        "AV1 derivation visual observation conflicts with existing evidence"
+                    ) from exc
+            assert_av1_validation_derivation_execution_contract(manifest, plan)
+            terminal_publication_started = True
+            ensure_av1_validation_derivation_terminal_intent(
+                artifact_root / "terminal-intents",
+                terminal,
+            )
+            ensure_av1_validation_derivation_terminal_record(
+                terminal_records_directory,
+                terminal,
+            )
+    except _AV1ValidationDerivationVerdictSafetyStop:
+        raise
+    except (
+        AV1ValidationDerivationError,
+        AV1ValidationPartitionError,
+        OSError,
+        SQLAlchemyError,
+    ) as exc:
+        if terminal_publication_started:
+            raise
+        raise _AV1ValidationDerivationVerdictSafetyStop(
+            "AV1 derivation pre-publication failure stopped the affected cell"
+        ) from exc
     return terminal
 
 
@@ -1800,6 +1898,7 @@ def _recover_interrupted_derivation_state(
         *,
         plan: AV1ValidationDerivationPlan,
         partition: AV1ValidationPrivatePartition,
+        artifact_root: Path,
         attempts_directory: Path,
         terminal_records_directory: Path,
         completed_at: str,
@@ -1816,6 +1915,60 @@ def _recover_interrupted_derivation_state(
         if terminal_records_directory.exists()
         else ()
     )
+    attempts_by_assignment = {
+        attempt.assignment_id: attempt
+        for attempt in attempts
+    }
+    records_by_assignment = {
+        record.assignment_id: record
+        for record in records
+    }
+    terminal_intents_directory = artifact_root / "terminal-intents"
+    terminal_intents = (
+        load_av1_validation_derivation_terminal_intents(
+            terminal_intents_directory
+        )
+        if terminal_intents_directory.exists()
+        else ()
+    )
+    interrupted_terminal_publications: list[
+        AV1ValidationDerivationTerminalRecord
+    ] = []
+    for terminal_intent in terminal_intents:
+        attempt = attempts_by_assignment.get(terminal_intent.assignment_id)
+        if (
+            attempt is None
+            or terminal_intent.plan_id != plan.plan_id
+            or terminal_intent.authorization_id
+            != plan.authorization.authorization_id
+            or terminal_intent.attempt_id != attempt.attempt_id
+            or terminal_intent.attempt_payload_sha256 != attempt.payload_sha256
+            or terminal_intent.cell_plan_id != attempt.cell_plan_id
+            or terminal_intent.ordinal != attempt.ordinal
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation terminal intent does not match its attempt"
+            )
+        terminal_record = records_by_assignment.get(
+            terminal_intent.assignment_id
+        )
+        if terminal_record is not None:
+            if terminal_record != terminal_intent:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation terminal intent conflicts with its record"
+                )
+            continue
+        interrupted_terminal_publications.append(terminal_intent)
+    if len(interrupted_terminal_publications) > 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation has multiple interrupted terminal publications"
+        )
+    if interrupted_terminal_publications:
+        ensure_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            interrupted_terminal_publications[0],
+        )
+        return True
     terminal_attempt_ids = {record.attempt_id for record in records}
     unterminated = [
         attempt
@@ -1834,6 +1987,46 @@ def _recover_interrupted_derivation_state(
             attempt=unterminated[0],
         )
         write_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+        )
+        return True
+    interrupted_verdicts: list[AV1ValidationDerivationAttempt] = []
+    for claim in load_av1_validation_derivation_verdict_claims(
+        artifact_root / "verdict-claims",
+        plan=plan,
+        attempts=attempts,
+    ):
+        attempt = attempts_by_assignment[str(claim["assignment_id"])]
+        if attempt.attempt_id in terminal_attempt_ids:
+            continue
+        if attempt.status != "review_pending":
+            raise AV1ValidationDerivationError(
+                "AV1 derivation verdict claim is not bound to a pending review"
+            )
+        verdict_intent = load_av1_validation_derivation_verdict_intent(
+            artifact_root / "verdict-intents",
+            plan=plan,
+            attempt=attempt,
+        )
+        if verdict_intent is None:
+            interrupted_verdicts.append(attempt)
+    if len(interrupted_verdicts) > 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation has multiple interrupted verdict claims"
+        )
+    if interrupted_verdicts:
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=plan,
+            partition=partition,
+            attempt=interrupted_verdicts[0],
+            review_failure_reason_code="safety_stop",
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            artifact_root / "terminal-intents",
+            terminal,
+        )
+        ensure_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
         )
@@ -1884,65 +2077,125 @@ def _current_derivation_review_artifact_fingerprint(
         review_root: Path,
         calibration: dict[str, Any],
 ) -> str | None:
+    clips: list[_DerivationReviewClip] = []
+    for role, key in (
+        ("preview", "preview_clips"),
+        ("source", "source_clips"),
+        ("compare", "compare_clips"),
+    ):
+        for value in calibration.get(key, []):
+            clip = object_dict(value)
+            parsed = urlparse(str(clip.get("path") or ""))
+            if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+                return None
+            candidate_path = Path(unquote(parsed.path))
+            if not candidate_path.is_absolute():
+                return None
+            clips.append(_DerivationReviewClip(
+                role=role,
+                path=candidate_path,
+                timestamp_seconds=float_value(clip.get("timestamp_seconds")),
+                duration_seconds=float_value(clip.get("duration_seconds")),
+            ))
+    return _secure_and_fingerprint_derivation_review_clips(
+        review_root=review_root,
+        clips=tuple(clips),
+    )
+
+
+def _derivation_review_clips_from_generated_artifacts(
+        *,
+        preview_clips: list[Any],
+        source_clips: list[Any],
+        compare_clips: list[Any],
+) -> tuple[_DerivationReviewClip, ...]:
+    return tuple(
+        _DerivationReviewClip(
+            role=role,
+            path=Path(getattr(clip, "output_path", "")),
+            timestamp_seconds=float_value(getattr(clip, "timestamp_seconds", None)),
+            duration_seconds=float_value(getattr(clip, "duration_seconds", None)),
+        )
+        for role, role_clips in (
+            ("preview", preview_clips),
+            ("source", source_clips),
+            ("compare", compare_clips),
+        )
+        for clip in role_clips
+    )
+
+
+def _secure_and_fingerprint_derivation_review_clips(
+        *,
+        review_root: Path,
+        clips: tuple[_DerivationReviewClip, ...],
+) -> str | None:
     root_descriptor = -1
+    held_clips: list[_HeldDerivationReviewClip] = []
     clip_payloads: list[dict[str, object]] = []
+    completed = False
     try:
         root_descriptor = _bind_owner_only_directory_descriptor(
             review_root,
             label="review-media",
         )
         resolved_review_root = stable_absolute_path(review_root)
-        for role, key in (("preview", "preview_clips"), ("source", "source_clips")):
-            for value in calibration.get(key, []):
-                clip = object_dict(value)
-                parsed = urlparse(str(clip.get("path") or ""))
-                if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
-                    return None
-                candidate_path = Path(unquote(parsed.path))
-                if not candidate_path.is_absolute():
-                    return None
-                try:
-                    if stat.S_ISLNK(candidate_path.lstat().st_mode):
-                        return None
-                    canonical_candidate_path = stable_absolute_path(candidate_path)
-                    relative_path = canonical_candidate_path.relative_to(
-                        resolved_review_root
-                    )
-                except (OSError, ValueError):
-                    return None
-                if (
-                    not relative_path.parts
-                    or any(part in {"", ".", ".."} for part in relative_path.parts)
-                ):
-                    return None
-                descriptor = _open_owner_only_review_media_relative_file(
+        invalid_clip_path = False
+        for clip in clips:
+            canonical_path, relative_path = _resolve_derivation_review_clip_path(
+                review_root=resolved_review_root,
+                path=clip.path,
+            )
+            if canonical_path is None or relative_path is None:
+                invalid_clip_path = True
+                break
+            held_clips.append(_HeldDerivationReviewClip(
+                clip=clip,
+                canonical_path=canonical_path,
+                descriptor=_open_owner_only_review_media_relative_file(
                     root_descriptor,
                     relative_path,
+                ),
+            ))
+        _secure_derivation_review_media(
+            review_root,
+            root_descriptor=root_descriptor,
+        )
+        if invalid_clip_path:
+            completed = True
+            return None
+        for held_clip in held_clips:
+            _assert_held_derivation_review_clip_is_immutable(held_clip)
+            held_clip.guard = MacOSFileIntegrityGuard(
+                path=held_clip.canonical_path,
+                descriptor=held_clip.descriptor,
+                require_single_link=True,
+            )
+            held_clip.guard.assert_quiet()
+        for held_clip in held_clips:
+            clip_payload = reviewed_artifact_clip_payload_from_descriptor(
+                role=held_clip.clip.role,
+                path=held_clip.canonical_path,
+                descriptor=held_clip.descriptor,
+                timestamp_seconds=held_clip.clip.timestamp_seconds,
+                duration_seconds=held_clip.clip.duration_seconds,
+            )
+            if clip_payload is None:
+                completed = True
+                return None
+            clip_payloads.append(clip_payload)
+        for held_clip in held_clips:
+            if held_clip.guard is None:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review-media guard is unavailable"
                 )
-                guard: MacOSFileIntegrityGuard | None = None
-                try:
-                    guard = MacOSFileIntegrityGuard(
-                        path=canonical_candidate_path,
-                        descriptor=descriptor,
-                        require_single_link=True,
-                    )
-                    guard.assert_quiet()
-                    clip_payload = reviewed_artifact_clip_payload_from_descriptor(
-                        role=role,
-                        path=canonical_candidate_path,
-                        descriptor=descriptor,
-                        timestamp_seconds=float_value(clip.get("timestamp_seconds")),
-                        duration_seconds=float_value(clip.get("duration_seconds")),
-                    )
-                    guard.assert_quiet()
-                finally:
-                    if guard is not None:
-                        guard.close()
-                    os.close(descriptor)
-                if clip_payload is None:
-                    return None
-                clip_payloads.append(clip_payload)
-        return reviewed_artifact_fingerprint_from_payloads(clip_payloads)
+            held_clip.guard.assert_quiet()
+        result = reviewed_artifact_fingerprint_from_payloads(
+            clip_payloads,
+            schema_version=3,
+        )
+        completed = True
+        return result
     except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(
             "AV1 derivation review-media integrity verification failed"
@@ -1952,10 +2205,75 @@ def _current_derivation_review_artifact_fingerprint(
             raise AV1ValidationDerivationError(
                 "AV1 derivation review-media verification resources are unavailable"
             ) from exc
+        completed = True
         return None
     finally:
+        cleanup_error: OSError | None = None
+        for held_clip in reversed(held_clips):
+            if held_clip.guard is not None:
+                try:
+                    held_clip.guard.close()
+                except OSError as exc:
+                    cleanup_error = cleanup_error or exc
+            try:
+                os.close(held_clip.descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
         if root_descriptor >= 0:
-            os.close(root_descriptor)
+            try:
+                os.close(root_descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None and completed:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review-media verification cleanup failed"
+            ) from cleanup_error
+
+
+def _resolve_derivation_review_clip_path(
+        *,
+        review_root: Path,
+        path: Path,
+) -> tuple[Path | None, Path | None]:
+    if not path.is_absolute():
+        return None, None
+    try:
+        if stat.S_ISLNK(path.lstat().st_mode):
+            return None, None
+        canonical_path = stable_absolute_path(path)
+        relative_path = canonical_path.relative_to(review_root)
+    except (OSError, ValueError):
+        return None, None
+    if (
+        not relative_path.parts
+        or any(part in {"", ".", ".."} for part in relative_path.parts)
+    ):
+        return None, None
+    return canonical_path, relative_path
+
+
+def _assert_held_derivation_review_clip_is_immutable(
+        held_clip: _HeldDerivationReviewClip,
+) -> None:
+    try:
+        descriptor_info = os.fstat(held_clip.descriptor)
+        path_info = held_clip.canonical_path.lstat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media is unavailable after sealing"
+        ) from exc
+    if (
+        not stat.S_ISREG(descriptor_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or descriptor_info.st_uid != os.getuid()
+        or stat.S_IMODE(descriptor_info.st_mode) != 0o400
+        or descriptor_info.st_nlink != 1
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (path_info.st_dev, path_info.st_ino)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media changed before fingerprinting"
+        )
 
 
 def _prepare_derivation_review_root(artifact_root: Path) -> Path:
@@ -1965,15 +2283,24 @@ def _prepare_derivation_review_root(artifact_root: Path) -> Path:
     )
 
 
-def _secure_derivation_review_media(review_root: Path) -> None:
-    descriptor = _open_owner_only_directory_descriptor(
-        review_root,
-        label="review-media",
+def _secure_derivation_review_media(
+        review_root: Path,
+        *,
+        root_descriptor: int | None = None,
+) -> None:
+    descriptor = (
+        root_descriptor
+        if root_descriptor is not None
+        else _open_owner_only_directory_descriptor(
+            review_root,
+            label="review-media",
+        )
     )
     try:
         _validate_owner_only_review_media_directory(descriptor)
     finally:
-        os.close(descriptor)
+        if root_descriptor is None:
+            os.close(descriptor)
 
 
 def _validate_owner_only_review_media_directory(
