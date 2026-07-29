@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import select
 import shutil
 import stat
 import subprocess
@@ -19,6 +18,10 @@ import uuid
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    MacOSFileIntegrityGuard,
+)
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
@@ -1136,22 +1139,6 @@ def _private_review_runner(
         *,
         expected_sha256: str,
 ) -> Iterator[Path]:
-    required_kqueue_names = (
-        "kqueue",
-        "kevent",
-        "KQ_FILTER_VNODE",
-        "KQ_EV_ADD",
-        "KQ_EV_CLEAR",
-        "KQ_NOTE_WRITE",
-        "KQ_NOTE_DELETE",
-        "KQ_NOTE_RENAME",
-        "KQ_NOTE_LINK",
-        "KQ_NOTE_REVOKE",
-    )
-    if any(not hasattr(select, name) for name in required_kqueue_names):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation secure Every Code execution monitoring is unavailable"
-        )
     _assert_native_review_runner(binary_bytes)
     if f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}" != expected_sha256:
         raise AV1ValidationDerivationError(
@@ -1160,9 +1147,8 @@ def _private_review_runner(
     directory = Path(tempfile.mkdtemp(prefix="mediaforce-av1-review-runner-"))
     path = directory / "code"
     descriptor = -1
-    watcher = None
+    guard: MacOSFileIntegrityGuard | None = None
     try:
-        directory.chmod(0o700)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -1184,24 +1170,17 @@ def _private_review_runner(
         if hasattr(os, "O_NOFOLLOW"):
             read_flags |= os.O_NOFOLLOW
         descriptor = os.open(path, read_flags)
-        watcher = select.kqueue()
-        vnode_flags = (
-            select.KQ_NOTE_WRITE
-            | select.KQ_NOTE_DELETE
-            | select.KQ_NOTE_RENAME
-            | select.KQ_NOTE_LINK
-            | select.KQ_NOTE_REVOKE
-        )
-        watcher.control(
-            [select.kevent(
-                descriptor,
-                filter=select.KQ_FILTER_VNODE,
-                flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
-                fflags=vnode_flags,
-            )],
-            0,
-            0,
-        )
+        try:
+            guard = MacOSFileIntegrityGuard(
+                path=path,
+                descriptor=descriptor,
+                require_single_link=True,
+            )
+        except FileIntegrityError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation secure Every Code execution monitoring is unavailable"
+            ) from exc
+        path = guard.path
         _assert_private_review_runner_identity(
             path,
             descriptor,
@@ -1210,22 +1189,22 @@ def _private_review_runner(
         try:
             yield path
         finally:
-            events = watcher.control(None, 8, 0)
-            if events:
+            try:
+                guard.assert_quiet()
+            except FileIntegrityError as exc:
                 raise AV1ValidationDerivationError(
                     "AV1 derivation private Every Code executable changed during review"
-                )
+                ) from exc
             _assert_private_review_runner_identity(
                 path,
                 descriptor,
                 expected_sha256=expected_sha256,
             )
     finally:
-        if watcher is not None:
-            watcher.close()
+        if guard is not None:
+            guard.close()
         if descriptor >= 0:
             os.close(descriptor)
-        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _run_code_agent_review(

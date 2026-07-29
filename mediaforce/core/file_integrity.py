@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import platform
 import select as select_module
-import shutil
 import stat
 import tempfile
 from typing import Any
@@ -207,29 +206,21 @@ def probe_macos_file_integrity(root: Path) -> None:
     descriptor = -1
     guard: MacOSFileIntegrityGuard | None = None
     try:
-        write_descriptor = os.open(
+        descriptor = os.open(
             probe_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
         )
-        try:
-            os.write(write_descriptor, b"clean")
-            os.fsync(write_descriptor)
-        finally:
-            os.close(write_descriptor)
-        descriptor = os.open(probe_path, os.O_RDONLY | os.O_NOFOLLOW)
+        os.write(descriptor, b"clean")
+        os.fsync(descriptor)
         guard = MacOSFileIntegrityGuard(
             path=probe_path,
             descriptor=descriptor,
             require_single_link=True,
         )
         guard.assert_quiet()
-        mutation_descriptor = os.open(probe_path, os.O_WRONLY | os.O_NOFOLLOW)
-        try:
-            os.pwrite(mutation_descriptor, b"X", 0)
-            os.fsync(mutation_descriptor)
-        finally:
-            os.close(mutation_descriptor)
+        os.pwrite(descriptor, b"X", 0)
+        os.fsync(descriptor)
         try:
             guard.assert_quiet(timeout_seconds=0.1)
         except FileIntegrityError:
@@ -240,4 +231,3 @@ def probe_macos_file_integrity(root: Path) -> None:
             guard.close()
         if descriptor >= 0:
             os.close(descriptor)
-        shutil.rmtree(probe_directory, ignore_errors=True)

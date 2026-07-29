@@ -8,18 +8,22 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import tempfile
 import threading
 from types import SimpleNamespace
 from typing import Literal, Sequence
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
 from mediaforce.core.process_control import ManagedProcessController
 from mediaforce.core.utils import content_version_fingerprint
+from mediaforce.reviewing.artifact_identity import (
+    reviewed_artifact_fingerprint_from_descriptors,
+)
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
@@ -70,6 +74,7 @@ from mediaforce.tuning.av1_validation_derivation import (
 from mediaforce.web.runtime.av1_validation_derivation import (
     _assert_next_assignment,
     _current_derivation_review_artifact_fingerprint,
+    _owner_only_umask,
     _prepare_derivation_review_root,
     _pinned_derivation_source,
     _recover_interrupted_derivation_state,
@@ -160,23 +165,6 @@ class _DescriptorBindingFileIntegrityGuard:
         pass
 
 
-class _QuietKqueue:
-    def control(
-            self,
-            changes: object,
-            max_events: int,
-            timeout: float,
-    ) -> list[object]:
-        return []
-
-    def close(self) -> None:
-        pass
-
-
-def _quiet_kevent(*args: object, **kwargs: object) -> object:
-    return object()
-
-
 class AV1ValidationDerivationTests(unittest.TestCase):
     def setUp(self) -> None:
         runtime_directory = tempfile.TemporaryDirectory()
@@ -214,33 +202,24 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "mediaforce.web.runtime.av1_validation_derivation.probe_macos_file_integrity",
             ),
             patch(
+                "mediaforce.web.runtime.av1_validation_derivation._available_bytes_for_descriptor",
+                return_value=100 * 1024 ** 3,
+            ),
+            patch(
                 "mediaforce.web.runtime.av1_validation_derivation.MacOSFileIntegrityGuard",
                 new=_DescriptorBindingFileIntegrityGuard,
             ),
         ):
             integrity_patcher.start()
             self.addCleanup(integrity_patcher.stop)
-        if not hasattr(verify_av1_cold_start_preregistration.select, "kqueue"):
-            for name, value in (
-                ("kqueue", _QuietKqueue),
-                ("kevent", _quiet_kevent),
-                ("KQ_FILTER_VNODE", 1),
-                ("KQ_EV_ADD", 2),
-                ("KQ_EV_CLEAR", 4),
-                ("KQ_NOTE_WRITE", 8),
-                ("KQ_NOTE_DELETE", 16),
-                ("KQ_NOTE_RENAME", 32),
-                ("KQ_NOTE_LINK", 64),
-                ("KQ_NOTE_REVOKE", 128),
-            ):
-                kqueue_patcher = patch.object(
-                    verify_av1_cold_start_preregistration.select,
-                    name,
-                    value,
-                    create=True,
-                )
-                kqueue_patcher.start()
-                self.addCleanup(kqueue_patcher.stop)
+        if not hasattr(__import__("select"), "kqueue"):
+            review_guard_patcher = patch.object(
+                verify_av1_cold_start_preregistration,
+                "MacOSFileIntegrityGuard",
+                new=_DescriptorBindingFileIntegrityGuard,
+            )
+            review_guard_patcher.start()
+            self.addCleanup(review_guard_patcher.stop)
         self.manifest = load_av1_validation_manifest_v2(V2_MANIFEST_PATH)
         self.expectations = AV1ValidationPartitionExpectations(
             compatibility_signature="av1vcompat1_test_contract",
@@ -300,6 +279,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         write_av1_validation_derivation_plan(
             self.runtime_artifact_root,
             self.plan,
+        )
+
+    def _retained_snapshot_path(self, artifact_root: Path) -> Path:
+        assignment_id = self.plan.assignments[0].assignment_id
+        return (
+            artifact_root
+            / "source-snapshots"
+            / f"{assignment_id}.source-media"
         )
 
     def test_execution_environment_rejects_unavailable_source_integrity(self) -> None:
@@ -655,7 +642,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(decision, "approved")
             launched_runner = Path(run_review.call_args.args[0][0])
             self.assertNotEqual(launched_runner, code_binary)
-            self.assertFalse(launched_runner.exists())
+            self.assertEqual(launched_runner.read_bytes(), REVIEW_RUNNER_BYTES)
             review_command = run_review.call_args.args[0]
             self.assertIn('shell_environment_policy.inherit="none"', review_command)
             review_environment = run_review.call_args.kwargs["env"]
@@ -681,6 +668,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 evidence,
                 review=review,
             )
+            shutil.rmtree(launched_runner.parent)
 
     def test_review_runner_rejects_interpreter_script(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1114,13 +1102,18 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 runner.rename(substitute)
                 original.rename(runner)
         assert runner_directory is not None
-        self.assertFalse(runner_directory.exists())
+        self.assertEqual(
+            (runner_directory / "code").read_bytes(),
+            REVIEW_RUNNER_BYTES,
+        )
+        shutil.rmtree(runner_directory)
 
     @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
-    def test_private_review_runner_detects_write_and_restore(self) -> None:
+    def test_private_review_runner_detects_parent_swap_and_restore(self) -> None:
         expected_sha256 = (
             f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
         )
+        runner_directory: Path | None = None
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
             "changed during review",
@@ -1129,10 +1122,120 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 REVIEW_RUNNER_BYTES,
                 expected_sha256=expected_sha256,
             ) as runner:
+                runner_directory = runner.parent
+                moved_directory = runner_directory.with_name(
+                    f"{runner_directory.name}-moved"
+                )
+                runner_directory.rename(moved_directory)
+                try:
+                    runner_directory.mkdir(mode=0o700)
+                    replacement = runner_directory / runner.name
+                    replacement.write_bytes(REVIEW_RUNNER_BYTES)
+                    replacement.chmod(0o500)
+                    self.assertEqual(runner.read_bytes(), REVIEW_RUNNER_BYTES)
+                finally:
+                    if runner_directory.exists():
+                        replacement = runner_directory / runner.name
+                        if replacement.exists():
+                            replacement.chmod(0o600)
+                            replacement.unlink()
+                        runner_directory.rmdir()
+                    moved_directory.rename(runner_directory)
+        assert runner_directory is not None
+        self.assertEqual(
+            (runner_directory / "code").read_bytes(),
+            REVIEW_RUNNER_BYTES,
+        )
+        shutil.rmtree(runner_directory)
+
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
+    def test_private_review_runner_detects_write_and_restore(self) -> None:
+        expected_sha256 = (
+            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+        )
+        runner_directory: Path | None = None
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "changed during review",
+        ):
+            with verify_av1_cold_start_preregistration._private_review_runner(
+                REVIEW_RUNNER_BYTES,
+                expected_sha256=expected_sha256,
+            ) as runner:
+                runner_directory = runner.parent
                 runner.chmod(0o700)
                 runner.write_bytes(b"substitute-code-binary")
                 runner.write_bytes(REVIEW_RUNNER_BYTES)
                 runner.chmod(0o500)
+        assert runner_directory is not None
+        self.assertTrue(runner_directory.exists())
+        shutil.rmtree(runner_directory)
+
+    def test_private_review_runner_never_recursively_deletes(self) -> None:
+        expected_sha256 = (
+            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+        )
+        runner_directory: Path | None = None
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration.shutil,
+                "rmtree",
+                side_effect=AssertionError("review runner must not rmtree"),
+            ),
+            verify_av1_cold_start_preregistration._private_review_runner(
+                REVIEW_RUNNER_BYTES,
+                expected_sha256=expected_sha256,
+            ) as runner,
+        ):
+            runner_directory = runner.parent
+        assert runner_directory is not None
+        self.assertEqual(
+            (runner_directory / "code").read_bytes(),
+            REVIEW_RUNNER_BYTES,
+        )
+        shutil.rmtree(runner_directory)
+
+    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
+    def test_private_review_runner_preserves_parent_replacement(self) -> None:
+        expected_sha256 = (
+            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+        )
+        runner_directory: Path | None = None
+        moved_directory: Path | None = None
+        replacement_bytes = b"outside-runner-replacement"
+        try:
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "changed during review",
+            ):
+                with verify_av1_cold_start_preregistration._private_review_runner(
+                    REVIEW_RUNNER_BYTES,
+                    expected_sha256=expected_sha256,
+                ) as runner:
+                    runner_directory = runner.parent
+                    moved_directory = runner_directory.with_name(
+                        f"{runner_directory.name}-moved"
+                    )
+                    runner_directory.rename(moved_directory)
+                    runner_directory.mkdir(mode=0o700)
+                    replacement = runner_directory / runner.name
+                    replacement.write_bytes(replacement_bytes)
+                    replacement.chmod(0o500)
+            assert runner_directory is not None
+            assert moved_directory is not None
+            self.assertEqual(
+                (runner_directory / "code").read_bytes(),
+                replacement_bytes,
+            )
+            self.assertEqual(
+                (moved_directory / "code").read_bytes(),
+                REVIEW_RUNNER_BYTES,
+            )
+        finally:
+            if runner_directory is not None:
+                shutil.rmtree(runner_directory, ignore_errors=True)
+            if moved_directory is not None:
+                shutil.rmtree(moved_directory, ignore_errors=True)
 
     def test_attempt_rejects_persisted_stream_budget_drift(self) -> None:
         assignment = self.plan.assignments[0]
@@ -2064,6 +2167,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         assignment = self.plan.assignments[0]
         attempts_dir = self.runtime_artifact_root / "attempts"
         records_dir = self.runtime_artifact_root / "terminal-records"
+        snapshot_root = self.runtime_artifact_root / "source-snapshots"
+        snapshot_root.mkdir(mode=0o700)
+        snapshot_path = self._retained_snapshot_path(self.runtime_artifact_root)
+        retained_bytes = b"interrupted-private-snapshot"
+        snapshot_path.write_bytes(retained_bytes)
+        snapshot_path.chmod(0o400)
         write_av1_validation_derivation_assignment_claim(
             attempts_dir,
             assignment_id=assignment.assignment_id,
@@ -2109,6 +2218,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
         self.assertEqual(attempt.reason_code, "interrupted_claim")
         self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+        self.assertEqual(snapshot_path.read_bytes(), retained_bytes)
 
     def test_source_integrity_probe_fails_before_assignment_claim(self) -> None:
         assignment = self.plan.assignments[0]
@@ -2250,8 +2360,215 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.assertEqual(pinned_source.size_bytes, len(original_bytes))
                 self.assertTrue(pinned_source.content_sha256.startswith("sha256:"))
                 self.assertEqual(pinned_source.path.stat().st_mode & 0o777, 0o400)
-                self.assertEqual(pinned_source.path.parent.stat().st_mode & 0o777, 0o500)
+                self.assertEqual(pinned_source.path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).read_bytes(),
+                original_bytes,
+            )
+
+    def test_retained_snapshot_existing_assignment_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            snapshot_root = artifact_root / "source-snapshots"
+            snapshot_root.mkdir(mode=0o700)
+            snapshot_path = self._retained_snapshot_path(artifact_root)
+            existing_bytes = b"existing-private-residue"
+            snapshot_path.write_bytes(existing_bytes)
+            snapshot_path.chmod(0o400)
+            existing_mode = snapshot_path.stat().st_mode & 0o777
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "retained source snapshot already exists",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    pass
+
+            self.assertEqual(snapshot_path.read_bytes(), existing_bytes)
+            self.assertEqual(snapshot_path.stat().st_mode & 0o777, existing_mode)
+
+    def test_retained_snapshot_rejects_invalid_assignment_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "assignment ID is invalid for retained snapshot storage",
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id="../outside",
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    pass
+
             self.assertFalse((artifact_root / "source-snapshots").exists())
+
+    def test_retained_snapshot_lifecycle_never_deletes_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.os.unlink",
+                    side_effect=AssertionError("snapshot lifecycle must not unlink"),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.os.rmdir",
+                    side_effect=AssertionError("snapshot lifecycle must not rmdir"),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.rmtree",
+                    side_effect=AssertionError("snapshot lifecycle must not rmtree"),
+                ),
+                _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ),
+            ):
+                pass
+
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).read_bytes(),
+                source_bytes,
+            )
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).stat().st_mode & 0o777,
+                0o400,
+            )
+
+    def test_retained_snapshot_reopen_substitution_preserves_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_root = root / "artifacts"
+            artifact_root.mkdir(mode=0o700)
+            source_path = root / "source.mkv"
+            source_bytes = b"registered-source" * 20_000
+            source_path.write_bytes(source_bytes)
+            source_identity = content_version_fingerprint(
+                source_path,
+                source_path.stat(),
+            )
+            snapshot_path = self._retained_snapshot_path(artifact_root)
+            moved_snapshot_path = root / "moved-source-snapshot"
+            replacement_bytes = b"outside-replacement"
+            original_open = os.open
+            snapshot_open_count = 0
+
+            def open_with_snapshot_substitution(
+                    path: os.PathLike[str] | str,
+                    flags: int,
+                    mode: int = 0o777,
+                    *,
+                    dir_fd: int | None = None,
+            ) -> int:
+                nonlocal snapshot_open_count
+                candidate = Path(path)
+                is_snapshot = (
+                    dir_fd is not None
+                    and candidate.name.endswith(".source-media")
+                )
+                if is_snapshot:
+                    snapshot_open_count += 1
+                    if snapshot_open_count == 2:
+                        snapshot_path.rename(moved_snapshot_path)
+                        snapshot_path.write_bytes(replacement_bytes)
+                        snapshot_path.chmod(0o400)
+                if dir_fd is None:
+                    return original_open(path, flags, mode)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                    return_value=SimpleNamespace(free=100 * 1024 ** 3),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation.os.open",
+                    side_effect=open_with_snapshot_substitution,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "source snapshot changed before monitoring",
+                ),
+            ):
+                with _pinned_derivation_source(
+                    artifact_root=artifact_root,
+                    assignment_id=self.plan.assignments[0].assignment_id,
+                    source_path=source_path,
+                    expected_content_version_fingerprint=source_identity,
+                    expected_source_sha256=(
+                        f"sha256:{hashlib.sha256(source_bytes).hexdigest()}"
+                    ),
+                    expected_size_bytes=len(source_bytes),
+                    process_controller=ManagedProcessController(),
+                ):
+                    pass
+
+            self.assertEqual(snapshot_open_count, 2)
+            self.assertEqual(snapshot_path.read_bytes(), replacement_bytes)
+            self.assertEqual(snapshot_path.stat().st_mode & 0o777, 0o400)
+            self.assertEqual(moved_snapshot_path.read_bytes(), source_bytes)
 
     def test_pinned_source_snapshot_rejects_full_digest_mismatch_before_media(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2287,7 +2604,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ):
                     media_entered = True
             self.assertFalse(media_entered)
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).read_bytes(),
+                source_bytes,
+            )
 
     def test_pinned_source_snapshot_rejects_swap_before_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2363,7 +2683,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     pinned_source.path.parent.chmod(0o700)
                     pinned_source.path.chmod(0o600)
                     pinned_source.path.write_bytes(b"mutated-source")
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertTrue(self._retained_snapshot_path(artifact_root).exists())
 
     @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_detects_transient_write_and_restore(self) -> None:
@@ -2407,7 +2727,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     pinned_source.path.write_bytes(b"transient-source")
                     pinned_source.path.write_bytes(source_bytes)
                     pinned_source.path.chmod(0o400)
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).read_bytes(),
+                source_bytes,
+            )
 
     @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_detects_hardlink_and_restore(self) -> None:
@@ -2451,7 +2774,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     os.link(pinned_source.path, link_path)
                     link_path.unlink()
             self.assertFalse(link_path.exists())
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).read_bytes(),
+                source_bytes,
+            )
 
     @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_detects_parent_swap_and_restore(self) -> None:
@@ -2515,7 +2841,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                                 replacement_path.unlink()
                             assignment_root.rmdir()
                         moved_root.rename(assignment_root)
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertEqual(
+                self._retained_snapshot_path(artifact_root).read_bytes(),
+                source_bytes,
+            )
 
     @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_pinned_source_snapshot_guard_runs_when_body_raises(self) -> None:
@@ -2623,27 +2952,40 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             original_close = os.close
             snapshot_descriptor = -1
             snapshot_open_count = 0
-            close_counts: dict[int, int] = {}
+            live_descriptors: set[int] = set()
+            invalid_closes: list[int] = []
 
             def open_with_reopen_failure(
                     path: os.PathLike[str] | str,
                     flags: int,
                     mode: int = 0o777,
+                    *,
+                    dir_fd: int | None = None,
             ) -> int:
                 nonlocal snapshot_descriptor, snapshot_open_count
                 candidate = Path(path)
-                is_snapshot = candidate.parent.parent.name == "source-snapshots"
+                is_snapshot = (
+                    dir_fd is not None
+                    and candidate.name.endswith(".source-media")
+                )
                 if is_snapshot:
                     snapshot_open_count += 1
                     if snapshot_open_count == 2:
                         raise OSError("fixture snapshot reopen failure")
-                descriptor = original_open(path, flags, mode)
+                if dir_fd is None:
+                    descriptor = original_open(path, flags, mode)
+                else:
+                    descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+                live_descriptors.add(descriptor)
                 if is_snapshot and snapshot_open_count == 1:
                     snapshot_descriptor = descriptor
                 return descriptor
 
             def tracked_close(descriptor: int) -> None:
-                close_counts[descriptor] = close_counts.get(descriptor, 0) + 1
+                if descriptor not in live_descriptors:
+                    invalid_closes.append(descriptor)
+                else:
+                    live_descriptors.remove(descriptor)
                 original_close(descriptor)
 
             with (
@@ -2674,8 +3016,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ):
                     pass
             self.assertGreaterEqual(snapshot_descriptor, 0)
-            self.assertEqual(close_counts[snapshot_descriptor], 1)
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertEqual(invalid_closes, [])
+            self.assertNotIn(snapshot_descriptor, live_descriptors)
+            self.assertEqual(live_descriptors, set())
+            self.assertTrue(self._retained_snapshot_path(artifact_root).exists())
 
     def test_pinned_source_snapshot_rejects_mutation_during_copy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2688,9 +3032,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             source_stat = source_path.stat()
             source_identity = content_version_fingerprint(source_path, source_stat)
             mutation_injected = False
+            snapshot_modes_during_copy: list[int] = []
 
             def write_and_mutate(descriptor: int, payload: bytes) -> None:
                 nonlocal mutation_injected
+                snapshot_modes_during_copy.append(
+                    os.fstat(descriptor).st_mode & 0o777
+                )
                 _write_all(descriptor, payload)
                 if mutation_injected:
                     return
@@ -2730,7 +3078,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ):
                     pass
             self.assertTrue(mutation_injected)
-            self.assertFalse((artifact_root / "source-snapshots").exists())
+            self.assertEqual(set(snapshot_modes_during_copy), {0o400})
+            retained_snapshot = self._retained_snapshot_path(artifact_root)
+            self.assertTrue(retained_snapshot.exists())
+            self.assertEqual(retained_snapshot.stat().st_mode & 0o777, 0o400)
 
     def test_assignment_loader_allows_recovery_before_full_runtime_context_check(self) -> None:
         drifted_config = SimpleNamespace(
@@ -2845,10 +3196,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             artifact_root = Path(directory) / "artifact-root"
             artifact_root.mkdir(mode=0o700)
             review_root = _prepare_derivation_review_root(artifact_root)
-            clip_directory = review_root / "run" / "item-00"
-            clip_directory.mkdir(parents=True)
+            run_directory = review_root / "run"
+            run_directory.mkdir(mode=0o700)
+            clip_directory = run_directory / "item-00"
+            clip_directory.mkdir(mode=0o700)
             clip_path = clip_directory / "encoded-01.mp4"
             clip_path.write_bytes(b"review-clip")
+            clip_path.chmod(0o600)
 
             _secure_derivation_review_media(review_root)
 
@@ -2884,6 +3238,91 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "must not contain links",
             ):
                 _secure_derivation_review_media(review_root)
+            linked_clip.unlink()
+
+            clip_path.chmod(0o640)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "must be owner-only",
+            ):
+                _secure_derivation_review_media(review_root)
+            self.assertEqual(clip_path.stat().st_mode & 0o777, 0o640)
+            clip_path.chmod(0o600)
+
+            outside_path = artifact_root.parent / "outside-review-media"
+            outside_path.write_bytes(b"outside-review-media")
+            outside_path.chmod(0o640)
+            outside_mode = outside_path.stat().st_mode & 0o777
+            hardlink_path = clip_directory / "hardlinked.mp4"
+            os.link(outside_path, hardlink_path)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "must not contain hard links",
+            ):
+                _secure_derivation_review_media(review_root)
+            self.assertEqual(outside_path.read_bytes(), b"outside-review-media")
+            self.assertEqual(outside_path.stat().st_mode & 0o777, outside_mode)
+
+    def test_review_fingerprint_rejects_matching_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifact-root"
+            artifact_root.mkdir(mode=0o700)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            run_directory = review_root / "run"
+            run_directory.mkdir(mode=0o700)
+            clip_path = run_directory / "encoded-01.mp4"
+            clip_bytes = b"matching-review-clip"
+            clip_path.write_bytes(clip_bytes)
+            clip_path.chmod(0o600)
+            moved_clip_path = run_directory / "original-encoded-01.mp4"
+            calibration = {
+                "preview_clips": [{
+                    "path": clip_path.as_uri(),
+                    "timestamp_seconds": 1.0,
+                    "duration_seconds": 8.0,
+                }],
+                "source_clips": [],
+            }
+
+            self.assertIsNotNone(
+                _current_derivation_review_artifact_fingerprint(
+                    review_root=review_root,
+                    calibration=calibration,
+                )
+            )
+
+            def fingerprint_with_replacement(
+                    clips: Sequence[tuple[str, int, float, float]],
+            ) -> str | None:
+                clip_path.rename(moved_clip_path)
+                clip_path.write_bytes(clip_bytes)
+                clip_path.chmod(0o600)
+                return reviewed_artifact_fingerprint_from_descriptors(clips)
+
+            with patch(
+                "mediaforce.web.runtime.av1_validation_derivation.reviewed_artifact_fingerprint_from_descriptors",
+                side_effect=fingerprint_with_replacement,
+            ):
+                self.assertIsNone(
+                    _current_derivation_review_artifact_fingerprint(
+                        review_root=review_root,
+                        calibration=calibration,
+                    )
+                )
+            self.assertEqual(clip_path.read_bytes(), clip_bytes)
+            self.assertEqual(moved_clip_path.read_bytes(), clip_bytes)
+
+    def test_owner_only_umask_restores_previous_value(self) -> None:
+        with patch(
+            "mediaforce.web.runtime.av1_validation_derivation.os.umask",
+            side_effect=(0o022, 0o077),
+        ) as umask:
+            with _owner_only_umask():
+                pass
+        self.assertEqual(
+            umask.call_args_list,
+            [call(0o077), call(0o022)],
+        )
 
     def test_derivation_verdict_validates_terminal_before_database_append(self) -> None:
         assignment = self.plan.assignments[0]

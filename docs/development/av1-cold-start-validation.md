@@ -233,8 +233,12 @@ current inventory before touching media, uses the exact assigned library item, f
 the existing sampled calibration path to leave the cold-start planner absent,
 and preserves an owner-only attempt artifact plus review media. Derivation
 review clips are redirected beneath the partition-global private artifact root;
-their directory is `0700`, files are `0600`, and verdict-time identity checks
-use no-follow file descriptors:
+the calibration subprocess tree inherits an owner-only `0077` umask, directories
+are `0700`, and files are `0600` or more restrictive. Post-run validation walks
+the tree through no-follow directory descriptors, rejects links, hard links,
+permission drift, ownership drift, and identity substitution, and performs no
+pathname chmod. Verdict-time identity checks also use no-follow file
+descriptors:
 
 Private partition creation first performs logical selection without hashing the
 broader eligible library. It then handles only the selected holdout and
@@ -251,19 +255,34 @@ Older private partitions without this binding fail closed.
 After the immutable assignment claim and before crop, search, encode, or review
 work, the runtime opens the assigned source with no-follow semantics, verifies
 its inode, size, sampled identity, and frozen full SHA-256, and copies the
-complete file into a private owner-only snapshot under the canonical artifact
-root. It records the snapshot's full SHA-256 and size in the immutable
-calibration payload, closes the writable descriptor, reopens the snapshot
-read-only, and routes every source read through that canonical snapshot path
-rather than the mutable library path. A macOS kqueue guard watches the snapshot
-vnode and every canonical pathname ancestor throughout media work; write,
-extend, attribute, hardlink, delete, rename, or revoke activity is latched even
-if bytes or names are later restored. The snapshot must keep one link, the
-source and snapshot identities are rechecked, and final guard validation runs
-even when media work raises. Creating the snapshot requires free space for the
-complete source plus the existing five-gibibyte safety floor. Snapshots are
-removed after the attempt; crash leftovers are purged under the runtime lock
-when interruption recovery terminalizes the owned assignment.
+complete file into one assignment-scoped, owner-only snapshot under the
+canonical artifact root. The snapshot is created relative to a pinned directory
+descriptor with `O_CREAT | O_EXCL | O_NOFOLLOW`; an existing assignment name
+fails closed and is never overwritten. Its pathname mode is `0400` from the
+instant of creation, while write access exists only through the original
+`O_RDWR` descriptor, so hard interruption leaves read-only partial residue. The
+runtime records the snapshot's full SHA-256 and size in the immutable
+calibration payload, reopens it read-only, and routes every source read through
+that canonical snapshot path rather than the mutable library path. A macOS
+kqueue guard watches the snapshot vnode and
+every canonical pathname ancestor throughout media work; write, extend,
+attribute, hardlink, delete, rename, or revoke activity is latched even if bytes
+or names are later restored. The snapshot must keep one link, the source and
+snapshot identities are rechecked, and final guard validation runs even when
+media work raises.
+
+Source snapshots are retained as private, write-once assignment artifacts after
+success, failure, cancellation, or interruption and are never reused as runtime
+inputs. The bounded derivation lane performs no automatic snapshot unlink,
+rename, truncation, pathname chmod, directory removal, or recursive cleanup.
+Interruption recovery terminalizes the owned assignment and preserves any full
+or partial snapshot residue for explicit out-of-band retirement while
+Mediaforce is stopped. Creating each snapshot requires free space for the
+complete source plus the existing five-gibibyte safety floor. Before execution
+authorization, the private operator storage gate must account for cumulative
+retained-snapshot capacity across the authorized derivation assignments; the
+runtime also rechecks free capacity through the pinned snapshot-directory
+descriptor before each assignment.
 
 The repository keeps the full protocol suite active on Linux with test-only
 seams for macOS capability admission, the same-filesystem mutation probe, and
@@ -280,8 +299,12 @@ files, AV1 encoder/metric toolchain, source-integrity guard contract, and merged
 statistical contract. It also binds SHA-256 digests of the canonical Every Code
 executable path and binary without persisting or printing the private path. A
 real same-filesystem kqueue mutation probe must pass before the immutable
-assignment claim is written. Assignment
-execution holds the same exclusive runtime lock as
+assignment claim is written. The probe creates a private owner-only file,
+mutates only its original `O_EXCL` descriptor, and retains the tiny probe
+directory instead of recursively deleting a mutable pathname. Independent
+review execution follows the same rule: each private copied Every Code runner
+is retained after its lane and retired only out of band while Mediaforce is
+stopped. Assignment execution holds the same exclusive runtime lock as
 `mediaforce-web`, so web, staging, database, and cleanup work cannot overlap the
 bounded derivation case. Machine or toolchain drift before the claim or after
 measurement is a safety stop rather than a newly compatible cohort.
@@ -408,9 +431,10 @@ rather than reopening the mutable PATH-selected source. The review process uses
 a fixed system `PATH` and a strict allowlisted process environment containing no
 caller secrets; agent shell commands use the same explicit minimal environment
 with no caller-environment inheritance. On the macOS execution host,
-a held no-follow descriptor and kqueue vnode guard reject any write, delete,
-rename, link, or revoke event on that copy before its output can become evidence;
-unavailable secure monitoring fails closed. Each attestation binds the claim plus
+a held no-follow descriptor and the canonical path-chain kqueue guard reject any
+write, delete, rename, link, revoke, or parent-path substitution event on that
+copy before its output can become evidence; unavailable secure monitoring fails
+closed. Each attestation binds the claim plus
 the SHA-256 digest of the canonical immutable owner-only completion transcript,
 and the loader recomputes that digest before trusting it. The attestation and
 transcript are written together as one immutable atomic lane envelope. Duplicate

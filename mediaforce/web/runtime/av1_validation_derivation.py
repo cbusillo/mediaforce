@@ -55,7 +55,9 @@ from mediaforce.review import (
     render_source_review_clips,
     review_moment_payload,
 )
-from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
+from mediaforce.reviewing.artifact_identity import (
+    reviewed_artifact_fingerprint_from_descriptors,
+)
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
@@ -138,6 +140,7 @@ _AV1_VALIDATION_DERIVATION_HOST_DATA = {
 _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FILES = (
     "core/file_integrity.py",
     "core/utils.py",
+    "reviewing/artifact_identity.py",
     "tuning/av1_validation_partition.py",
     "tuning/av1_validation_partition_inventory.py",
     "tuning/av1_validation_derivation.py",
@@ -166,6 +169,21 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         written += count
 
 
+def _available_bytes_for_descriptor(descriptor: int) -> int:
+    filesystem_info = os.fstatvfs(descriptor)
+    block_size = filesystem_info.f_frsize or filesystem_info.f_bsize
+    return int(filesystem_info.f_bavail) * int(block_size)
+
+
+@contextmanager
+def _owner_only_umask() -> Iterator[None]:
+    previous_umask = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous_umask)
+
+
 def _prepare_owner_only_directory(path: Path, *, label: str) -> Path:
     try:
         path.mkdir(mode=0o700)
@@ -188,33 +206,58 @@ def _prepare_owner_only_directory(path: Path, *, label: str) -> Path:
     return path
 
 
-def _remove_owner_only_tree(path: Path) -> None:
+def _open_owner_only_directory_descriptor(path: Path, *, label: str) -> int:
+    directory = _prepare_owner_only_directory(path, label=label)
+    return _bind_owner_only_directory_descriptor(directory, label=label)
+
+
+def _bind_owner_only_directory_descriptor(path: Path, *, label: str) -> int:
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation {label} directory binding is unavailable"
+        )
+    descriptor = -1
     try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+        descriptor_info = os.fstat(descriptor)
         path_info = path.lstat()
-    except FileNotFoundError:
-        return
-    if path_info.st_uid != os.getuid():
+        if (
+            not stat.S_ISDIR(descriptor_info.st_mode)
+            or not stat.S_ISDIR(path_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or descriptor_info.st_mode & 0o077
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                f"AV1 derivation {label} directory must be owner-only and stable"
+            )
+        return descriptor
+    except AV1ValidationDerivationError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        raise
+    except OSError as exc:
+        if descriptor >= 0:
+            os.close(descriptor)
         raise AV1ValidationDerivationError(
-            "AV1 derivation source snapshot tree must be owned by the current user"
-        )
-    if stat.S_ISREG(path_info.st_mode):
-        path.chmod(0o600, follow_symlinks=False)
-        path.unlink()
-        return
-    if not stat.S_ISDIR(path_info.st_mode):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation source snapshot tree must not contain links or special files"
-        )
-    path.chmod(0o700, follow_symlinks=False)
-    for child in path.iterdir():
-        _remove_owner_only_tree(child)
-    path.rmdir()
+            f"AV1 derivation {label} directory could not be safely bound"
+        ) from exc
 
 
-def _purge_derivation_source_snapshots(artifact_root: Path) -> None:
-    _remove_owner_only_tree(
-        artifact_root / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY
-    )
+def _retained_source_snapshot_name(assignment_id: str) -> str:
+    if (
+        not assignment_id
+        or assignment_id in {".", ".."}
+        or Path(assignment_id).name != assignment_id
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation assignment ID is invalid for retained snapshot storage"
+        )
+    return f"{assignment_id}.source-media"
 
 
 def _assert_pinned_source_guard_quiet(
@@ -278,24 +321,17 @@ def _pinned_derivation_source(
         expected_size_bytes: int,
         process_controller: ManagedProcessController,
 ) -> Iterator[_PinnedDerivationSource]:
-    snapshot_root = _prepare_owner_only_directory(
-        artifact_root / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY,
-        label="source-snapshot",
+    snapshot_root = (
+        artifact_root / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY
     )
-    assignment_root = snapshot_root / assignment_id
-    if assignment_root.exists():
-        raise AV1ValidationDerivationError(
-            "AV1 derivation source snapshot already exists for this assignment"
-        )
-    _prepare_owner_only_directory(
-        assignment_root,
-        label="assignment source-snapshot",
-    )
-    snapshot_path = assignment_root / "source-media"
+    snapshot_root_descriptor = -1
     source_descriptor = -1
+    snapshot_write_descriptor = -1
     snapshot_descriptor = -1
     snapshot_guard: MacOSFileIntegrityGuard | None = None
     try:
+        snapshot_name = _retained_source_snapshot_name(assignment_id)
+        snapshot_path = snapshot_root / snapshot_name
         source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         try:
             source_descriptor = os.open(source_path, source_flags)
@@ -327,14 +363,45 @@ def _pinned_derivation_source(
             raise AV1ValidationDerivationError(
                 "AV1 derivation source bytes drifted from the frozen reservation"
             )
+        snapshot_root_descriptor = _open_owner_only_directory_descriptor(
+            snapshot_root,
+            label="source-snapshot",
+        )
         if (
-            shutil.disk_usage(snapshot_root).free
+            _available_bytes_for_descriptor(snapshot_root_descriptor)
             < source_initial.st_size + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
         ):
             raise OSError("AV1 derivation source snapshot storage floor is not available")
         snapshot_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
         snapshot_flags |= getattr(os, "O_NOFOLLOW", 0)
-        snapshot_descriptor = os.open(snapshot_path, snapshot_flags, 0o600)
+        try:
+            snapshot_write_descriptor = os.open(
+                snapshot_name,
+                snapshot_flags,
+                0o400,
+                dir_fd=snapshot_root_descriptor,
+            )
+        except FileExistsError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation retained source snapshot already exists for this assignment"
+            ) from exc
+        created_snapshot_info = os.fstat(snapshot_write_descriptor)
+        current_snapshot_info = os.stat(
+            snapshot_name,
+            dir_fd=snapshot_root_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(created_snapshot_info.st_mode)
+            or created_snapshot_info.st_uid != os.getuid()
+            or created_snapshot_info.st_nlink != 1
+            or created_snapshot_info.st_mode & 0o077
+            or (created_snapshot_info.st_dev, created_snapshot_info.st_ino)
+            != (current_snapshot_info.st_dev, current_snapshot_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation retained source snapshot was not created safely"
+            )
         digest = hashlib.sha256()
         os.lseek(source_descriptor, 0, os.SEEK_SET)
         while True:
@@ -346,8 +413,8 @@ def _pinned_derivation_source(
             if not chunk:
                 break
             digest.update(chunk)
-            _write_all(snapshot_descriptor, chunk)
-        os.fsync(snapshot_descriptor)
+            _write_all(snapshot_write_descriptor, chunk)
+        os.fsync(snapshot_write_descriptor)
         source_final = os.fstat(source_descriptor)
         try:
             source_path_final = source_path.lstat()
@@ -355,7 +422,7 @@ def _pinned_derivation_source(
             raise AV1ValidationDerivationError(
                 "AV1 derivation source path changed during snapshot creation"
             ) from exc
-        snapshot_info = os.fstat(snapshot_descriptor)
+        snapshot_info = os.fstat(snapshot_write_descriptor)
         copied_sha256 = f"sha256:{digest.hexdigest()}"
         if (
             file_stat_signature(source_initial)
@@ -365,11 +432,11 @@ def _pinned_derivation_source(
             or not stat.S_ISREG(source_path_final.st_mode)
             or snapshot_info.st_size != source_initial.st_size
             or descriptor_content_version_fingerprint(
-                snapshot_descriptor,
+                snapshot_write_descriptor,
                 size_bytes=snapshot_info.st_size,
             ) != expected_content_version_fingerprint
             or descriptor_sha256(
-                snapshot_descriptor,
+                snapshot_write_descriptor,
                 check_cancelled=process_controller.throw_if_cancelled,
             ) != copied_sha256
             or copied_sha256 != expected_source_sha256
@@ -377,19 +444,24 @@ def _pinned_derivation_source(
             raise AV1ValidationDerivationError(
                 "AV1 derivation source changed while its snapshot was created"
             )
-        os.fchmod(snapshot_descriptor, 0o400)
-        os.fsync(snapshot_descriptor)
-        assignment_root.chmod(0o500, follow_symlinks=False)
-        os.close(snapshot_descriptor)
-        snapshot_descriptor = -1
+        os.fchmod(snapshot_write_descriptor, 0o400)
+        os.fsync(snapshot_write_descriptor)
         snapshot_descriptor = os.open(
-            snapshot_path,
+            snapshot_name,
             os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=snapshot_root_descriptor,
         )
         reopened_snapshot_info = os.fstat(snapshot_descriptor)
+        current_snapshot_info = os.stat(
+            snapshot_name,
+            dir_fd=snapshot_root_descriptor,
+            follow_symlinks=False,
+        )
         if (
-            reopened_snapshot_info.st_dev != snapshot_info.st_dev
-            or reopened_snapshot_info.st_ino != snapshot_info.st_ino
+            (reopened_snapshot_info.st_dev, reopened_snapshot_info.st_ino)
+            != (snapshot_info.st_dev, snapshot_info.st_ino)
+            or (current_snapshot_info.st_dev, current_snapshot_info.st_ino)
+            != (snapshot_info.st_dev, snapshot_info.st_ino)
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation source snapshot changed before monitoring"
@@ -404,6 +476,8 @@ def _pinned_derivation_source(
             raise AV1ValidationDerivationError(
                 "AV1 derivation source snapshot monitoring is unavailable"
             ) from exc
+        os.close(snapshot_write_descriptor)
+        snapshot_write_descriptor = -1
         pinned = _PinnedDerivationSource(
             path=snapshot_guard.path,
             content_version_fingerprint=expected_content_version_fingerprint,
@@ -429,13 +503,27 @@ def _pinned_derivation_source(
             )
             _assert_pinned_source_guard_quiet(snapshot_guard)
     finally:
+        retained_snapshot_seal_cause: OSError | None = None
+        if snapshot_write_descriptor >= 0:
+            try:
+                os.fchmod(snapshot_write_descriptor, 0o400)
+                os.fsync(snapshot_write_descriptor)
+            except OSError as exc:
+                retained_snapshot_seal_cause = exc
         if snapshot_guard is not None:
             snapshot_guard.close()
         if snapshot_descriptor >= 0:
             os.close(snapshot_descriptor)
+        if snapshot_write_descriptor >= 0:
+            os.close(snapshot_write_descriptor)
         if source_descriptor >= 0:
             os.close(source_descriptor)
-        _purge_derivation_source_snapshots(artifact_root)
+        if snapshot_root_descriptor >= 0:
+            os.close(snapshot_root_descriptor)
+        if retained_snapshot_seal_cause is not None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation retained source snapshot could not be sealed"
+            ) from retained_snapshot_seal_cause
 
 
 def av1_validation_derivation_runtime_context_sha256(
@@ -783,7 +871,6 @@ def _run_av1_validation_derivation_assignment_locked(
         terminal_records_directory=terminal_records_directory,
         completed_at=recovery_completed_at,
     )
-    _purge_derivation_source_snapshots(artifact_root)
     if interrupted_state_recovered:
         raise AV1ValidationDerivationError(
             "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
@@ -890,20 +977,21 @@ def _run_av1_validation_derivation_assignment_locked(
             sample_item["source_snapshot_content_version_fingerprint"] = (
                 pinned_source.content_version_fingerprint
             )
-            payload, _ = run_sampled_calibration(
-                config=calibration_config,
-                prefix=prefix,
-                action="av1_derivation",
-                host_data=host_data,
-                notes="Bounded AV1 v2 derivation observation",
-                policy=object_dict(sample_item.get("resolved_policy")),
-                seed_metadata=None,
-                sample_item=sample_item,
-                calibration_run_id=calibration_run_id,
-                process_controller=controller,
-                deps=run_deps,
-                source_path_override=pinned_source.path,
-            )
+            with _owner_only_umask():
+                payload, _ = run_sampled_calibration(
+                    config=calibration_config,
+                    prefix=prefix,
+                    action="av1_derivation",
+                    host_data=host_data,
+                    notes="Bounded AV1 v2 derivation observation",
+                    policy=object_dict(sample_item.get("resolved_policy")),
+                    seed_metadata=None,
+                    sample_item=sample_item,
+                    calibration_run_id=calibration_run_id,
+                    process_controller=controller,
+                    deps=run_deps,
+                    source_path_override=pinned_source.path,
+                )
         assert_av1_validation_derivation_execution_contract(manifest, plan)
         _secure_derivation_review_media(review_root)
         current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
@@ -1792,41 +1880,71 @@ def _current_derivation_review_artifact_fingerprint(
         review_root: Path,
         calibration: dict[str, Any],
 ) -> str | None:
-    resolved_review_root = review_root.resolve()
-    clips: list[tuple[str, Path, float, float]] = []
-    for role, key in (("preview", "preview_clips"), ("source", "source_clips")):
-        for value in calibration.get(key, []):
-            clip = object_dict(value)
-            parsed = urlparse(str(clip.get("path") or ""))
-            if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
-                return None
-            candidate_path = Path(unquote(parsed.path))
-            try:
-                candidate_info = candidate_path.lstat()
-            except OSError:
-                return None
-            if stat.S_ISLNK(candidate_info.st_mode):
-                return None
-            path = candidate_path.resolve()
-            if not path.is_relative_to(resolved_review_root):
-                return None
-            try:
-                path_info = path.lstat()
-            except OSError:
-                return None
-            if (
-                not stat.S_ISREG(path_info.st_mode)
-                or path_info.st_uid != os.getuid()
-                or path_info.st_mode & 0o077
-            ):
-                return None
-            clips.append((
-                role,
-                path,
-                float_value(clip.get("timestamp_seconds")),
-                float_value(clip.get("duration_seconds")),
-            ))
-    return reviewed_artifact_fingerprint(clips)
+    root_descriptor = -1
+    descriptors: list[int] = []
+    guards: list[MacOSFileIntegrityGuard] = []
+    clips: list[tuple[str, int, float, float]] = []
+    try:
+        resolved_review_root = review_root.expanduser().resolve(strict=True)
+        root_descriptor = _bind_owner_only_directory_descriptor(
+            resolved_review_root,
+            label="review-media",
+        )
+        for role, key in (("preview", "preview_clips"), ("source", "source_clips")):
+            for value in calibration.get(key, []):
+                clip = object_dict(value)
+                parsed = urlparse(str(clip.get("path") or ""))
+                if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+                    return None
+                candidate_path = Path(unquote(parsed.path))
+                if not candidate_path.is_absolute():
+                    return None
+                try:
+                    candidate_info = candidate_path.lstat()
+                    if stat.S_ISLNK(candidate_info.st_mode):
+                        return None
+                    canonical_candidate_path = candidate_path.resolve(strict=True)
+                    relative_path = canonical_candidate_path.relative_to(
+                        resolved_review_root
+                    )
+                except (OSError, ValueError):
+                    return None
+                if (
+                    not relative_path.parts
+                    or any(part in {"", ".", ".."} for part in relative_path.parts)
+                ):
+                    return None
+                descriptor = _open_owner_only_review_media_relative_file(
+                    root_descriptor,
+                    relative_path,
+                )
+                descriptors.append(descriptor)
+                guard = MacOSFileIntegrityGuard(
+                    path=canonical_candidate_path,
+                    descriptor=descriptor,
+                    require_single_link=True,
+                )
+                guards.append(guard)
+                guard.assert_quiet()
+                clips.append((
+                    role,
+                    descriptor,
+                    float_value(clip.get("timestamp_seconds")),
+                    float_value(clip.get("duration_seconds")),
+                ))
+        fingerprint = reviewed_artifact_fingerprint_from_descriptors(clips)
+        for guard in guards:
+            guard.assert_quiet()
+        return fingerprint
+    except (AV1ValidationDerivationError, FileIntegrityError, OSError):
+        return None
+    finally:
+        for guard in reversed(guards):
+            guard.close()
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        if root_descriptor >= 0:
+            os.close(root_descriptor)
 
 
 def _prepare_derivation_review_root(artifact_root: Path) -> Path:
@@ -1853,26 +1971,257 @@ def _prepare_derivation_review_root(artifact_root: Path) -> Path:
 
 
 def _secure_derivation_review_media(review_root: Path) -> None:
-    _prepare_derivation_review_root(review_root.parent)
-    for path in sorted(review_root.rglob("*")):
+    descriptor = _open_owner_only_directory_descriptor(
+        review_root,
+        label="review-media",
+    )
+    try:
+        _validate_owner_only_review_media_directory(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_owner_only_review_media_directory(
+        directory_descriptor: int,
+) -> None:
+    try:
+        with os.scandir(directory_descriptor) as entries:
+            entry_names = tuple(sorted(entry.name for entry in entries))
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media could not be inspected safely"
+        ) from exc
+    for entry_name in entry_names:
         try:
-            path_info = path.lstat()
+            initial_info = os.stat(
+                entry_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
         except OSError as exc:
             raise AV1ValidationDerivationError(
                 "AV1 derivation review media could not be inspected safely"
             ) from exc
-        if path_info.st_uid != os.getuid():
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review media must be owned by the current user"
-            )
-        if stat.S_ISDIR(path_info.st_mode):
-            path.chmod(0o700, follow_symlinks=False)
-        elif stat.S_ISREG(path_info.st_mode):
-            path.chmod(0o600, follow_symlinks=False)
-        else:
+        is_directory = stat.S_ISDIR(initial_info.st_mode)
+        is_regular_file = stat.S_ISREG(initial_info.st_mode)
+        if not is_directory and not is_regular_file:
             raise AV1ValidationDerivationError(
                 "AV1 derivation review media must not contain links or special files"
             )
+        if is_directory:
+            if initial_info.st_uid != os.getuid() or initial_info.st_mode & 0o077:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review media must be owner-only"
+                )
+            _validate_owner_only_review_media_subdirectory(
+                directory_descriptor,
+                entry_name,
+                initial_info=initial_info,
+            )
+        else:
+            if initial_info.st_nlink != 1:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review media must not contain hard links"
+                )
+            if initial_info.st_uid != os.getuid() or initial_info.st_mode & 0o077:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review media must be owner-only"
+                )
+            _validate_owner_only_review_media_file(
+                directory_descriptor,
+                entry_name,
+                initial_info=initial_info,
+            )
+    try:
+        with os.scandir(directory_descriptor) as entries:
+            final_names = tuple(sorted(entry.name for entry in entries))
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media could not be inspected safely"
+        ) from exc
+    if final_names != entry_names:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media changed during validation"
+        )
+
+
+def _validate_owner_only_review_media_subdirectory(
+        parent_descriptor: int,
+        entry_name: str,
+        *,
+        initial_info: os.stat_result,
+) -> None:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            entry_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        descriptor_info = os.fstat(descriptor)
+        current_info = os.stat(
+            entry_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISDIR(descriptor_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or descriptor_info.st_mode & 0o077
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (initial_info.st_dev, initial_info.st_ino)
+            or (current_info.st_dev, current_info.st_ino)
+            != (descriptor_info.st_dev, descriptor_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review media changed during validation"
+            )
+        _validate_owner_only_review_media_directory(descriptor)
+    except AV1ValidationDerivationError:
+        raise
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media could not be inspected safely"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _validate_owner_only_review_media_file(
+        parent_descriptor: int,
+        entry_name: str,
+        *,
+        initial_info: os.stat_result,
+) -> None:
+    if initial_info.st_nlink != 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media must not contain hard links"
+        )
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            entry_name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=parent_descriptor,
+        )
+        descriptor_info = os.fstat(descriptor)
+        current_info = os.stat(
+            entry_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or descriptor_info.st_mode & 0o077
+            or descriptor_info.st_nlink != 1
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (initial_info.st_dev, initial_info.st_ino)
+            or (current_info.st_dev, current_info.st_ino)
+            != (descriptor_info.st_dev, descriptor_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review media changed during validation"
+            )
+    except AV1ValidationDerivationError:
+        raise
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media could not be inspected safely"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _open_owner_only_review_media_relative_file(
+        root_descriptor: int,
+        relative_path: Path,
+) -> int:
+    current_descriptor = os.dup(root_descriptor)
+    file_descriptor = -1
+    try:
+        for component in relative_path.parts[:-1]:
+            next_descriptor = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=current_descriptor,
+            )
+            try:
+                descriptor_info = os.fstat(next_descriptor)
+                current_info = os.stat(
+                    component,
+                    dir_fd=current_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISDIR(descriptor_info.st_mode)
+                    or descriptor_info.st_uid != os.getuid()
+                    or descriptor_info.st_mode & 0o077
+                    or (descriptor_info.st_dev, descriptor_info.st_ino)
+                    != (current_info.st_dev, current_info.st_ino)
+                ):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation review media path changed during fingerprinting"
+                    )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(current_descriptor)
+            current_descriptor = next_descriptor
+        entry_name = relative_path.parts[-1]
+        initial_info = os.stat(
+            entry_name,
+            dir_fd=current_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(initial_info.st_mode)
+            or initial_info.st_uid != os.getuid()
+            or initial_info.st_mode & 0o077
+            or initial_info.st_nlink != 1
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review media file is not owner-only and single-link"
+            )
+        file_descriptor = os.open(
+            entry_name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=current_descriptor,
+        )
+        descriptor_info = os.fstat(file_descriptor)
+        current_info = os.stat(
+            entry_name,
+            dir_fd=current_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or descriptor_info.st_mode & 0o077
+            or descriptor_info.st_nlink != 1
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (initial_info.st_dev, initial_info.st_ino)
+            or (current_info.st_dev, current_info.st_ino)
+            != (descriptor_info.st_dev, descriptor_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review media file changed during fingerprinting"
+            )
+        return file_descriptor
+    except AV1ValidationDerivationError:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        raise
+    except OSError as exc:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review media file could not be opened safely"
+        ) from exc
+    finally:
+        os.close(current_descriptor)
 
 
 def _config_with_review_directory(

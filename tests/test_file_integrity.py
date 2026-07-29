@@ -37,7 +37,61 @@ class FileIntegrityCapabilityTests(unittest.TestCase):
 class MacOSFileIntegrityGuardTests(unittest.TestCase):
     def test_probe_detects_same_filesystem_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            probe_macos_file_integrity(Path(directory))
+            root = Path(directory)
+            probe_macos_file_integrity(root)
+            probe_directories = tuple(root.glob(".mediaforce-integrity-*"))
+            self.assertEqual(len(probe_directories), 1)
+            self.assertEqual(
+                (probe_directories[0] / "probe").read_bytes(),
+                b"Xlean",
+            )
+
+    def test_probe_mutation_preserves_path_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original_pwrite = os.pwrite
+            replacement_bytes = b"outside-probe-replacement"
+            moved_probe: Path | None = None
+
+            def pwrite_with_path_substitution(
+                    descriptor: int,
+                    payload: bytes,
+                    offset: int,
+            ) -> int:
+                nonlocal moved_probe
+                probe_directory = next(root.glob(".mediaforce-integrity-*"))
+                probe_path = probe_directory / "probe"
+                moved_probe = probe_directory / "original-probe"
+                probe_path.rename(moved_probe)
+                probe_path.write_bytes(replacement_bytes)
+                return original_pwrite(descriptor, payload, offset)
+
+            with patch(
+                "mediaforce.core.file_integrity.os.pwrite",
+                side_effect=pwrite_with_path_substitution,
+            ):
+                probe_macos_file_integrity(root)
+
+            assert moved_probe is not None
+            self.assertEqual(
+                moved_probe.with_name("probe").read_bytes(),
+                replacement_bytes,
+            )
+            self.assertEqual(moved_probe.read_bytes(), b"Xlean")
+
+    def test_probe_never_deletes_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch(
+                    "mediaforce.core.file_integrity.os.unlink",
+                    side_effect=AssertionError("integrity probe must not unlink"),
+                ),
+                patch(
+                    "mediaforce.core.file_integrity.os.rmdir",
+                    side_effect=AssertionError("integrity probe must not rmdir"),
+                ),
+            ):
+                probe_macos_file_integrity(Path(directory))
 
     def test_guard_detects_transient_write_and_restore(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
