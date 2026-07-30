@@ -346,14 +346,8 @@ class AV1ValidationHarnessTests(unittest.TestCase):
             derivation_evidence_count=12,
             derivation_source_count=6,
             derivation_source_tokens=tuple(f"source_{index}" for index in range(6)),
-            derivation_title_tokens=tuple(
-                f"title_token_{index}" for index in range(12)
-            ),
             derivation_series_tokens=tuple(f"series_{index}" for index in range(12)),
             derivation_source_group_tokens=tuple(f"group_{index:03d}" for index in range(6)),
-            derivation_source_group_observation_tokens=tuple(
-                f"group_{index:03d}" for index in range(6) for _ in range(2)
-            ),
             derivation_oldest_recorded_at="2026-07-01T00:00:00Z",
             derivation_newest_recorded_at="2026-07-10T00:00:00Z",
             derivation_conflict_count=0,
