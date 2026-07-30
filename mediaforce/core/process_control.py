@@ -207,6 +207,7 @@ def run_command(
         process_controller: ManagedProcessController | None = None,
         capture_output: bool = True,
         text: bool = True,
+        cwd: str | os.PathLike[str] | None = None,
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
         check: bool = False,
@@ -217,6 +218,7 @@ def run_command(
             cmd,
             capture_output=capture_output,
             text=text,
+            cwd=cwd,
             env=env,
             timeout=timeout,
             check=check,
@@ -231,12 +233,11 @@ def run_command(
     deadline_status_write_descriptor = -1
     process_cmd = cmd
     if process_deadline_ns is not None:
-        if not hasattr(os, "fork") or not hasattr(signal, "setitimer"):
+        if not hasattr(os, "fork"):
             raise ProcessDeadlineEnforcementError(
                 "Absolute process deadline enforcement is unavailable."
             )
         deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
-        os.set_blocking(deadline_status_descriptor, False)
         helper_path = Path(__file__).with_name("_process_deadline.py")
         process_cmd = [
             sys.executable,
@@ -255,6 +256,7 @@ def run_command(
                 stdout=stdout_pipe,
                 stderr=stderr_pipe,
                 text=text,
+                cwd=cwd,
                 env=env,
                 start_new_session=True,
                 pass_fds=(deadline_status_write_descriptor,),
@@ -266,6 +268,7 @@ def run_command(
                 stdout=stdout_pipe,
                 stderr=stderr_pipe,
                 text=text,
+                cwd=cwd,
                 env=env,
                 start_new_session=True,
             )
@@ -314,9 +317,10 @@ def run_command(
     deadline_status = b""
     if deadline_status_descriptor >= 0:
         try:
-            deadline_status = os.read(deadline_status_descriptor, 16)
-        except BlockingIOError:
-            pass
+            chunks: list[bytes] = []
+            while chunk := os.read(deadline_status_descriptor, 16):
+                chunks.append(chunk)
+            deadline_status = b"".join(chunks)
         finally:
             os.close(deadline_status_descriptor)
     if b"E" in deadline_status:

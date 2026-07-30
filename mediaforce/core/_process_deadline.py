@@ -14,6 +14,7 @@ _STATUS_UNAVAILABLE = b"U"
 _WATCHDOG_READY = b"R"
 _WATCHDOG_FAILED = b"F"
 _WATCHDOG_POLL_SECONDS = 0.25
+_PROCESS_GROUP_POLL_SECONDS = 0.05
 
 
 def _notify(status_descriptor: int, status: bytes) -> None:
@@ -77,6 +78,16 @@ def _exit_waiter(target_pid: int) -> tuple[Callable[[float], bool], Callable[[],
     raise RuntimeError("absolute process deadline monitoring is unavailable")
 
 
+def _process_group_exists(process_group: int) -> bool:
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _watch_target(
         *,
         target_pid: int,
@@ -103,6 +114,7 @@ def _watch_target(
         except OSError:
             pass
 
+    target_exited = False
     try:
         while True:
             remaining_ns = deadline_ns - time.time_ns()
@@ -117,10 +129,20 @@ def _watch_target(
                 return
             timeout = min(
                 remaining_ns / 1_000_000_000,
-                _WATCHDOG_POLL_SECONDS,
+                (
+                    _PROCESS_GROUP_POLL_SECONDS
+                    if target_exited
+                    else _WATCHDOG_POLL_SECONDS
+                ),
             )
-            if wait_for_exit(timeout):
-                return
+            if target_exited:
+                if not _process_group_exists(target_process_group):
+                    return
+                time.sleep(timeout)
+            elif wait_for_exit(timeout):
+                target_exited = True
+                if not _process_group_exists(target_process_group):
+                    return
     finally:
         if close_waiter is not None:
             close_waiter()
@@ -181,8 +203,6 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
         _notify(status_descriptor, _STATUS_EXPIRED)
         _stop_watchdog(watchdog_pid)
         return 124
-    signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    signal.setitimer(signal.ITIMER_REAL, remaining_ns / 1_000_000_000)
     if time.time_ns() >= deadline_ns:
         _notify(status_descriptor, _STATUS_EXPIRED)
         _stop_watchdog(watchdog_pid)

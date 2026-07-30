@@ -468,19 +468,24 @@ metadata lock, changing configured state paths, or renaming and replacing its
 parent cannot create a second lock domain for another compliant runtime. The
 lock path resolves `web_state_dir` symlinks before choosing that domain, so
 aliases cannot create a second one. Guarded SQLite engines verify the reserved
-database identity before and after every cursor operation, after writable
-transaction commit, and around the raw legacy-schema bootstrap. Persistent path
-replacement during a query, migration, or commit therefore fails closed before
-later evidence publication can proceed.
+database identity before and after connection creation, every cursor operation,
+writable transaction commit, and the raw legacy-schema bootstrap. Connection
+creation also snapshots the path's device, inode, change time, and link count so
+a swap-and-restore race cannot attach SQLite to a transient replacement.
+Persistent or transient path replacement during connect, query, migration, or
+commit therefore fails closed before later evidence publication can proceed.
 Fresh execution installs its absolute authorization deadline before toolchain
 preflight. Every managed command then starts through Mediaforce's private
 isolated deadline runner. The runner refuses to execute the target after the
 deadline, arms an independently scheduled process-exit watchdog first, and the
 watchdog immediately kills the complete target process group at expiration even
-if the parent operator process is stopped. A dedicated status pipe distinguishes
-deadline expiry from an ordinary target exit code, and unavailable watchdog
-support fails closed. The assignment's already-frozen quality metric and target
-are selected without launching a second unmanaged capability probe.
+if the parent operator process is stopped. If a group leader exits while its
+descendants remain, the watchdog keeps policing the process group until every
+descendant exits or the deadline kills the group. A dedicated status pipe
+distinguishes deadline expiry from an ordinary target exit code, and unavailable
+watchdog support fails closed. Toolchain and quality-metric capability probes use
+that same controller and deadline; the assignment's already-frozen quality
+metric and target are selected without launching a second unmanaged probe.
 Fresh execution samples its authorization
 timestamp only after all preflight checks and immediately before the immutable
 claim.
@@ -628,8 +633,14 @@ that claim; a crash before a complete lane envelope exists leaves an unresolved
 terminal claim that cannot launch another agent. A retry after the complete
 matching claim and envelope are visible validates both, re-fsyncs the envelope
 parent, returns the original decision and `reviewed_at`, and does not launch a
-second agent. A rejected review remains terminal. The exact PATH-selected runner
-must match the authorization
+second agent. A rejected review remains terminal. The review command and its
+repository/toolchain probes remain under the plan's absolute authorization
+deadline. Before claim publication, the reviewer records the exact Git commit
+and tree, rejects uncommitted tracked changes, and repeats that repository
+identity check after the run. The prompt, completion marker, and canonical run
+evidence all bind the same commit and tree, so later validation cannot silently
+reinterpret an approval against another repository snapshot. The exact
+PATH-selected runner must match the authorization
 before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
 unbound interpreter. Its canonical path must also match the active ancestor Code
@@ -668,8 +679,12 @@ preparation. Review claims and envelopes are produced by the bounded reviewer
 path and rely on the stronger final-inode publication receipt. After every
 deadline-bound rename, the writer verifies the inode's kernel change time
 against the same expiration; every loader repeats that check. Recovery of an
-already-published artifact skips live-clock sampling but still rejects a
-kernel-observable post-expiration publication.
+already-published authoritative artifact skips live-clock sampling but still
+rejects a kernel-observable post-expiration publication. Assignment claims are
+the narrow recovery exception: a claim whose rename landed after expiration is
+loaded only as terminal evidence, marked late in memory, and recovered as
+`failed/authorization_expired`. It can never authorize work or permanently
+poison recovery.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write

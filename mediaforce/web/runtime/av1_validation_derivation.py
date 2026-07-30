@@ -35,6 +35,7 @@ from mediaforce.core.file_integrity import (
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
     ProcessDeadlineExpiredError,
 )
 from mediaforce.core.type_defs import float_value, int_value, mapping_dict, object_dict, object_list
@@ -699,13 +700,22 @@ def assert_av1_validation_derivation_execution_environment(
         raise AV1ValidationDerivationError(
             "AV1 derivation plan quality metric is not uniform"
         )
-    if (
-        av1_validation_derivation_execution_environment_sha256(
-            quality_metric=next(iter(quality_metrics)),
-            process_controller=process_controller,
-        )
-        != plan.execution_environment_sha256
-    ):
+    controller = process_controller or ManagedProcessController()
+    try:
+        with controller.absolute_deadline(
+            _timestamp(plan.authorization.valid_until)
+        ):
+            actual_environment_sha256 = (
+                av1_validation_derivation_execution_environment_sha256(
+                    quality_metric=next(iter(quality_metrics)),
+                    process_controller=controller,
+                )
+            )
+    except (ProcessCancelledError, ProcessDeadlineEnforcementError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation execution environment could not be verified before authorization expired"
+        ) from exc
+    if actual_environment_sha256 != plan.execution_environment_sha256:
         raise AV1ValidationDerivationError(
             "AV1 derivation execution environment drifted after authorization"
         )
@@ -2531,14 +2541,19 @@ def _recover_interrupted_derivation_state(
         raise AV1ValidationDerivationError(
             "AV1 derivation interrupted claim is bound to another plan"
         )
+    published_after_deadline = bool(claim.get("published_after_deadline"))
     attempt = _failed_attempt(
         plan=plan,
         partition=partition,
         assignment_id=str(claim["assignment_id"]),
         started_at=str(claim["claimed_at"]),
         completed_at=completed_at,
-        status="stopped",
-        reason_code="interrupted_claim",
+        status="failed" if published_after_deadline else "stopped",
+        reason_code=(
+            "authorization_expired"
+            if published_after_deadline
+            else "interrupted_claim"
+        ),
     )
     write_av1_validation_derivation_attempt(attempts_directory, attempt)
     terminal = build_av1_validation_derivation_terminal_record(

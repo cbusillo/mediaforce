@@ -156,6 +156,8 @@ SELECTED_AT = "2026-07-27T22:50:00Z"
 AUTHORIZED_AT = "2026-07-28T00:00:00Z"
 VALID_UNTIL = "2026-08-01T00:00:00Z"
 REVIEW_RUNNER_BYTES = b"\xcf\xfa\xed\xfe" + b"test-code-binary"
+REVIEW_REPOSITORY_COMMIT = "1" * 40
+REVIEW_REPOSITORY_TREE = "2" * 40
 SOURCE_SIZE_BYTES = 900_000_000
 
 
@@ -718,6 +720,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
         ):
             assert_av1_validation_derivation_execution_environment(self.plan)
+
+    def test_execution_environment_probe_runs_under_authorization_deadline(self) -> None:
+        controller = ManagedProcessController()
+
+        def probe_environment(
+                *,
+                quality_metric: str,
+                process_controller: ManagedProcessController,
+        ) -> str:
+            self.assertEqual(quality_metric, self.expectations.quality_metric)
+            self.assertIs(process_controller, controller)
+            self.assertIsNotNone(process_controller.process_deadline_ns())
+            return self.plan.execution_environment_sha256
+
+        with patch(
+            "mediaforce.web.runtime.av1_validation_derivation.av1_validation_derivation_execution_environment_sha256",
+            side_effect=probe_environment,
+        ):
+            assert_av1_validation_derivation_execution_environment(
+                self.plan,
+                process_controller=controller,
+            )
+        self.assertIsNone(controller.process_deadline_ns())
 
     def test_implementation_identity_covers_complete_runtime_tree(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
@@ -1326,6 +1351,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id="81000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
@@ -1505,6 +1532,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id="82000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
@@ -1771,7 +1800,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     published_before=AUTHORIZED_AT,
                 )
 
-    def test_assignment_claim_loader_rejects_post_deadline_publication(self) -> None:
+    def test_assignment_claim_loader_marks_post_deadline_publication(self) -> None:
         claims_directory = self.runtime_artifact_root / "attempts"
         assignment = self.plan.assignments[0]
         write_av1_validation_derivation_assignment_claim(
@@ -1782,17 +1811,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             claimed_at="2026-07-28T01:00:00Z",
         )
 
-        with (
-            patch(
-                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
-                return_value=10**30,
-            ),
-            self.assertRaises(AV1ValidationDerivationPublicationDeadlineError),
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+            return_value=10**30,
         ):
-            load_av1_validation_derivation_assignment_claims(
+            claims = load_av1_validation_derivation_assignment_claims(
                 claims_directory,
                 plan=self.plan,
             )
+        self.assertEqual(len(claims), 1)
+        self.assertTrue(claims[0]["published_after_deadline"])
 
     def test_exclusive_rename_advances_kernel_change_time(self) -> None:
         self.publication_time_patcher.stop()
@@ -1926,6 +1954,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id="70000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
@@ -1985,6 +2015,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         expected_claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id=agent_id,
             review_runner_canonical_path_sha256=(
@@ -2000,6 +2032,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "lane": "architecture",
             "proposal_id": proposal.proposal_id,
             "proposal_payload_sha256": proposal.payload_sha256,
+            "repository_commit": REVIEW_REPOSITORY_COMMIT,
+            "repository_tree": REVIEW_REPOSITORY_TREE,
             "review_claim_id": expected_claim.claim_id,
             "review_claim_payload_sha256": expected_claim.payload_sha256,
             "review_run_id": agent_id,
@@ -2049,6 +2083,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             with (
                 patch.object(
                     verify_av1_cold_start_preregistration,
+                    "_repository_review_identity",
+                    return_value=(
+                        REVIEW_REPOSITORY_COMMIT,
+                        REVIEW_REPOSITORY_TREE,
+                    ),
+                ) as repository_identity,
+                patch.object(
+                    verify_av1_cold_start_preregistration,
                     "_authorized_review_runner_identity",
                     return_value=(
                         code_binary,
@@ -2058,8 +2100,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     ),
                 ),
                 patch.object(
-                    verify_av1_cold_start_preregistration.subprocess,
-                    "run",
+                    verify_av1_cold_start_preregistration,
+                    "run_command",
                     return_value=completed,
                 ) as run_review,
                 patch.object(
@@ -2098,6 +2140,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(evidence, canonical_json_bytes(evidence_payload))
             self.assertEqual(evidence_payload["review_run_id"], agent_id)
             self.assertEqual(evidence_payload["returncode"], 0)
+            self.assertEqual(
+                evidence_payload["repository_commit"],
+                REVIEW_REPOSITORY_COMMIT,
+            )
+            self.assertEqual(
+                evidence_payload["repository_tree"],
+                REVIEW_REPOSITORY_TREE,
+            )
+            self.assertEqual(repository_identity.call_count, 2)
             self.assertNotIn(str(code_binary), evidence.decode("utf-8"))
             review = build_av1_validation_derivation_review_attestation(
                 proposal=proposal,
@@ -2142,6 +2193,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         expected_claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id=agent_id,
             review_runner_canonical_path_sha256=(
@@ -2178,6 +2231,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             with (
                 patch.object(
                     verify_av1_cold_start_preregistration,
+                    "_repository_review_identity",
+                    return_value=(
+                        REVIEW_REPOSITORY_COMMIT,
+                        REVIEW_REPOSITORY_TREE,
+                    ),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
                     "_authorized_review_runner_identity",
                     return_value=(
                         code_binary,
@@ -2187,8 +2248,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     ),
                 ),
                 patch.object(
-                    verify_av1_cold_start_preregistration.subprocess,
-                    "run",
+                    verify_av1_cold_start_preregistration,
+                    "run_command",
                     return_value=completed,
                 ),
                 patch.object(
@@ -2448,8 +2509,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ),
             ),
             patch.object(
-                verify_av1_cold_start_preregistration.subprocess,
-                "run",
+                verify_av1_cold_start_preregistration,
+                "run_command",
             ) as run_review,
             self.assertRaisesRegex(
                 AV1ValidationDerivationError,
@@ -2463,6 +2524,53 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 lane="architecture",
             )
         run_review.assert_not_called()
+
+    def test_repository_review_identity_requires_clean_tracked_state(self) -> None:
+        controller = ManagedProcessController()
+        identity_result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"{REVIEW_REPOSITORY_COMMIT}\n"
+                f"{REVIEW_REPOSITORY_TREE}\n"
+            ),
+        )
+        clean_result = SimpleNamespace(returncode=0, stdout="")
+        with patch.object(
+            verify_av1_cold_start_preregistration,
+            "run_command",
+            side_effect=(identity_result, clean_result),
+        ) as run_git:
+            identity = (
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=controller,
+                )
+            )
+        self.assertEqual(
+            identity,
+            (REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
+        )
+        self.assertEqual(run_git.call_count, 2)
+        self.assertEqual(run_git.call_args_list[0].args[0][:3], [
+            "/usr/bin/git",
+            "rev-parse",
+            "HEAD",
+        ])
+
+        dirty_result = SimpleNamespace(returncode=1, stdout="")
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_command",
+                side_effect=(identity_result, dirty_result),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "uncommitted tracked changes",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._repository_review_identity(
+                process_controller=controller,
+            )
 
     def test_review_runner_is_reverified_after_launch(self) -> None:
         proposal = self._candidate_proposal()
@@ -2482,12 +2590,20 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with (
             patch.object(
                 verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=(
+                    REVIEW_REPOSITORY_COMMIT,
+                    REVIEW_REPOSITORY_TREE,
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
                 "_review_runner_identity",
                 side_effect=(before_identity, after_identity),
             ),
             patch.object(
-                verify_av1_cold_start_preregistration.subprocess,
-                "run",
+                verify_av1_cold_start_preregistration,
+                "run_command",
                 return_value=completed,
             ) as run_review,
             patch.object(
@@ -2786,6 +2902,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             build_av1_validation_derivation_review_claim(
                 plan=self.plan,
                 proposal=proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
                 lane="architecture",
                 review_run_id=f"20000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
@@ -2853,6 +2971,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             claim = build_av1_validation_derivation_review_claim(
                 plan=self.plan,
                 proposal=proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
                 lane=lane,
                 review_run_id=f"30000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
@@ -2903,6 +3023,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         replacement = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="privacy_security",
             review_run_id="40000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
@@ -2950,6 +3072,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id="50000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
@@ -2982,6 +3106,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
             proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             lane="architecture",
             review_run_id="50000000-0000-0000-0000-000000000002",
             review_runner_canonical_path_sha256=(
@@ -3668,6 +3794,37 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
             self.assertEqual(attempt.status, "stopped")
             self.assertEqual(attempt.reason_code, "interrupted_claim")
+            self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_late_interrupted_claim_terminalizes_as_authorization_expired(self) -> None:
+        assignment = self.plan.assignments[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attempts_dir = root / "attempts"
+            records_dir = root / "records"
+            write_av1_validation_derivation_assignment_claim(
+                attempts_dir,
+                assignment_id=assignment.assignment_id,
+                plan_id=self.plan.plan_id,
+                authorization_id=self.plan.authorization.authorization_id,
+                claimed_at="2026-07-28T01:00:00Z",
+            )
+            with patch(
+                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                return_value=10**30,
+            ):
+                self.assertTrue(_recover_interrupted_derivation_state(
+                    plan=self.plan,
+                    partition=self.partition,
+                    artifact_root=root,
+                    attempts_directory=attempts_dir,
+                    terminal_records_directory=records_dir,
+                    completed_at="2026-07-28T01:01:00Z",
+                ))
+            attempt = load_av1_validation_derivation_attempts(attempts_dir)[0]
+            terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+            self.assertEqual(attempt.status, "failed")
+            self.assertEqual(attempt.reason_code, "authorization_expired")
             self.assertEqual(terminal.attempt_id, attempt.attempt_id)
 
     def test_interrupted_claim_terminalizes_before_live_inventory_validation(self) -> None:
@@ -7896,6 +8053,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             claim = build_av1_validation_derivation_review_claim(
                 plan=self.plan,
                 proposal=evaluation.proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
                 lane=lane,
                 review_run_id=f"00000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
@@ -7944,6 +8103,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             build_av1_validation_derivation_review_claim(
                 plan=self.plan,
                 proposal=evaluation.proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
                 lane=lane,
                 review_run_id=f"10000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
@@ -8771,6 +8932,8 @@ def _review_run_evidence(
     review_run_id = str(getattr(claim, "review_run_id"))
     review_claim_id = str(getattr(claim, "claim_id"))
     review_claim_payload_sha256 = str(getattr(claim, "payload_sha256"))
+    repository_commit = str(getattr(claim, "repository_commit"))
+    repository_tree = str(getattr(claim, "repository_tree"))
     prompt = build_av1_validation_derivation_review_prompt(
         proposal=proposal,
         claim=claim,
@@ -8780,6 +8943,8 @@ def _review_run_evidence(
         "lane": lane,
         "proposal_id": proposal_id,
         "proposal_payload_sha256": proposal_payload_sha256,
+        "repository_commit": repository_commit,
+        "repository_tree": repository_tree,
         "review_claim_id": review_claim_id,
         "review_claim_payload_sha256": review_claim_payload_sha256,
         "review_run_id": review_run_id,
@@ -8819,6 +8984,8 @@ def _review_run_evidence(
         "reviewer_token": f"agent:{review_run_id}",
         "proposal_id": proposal_id,
         "proposal_payload_sha256": proposal_payload_sha256,
+        "repository_commit": repository_commit,
+        "repository_tree": repository_tree,
         "review_claim_id": review_claim_id,
         "review_claim_payload_sha256": review_claim_payload_sha256,
         "lane": lane,

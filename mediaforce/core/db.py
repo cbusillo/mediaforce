@@ -13,6 +13,7 @@ from sqlalchemy.engine import RowMapping
 
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
 from mediaforce.core.db_migrations import create_engine_for_path
+from mediaforce.core.db_migrations import database_identity_connection_factory
 from mediaforce.core.db_migrations import register_database_identity_guards
 from mediaforce.core.db_migrations import run_migrations
 
@@ -157,7 +158,17 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
         identity_guard()
     if not resolved_path.is_file():
         raise FileNotFoundError(f"Mediaforce database does not exist: {resolved_path}")
-    engine = create_engine(f"sqlite+pysqlite:///file:{resolved_path}?mode=ro&uri=true")
+    connect_args: dict[str, Any] = {}
+    connection_factory = database_identity_connection_factory(
+        resolved_path,
+        identity_guard,
+    )
+    if connection_factory is not None:
+        connect_args["factory"] = connection_factory
+    engine = create_engine(
+        f"sqlite+pysqlite:///file:{resolved_path}?mode=ro&uri=true",
+        connect_args=connect_args,
+    )
     register_database_identity_guards(engine, identity_guard)
     connection = engine.connect()
     try:

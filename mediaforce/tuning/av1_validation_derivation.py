@@ -138,6 +138,7 @@ AV1_VALIDATION_DERIVATION_REASON_CODES = frozenset({
 })
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SAFE_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{7,191}\Z")
 _AGENT_REVIEWER_RE = re.compile(
     r"agent:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z"
@@ -1048,6 +1049,8 @@ class AV1ValidationDerivationReviewClaim:
     authorization_id: str
     proposal_id: str
     proposal_payload_sha256: str
+    repository_commit: str
+    repository_tree: str
     lane: AV1ValidationDerivationReviewLane
     review_run_id: str
     reviewer_token: str
@@ -1086,6 +1089,14 @@ class AV1ValidationDerivationReviewClaim:
             (self.payload_sha256, "review-claim digest"),
         ):
             _require_sha256(digest, label)
+        _require_git_object_id(
+            self.repository_commit,
+            "review repository commit",
+        )
+        _require_git_object_id(
+            self.repository_tree,
+            "review repository tree",
+        )
         _parse_timestamp(self.claimed_at, "review-claim timestamp")
         semantic_payload = self.semantic_payload()
         if self.claim_id != _derivation_id("review_claim", semantic_payload):
@@ -1109,6 +1120,8 @@ class AV1ValidationDerivationReviewClaim:
             "authorization_id": self.authorization_id,
             "proposal_id": self.proposal_id,
             "proposal_payload_sha256": self.proposal_payload_sha256,
+            "repository_commit": self.repository_commit,
+            "repository_tree": self.repository_tree,
             "lane": self.lane,
             "review_run_id": self.review_run_id,
             "reviewer_token": self.reviewer_token,
@@ -1982,6 +1995,8 @@ def build_av1_validation_derivation_review_claim(
         *,
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
+        repository_commit: str,
+        repository_tree: str,
         lane: AV1ValidationDerivationReviewLane,
         review_run_id: str,
         review_runner_canonical_path_sha256: str,
@@ -2006,6 +2021,8 @@ def build_av1_validation_derivation_review_claim(
         raise AV1ValidationDerivationError(
             "AV1 derivation review runner does not match the authorization"
         )
+    _require_git_object_id(repository_commit, "review repository commit")
+    _require_git_object_id(repository_tree, "review repository tree")
     if not (
         _parse_timestamp(proposal.proposed_at, "proposal timestamp")
         <= claimed
@@ -2026,6 +2043,8 @@ def build_av1_validation_derivation_review_claim(
         "authorization_id": plan.authorization.authorization_id,
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
+        "repository_commit": repository_commit,
+        "repository_tree": repository_tree,
         "lane": lane,
         "review_run_id": review_run_id,
         "reviewer_token": reviewer_token,
@@ -2042,6 +2061,8 @@ def build_av1_validation_derivation_review_claim(
         authorization_id=plan.authorization.authorization_id,
         proposal_id=proposal.proposal_id,
         proposal_payload_sha256=proposal.payload_sha256,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
         lane=lane,
         review_run_id=review_run_id,
         reviewer_token=reviewer_token,
@@ -2075,6 +2096,8 @@ def build_av1_validation_derivation_review_prompt(
         "lane": claim.lane,
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
         "review_claim_id": claim.claim_id,
         "review_claim_payload_sha256": claim.payload_sha256,
         "review_run_id": claim.review_run_id,
@@ -2085,6 +2108,7 @@ def build_av1_validation_derivation_review_prompt(
         "Perform one independent, read-only AV1 derivation candidate review. "
         "Do not modify files, invoke another agent, reveal opaque tokens, or infer private media identity. "
         f"Review lane: {claim.lane}. Review the repository implementation and this canonical proposal payload:\n"
+        f"Review only repository commit {claim.repository_commit} with tree {claim.repository_tree}; ignore uncommitted worktree state.\n"
         f"Immutable review claim: {claim.claim_id} ({claim.payload_sha256}).\n"
         f"{proposal_json}\n"
         "Reject on any actionable gate failure; otherwise approve. Explain findings concisely. "
@@ -3199,11 +3223,19 @@ def load_av1_validation_derivation_assignment_claims(
         return ()
     claims: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.claim")):
-        payload, raw = _load_owner_only_json(
-            path,
-            "derivation assignment claim",
-            published_before=plan.authorization.valid_until,
-        )
+        published_after_deadline = False
+        try:
+            payload, raw = _load_owner_only_json(
+                path,
+                "derivation assignment claim",
+                published_before=plan.authorization.valid_until,
+            )
+        except AV1ValidationDerivationPublicationDeadlineError:
+            payload, raw = _load_owner_only_json(
+                path,
+                "derivation assignment claim",
+            )
+            published_after_deadline = True
         _require_exact_keys(payload, {
             "schema", "schema_version", "contract_version", "plan_id",
             "authorization_id", "assignment_id", "claimed_at",
@@ -3255,6 +3287,7 @@ def load_av1_validation_derivation_assignment_claims(
             raise AV1ValidationDerivationError(
                 "AV1 derivation assignment claim is outside its authorization window"
             )
+        claim["published_after_deadline"] = published_after_deadline
         claims.append(claim)
     return tuple(claims)
 
@@ -3695,6 +3728,7 @@ def validate_av1_validation_derivation_review_run_evidence(
         "schema", "schema_version", "review_run_id", "reviewer_token",
         "proposal_id", "proposal_payload_sha256", "review_claim_id",
         "review_claim_payload_sha256", "lane", "decision",
+        "repository_commit", "repository_tree",
         "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
         "proposal", "review_claim", "prompt_sha256", "stdout", "stderr",
         "returncode",
@@ -3715,6 +3749,16 @@ def validate_av1_validation_derivation_review_run_evidence(
             "AV1 derivation review run evidence bindings are invalid"
         ) from exc
     review_run_id = _required_text(payload.get("review_run_id"), "review run ID")
+    repository_commit = _required_text(
+        payload.get("repository_commit"),
+        "review repository commit",
+    )
+    repository_tree = _required_text(
+        payload.get("repository_tree"),
+        "review repository tree",
+    )
+    _require_git_object_id(repository_commit, "review repository commit")
+    _require_git_object_id(repository_tree, "review repository tree")
     stdout = payload.get("stdout")
     stderr = payload.get("stderr")
     returncode = payload.get("returncode")
@@ -3728,6 +3772,8 @@ def validate_av1_validation_derivation_review_run_evidence(
         or payload.get("review_claim_id") != review.review_claim_id
         or payload.get("review_claim_payload_sha256")
         != review.review_claim_payload_sha256
+        or payload.get("repository_commit") != claim.repository_commit
+        or payload.get("repository_tree") != claim.repository_tree
         or payload.get("lane") != review.lane
         or payload.get("decision") != review.decision
         or payload.get("review_runner_canonical_path_sha256")
@@ -3790,6 +3836,8 @@ def validate_av1_validation_derivation_review_run_evidence(
         "lane": review.lane,
         "proposal_id": review.proposal_id,
         "proposal_payload_sha256": review.proposal_payload_sha256,
+        "repository_commit": repository_commit,
+        "repository_tree": repository_tree,
         "review_claim_id": review.review_claim_id,
         "review_claim_payload_sha256": review.review_claim_payload_sha256,
         "review_run_id": review_run_id,
@@ -3940,6 +3988,7 @@ def _code_review_marker(message: str) -> dict[str, Any]:
         ) from exc
     _require_exact_keys(marker, {
         "decision", "lane", "proposal_id", "proposal_payload_sha256",
+        "repository_commit", "repository_tree",
         "review_claim_id", "review_claim_payload_sha256", "review_run_id",
     }, "derivation review completion marker")
     return marker
@@ -4270,6 +4319,7 @@ def av1_validation_derivation_review_claim_from_payload(
     _require_exact_keys(value, {
         "claim_id", "schema", "schema_version", "contract_version", "plan_id",
         "authorization_id", "proposal_id", "proposal_payload_sha256", "lane",
+        "repository_commit", "repository_tree",
         "review_run_id", "reviewer_token",
         "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
         "claimed_at", "payload_sha256",
@@ -4295,6 +4345,14 @@ def av1_validation_derivation_review_claim_from_payload(
         proposal_payload_sha256=_required_text(
             value.get("proposal_payload_sha256"),
             "proposal digest",
+        ),
+        repository_commit=_required_text(
+            value.get("repository_commit"),
+            "review repository commit",
+        ),
+        repository_tree=_required_text(
+            value.get("repository_tree"),
+            "review repository tree",
         ),
         lane=cast(
             AV1ValidationDerivationReviewLane,
@@ -5754,6 +5812,11 @@ def _utc_timestamp(value: datetime) -> str:
 
 def _require_sha256(value: str, label: str) -> None:
     if not _SHA256_RE.fullmatch(value):
+        raise AV1ValidationDerivationError(f"AV1 {label} is invalid")
+
+
+def _require_git_object_id(value: str, label: str) -> None:
+    if not _GIT_OBJECT_ID_RE.fullmatch(value):
         raise AV1ValidationDerivationError(f"AV1 {label} is invalid")
 
 

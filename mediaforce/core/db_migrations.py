@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from importlib.resources import as_file
 from importlib.resources import files
 from pathlib import Path
+import sqlite3
 from typing import Any, cast
 
 # noinspection PyPackageRequirements
@@ -17,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 INITIAL_REVISION = "20260401_0001"
+SQLiteConnectionFactory = Callable[..., sqlite3.Connection]
 
 
 def database_url(
@@ -41,17 +43,67 @@ def create_engine_for_path(
         *,
     identity_guard: Callable[[], None] | None = None,
 ) -> Engine:
+    connect_args: dict[str, Any] = {
+        "timeout": SQLITE_BUSY_TIMEOUT_MS / 1000,
+    }
+    connection_factory = database_identity_connection_factory(
+        db_path,
+        identity_guard,
+    )
+    if connection_factory is not None:
+        connect_args["factory"] = connection_factory
     engine = create_engine(
         database_url(
             db_path,
             require_existing=identity_guard is not None,
         ),
-        connect_args={"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
+        connect_args=connect_args,
         poolclass=NullPool,
         future=True,
     )
     register_database_identity_guards(engine, identity_guard)
     return engine
+
+
+def database_identity_connection_factory(
+        db_path: Path,
+        identity_guard: Callable[[], None] | None,
+) -> SQLiteConnectionFactory | None:
+    if identity_guard is None:
+        return None
+    resolved_path = db_path.expanduser().resolve()
+
+    def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        identity_guard()
+        before = _database_connection_path_snapshot(resolved_path)
+        identity_guard()
+        kwargs.pop("factory", None)
+        connection = sqlite3.Connection(*args, **kwargs)
+        try:
+            identity_guard()
+            after = _database_connection_path_snapshot(resolved_path)
+            if after != before:
+                raise RuntimeError(
+                    "Mediaforce database identity changed during connection"
+                )
+        except BaseException:
+            connection.close()
+            raise
+        return connection
+
+    return connect
+
+
+def _database_connection_path_snapshot(
+        db_path: Path,
+) -> tuple[int, int, int, int]:
+    info = db_path.stat()
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_ctime_ns,
+        info.st_nlink,
+    )
 
 
 def register_database_identity_guards(
@@ -241,6 +293,9 @@ def _alembic_config(
     )
     if identity_guard is not None:
         config.attributes["database_identity_guard"] = identity_guard
+        config.attributes["database_identity_connection_factory"] = (
+            database_identity_connection_factory(db_path, identity_guard)
+        )
     return config
 
 

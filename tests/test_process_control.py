@@ -117,6 +117,40 @@ class ProcessControlTests(TestCase):
 
         self.assertEqual(result.returncode, 124)
 
+    def test_deadline_watchdog_kills_descendant_after_target_leader_exits(self) -> None:
+        controller = ManagedProcessController()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / "descendant-ran"
+            target_script = "\n".join((
+                "import subprocess",
+                "import sys",
+                "subprocess.Popen([",
+                "    sys.executable, '-c',",
+                "    \"from pathlib import Path; import sys, time; time.sleep(1.0); Path(sys.argv[1]).write_text('ran')\",",
+                "    sys.argv[1],",
+                "])",
+            ))
+
+            with (
+                controller.absolute_deadline(
+                    datetime.now(UTC) + timedelta(seconds=0.4)
+                ),
+                self.assertRaises(ProcessDeadlineExpiredError),
+            ):
+                run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        target_script,
+                        str(marker_path),
+                    ],
+                    process_controller=controller,
+                )
+
+            time.sleep(0.8)
+            self.assertFalse(marker_path.exists())
+
     def test_nested_absolute_deadlines_use_earliest_and_restore_previous(self) -> None:
         controller = ManagedProcessController()
         outer = datetime.now(UTC) + timedelta(seconds=10)

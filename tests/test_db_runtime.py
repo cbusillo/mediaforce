@@ -27,6 +27,7 @@ from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location, run_migrations
+from mediaforce.core.db_migrations import database_identity_connection_factory
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
@@ -142,6 +143,57 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             identity_guard.assert_called_once_with()
             self.assertFalse(db_path.exists())
+
+    def test_connection_factory_rejects_database_swap_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "library.sqlite3"
+            replacement_path = root / "replacement.sqlite3"
+            original_path = root / "library-original.sqlite3"
+            sqlite3.connect(db_path).close()
+            sqlite3.connect(replacement_path).close()
+            expected_identity = db_path.stat()
+
+            def identity_guard() -> None:
+                current = db_path.stat()
+                if (
+                    current.st_dev,
+                    current.st_ino,
+                ) != (
+                    expected_identity.st_dev,
+                    expected_identity.st_ino,
+                ):
+                    raise RuntimeError("database identity changed")
+
+            factory = database_identity_connection_factory(
+                db_path,
+                identity_guard,
+            )
+            assert factory is not None
+            real_connection = sqlite3.Connection
+
+            def connect_replacement(
+                    *args: object,
+                    **kwargs: object,
+            ) -> sqlite3.Connection:
+                db_path.replace(original_path)
+                replacement_path.replace(db_path)
+                connection = real_connection(*args, **kwargs)
+                db_path.replace(replacement_path)
+                original_path.replace(db_path)
+                return connection
+
+            with (
+                patch(
+                    "mediaforce.core.db_migrations.sqlite3.Connection",
+                    side_effect=connect_replacement,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "identity changed during connection",
+                ),
+            ):
+                factory(str(db_path), check_same_thread=False)
 
     def test_open_db_uses_reserved_missing_database_under_runtime_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -372,7 +424,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         "mediaforce.core.db._engine_for_db_path",
                         return_value=_RemovingEngine(),
                     ),
-                    self.assertRaises(OperationalError),
+                    self.assertRaises(MediaforceRuntimeBusyError),
                 ):
                     connect(db_path)
 

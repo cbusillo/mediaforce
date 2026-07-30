@@ -27,6 +27,12 @@ from mediaforce.core.file_integrity import (
     FileIntegrityError,
     MacOSFileIntegrityGuard,
 )
+from mediaforce.core.process_control import (
+    ManagedProcessController,
+    ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
+    run_command,
+)
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
@@ -1280,6 +1286,50 @@ def _authorized_review_runner_identity(
     return identity
 
 
+def _repository_review_identity(
+        *,
+        process_controller: ManagedProcessController,
+) -> tuple[str, str]:
+    identity = run_command(
+        ["/usr/bin/git", "rev-parse", "HEAD", "HEAD^{tree}"],
+        process_controller=process_controller,
+        cwd=REPOSITORY_ROOT,
+        env=_review_runner_environment(),
+        timeout=15,
+        check=False,
+    )
+    object_ids = tuple(identity.stdout.splitlines())
+    if (
+        identity.returncode != 0
+        or len(object_ids) != 2
+        or any(
+            len(object_id) not in {40, 64}
+            or any(character not in "0123456789abcdef" for character in object_id)
+            for object_id in object_ids
+        )
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository identity is unavailable"
+        )
+    tracked_state = run_command(
+        ["/usr/bin/git", "diff", "--quiet", "HEAD", "--"],
+        process_controller=process_controller,
+        cwd=REPOSITORY_ROOT,
+        env=_review_runner_environment(),
+        timeout=15,
+        check=False,
+    )
+    if tracked_state.returncode == 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository has uncommitted tracked changes"
+        )
+    if tracked_state.returncode != 0:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository state is unavailable"
+        )
+    return object_ids[0], object_ids[1]
+
+
 def _assert_native_review_runner(binary_bytes: bytes) -> None:
     if binary_bytes[:4] not in _MACH_O_MAGICS:
         raise AV1ValidationDerivationError(
@@ -1556,12 +1606,60 @@ def _run_code_agent_review(
     bytes,
     AV1ValidationDerivationReviewDecision,
 ]:
-    assert_av1_validation_derivation_execution_environment(plan)
+    try:
+        deadline = datetime.fromisoformat(
+            plan.authorization.valid_until.replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review authorization deadline is invalid"
+        ) from exc
+    if deadline.tzinfo is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review authorization deadline must include a UTC offset"
+        )
+    process_controller = ManagedProcessController()
+    try:
+        with process_controller.absolute_deadline(deadline.astimezone(UTC)):
+            return _run_code_agent_review_before_deadline(
+                artifact_root=artifact_root,
+                plan=plan,
+                proposal=proposal,
+                lane=lane,
+                process_controller=process_controller,
+            )
+    except (ProcessCancelledError, ProcessDeadlineEnforcementError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code review exceeded its authorization deadline"
+        ) from exc
+
+
+def _run_code_agent_review_before_deadline(
+        *,
+        artifact_root: Path,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        lane: AV1ValidationDerivationReviewLane,
+        process_controller: ManagedProcessController,
+) -> tuple[
+    AV1ValidationDerivationReviewClaim,
+    bytes,
+    AV1ValidationDerivationReviewDecision,
+]:
+    assert_av1_validation_derivation_execution_environment(
+        plan,
+        process_controller=process_controller,
+    )
     before_identity = _authorized_review_runner_identity(plan)
+    before_repository_identity = _repository_review_identity(
+        process_controller=process_controller,
+    )
     review_run_id = str(uuid.uuid4())
     claim = build_av1_validation_derivation_review_claim(
         plan=plan,
         proposal=proposal,
+        repository_commit=before_repository_identity[0],
+        repository_tree=before_repository_identity[1],
         lane=lane,
         review_run_id=review_run_id,
         review_runner_canonical_path_sha256=before_identity[1],
@@ -1600,12 +1698,11 @@ def _run_code_agent_review(
                 "-",
             ))
             try:
-                completed = subprocess.run(
+                completed = run_command(
                     command,
+                    process_controller=process_controller,
                     cwd=REPOSITORY_ROOT,
-                    input=prompt,
-                    text=True,
-                    capture_output=True,
+                    input_text=prompt,
                     timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
                     check=False,
                     env=_review_runner_environment(),
@@ -1620,6 +1717,13 @@ def _run_code_agent_review(
             raise AV1ValidationDerivationError(
                 "AV1 derivation Every Code executable changed during review"
             )
+    after_repository_identity = _repository_review_identity(
+        process_controller=process_controller,
+    )
+    if after_repository_identity != before_repository_identity:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository changed during review"
+        )
     if completed.returncode != 0:
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code review failed"
@@ -1647,6 +1751,8 @@ def _run_code_agent_review(
             "review_claim_payload_sha256": claim.payload_sha256,
             "lane": claim.lane,
             "decision": decision,
+            "repository_commit": claim.repository_commit,
+            "repository_tree": claim.repository_tree,
             "review_runner_canonical_path_sha256": before_identity[1],
             "review_runner_binary_sha256": before_identity[2],
             "proposal": proposal.to_payload(),
@@ -1670,6 +1776,8 @@ def _agent_review_decision(
     if (
         marker.get("proposal_id") != proposal.proposal_id
         or marker.get("proposal_payload_sha256") != proposal.payload_sha256
+        or marker.get("repository_commit") != claim.repository_commit
+        or marker.get("repository_tree") != claim.repository_tree
         or marker.get("review_claim_id") != claim.claim_id
         or marker.get("review_claim_payload_sha256") != claim.payload_sha256
         or marker.get("lane") != claim.lane
