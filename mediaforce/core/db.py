@@ -161,6 +161,11 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
             "connect",
             lambda _connection, _record: identity_guard(),
         )
+        event.listen(
+            engine,
+            "before_cursor_execute",
+            lambda *_args, **_kwargs: identity_guard(),
+        )
     connection = engine.connect()
     try:
         if identity_guard is not None:

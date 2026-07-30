@@ -3,7 +3,8 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 
 
 class ProcessCancelledError(RuntimeError):
@@ -22,6 +23,7 @@ class ManagedProcessController:
         self._cancel_error_type: type[ProcessCancelledError] = ProcessCancelledError
         self._cancel_message = "Operation was cancelled."
         self._terminate_process_group = False
+        self._activity_guard: Callable[[], None] | None = None
 
     def attach(self, process: subprocess.Popen[str], *, terminate_process_group: bool = False) -> None:
         with self._lock:
@@ -55,14 +57,41 @@ class ManagedProcessController:
             self._cancel_message = "Operation was cancelled."
             self._process = None
             self._terminate_process_group = False
+            self._activity_guard = None
+
+    @contextmanager
+    def activity_guard(
+            self,
+            guard: Callable[[], None],
+    ) -> Iterator[None]:
+        with self._lock:
+            previous_guard = self._activity_guard
+
+            if previous_guard is None:
+                active_guard = guard
+            else:
+                def active_guard() -> None:
+                    previous_guard()
+                    guard()
+
+            self._activity_guard = active_guard
+        try:
+            yield
+        finally:
+            with self._lock:
+                if self._activity_guard is active_guard:
+                    self._activity_guard = previous_guard
 
     def throw_if_cancelled(self) -> None:
         with self._lock:
-            if not self._cancel_requested:
-                return
+            activity_guard = self._activity_guard
+            cancelled = self._cancel_requested
             error_type = self._cancel_error_type
             message = self._cancel_message
-        raise error_type(message)
+        if cancelled:
+            raise error_type(message)
+        if activity_guard is not None:
+            activity_guard()
 
     @property
     def cancelled(self) -> bool:

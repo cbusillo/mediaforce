@@ -41,6 +41,28 @@ class ProcessControlTests(TestCase):
         self.assertNotIsInstance(raised.exception, ScheduleWindowClosedError)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_activity_guard_prevents_managed_process_start(
+            self,
+            popen_mock: Mock,
+    ) -> None:
+        controller = ManagedProcessController()
+        guard = Mock(
+            side_effect=ScheduleWindowClosedError("Authorization expired.")
+        )
+
+        with (
+            controller.activity_guard(guard),
+            self.assertRaisesRegex(
+                ScheduleWindowClosedError,
+                "Authorization expired",
+            ),
+        ):
+            run_command(["echo", "ok"], process_controller=controller)
+
+        guard.assert_called_once_with()
+        popen_mock.assert_not_called()
+
+    @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_run_command_starts_new_session_for_managed_processes(self, popen_mock: Mock) -> None:
         process = Mock()
         process.communicate.return_value = ("stdout", "stderr")

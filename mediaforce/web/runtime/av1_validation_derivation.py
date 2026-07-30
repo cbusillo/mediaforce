@@ -1115,6 +1115,10 @@ def _run_av1_validation_derivation_assignment_locked(
                 checked_at
             ) from exc
 
+    def assert_fresh_execution_context() -> None:
+        assert_fresh_authorization()
+        assert_av1_validation_derivation_runtime_context(config, plan)
+
     _source_commitment_guard()
     write_av1_validation_derivation_assignment_claim(
         attempts_directory,
@@ -1130,48 +1134,50 @@ def _run_av1_validation_derivation_assignment_locked(
     run_deps = replace(
         run_deps,
         quality_toolchain_identity=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.quality_toolchain_identity,
         ),
         detect_video_crop=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.detect_video_crop,
         ),
         search_quality_for_source=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.search_quality_for_source,
         ),
         run_sample_encode=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.run_sample_encode,
         ),
         recommend_review_moments=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.recommend_review_moments,
         ),
         recommend_review_timestamps=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.recommend_review_timestamps,
         ),
         encode_preview_clips=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.encode_preview_clips,
         ),
         render_source_review_clips=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.render_source_review_clips,
         ),
         generate_compare_clips_from_review_pairs=_authorization_guarded_call(
-            assert_fresh_authorization,
+            assert_fresh_execution_context,
             run_deps.generate_compare_clips_from_review_pairs,
         ),
     )
+    activity_guard = controller.activity_guard(assert_fresh_execution_context)
+    activity_guard.__enter__()
     attempt: AV1ValidationDerivationAttempt | None = None
     staged_snapshot: dict[str, Any] | None = None
     staged_snapshot_taken = False
     sample_item: dict[str, Any] | None = None
     try:
-        assert_fresh_authorization()
+        assert_fresh_execution_context()
         if (
             shutil.disk_usage(config.paths.review_dir.parent).free
             < AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
@@ -1235,7 +1241,7 @@ def _run_av1_validation_derivation_assignment_locked(
             expected_source_sha256=source_commitment.source_sha256,
             expected_size_bytes=source_commitment.source_size_bytes,
             process_controller=controller,
-            assert_authorized=assert_fresh_authorization,
+            assert_authorized=assert_fresh_execution_context,
         ) as pinned_source:
             sample_item["source_snapshot_sha256"] = pinned_source.content_sha256
             sample_item["source_snapshot_size_bytes"] = pinned_source.size_bytes
@@ -1243,7 +1249,7 @@ def _run_av1_validation_derivation_assignment_locked(
                 pinned_source.content_version_fingerprint
             )
             with _owner_only_umask():
-                assert_fresh_authorization()
+                assert_fresh_execution_context()
                 payload, _ = run_sampled_calibration(
                     config=calibration_config,
                     prefix=prefix,
@@ -1258,9 +1264,10 @@ def _run_av1_validation_derivation_assignment_locked(
                     deps=run_deps,
                     source_path_override=pinned_source.path,
                     progress_callback=(
-                        lambda *_args, **_kwargs: assert_fresh_authorization()
+                        lambda *_args, **_kwargs: assert_fresh_execution_context()
                     ),
                 )
+        assert_fresh_execution_context()
         assert_av1_validation_derivation_execution_contract(manifest, plan)
         current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
             review_root=review_root,
@@ -1380,32 +1387,35 @@ def _run_av1_validation_derivation_assignment_locked(
             reason_code="runtime_failure",
         )
     finally:
-        cleanup_failed = False
-        if staged_snapshot_taken:
+        try:
+            cleanup_failed = False
+            if staged_snapshot_taken:
+                try:
+                    with open_db(config.paths.db_path) as connection:
+                        restore_staged_artifact(
+                            connection,
+                            assignment.local_item_id,
+                            staged_snapshot,
+                            run_deps.staged_artifact_columns,
+                        )
+                except Exception:
+                    cleanup_failed = True
             try:
-                with open_db(config.paths.db_path) as connection:
-                    restore_staged_artifact(
-                        connection,
-                        assignment.local_item_id,
-                        staged_snapshot,
-                        run_deps.staged_artifact_columns,
-                    )
+                purge_transient_artifacts(config, force=True)
             except Exception:
                 cleanup_failed = True
-        try:
-            purge_transient_artifacts(config, force=True)
-        except Exception:
-            cleanup_failed = True
-        if cleanup_failed:
-            attempt = _failed_attempt(
-                plan=plan,
-                partition=partition,
-                assignment_id=assignment.assignment_id,
-                started_at=started_at,
-                completed_at=clock(),
-                status="failed",
-                reason_code="runtime_failure",
-            )
+            if cleanup_failed:
+                attempt = _failed_attempt(
+                    plan=plan,
+                    partition=partition,
+                    assignment_id=assignment.assignment_id,
+                    started_at=started_at,
+                    completed_at=clock(),
+                    status="failed",
+                    reason_code="runtime_failure",
+                )
+        finally:
+            activity_guard.__exit__(None, None, None)
     if attempt is None:
         raise AV1ValidationDerivationError("AV1 derivation attempt did not reach a terminal state")
     _source_commitment_guard()
