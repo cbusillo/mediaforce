@@ -1135,6 +1135,42 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.runtime_artifact_root.resolve(),
         )
 
+    def test_runtime_artifact_root_rejects_repository_containment(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        web_state_dir = repository_root / ".private-av1-state"
+        artifact_root = (
+            web_state_dir
+            / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            / self.plan.partition_id
+        )
+        config = SimpleNamespace(
+            paths=SimpleNamespace(
+                db_path=self.runtime_config.paths.db_path,
+                review_dir=self.runtime_config.paths.review_dir,
+                web_state_dir=web_state_dir,
+            )
+        )
+        lock_path = repository_root / ".private-av1-runtime.lock"
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.mediaforce_runtime_lock_path_for_web_state_dir",
+                return_value=lock_path,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.mediaforce_runtime_lock_path",
+                return_value=lock_path,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "must remain outside the repository",
+            ),
+        ):
+            _validated_av1_validation_derivation_artifact_root(
+                config=config,
+                plan=self.plan,
+                artifact_root=artifact_root,
+            )
+
     def test_direct_derivation_artifact_write_holds_runtime_lock(self) -> None:
         lock_held = False
 
@@ -1967,7 +2003,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(decision, "approved")
             launched_runner = Path(run_review.call_args.args[0][0])
             self.assertNotEqual(launched_runner, code_binary)
-            self.assertEqual(launched_runner.read_bytes(), REVIEW_RUNNER_BYTES)
+            self.assertFalse(launched_runner.exists())
+            self.assertFalse(launched_runner.parent.exists())
             review_command = run_review.call_args.args[0]
             self.assertIn('shell_environment_policy.inherit="none"', review_command)
             review_environment = run_review.call_args.kwargs["env"]
@@ -1993,7 +2030,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 evidence,
                 review=review,
             )
-            shutil.rmtree(launched_runner.parent)
 
     def test_review_runner_rejects_interpreter_script(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2496,7 +2532,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertTrue(runner_directory.exists())
         shutil.rmtree(runner_directory)
 
-    def test_private_review_runner_never_recursively_deletes(self) -> None:
+    def test_private_review_runner_cleans_without_recursive_delete(self) -> None:
         expected_sha256 = (
             f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
         )
@@ -2513,12 +2549,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ) as runner,
         ):
             runner_directory = runner.parent
+            self.assertEqual(runner.read_bytes(), REVIEW_RUNNER_BYTES)
         assert runner_directory is not None
-        self.assertEqual(
-            (runner_directory / "code").read_bytes(),
-            REVIEW_RUNNER_BYTES,
-        )
-        shutil.rmtree(runner_directory)
+        self.assertFalse(runner_directory.exists())
 
     @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
     def test_private_review_runner_preserves_parent_replacement(self) -> None:
@@ -5542,6 +5575,67 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         self.assertFalse((self.runtime_artifact_root / "verdict-intents").exists())
 
+    def test_derivation_verdict_stops_when_claim_publication_crosses_expiry(
+            self,
+    ) -> None:
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        clock_values = iter(("2026-07-31T23:59:59Z", VALID_UNTIL))
+        clock_calls: list[str] = []
+
+        def clock() -> str:
+            value = next(clock_values)
+            clock_calls.append(value)
+            return value
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db"
+            ) as open_database,
+        ):
+            terminal = record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                now_iso=clock,
+            )
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        self.assertEqual(
+            clock_calls,
+            ["2026-07-31T23:59:59Z", VALID_UNTIL],
+        )
+        open_database.assert_not_called()
+        self.assertFalse(
+            (
+                self.runtime_artifact_root
+                / "verdict-claims"
+                / f"{attempt.assignment_id}.json"
+            ).exists()
+        )
+        self.assertFalse((self.runtime_artifact_root / "verdict-intents").exists())
+
     def test_derivation_verdict_terminalizes_transaction_begin_failure(self) -> None:
         attempt = self._review_pending_attempt()
         write_av1_validation_derivation_attempt(
@@ -6971,7 +7065,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
         self.assertEqual(exit_code, 0)
         self.assertTrue(recovered_parent_sync)
-        now_iso.assert_called_once_with()
+        self.assertEqual(now_iso.call_args_list, [call(), call()])
         persisted = load_av1_validation_derivation_candidate_proposal(
             self.runtime_artifact_root,
             plan=self.plan,
@@ -6991,6 +7085,106 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 plan=self.plan,
                 proposal=conflicting,
             )
+
+    def test_proposal_expiry_crossing_is_checked_at_publication(self) -> None:
+        cell_plan_id = self.plan.assignments[0].cell_plan_id
+        proposal = self._candidate_proposal(
+            proposed_at="2026-07-31T23:59:59Z",
+        )
+        evaluation = SimpleNamespace(proposal=proposal)
+        args = SimpleNamespace(
+            action="build-derivation-proposal",
+            manifest=V2_MANIFEST_PATH,
+            partition=self.runtime_artifact_root / "partition.json",
+            plan=self.runtime_artifact_root / "plan.json",
+            key=self.runtime_artifact_root / "partition.key",
+            config=Path("unused.toml"),
+            cell_plan_id=cell_plan_id,
+            json_output=True,
+        )
+
+        def publish_proposal(*_args: object, **kwargs: object) -> None:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
+            self.fail("expired proposal reached publication")
+
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_derivation_partition_for_evaluation",
+                side_effect=lambda **_kwargs: _context_value((
+                    self.partition,
+                    _SourceSHA256Session(),
+                )),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_derivation_attempts",
+                return_value=(),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_derivation_terminal_records",
+                return_value=(),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_current_av1_validation_derivation_observations",
+                return_value={},
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "evaluate_av1_validation_derivation_candidate",
+                return_value=evaluation,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "av1_validation_derivation_candidate_evaluation_public_summary",
+                return_value={},
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_av1_validation_derivation_execution_environment",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_now_iso",
+                side_effect=("2026-07-31T23:59:59Z", VALID_UNTIL),
+            ) as now_iso,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "write_av1_validation_derivation_candidate_proposal",
+                side_effect=publish_proposal,
+            ) as write_proposal,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "outside its authorization window",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._run_derivation_proposal_action(
+                args,
+                config=self.runtime_config,
+            )
+        self.assertEqual(now_iso.call_args_list, [call(), call()])
+        write_proposal.assert_called_once()
+        self.assertFalse(
+            (
+                self.runtime_artifact_root
+                / "proposals"
+                / f"{cell_plan_id}.json"
+            ).exists()
+        )
 
     def test_proposal_type_reasserts_preregistered_invariants(self) -> None:
         cell_plan_id = self.plan.assignments[0].cell_plan_id
@@ -7151,6 +7345,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             return current_evaluation
 
         def publish_candidate_lock(*_args: object, **kwargs: object) -> object:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
             events.append("publish")
             self.assertEqual(kwargs["locked_at"], locked_at)
             return expected_envelope
@@ -7248,10 +7446,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "source-verify",
             "clock",
             "evaluate",
+            "source-final-quiet",
+            "clock",
             "publish",
             "source-final-quiet",
         ])
-        self.assertEqual(events.count("clock"), 1)
+        self.assertEqual(events.count("clock"), 2)
 
     def test_candidate_lock_expiry_crossing_is_checked_after_source_verification(
             self,
@@ -7296,9 +7496,19 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             events.append("current-evidence")
             return current_observations
 
+        locked_at = "2026-07-28T03:06:00Z"
+        clock_values = iter((locked_at, VALID_UNTIL))
+
         def sample_expired_clock() -> str:
             events.append("clock")
-            return VALID_UNTIL
+            return next(clock_values)
+
+        def publish_candidate_lock(*_args: object, **kwargs: object) -> object:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
+            self.fail("expired candidate lock reached publication")
 
         with (
             patch(
@@ -7369,7 +7579,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation._finalize_and_write_av1_validation_derivation_candidate_lock",
-            ) as publish_candidate_lock,
+                side_effect=publish_candidate_lock,
+            ) as publish_candidate_lock_mock,
             self.assertRaisesRegex(
                 AV1ValidationDerivationError,
                 "outside its authorization window",
@@ -7384,12 +7595,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 cell_plan_id=cell_plan_id,
                 now_iso=sample_expired_clock,
             )
-        publish_candidate_lock.assert_not_called()
+        publish_candidate_lock_mock.assert_called_once()
         self.assertEqual(events, [
             "current-inputs",
             "source-commitments",
             "current-evidence",
             "source-verify",
+            "clock",
+            "source-final-quiet",
             "clock",
             "source-final-quiet",
         ])

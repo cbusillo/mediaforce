@@ -266,6 +266,8 @@ progress. A surviving orphaned claim is terminalized by that recovery rather
 than resuming the claimed action. A retry that finds an identical published
 artifact re-fsyncs its parent directory before accepting it, so a prior
 directory-sync error cannot be downgraded to an unsynced idempotent success. A
+fresh candidate proposal rechecks the live authorization immediately before its
+exclusive rename. A
 candidate-proposal retry first loads the canonical existing proposal and reuses
 its original `proposed_at`; it never samples a replacement timestamp. A review
 retry accepts only a complete matching immutable lane claim and envelope,
@@ -477,11 +479,13 @@ preceded first by an immutable verdict claim. The claim exists before database
 open, `BEGIN IMMEDIATE`, inventory reload, current-input validation, or review
 media verification; a hard interruption before the later verdict intent is
 recovered as the affected cell's immutable `safety_stop`, never as a retryable
-human verdict. A first verdict submitted after authorization expiry still
-creates that claim and then terminalizes the affected cell before database open;
-an already-frozen in-window verdict remains eligible for an idempotent retry
-after expiry. After those checks, an immutable verdict intent freezes the first
-human input and runtime timestamp. The validated observation is appended inside
+human verdict. A first verdict whose claim publication reaches authorization
+expiry publishes no claim and terminalizes the affected cell before database
+open. A claim published in-window without a matching verdict intent remains an
+interrupted safety stop, while an immutable in-window verdict intent remains
+eligible for idempotent completion after expiry. After those checks, an
+immutable verdict intent freezes the first human input and runtime timestamp.
+The validated observation is appended inside
 the immediate database transaction, then the execution contract is checked one
 final time. The source cohort then completes full verification and its final
 quiet/exit check while that transaction remains open. A final source-session
@@ -603,7 +607,10 @@ unbound interpreter. Its canonical path must also match the active ancestor Code
 process that is conducting the operator session, so a different PATH-selected
 native binary cannot establish its own trust root. Those bytes are executed from
 an owner-only ephemeral copy
-rather than reopening the mutable PATH-selected source. The review process uses
+rather than reopening the mutable PATH-selected source. After an unchanged run,
+the copy is unlinked and its empty owner-only directory is removed without a
+recursive delete; an integrity failure leaves any suspicious replacement
+untouched. The review process uses
 a fixed system `PATH` and a strict allowlisted process environment containing no
 caller secrets; agent shell commands use the same explicit minimal environment
 with no caller-environment inheritance. On the macOS execution host,
@@ -623,8 +630,12 @@ completion, and any event after quiescence, and treats only LF/CRLF as record
 boundaries so Unicode line separators remain inside their JSON strings.
 The decision is extracted rather than supplied by the operator. Public summaries
 expose only that the runner identity is bound, never the canonical private path.
-Review, verdict, proposal, and lock timestamps come from the runtime clock only
-for their first immutable publication; recovery reuses persisted timestamps.
+Review, verdict, proposal, and lock payload timestamps come from the runtime
+clock only for their first immutable publication; recovery reuses persisted
+timestamps. Fresh proposal, candidate-lock, verdict-claim, and verdict-intent
+publication also samples the live clock immediately before the exclusive rename
+and fails closed if authorization expired during preparation. Recovery of an
+already-published artifact skips that publication check.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write
@@ -633,7 +644,9 @@ transaction, resolves every frozen source commitment, rereads current
 observations, and fully verifies the source cohort. A new `locked_at` is sampled
 exactly once only after those current inputs and evidence are loaded and
 verified; freshness and authorization are then evaluated at that timestamp
-before publication. Recovery of an existing candidate-lock envelope instead
+before publication. The live authorization is checked again immediately before
+the first exclusive candidate-lock rename. Recovery of an existing
+candidate-lock envelope instead
 reuses its persisted `locked_at` and never calls the runtime clock. The lock is
 computed and written through one runtime-owned finalization API. That API
 derives the canonical root from config and the immutable plan path, loads the

@@ -108,6 +108,7 @@ from mediaforce.tuning.av1_validation_partition import (
     AV1ValidationPartitionAssignment,
     AV1ValidationPartitionError,
     AV1ValidationPrivatePartition,
+    assert_private_artifact_path,
     validate_av1_validation_partition_current_inputs,
     validate_av1_validation_private_partition,
 )
@@ -1333,6 +1334,15 @@ def _validated_av1_validation_derivation_artifact_root(
         raise AV1ValidationDerivationError(
             "AV1 derivation runtime-lock domain drifted"
         )
+    try:
+        assert_private_artifact_path(
+            canonical_artifact_root,
+            repository_root=Path(__file__).resolve().parents[3],
+        )
+    except AV1ValidationPartitionError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation private artifacts must remain outside the repository"
+        ) from exc
     validate_av1_validation_derivation_artifact_root_binding(
         canonical_artifact_root,
         plan,
@@ -1434,6 +1444,12 @@ def finalize_av1_validation_derivation_candidate_lock(
                     )
                 )
                 source_sha256_resolver.verify()
+                candidate_lock_path = (
+                    artifact_root / "candidate-locks" / f"{cell_plan_id}.json"
+                )
+                fresh_lock = not (
+                    candidate_lock_path.exists() or candidate_lock_path.is_symlink()
+                )
                 locked_at = _av1_validation_derivation_candidate_locked_at(
                     artifact_root=artifact_root,
                     plan=plan,
@@ -1454,6 +1470,13 @@ def finalize_av1_validation_derivation_candidate_lock(
                     manifest,
                     plan,
                 )
+                def _before_candidate_lock_publish() -> None:
+                    source_sha256_resolver.assert_quiet()
+                    assert_av1_validation_derivation_authorization_active(
+                        plan,
+                        at=clock(),
+                    )
+
                 return _finalize_and_write_av1_validation_derivation_candidate_lock(
                     artifact_root,
                     plan=plan,
@@ -1462,7 +1485,9 @@ def finalize_av1_validation_derivation_candidate_lock(
                     review_envelopes=review_envelopes,
                     current_evaluation=current_evaluation,
                     locked_at=locked_at,
-                    before_publish=source_sha256_resolver.assert_quiet,
+                    before_publish=(
+                        _before_candidate_lock_publish if fresh_lock else None
+                    ),
                 )
     except MediaforceRuntimeBusyError as exc:
         raise AV1ValidationDerivationError(
@@ -1627,9 +1652,11 @@ def record_av1_validation_derivation_visual_verdict(
         concern_tags: list[str],
         evidence_ids: list[str],
         moment_indexes: list[int],
-        recorded_at: str,
+        recorded_at: str | None = None,
+        now_iso: Callable[[], str] | None = None,
 ) -> AV1ValidationDerivationTerminalRecord:
     config = load_config(config_path)
+    clock = now_iso or _now_iso
     try:
         with exclusive_mediaforce_runtime_lock(
             config,
@@ -1655,6 +1682,7 @@ def record_av1_validation_derivation_visual_verdict(
                     evidence_ids=evidence_ids,
                     moment_indexes=moment_indexes,
                     recorded_at=recorded_at,
+                    clock=clock,
                 )
             except _AV1ValidationDerivationVerdictSafetyStop:
                 artifact_root = _validated_av1_validation_derivation_artifact_root(
@@ -1705,7 +1733,8 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         concern_tags: list[str],
         evidence_ids: list[str],
         moment_indexes: list[int],
-        recorded_at: str,
+        recorded_at: str | None,
+        clock: Callable[[], str],
 ) -> AV1ValidationDerivationTerminalRecord:
     if attempt.status != "review_pending":
         raise AV1ValidationDerivationError("AV1 derivation attempt is not awaiting visual review")
@@ -1761,11 +1790,34 @@ def _record_av1_validation_derivation_visual_verdict_locked(
     terminal_records_directory = artifact_root / "terminal-records"
     calibration = attempt.calibration_payload()
     sample_item = object_dict(calibration.get("sample_item"))
+
+    def _assert_fresh_authorization() -> None:
+        try:
+            assert_av1_validation_derivation_authorization_active(
+                plan,
+                at=clock(),
+            )
+        except AV1ValidationDerivationError as exc:
+            raise _AV1ValidationDerivationVerdictSafetyStop(
+                "AV1 derivation authorization expired before immutable verdict publication"
+            ) from exc
+
+    claim_path = (
+        artifact_root / "verdict-claims" / f"{attempt.assignment_id}.json"
+    )
+    claim_exists = claim_path.exists() or claim_path.is_symlink()
+    effective_recorded_at = (
+        recorded_at
+        if recorded_at is not None
+        else ("" if claim_exists else clock())
+    )
+
     claim_created = ensure_av1_validation_derivation_verdict_claim(
         artifact_root / "verdict-claims",
         plan=plan,
         attempt=attempt,
-        claimed_at=recorded_at,
+        claimed_at=effective_recorded_at,
+        before_publish=(None if claim_exists else _assert_fresh_authorization),
     )
     existing_verdict_intent = (
         None
@@ -1780,11 +1832,13 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         raise _AV1ValidationDerivationVerdictSafetyStop(
             "AV1 derivation interrupted verdict claim stopped the affected cell"
         )
+    if existing_verdict_intent is not None:
+        effective_recorded_at = str(existing_verdict_intent["recorded_at"])
     if claim_created:
         try:
             assert_av1_validation_derivation_authorization_active(
                 plan,
-                at=recorded_at,
+                at=effective_recorded_at,
             )
         except AV1ValidationDerivationError as exc:
             raise _AV1ValidationDerivationVerdictSafetyStop(
@@ -1836,7 +1890,10 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                     concern_tags=concern_tags,
                     evidence_ids=evidence_ids,
                     moment_indexes=moment_indexes,
-                    recorded_at=recorded_at,
+                    recorded_at=effective_recorded_at,
+                    before_publish=(
+                        _assert_fresh_authorization if claim_created else None
+                    ),
                 )
                 frozen_verdict = str(verdict_intent["verdict"])
                 frozen_concern_tags = [

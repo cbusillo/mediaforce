@@ -55,6 +55,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationReviewDecision,
     AV1ValidationDerivationReviewEnvelope,
+    assert_av1_validation_derivation_authorization_active,
     AV1ValidationDerivationReviewLane,
     _code_review_marker,
     _completed_code_review_message,
@@ -697,7 +698,6 @@ def _run_derivation_action_body(
             concern_tags=args.concern_tag,
             evidence_ids=args.evidence_id,
             moment_indexes=args.moment_index,
-            recorded_at=_now_iso(),
         )
         _print_partition_payload(
             {
@@ -999,7 +999,8 @@ def _run_derivation_proposal_action(
         proposal_path = (
             artifact_root / "proposals" / f"{args.cell_plan_id}.json"
         )
-        if proposal_path.exists() or proposal_path.is_symlink():
+        proposal_exists = proposal_path.exists() or proposal_path.is_symlink()
+        if proposal_exists:
             persisted_proposal = load_av1_validation_derivation_candidate_proposal(
                 artifact_root,
                 plan=plan,
@@ -1025,11 +1026,18 @@ def _run_derivation_proposal_action(
         if evaluation.proposal is None:
             return 2
         assert_av1_validation_derivation_execution_environment(plan)
+        def _before_proposal_publish() -> None:
+            source_sha256_session.assert_quiet()
+            assert_av1_validation_derivation_authorization_active(
+                plan,
+                at=_now_iso(),
+            )
+
         write_av1_validation_derivation_candidate_proposal(
             artifact_root,
             plan=plan,
             proposal=evaluation.proposal,
-            before_publish=source_sha256_session.assert_quiet,
+            before_publish=(None if proposal_exists else _before_proposal_publish),
         )
         return 0
 
@@ -1415,6 +1423,7 @@ def _private_review_runner(
     path = directory / "code"
     descriptor = -1
     guard: MacOSFileIntegrityGuard | None = None
+    cleanup_allowed = False
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
@@ -1467,11 +1476,20 @@ def _private_review_runner(
                 descriptor,
                 expected_sha256=expected_sha256,
             )
+            cleanup_allowed = True
     finally:
         if guard is not None:
             guard.close()
         if descriptor >= 0:
             os.close(descriptor)
+        if cleanup_allowed:
+            try:
+                path.unlink()
+                directory.rmdir()
+            except OSError as exc:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation private Every Code executable cleanup failed"
+                ) from exc
 
 
 def _load_existing_derivation_review(

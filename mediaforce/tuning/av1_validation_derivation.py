@@ -2740,6 +2740,7 @@ def ensure_av1_validation_derivation_verdict_claim(
         plan: AV1ValidationDerivationPlan,
         attempt: AV1ValidationDerivationAttempt,
         claimed_at: str,
+        before_publish: Callable[[], None] | None = None,
 ) -> bool:
     if attempt.plan_id != plan.plan_id or attempt.status != "review_pending":
         raise AV1ValidationDerivationError(
@@ -2781,7 +2782,11 @@ def ensure_av1_validation_derivation_verdict_claim(
         attempt=attempt,
     )
     try:
-        _write_owner_only(path, canonical_json_bytes(payload))
+        _write_owner_only(
+            path,
+            canonical_json_bytes(payload),
+            before_publish=before_publish,
+        )
         return True
     except _AV1ValidationDerivationArtifactAlreadyExists:
         if not path.exists():
@@ -2884,6 +2889,7 @@ def resolve_av1_validation_derivation_verdict_intent(
         evidence_ids: Sequence[str],
         moment_indexes: Sequence[int],
         recorded_at: str,
+        before_publish: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     if attempt.plan_id != plan.plan_id or attempt.status != "review_pending":
         raise AV1ValidationDerivationError(
@@ -2952,7 +2958,11 @@ def resolve_av1_validation_derivation_verdict_intent(
                 "AV1 derivation verdict intent is outside its authorization window"
             )
         try:
-            _write_owner_only(path, canonical_json_bytes(payload))
+            _write_owner_only(
+                path,
+                canonical_json_bytes(payload),
+                before_publish=before_publish,
+            )
             return payload
         except _AV1ValidationDerivationArtifactAlreadyExists:
             if not path.exists():
