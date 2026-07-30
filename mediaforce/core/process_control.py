@@ -1,10 +1,13 @@
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
 
 
 class ProcessCancelledError(RuntimeError):
@@ -12,6 +15,14 @@ class ProcessCancelledError(RuntimeError):
 
 
 class ScheduleWindowClosedError(ProcessCancelledError):
+    pass
+
+
+class ProcessDeadlineExpiredError(ScheduleWindowClosedError):
+    pass
+
+
+class ProcessDeadlineEnforcementError(RuntimeError):
     pass
 
 
@@ -24,6 +35,7 @@ class ManagedProcessController:
         self._cancel_message = "Operation was cancelled."
         self._terminate_process_group = False
         self._activity_guard: Callable[[], None] | None = None
+        self._process_deadline_ns: int | None = None
 
     def attach(self, process: subprocess.Popen[str], *, terminate_process_group: bool = False) -> None:
         with self._lock:
@@ -58,6 +70,27 @@ class ManagedProcessController:
             self._process = None
             self._terminate_process_group = False
             self._activity_guard = None
+            self._process_deadline_ns = None
+
+    @contextmanager
+    def absolute_deadline(self, deadline: datetime) -> Iterator[None]:
+        if deadline.tzinfo is None:
+            raise ValueError("Process deadline must include a UTC offset")
+        requested_deadline_ns = int(deadline.timestamp() * 1_000_000_000)
+        with self._lock:
+            previous_deadline_ns = self._process_deadline_ns
+            active_deadline_ns = (
+                requested_deadline_ns
+                if previous_deadline_ns is None
+                else min(previous_deadline_ns, requested_deadline_ns)
+            )
+            self._process_deadline_ns = active_deadline_ns
+        try:
+            yield
+        finally:
+            with self._lock:
+                if self._process_deadline_ns == active_deadline_ns:
+                    self._process_deadline_ns = previous_deadline_ns
 
     @contextmanager
     def activity_guard(
@@ -88,10 +121,17 @@ class ManagedProcessController:
             cancelled = self._cancel_requested
             error_type = self._cancel_error_type
             message = self._cancel_message
+            process_deadline_ns = self._process_deadline_ns
         if cancelled:
             raise error_type(message)
         if activity_guard is not None:
             activity_guard()
+        if process_deadline_ns is not None and time.time_ns() >= process_deadline_ns:
+            raise ProcessDeadlineExpiredError("Process authorization deadline expired.")
+
+    def process_deadline_ns(self) -> int | None:
+        with self._lock:
+            return self._process_deadline_ns
 
     @property
     def cancelled(self) -> bool:
@@ -184,17 +224,59 @@ def run_command(
         )
 
     process_controller.throw_if_cancelled()
+    process_deadline_ns = process_controller.process_deadline_ns()
     stdout_pipe = subprocess.PIPE if capture_output else None
     stderr_pipe = subprocess.PIPE if capture_output else None
-    process = subprocess.Popen(
-        cmd,
-        stdin=subprocess.PIPE if input_text is not None else None,
-        stdout=stdout_pipe,
-        stderr=stderr_pipe,
-        text=text,
-        env=env,
-        start_new_session=True,
-    )
+    deadline_status_descriptor = -1
+    deadline_status_write_descriptor = -1
+    process_cmd = cmd
+    if process_deadline_ns is not None:
+        if not hasattr(os, "fork") or not hasattr(signal, "setitimer"):
+            raise ProcessDeadlineEnforcementError(
+                "Absolute process deadline enforcement is unavailable."
+            )
+        deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
+        os.set_blocking(deadline_status_descriptor, False)
+        helper_path = Path(__file__).with_name("_process_deadline.py")
+        process_cmd = [
+            sys.executable,
+            "-I",
+            str(helper_path),
+            str(process_deadline_ns),
+            str(deadline_status_write_descriptor),
+            "--",
+            *cmd,
+        ]
+    try:
+        if deadline_status_write_descriptor >= 0:
+            process = subprocess.Popen(
+                process_cmd,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=stdout_pipe,
+                stderr=stderr_pipe,
+                text=text,
+                env=env,
+                start_new_session=True,
+                pass_fds=(deadline_status_write_descriptor,),
+            )
+        else:
+            process = subprocess.Popen(
+                process_cmd,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=stdout_pipe,
+                stderr=stderr_pipe,
+                text=text,
+                env=env,
+                start_new_session=True,
+            )
+    except BaseException:
+        if deadline_status_descriptor >= 0:
+            os.close(deadline_status_descriptor)
+        if deadline_status_write_descriptor >= 0:
+            os.close(deadline_status_write_descriptor)
+        raise
+    if deadline_status_write_descriptor >= 0:
+        os.close(deadline_status_write_descriptor)
     attached = False
     try:
         process_controller.attach(process, terminate_process_group=True)
@@ -224,9 +306,25 @@ def run_command(
                 "Managed process cleanup also failed: "
                 f"{type(error).__name__}: {error}"
             )
+        if deadline_status_descriptor >= 0:
+            os.close(deadline_status_descriptor)
         raise
     finally:
         process_controller.clear(process)
+    deadline_status = b""
+    if deadline_status_descriptor >= 0:
+        try:
+            deadline_status = os.read(deadline_status_descriptor, 16)
+        except BlockingIOError:
+            pass
+        finally:
+            os.close(deadline_status_descriptor)
+    if b"E" in deadline_status:
+        raise ProcessDeadlineExpiredError("Process authorization deadline expired.")
+    if b"U" in deadline_status:
+        raise ProcessDeadlineEnforcementError(
+            "Absolute process deadline enforcement failed closed."
+        )
     process_controller.throw_if_cancelled()
     completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if check and completed.returncode:

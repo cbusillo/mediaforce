@@ -32,7 +32,11 @@ from mediaforce.core.file_integrity import (
     probe_macos_file_integrity,
     stable_absolute_path,
 )
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import (
+    ManagedProcessController,
+    ProcessCancelledError,
+    ProcessDeadlineExpiredError,
+)
 from mediaforce.core.type_defs import float_value, int_value, mapping_dict, object_dict, object_list
 from mediaforce.core.utils import (
     descriptor_content_version_fingerprint,
@@ -641,6 +645,7 @@ def _av1_validation_derivation_implementation_files(
 def av1_validation_derivation_execution_environment_sha256(
         *,
         quality_metric: str,
+        process_controller: ManagedProcessController | None = None,
 ) -> str:
     try:
         assert_macos_file_integrity_capability()
@@ -648,7 +653,10 @@ def av1_validation_derivation_execution_environment_sha256(
         raise AV1ValidationDerivationError(
             "AV1 derivation source-integrity monitoring is unavailable"
         ) from exc
-    toolchain = quality_toolchain_identity(quality_metric=quality_metric)
+    toolchain = quality_toolchain_identity(
+        quality_metric=quality_metric,
+        process_controller=process_controller,
+    )
     if toolchain.get("status") != "available":
         raise AV1ValidationDerivationError(
             "AV1 derivation execution toolchain is unavailable"
@@ -683,6 +691,8 @@ def assert_av1_validation_derivation_runtime_context(
 
 def assert_av1_validation_derivation_execution_environment(
         plan: AV1ValidationDerivationPlan,
+        *,
+        process_controller: ManagedProcessController | None = None,
 ) -> None:
     quality_metrics = {assignment.quality_metric for assignment in plan.assignments}
     if len(quality_metrics) != 1:
@@ -692,6 +702,7 @@ def assert_av1_validation_derivation_execution_environment(
     if (
         av1_validation_derivation_execution_environment_sha256(
             quality_metric=next(iter(quality_metrics)),
+            process_controller=process_controller,
         )
         != plan.execution_environment_sha256
     ):
@@ -703,8 +714,13 @@ def assert_av1_validation_derivation_execution_environment(
 def assert_av1_validation_derivation_execution_contract(
         manifest: AV1ValidationManifestV2,
         plan: AV1ValidationDerivationPlan,
+        *,
+        process_controller: ManagedProcessController | None = None,
 ) -> None:
-    assert_av1_validation_derivation_execution_environment(plan)
+    assert_av1_validation_derivation_execution_environment(
+        plan,
+        process_controller=process_controller,
+    )
     if (
         av1_validation_derivation_statistics_contract_sha256(manifest)
         != plan.statistics_contract_sha256
@@ -926,33 +942,37 @@ def run_av1_validation_derivation_assignment(
         now_iso: Callable[[], str] | None = None,
 ) -> AV1ValidationDerivationAttempt:
     config = load_config(config_path)
+    controller = process_controller or ManagedProcessController()
     try:
-        with exclusive_mediaforce_runtime_lock(
-            config,
-            owner_payload={
-                "purpose": "av1-derivation",
-                "plan_id": plan.plan_id,
-                "assignment_id": assignment_id,
-            },
+        with controller.absolute_deadline(
+            _timestamp(plan.authorization.valid_until)
         ):
-            migrate_config_state(config)
-            reserve_mediaforce_database_identity(
+            with exclusive_mediaforce_runtime_lock(
                 config,
-                create_if_missing=True,
-            )
-            return _run_av1_validation_derivation_assignment_locked(
-                config=config,
-                manifest=manifest,
-                partition=partition,
-                token_key=token_key,
-                plan=plan,
-                assignment_id=assignment_id,
-                attempts_directory=attempts_directory,
-                terminal_records_directory=terminal_records_directory,
-                process_controller=process_controller,
-                deps=deps,
-                now_iso=now_iso,
-            )
+                owner_payload={
+                    "purpose": "av1-derivation",
+                    "plan_id": plan.plan_id,
+                    "assignment_id": assignment_id,
+                },
+            ):
+                migrate_config_state(config)
+                reserve_mediaforce_database_identity(
+                    config,
+                    create_if_missing=True,
+                )
+                return _run_av1_validation_derivation_assignment_locked(
+                    config=config,
+                    manifest=manifest,
+                    partition=partition,
+                    token_key=token_key,
+                    plan=plan,
+                    assignment_id=assignment_id,
+                    attempts_directory=attempts_directory,
+                    terminal_records_directory=terminal_records_directory,
+                    process_controller=controller,
+                    deps=deps,
+                    now_iso=now_iso,
+                )
     except MediaforceRuntimeBusyError as exc:
         raise AV1ValidationDerivationError(
             "AV1 derivation requires the Mediaforce runtime to be paused"
@@ -1029,7 +1049,15 @@ def _run_av1_validation_derivation_assignment_locked(
             raise AV1ValidationDerivationError(
                 "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
             )
-        assert_av1_validation_derivation_execution_contract(manifest, plan)
+        assert_av1_validation_derivation_authorization_active(
+            plan,
+            at=clock(),
+        )
+        assert_av1_validation_derivation_execution_contract(
+            manifest,
+            plan,
+            process_controller=process_controller,
+        )
         if stable_absolute_path(
             av1_validation_derivation_artifact_root(config, plan)
         ) != artifact_root:
@@ -1169,6 +1197,12 @@ def _run_av1_validation_derivation_assignment_locked(
             assert_fresh_execution_context,
             run_deps.generate_compare_clips_from_review_pairs,
         ),
+        select_quality_metric=(
+            lambda _preferred: (
+                assignment.quality_metric,
+                assignment.quality_target,
+            )
+        ),
     )
     activity_guard = controller.activity_guard(assert_fresh_execution_context)
     activity_guard.__enter__()
@@ -1268,7 +1302,11 @@ def _run_av1_validation_derivation_assignment_locked(
                     ),
                 )
         assert_fresh_execution_context()
-        assert_av1_validation_derivation_execution_contract(manifest, plan)
+        assert_av1_validation_derivation_execution_contract(
+            manifest,
+            plan,
+            process_controller=controller,
+        )
         current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
             review_root=review_root,
             calibration=payload,
@@ -1313,6 +1351,16 @@ def _run_av1_validation_derivation_assignment_locked(
             assignment_id=assignment.assignment_id,
             started_at=started_at,
             completed_at=exc.completed_at,
+            status="failed",
+            reason_code="authorization_expired",
+        )
+    except ProcessDeadlineExpiredError:
+        attempt = _failed_attempt(
+            plan=plan,
+            partition=partition,
+            assignment_id=assignment.assignment_id,
+            started_at=started_at,
+            completed_at=clock(),
             status="failed",
             reason_code="authorization_expired",
         )

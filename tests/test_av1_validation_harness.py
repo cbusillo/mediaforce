@@ -409,23 +409,45 @@ class AV1ValidationHarnessTests(unittest.TestCase):
                 "trace_id": "operator-success",
             })
 
+    def test_candidate_review_may_share_authorization_second(self) -> None:
+        plan, machine, context = self._candidate_fixture(
+            crf_center=20.0,
+            reviewed_at="2026-07-22T00:00:00Z",
+            authorized_at="2026-07-22T00:00:00Z",
+        )
+
+        decision = plan_av1_validation_harness_case(
+            manifest=self.manifest,
+            plan=plan,
+            machine_binding=machine,
+            mode="guided",
+            candidate_context=context,
+        )
+
+        self.assertEqual(decision.mode, "guided")
+
     def _candidate_fixture(
             self,
             *,
             crf_center: float,
+            reviewed_at: str = "2026-07-21T00:00:00Z",
+            authorized_at: str = "2026-07-22T00:00:00Z",
     ) -> tuple[
         AV1ColdStartValidationCellPlanV1,
         AV1ValidationHarnessMachineBindingV1,
         AV1ValidationCandidateContextV1,
     ]:
         plan = self._plan("typical_live_action_balanced_candidate")
-        candidate_locks = self._candidate_locks(crf_center=crf_center)
+        candidate_locks = self._candidate_locks(
+            crf_center=crf_center,
+            reviewed_at=reviewed_at,
+        )
         authorization = build_av1_cold_start_validation_execution_authorization(
             manifest=self.manifest,
             selection_lock_sha256=SELECTION_LOCK_SHA256,
             candidate_locks=candidate_locks,
             review_environment_token="review_environment",
-            authorized_at="2026-07-22T00:00:00Z",
+            authorized_at=authorized_at,
         )
         machine = self._machine()
         context = build_av1_validation_candidate_context(
@@ -444,12 +466,14 @@ class AV1ValidationHarnessTests(unittest.TestCase):
             *,
             crf_center: float,
             selection_lock_sha256: str = SELECTION_LOCK_SHA256,
+            reviewed_at: str = "2026-07-21T00:00:00Z",
     ) -> tuple[AV1ColdStartValidationCandidateLockV1, ...]:
         return tuple(
             self._candidate_lock(
                 plan,
                 crf_center=crf_center,
                 selection_lock_sha256=selection_lock_sha256,
+                reviewed_at=reviewed_at,
             )
             for plan in self.manifest.cell_plans
             if plan.mode == "publication_candidate"
@@ -461,6 +485,7 @@ class AV1ValidationHarnessTests(unittest.TestCase):
             *,
             crf_center: float,
             selection_lock_sha256: str = SELECTION_LOCK_SHA256,
+            reviewed_at: str = "2026-07-21T00:00:00Z",
     ) -> AV1ColdStartValidationCandidateLockV1:
         target_bitrate = int(self.ledger.remaining_video_bitrate_bps or 0)
         return build_av1_cold_start_validation_candidate_lock(
@@ -488,7 +513,7 @@ class AV1ValidationHarnessTests(unittest.TestCase):
             derivation_snapshot_sha256=f"sha256:{'b' * 64}",
             selection_lock_sha256=selection_lock_sha256,
             locked_at="2026-07-20T00:00:00Z",
-            reviewed_at="2026-07-21T00:00:00Z",
+            reviewed_at=reviewed_at,
         )
 
     def _machine(self) -> AV1ValidationHarnessMachineBindingV1:

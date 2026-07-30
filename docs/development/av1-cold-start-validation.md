@@ -467,7 +467,21 @@ every reservation, direct config lock, and metadata-lock handoff. Unlinking the
 metadata lock, changing configured state paths, or renaming and replacing its
 parent cannot create a second lock domain for another compliant runtime. The
 lock path resolves `web_state_dir` symlinks before choosing that domain, so
-aliases cannot create a second one. Fresh execution samples its authorization
+aliases cannot create a second one. Guarded SQLite engines verify the reserved
+database identity before and after every cursor operation, after writable
+transaction commit, and around the raw legacy-schema bootstrap. Persistent path
+replacement during a query, migration, or commit therefore fails closed before
+later evidence publication can proceed.
+Fresh execution installs its absolute authorization deadline before toolchain
+preflight. Every managed command then starts through Mediaforce's private
+isolated deadline runner. The runner refuses to execute the target after the
+deadline, arms an independently scheduled process-exit watchdog first, and the
+watchdog immediately kills the complete target process group at expiration even
+if the parent operator process is stopped. A dedicated status pipe distinguishes
+deadline expiry from an ordinary target exit code, and unavailable watchdog
+support fails closed. The assignment's already-frozen quality metric and target
+are selected without launching a second unmanaged capability probe.
+Fresh execution samples its authorization
 timestamp only after all preflight checks and immediately before the immutable
 claim.
 `scripts/mediaforce-dev.sh` leaves that persistent lock path in place when
@@ -668,7 +682,11 @@ before publication. The live authorization is checked again immediately before
 the first exclusive candidate-lock rename. Recovery of an existing
 candidate-lock envelope instead
 reuses its persisted `locked_at` and never calls the runtime clock. The lock is
-computed and written through one runtime-owned finalization API. That API
+compatible with the canonical V1 chronology
+`locked_at <= reviewed_at <= authorized_at`; because these artifacts use whole
+UTC seconds, a review and its later authorization may legitimately share the
+same serialized second. The lock is computed and written through one
+runtime-owned finalization API. That API
 derives the canonical root from config and the immutable plan path, loads the
 attempts, terminals,
 proposal, review claims, and review envelopes itself, and exposes no

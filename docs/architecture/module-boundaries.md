@@ -43,7 +43,9 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `binaries.py`
   - ffmpeg/ffprobe binary discovery
 - `process_control.py`
-  - managed subprocess cancellation and command helpers
+  - managed subprocess cancellation, absolute deadlines, and command helpers
+- `_process_deadline.py`
+  - private isolated target launcher and independent process-group watchdog
 
 Guidance:
 

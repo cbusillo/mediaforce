@@ -2,10 +2,11 @@ from logging.config import fileConfig
 
 # noinspection PyPackageRequirements
 from alembic import context
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy import pool
 
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
+from mediaforce.core.db_migrations import register_database_identity_guards
 from mediaforce.core.db_tables import metadata
 
 config = context.config
@@ -40,12 +41,7 @@ def run_migrations_online() -> None:
         connect_args={"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
         poolclass=pool.NullPool,
     )
-    if identity_guard is not None:
-        event.listen(
-            connectable,
-            "connect",
-            lambda _connection, _record: identity_guard(),
-        )
+    register_database_identity_guards(connectable, identity_guard)
 
     with connectable.connect() as connection:
         if identity_guard is not None:

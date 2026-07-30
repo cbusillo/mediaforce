@@ -50,13 +50,31 @@ def create_engine_for_path(
         poolclass=NullPool,
         future=True,
     )
-    if identity_guard is not None:
-        event.listen(
-            engine,
-            "connect",
-            lambda _connection, _record: identity_guard(),
-        )
+    register_database_identity_guards(engine, identity_guard)
     return engine
+
+
+def register_database_identity_guards(
+        engine: Engine,
+        identity_guard: Callable[[], None] | None,
+) -> None:
+    if identity_guard is None:
+        return
+    event.listen(
+        engine,
+        "connect",
+        lambda _connection, _record: identity_guard(),
+    )
+    event.listen(
+        engine,
+        "before_cursor_execute",
+        lambda *_args, **_kwargs: identity_guard(),
+    )
+    event.listen(
+        engine,
+        "after_cursor_execute",
+        lambda *_args, **_kwargs: identity_guard(),
+    )
 
 
 def run_migrations(
@@ -81,7 +99,10 @@ def run_migrations(
                 _run_identity_guard(identity_guard)
                 return
             if _has_user_tables(connection):
-                _bootstrap_legacy_schema(connection)
+                _bootstrap_legacy_schema(
+                    connection,
+                    identity_guard=identity_guard,
+                )
                 _run_identity_guard(identity_guard)
                 _stamp_revision(
                     db_path,
@@ -118,7 +139,11 @@ def _has_user_tables(connection: Connection) -> bool:
     return row is not None
 
 
-def _bootstrap_legacy_schema(connection: Connection) -> None:
+def _bootstrap_legacy_schema(
+        connection: Connection,
+        *,
+        identity_guard: Callable[[], None] | None = None,
+) -> None:
     # Keep this bridge aligned with the initial Alembic revision so future
     # revisions still run normally after the one-time legacy stamp.
     raw_connection = connection.connection.driver_connection
@@ -126,7 +151,9 @@ def _bootstrap_legacy_schema(connection: Connection) -> None:
         raise RuntimeError("SQLite driver connection is unavailable for legacy schema bootstrap.")
     sqlite_connection = cast(Any, raw_connection)
     schema_sql = files("mediaforce.core").joinpath("sql", "schema.sql").read_text(encoding="utf-8")
+    _run_identity_guard(identity_guard)
     sqlite_connection.executescript(schema_sql)
+    _run_identity_guard(identity_guard)
     _ensure_column(connection, "scan_runs", "scope", "TEXT NOT NULL DEFAULT 'unknown'")
     _ensure_column(connection, "scan_runs", "prefixes_json", "TEXT")
     _ensure_column(connection, "scan_runs", "owner_pid", "INTEGER")
@@ -151,7 +178,9 @@ def _bootstrap_legacy_schema(connection: Connection) -> None:
     _ensure_column(connection, "encode_jobs", "progress_json", "TEXT")
     _ensure_column(connection, "library_items", "cadence_summary_json", "TEXT")
     _ensure_column(connection, "library_items", "media_fingerprint_json", "TEXT")
+    _run_identity_guard(identity_guard)
     connection.commit()
+    _run_identity_guard(identity_guard)
 
 
 def _ensure_column(connection: Connection, table_name: str, column_name: str, column_definition: str) -> None:

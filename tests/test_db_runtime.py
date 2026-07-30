@@ -219,6 +219,56 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
                 self.assertEqual(db_path.read_bytes(), b"replacement")
 
+    def test_open_db_rechecks_identity_after_commit(self) -> None:
+        events: list[str] = []
+
+        class _FakeConnection:
+            @staticmethod
+            def in_transaction() -> bool:
+                return True
+
+            @staticmethod
+            def rollback() -> None:
+                raise AssertionError("rollback should not be called")
+
+            def commit(self) -> None:
+                events.append("commit")
+
+            def close(self) -> None:
+                events.append("close")
+
+        guard_calls = 0
+
+        def identity_guard() -> None:
+            nonlocal guard_calls
+            guard_calls += 1
+            events.append("guard")
+            if guard_calls == 2:
+                raise MediaforceRuntimeBusyError("database identity changed")
+
+        with (
+            patch(
+                "mediaforce.core.db._assert_writable_database_identity_reserved",
+                return_value=(7, 11, 22),
+            ),
+            patch(
+                "mediaforce.core.db._database_identity_guard",
+                return_value=identity_guard,
+            ),
+            patch(
+                "mediaforce.core.db._connect_with_reserved_identity",
+                return_value=_FakeConnection(),
+            ),
+            self.assertRaisesRegex(
+                MediaforceRuntimeBusyError,
+                "database identity changed",
+            ),
+        ):
+            with open_db(Path("library.sqlite3")):
+                pass
+
+        self.assertEqual(events, ["guard", "commit", "guard", "close"])
+
     def test_runtime_lease_rejects_replaced_database_inode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -492,6 +542,50 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     replacement_path.chmod(0o600)
                     replacement_path.replace(db_path)
                     connection.exec_driver_sql("SELECT 1")
+
+    def test_open_readonly_db_rechecks_identity_after_each_query(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "readonly-post-query-guard-probe"},
+                ),
+                open_readonly_db(db_path) as connection,
+            ):
+                replacement_path = root / "replacement.sqlite3"
+                replacement_path.write_bytes(db_path.read_bytes())
+                replacement_path.chmod(0o600)
+                original_path = root / "library-original.sqlite3"
+
+                def replace_database() -> int:
+                    db_path.replace(original_path)
+                    replacement_path.replace(db_path)
+                    return 1
+
+                raw_connection = connection.connection.driver_connection
+                raw_connection.create_function("replace_database", 0, replace_database)
+                with self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "identity is not reserved|identity changed",
+                ):
+                    connection.exec_driver_sql("SELECT replace_database()")
+                db_path.unlink()
+                original_path.replace(db_path)
 
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

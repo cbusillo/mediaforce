@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 from typing import TypeAlias
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import RowMapping
 
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
 from mediaforce.core.db_migrations import create_engine_for_path
+from mediaforce.core.db_migrations import register_database_identity_guards
 from mediaforce.core.db_migrations import run_migrations
 
 DBClient: TypeAlias = Connection
@@ -136,6 +137,8 @@ def open_db(db_path: Path) -> Iterator[Connection]:
                 identity_guard()
             if connection.in_transaction():
                 connection.commit()
+            if identity_guard is not None:
+                identity_guard()
         finally:
             connection.close()
 
@@ -155,17 +158,7 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
     if not resolved_path.is_file():
         raise FileNotFoundError(f"Mediaforce database does not exist: {resolved_path}")
     engine = create_engine(f"sqlite+pysqlite:///file:{resolved_path}?mode=ro&uri=true")
-    if identity_guard is not None:
-        event.listen(
-            engine,
-            "connect",
-            lambda _connection, _record: identity_guard(),
-        )
-        event.listen(
-            engine,
-            "before_cursor_execute",
-            lambda *_args, **_kwargs: identity_guard(),
-        )
+    register_database_identity_guards(engine, identity_guard)
     connection = engine.connect()
     try:
         if identity_guard is not None:

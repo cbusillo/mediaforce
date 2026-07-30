@@ -3776,6 +3776,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         timestamps = iter((
             "2026-07-31T23:59:57Z",
             "2026-07-31T23:59:58Z",
+            "2026-07-31T23:59:58Z",
             "2026-07-31T23:59:59Z",
             VALID_UNTIL,
         ))

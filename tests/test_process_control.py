@@ -1,10 +1,18 @@
+from datetime import UTC, datetime, timedelta
+import os
+from pathlib import Path
 import signal
+import subprocess
 import sys
+import tempfile
+import time
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
+from mediaforce.core import process_control as process_control_module
 from mediaforce.core.process_control import (
     ManagedProcessController,
+    ProcessDeadlineExpiredError,
     ScheduleWindowClosedError,
     _terminate_process,
     run_command,
@@ -62,6 +70,141 @@ class ProcessControlTests(TestCase):
         guard.assert_called_once_with()
         popen_mock.assert_not_called()
 
+    def test_deadline_runner_rejects_target_after_parent_launch_pause(self) -> None:
+        real_popen = process_control_module.subprocess.Popen
+        controller = ManagedProcessController()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / "target-ran"
+
+            def delayed_popen(*args: object, **kwargs: object) -> subprocess.Popen[str]:
+                time.sleep(0.2)
+                return real_popen(*args, **kwargs)
+
+            with (
+                controller.absolute_deadline(
+                    datetime.now(UTC) + timedelta(seconds=0.1)
+                ),
+                patch.object(
+                    process_control_module.subprocess,
+                    "Popen",
+                    side_effect=delayed_popen,
+                ),
+                self.assertRaises(ProcessDeadlineExpiredError),
+            ):
+                run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ran')",
+                        str(marker_path),
+                    ],
+                    process_controller=controller,
+                )
+
+            self.assertFalse(marker_path.exists())
+
+    def test_target_exit_124_is_not_misclassified_as_deadline(self) -> None:
+        controller = ManagedProcessController()
+
+        with controller.absolute_deadline(
+            datetime.now(UTC) + timedelta(seconds=2)
+        ):
+            result = run_command(
+                [sys.executable, "-c", "raise SystemExit(124)"],
+                process_controller=controller,
+            )
+
+        self.assertEqual(result.returncode, 124)
+
+    def test_nested_absolute_deadlines_use_earliest_and_restore_previous(self) -> None:
+        controller = ManagedProcessController()
+        outer = datetime.now(UTC) + timedelta(seconds=10)
+        later = outer + timedelta(seconds=10)
+        earlier = outer - timedelta(seconds=5)
+
+        with controller.absolute_deadline(outer):
+            outer_deadline_ns = controller.process_deadline_ns()
+            with controller.absolute_deadline(later):
+                self.assertEqual(controller.process_deadline_ns(), outer_deadline_ns)
+            self.assertEqual(controller.process_deadline_ns(), outer_deadline_ns)
+            with controller.absolute_deadline(earlier):
+                self.assertLess(
+                    controller.process_deadline_ns() or 0,
+                    outer_deadline_ns or 0,
+                )
+            self.assertEqual(controller.process_deadline_ns(), outer_deadline_ns)
+
+        self.assertIsNone(controller.process_deadline_ns())
+
+    def test_deadline_watchdog_kills_group_while_parent_is_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            started_path = root / "target-started"
+            descendant_path = root / "descendant-ran"
+            target_script = "\n".join((
+                "from pathlib import Path",
+                "import subprocess",
+                "import sys",
+                "import time",
+                "Path(sys.argv[1]).write_text('started')",
+                "subprocess.Popen([",
+                "    sys.executable, '-c',",
+                "    \"from pathlib import Path; import sys, time; time.sleep(2.2); Path(sys.argv[1]).write_text('ran')\",",
+                "    sys.argv[2],",
+                "])",
+                "time.sleep(10)",
+            ))
+            harness_script = "\n".join((
+                "from datetime import UTC, datetime, timedelta",
+                "import sys",
+                "from mediaforce.core.process_control import (",
+                "    ManagedProcessController,",
+                "    ProcessDeadlineExpiredError,",
+                "    run_command,",
+                ")",
+                "controller = ManagedProcessController()",
+                "try:",
+                "    with controller.absolute_deadline(datetime.now(UTC) + timedelta(seconds=1.5)):",
+                "        run_command([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]], process_controller=controller)",
+                "except ProcessDeadlineExpiredError:",
+                "    raise SystemExit(0)",
+                "raise SystemExit(3)",
+            ))
+            harness = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    harness_script,
+                    target_script,
+                    str(started_path),
+                    str(descendant_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                wait_deadline = time.monotonic() + 2
+                while not started_path.exists() and time.monotonic() < wait_deadline:
+                    time.sleep(0.02)
+                self.assertTrue(started_path.exists())
+                os.kill(harness.pid, signal.SIGSTOP)
+                time.sleep(2.5)
+                os.kill(harness.pid, signal.SIGCONT)
+                stdout, stderr = harness.communicate(timeout=5)
+            finally:
+                if harness.poll() is None:
+                    try:
+                        os.kill(harness.pid, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
+                    harness.kill()
+                    harness.communicate()
+
+            self.assertEqual(harness.returncode, 0, f"stdout={stdout!r} stderr={stderr!r}")
+            self.assertFalse(descendant_path.exists())
+
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_run_command_starts_new_session_for_managed_processes(self, popen_mock: Mock) -> None:
         process = Mock()
@@ -81,6 +224,7 @@ class ProcessControlTests(TestCase):
         process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
         popen_mock.return_value = process
         controller = Mock(spec=ManagedProcessController)
+        controller.process_deadline_ns.return_value = None
 
         with self.assertRaises(KeyboardInterrupt):
             run_command(["echo", "ok"], process_controller=controller)
@@ -105,6 +249,7 @@ class ProcessControlTests(TestCase):
         popen_mock.return_value = process
         controller = Mock(spec=ManagedProcessController)
         controller.attach.side_effect = KeyboardInterrupt()
+        controller.process_deadline_ns.return_value = None
 
         with self.assertRaises(KeyboardInterrupt):
             run_command(["echo", "ok"], process_controller=controller)

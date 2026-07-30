@@ -568,7 +568,7 @@ def _assert_candidate_lock_is_executable(
     locked_at = _parse_timestamp(candidate_lock.locked_at)
     reviewed_at = _parse_timestamp(candidate_lock.reviewed_at)
     authorized_at = _parse_timestamp(authorization.authorized_at)
-    if not oldest_derivation <= newest_derivation <= locked_at <= reviewed_at < authorized_at:
+    if not oldest_derivation <= newest_derivation <= locked_at <= reviewed_at <= authorized_at:
         raise AV1ValidationHarnessError("AV1 validation candidate chronology is invalid")
     if (locked_at - oldest_derivation).days > manifest.criteria.maximum_derivation_age_days:
         raise AV1ValidationHarnessError("AV1 validation derivation evidence is stale")
