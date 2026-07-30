@@ -1435,18 +1435,71 @@ def build_av1_cold_start_validation_candidate_lock(
     )
 
 
+def resolve_av1_cold_start_validation_candidate_lock_set(
+        *,
+        manifest: AV1ColdStartValidationManifestV1,
+        candidate_locks: Sequence[AV1ColdStartValidationCandidateLockV1],
+        selection_lock_sha256: str | None = None,
+) -> dict[str, AV1ColdStartValidationCandidateLockV1]:
+    publication_plans = {
+        plan.cell_plan_id: plan
+        for plan in manifest.cell_plans
+        if plan.mode == "publication_candidate"
+    }
+    if not publication_plans:
+        raise AV1ColdStartValidationError("AV1 validation manifest declares no publication candidate cell")
+    locks = tuple(candidate_locks)
+    if len(locks) != len(publication_plans):
+        raise AV1ColdStartValidationError(
+            "AV1 validation holdout requires exactly one candidate lock per publication candidate cell"
+        )
+    if len({lock.candidate_lock_id for lock in locks}) != len(locks):
+        raise AV1ColdStartValidationError("AV1 validation candidate locks must be independently approved")
+    locks_by_plan: dict[str, AV1ColdStartValidationCandidateLockV1] = {}
+    for lock in locks:
+        plan = publication_plans.get(lock.cell_plan_id)
+        if plan is None:
+            raise AV1ColdStartValidationError(
+                "AV1 validation candidate lock does not bind a preregistered publication candidate cell"
+            )
+        if lock.cell_plan_id in locks_by_plan:
+            raise AV1ColdStartValidationError(
+                "AV1 validation publication candidate cell carries more than one candidate lock"
+            )
+        if lock.manifest_id != manifest.manifest_id:
+            raise AV1ColdStartValidationError("AV1 validation candidate lock references another manifest")
+        if lock.review_state != "approved_for_holdout":
+            raise AV1ColdStartValidationError("AV1 validation candidate lock is not approved for holdout")
+        if not plan.trait_selector.matches(lock.exact_traits):
+            raise AV1ColdStartValidationError("AV1 validation candidate lock traits do not match its cell")
+        locks_by_plan[lock.cell_plan_id] = lock
+    if set(locks_by_plan) != set(publication_plans):
+        raise AV1ColdStartValidationError("AV1 validation holdout requires every publication candidate lock")
+    selection_locks = {lock.selection_lock_sha256 for lock in locks}
+    if len(selection_locks) != 1:
+        raise AV1ColdStartValidationError("AV1 validation candidate locks use different selection locks")
+    if selection_lock_sha256 is not None and selection_lock_sha256 not in selection_locks:
+        raise AV1ColdStartValidationError("AV1 validation candidate locks use another selection lock")
+    return locks_by_plan
+
+
 def build_av1_cold_start_validation_execution_authorization(
         *,
-        manifest_id: str,
+        manifest: AV1ColdStartValidationManifestV1,
         selection_lock_sha256: str,
-        candidate_lock_ids: Sequence[str],
+        candidate_locks: Sequence[AV1ColdStartValidationCandidateLockV1],
         review_environment_token: str,
         authorized_at: str,
 ) -> AV1ColdStartValidationExecutionAuthorizationV1:
+    locks_by_plan = resolve_av1_cold_start_validation_candidate_lock_set(
+        manifest=manifest,
+        candidate_locks=candidate_locks,
+        selection_lock_sha256=selection_lock_sha256,
+    )
     semantic_payload = {
-        "manifest_id": manifest_id,
+        "manifest_id": manifest.manifest_id,
         "selection_lock_sha256": selection_lock_sha256,
-        "candidate_lock_ids": sorted(set(candidate_lock_ids)),
+        "candidate_lock_ids": sorted(lock.candidate_lock_id for lock in locks_by_plan.values()),
         "review_environment_token": review_environment_token,
         "authorized_at": authorized_at,
         "review_state": "approved_for_execution",
@@ -1454,7 +1507,7 @@ def build_av1_cold_start_validation_execution_authorization(
     authorization_id = _validation_id("authorization", semantic_payload)
     return AV1ColdStartValidationExecutionAuthorizationV1(
         authorization_id=authorization_id,
-        manifest_id=manifest_id,
+        manifest_id=manifest.manifest_id,
         selection_lock_sha256=selection_lock_sha256,
         candidate_lock_ids=tuple(semantic_payload["candidate_lock_ids"]),
         review_environment_token=review_environment_token,

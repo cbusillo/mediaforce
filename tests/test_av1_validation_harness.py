@@ -9,7 +9,9 @@ import unittest
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeResult
 from mediaforce.tuning.av1_cold_start import load_packaged_av1_cold_start_bundle
 from mediaforce.tuning.av1_cold_start_evaluation import (
+    AV1ColdStartValidationCandidateLockV1,
     AV1ColdStartValidationCellPlanV1,
+    AV1ColdStartValidationError,
     build_av1_cold_start_validation_candidate_lock,
     build_av1_cold_start_validation_execution_authorization,
     load_av1_cold_start_validation_manifest,
@@ -36,6 +38,7 @@ from mediaforce.web.runtime import calibration_runtime
 
 
 MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v1.json")
+SELECTION_LOCK_SHA256 = f"sha256:{'a' * 64}"
 
 
 class AV1ValidationHarnessTests(unittest.TestCase):
@@ -182,6 +185,95 @@ class AV1ValidationHarnessTests(unittest.TestCase):
                 candidate_context=context,
             )
 
+    def test_holdout_context_requires_every_authorized_candidate_lock(self) -> None:
+        plan = self._plan("typical_live_action_balanced_candidate")
+        machine = self._machine()
+        candidate_locks = self._candidate_locks(crf_center=20.0)
+        executing_lock = next(
+            lock for lock in candidate_locks if lock.cell_plan_id == plan.cell_plan_id
+        )
+        with self.assertRaises(AV1ColdStartValidationError):
+            build_av1_cold_start_validation_execution_authorization(
+                manifest=self.manifest,
+                selection_lock_sha256=SELECTION_LOCK_SHA256,
+                candidate_locks=(executing_lock,),
+                review_environment_token="review_environment",
+                authorized_at="2026-07-22T00:00:00Z",
+            )
+
+        authorization = build_av1_cold_start_validation_execution_authorization(
+            manifest=self.manifest,
+            selection_lock_sha256=SELECTION_LOCK_SHA256,
+            candidate_locks=candidate_locks,
+            review_environment_token="review_environment",
+            authorized_at="2026-07-22T00:00:00Z",
+        )
+        self.assertEqual(len(authorization.candidate_lock_ids), 2)
+
+        substituted = tuple(
+            lock if lock.cell_plan_id == plan.cell_plan_id else self._candidate_lock(
+                self._plan("animation_balanced_candidate"),
+                crf_center=21.0,
+            )
+            for lock in candidate_locks
+        )
+        rejected_lock_sets = {
+            "single_lock": (executing_lock,),
+            "duplicate_cell": (executing_lock, executing_lock),
+            "unbound_second_lock": substituted,
+            "wrong_selection_lock": self._candidate_locks(
+                crf_center=20.0,
+                selection_lock_sha256=f"sha256:{'e' * 64}",
+            ),
+        }
+        for name, locks in rejected_lock_sets.items():
+            with self.subTest(name=name), self.assertRaises(AV1ValidationHarnessError):
+                build_av1_validation_candidate_context(
+                    manifest=self.manifest,
+                    plan=plan,
+                    candidate_locks=locks,
+                    authorization=authorization,
+                    machine_binding=machine,
+                    configured_min_crf=18,
+                    configured_max_crf=38,
+                )
+
+        context = build_av1_validation_candidate_context(
+            manifest=self.manifest,
+            plan=plan,
+            candidate_locks=candidate_locks,
+            authorization=authorization,
+            machine_binding=machine,
+            configured_min_crf=18,
+            configured_max_crf=38,
+        )
+        self.assertEqual(context.candidate_lock_id, executing_lock.candidate_lock_id)
+        self.assertEqual(context.authorization_id, authorization.authorization_id)
+        self.assertEqual(
+            set(context.to_payload()),
+            {
+                "context_id",
+                "contract_version",
+                "scope",
+                "manifest_id",
+                "cell_plan_id",
+                "candidate_lock_id",
+                "authorization_id",
+                "machine_binding_id",
+                "intent_level",
+                "exact_traits",
+                "requested_crf",
+                "candidate_crf",
+                "crf_lower",
+                "crf_upper",
+                "search_signature_id",
+                "candidate_lock_payload_sha256",
+                "authorization_payload_sha256",
+                "local_evidence_present",
+                "production_prediction_allowed",
+            },
+        )
+
     def test_missing_or_tampered_machine_trace_fails_closed(self) -> None:
         plan, machine, context = self._candidate_fixture(crf_center=20.0)
         decision = plan_av1_validation_harness_case(
@@ -327,12 +419,54 @@ class AV1ValidationHarnessTests(unittest.TestCase):
         AV1ValidationCandidateContextV1,
     ]:
         plan = self._plan("typical_live_action_balanced_candidate")
-        selection_lock_sha256 = f"sha256:{'a' * 64}"
+        candidate_locks = self._candidate_locks(crf_center=crf_center)
+        authorization = build_av1_cold_start_validation_execution_authorization(
+            manifest=self.manifest,
+            selection_lock_sha256=SELECTION_LOCK_SHA256,
+            candidate_locks=candidate_locks,
+            review_environment_token="review_environment",
+            authorized_at="2026-07-22T00:00:00Z",
+        )
+        machine = self._machine()
+        context = build_av1_validation_candidate_context(
+            manifest=self.manifest,
+            plan=plan,
+            candidate_locks=candidate_locks,
+            authorization=authorization,
+            machine_binding=machine,
+            configured_min_crf=18,
+            configured_max_crf=38,
+        )
+        return plan, machine, context
+
+    def _candidate_locks(
+            self,
+            *,
+            crf_center: float,
+            selection_lock_sha256: str = SELECTION_LOCK_SHA256,
+    ) -> tuple[AV1ColdStartValidationCandidateLockV1, ...]:
+        return tuple(
+            self._candidate_lock(
+                plan,
+                crf_center=crf_center,
+                selection_lock_sha256=selection_lock_sha256,
+            )
+            for plan in self.manifest.cell_plans
+            if plan.mode == "publication_candidate"
+        )
+
+    def _candidate_lock(
+            self,
+            plan: AV1ColdStartValidationCellPlanV1,
+            *,
+            crf_center: float,
+            selection_lock_sha256: str = SELECTION_LOCK_SHA256,
+    ) -> AV1ColdStartValidationCandidateLockV1:
         target_bitrate = int(self.ledger.remaining_video_bitrate_bps or 0)
-        candidate_lock = build_av1_cold_start_validation_candidate_lock(
+        return build_av1_cold_start_validation_candidate_lock(
             manifest_id=self.manifest.manifest_id,
             cell_plan_id=plan.cell_plan_id,
-            exact_traits=("typical",),
+            exact_traits=plan.trait_selector.traits,
             crf_lower=crf_center - 2,
             crf_center=crf_center,
             crf_upper=crf_center + 2,
@@ -356,24 +490,6 @@ class AV1ValidationHarnessTests(unittest.TestCase):
             locked_at="2026-07-20T00:00:00Z",
             reviewed_at="2026-07-21T00:00:00Z",
         )
-        authorization = build_av1_cold_start_validation_execution_authorization(
-            manifest_id=self.manifest.manifest_id,
-            selection_lock_sha256=selection_lock_sha256,
-            candidate_lock_ids=(candidate_lock.candidate_lock_id,),
-            review_environment_token="review_environment",
-            authorized_at="2026-07-22T00:00:00Z",
-        )
-        machine = self._machine()
-        context = build_av1_validation_candidate_context(
-            manifest=self.manifest,
-            plan=plan,
-            candidate_lock=candidate_lock,
-            authorization=authorization,
-            machine_binding=machine,
-            configured_min_crf=18,
-            configured_max_crf=38,
-        )
-        return plan, machine, context
 
     def _machine(self) -> AV1ValidationHarnessMachineBindingV1:
         return build_av1_validation_harness_machine_binding(

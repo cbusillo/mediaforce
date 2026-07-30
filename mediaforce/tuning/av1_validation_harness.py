@@ -17,8 +17,10 @@ from mediaforce.tuning.av1_cold_start import (
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationCandidateLockV1,
     AV1ColdStartValidationCellPlanV1,
+    AV1ColdStartValidationError,
     AV1ColdStartValidationExecutionAuthorizationV1,
     AV1ColdStartValidationManifestV1,
+    resolve_av1_cold_start_validation_candidate_lock_set,
 )
 from mediaforce.tuning.target_size_search import search_target_size
 
@@ -430,7 +432,7 @@ def build_av1_validation_candidate_context(
         *,
         manifest: AV1ColdStartValidationManifestV1,
         plan: AV1ColdStartValidationCellPlanV1,
-        candidate_lock: AV1ColdStartValidationCandidateLockV1,
+        candidate_locks: Sequence[AV1ColdStartValidationCandidateLockV1],
         authorization: AV1ColdStartValidationExecutionAuthorizationV1,
         machine_binding: AV1ValidationHarnessMachineBindingV1,
         configured_min_crf: int,
@@ -439,37 +441,21 @@ def build_av1_validation_candidate_context(
 ) -> AV1ValidationCandidateContextV1:
     if plan not in manifest.cell_plans or plan.mode != "publication_candidate":
         raise AV1ValidationHarnessError("AV1 validation candidate requires a manifest publication plan")
-    if candidate_lock.manifest_id != manifest.manifest_id or candidate_lock.cell_plan_id != plan.cell_plan_id:
-        raise AV1ValidationHarnessError("AV1 validation candidate lock does not match its plan")
-    if not plan.trait_selector.matches(candidate_lock.exact_traits):
-        raise AV1ValidationHarnessError("AV1 validation candidate traits do not match the plan")
-    if candidate_lock.review_state != "approved_for_holdout":
-        raise AV1ValidationHarnessError("AV1 validation candidate lock is not reviewed")
-    if (
-            candidate_lock.derivation_evidence_count < manifest.criteria.minimum_derivation_evidence_count
-            or candidate_lock.derivation_source_count < manifest.criteria.minimum_derivation_source_count
-            or candidate_lock.confidence_level not in {manifest.criteria.confidence_level, "high"}
-            or candidate_lock.confidence_score < manifest.criteria.confidence_score
-            or candidate_lock.derivation_conflict_count != 0
-    ):
-        raise AV1ValidationHarnessError("AV1 validation candidate lock does not satisfy derivation gates")
     if authorization.manifest_id != manifest.manifest_id:
         raise AV1ValidationHarnessError("AV1 validation authorization references another manifest")
-    if candidate_lock.candidate_lock_id not in authorization.candidate_lock_ids:
-        raise AV1ValidationHarnessError("AV1 validation authorization does not bind the candidate lock")
-    if candidate_lock.selection_lock_sha256 != authorization.selection_lock_sha256:
-        raise AV1ValidationHarnessError("AV1 validation selection-lock binding is inconsistent")
-    if _parse_timestamp(authorization.authorized_at) <= _parse_timestamp(candidate_lock.reviewed_at):
-        raise AV1ValidationHarnessError("AV1 validation authorization must follow candidate review")
-    oldest_derivation = _parse_timestamp(candidate_lock.derivation_oldest_recorded_at)
-    newest_derivation = _parse_timestamp(candidate_lock.derivation_newest_recorded_at)
-    locked_at = _parse_timestamp(candidate_lock.locked_at)
-    reviewed_at = _parse_timestamp(candidate_lock.reviewed_at)
-    authorized_at = _parse_timestamp(authorization.authorized_at)
-    if not oldest_derivation <= newest_derivation <= locked_at <= reviewed_at < authorized_at:
-        raise AV1ValidationHarnessError("AV1 validation candidate chronology is invalid")
-    if (locked_at - oldest_derivation).days > manifest.criteria.maximum_derivation_age_days:
-        raise AV1ValidationHarnessError("AV1 validation derivation evidence is stale")
+    locks_by_plan = _resolve_authorized_candidate_locks(manifest, candidate_locks, authorization)
+    for publication_plan in manifest.cell_plans:
+        if publication_plan.mode != "publication_candidate":
+            continue
+        _assert_candidate_lock_is_executable(
+            manifest=manifest,
+            plan=publication_plan,
+            candidate_lock=locks_by_plan[publication_plan.cell_plan_id],
+            authorization=authorization,
+            configured_min_crf=configured_min_crf,
+            configured_max_crf=configured_max_crf,
+        )
+    candidate_lock = locks_by_plan[plan.cell_plan_id]
     if candidate_lock.compatibility_signature != machine_binding.compatibility_signature:
         raise AV1ValidationHarnessError("AV1 validation machine compatibility differs from the candidate lock")
     if candidate_lock.policy_signature != machine_binding.policy_signature:
@@ -484,12 +470,6 @@ def build_av1_validation_candidate_context(
         raise AV1ValidationHarnessError("AV1 validation quality floor differs from the candidate lock")
     if local_evidence_present:
         raise AV1ValidationHarnessError("AV1 validation publication candidates reject private local evidence")
-    if (
-            candidate_lock.crf_lower < configured_min_crf
-            or candidate_lock.crf_upper > configured_max_crf
-            or candidate_lock.crf_upper - candidate_lock.crf_lower > manifest.criteria.maximum_candidate_crf_span
-    ):
-        raise AV1ValidationHarnessError("AV1 validation candidate range is not executable")
     minimum_candidate = math.ceil(candidate_lock.crf_lower)
     maximum_candidate = math.floor(candidate_lock.crf_upper)
     if minimum_candidate > maximum_candidate:
@@ -535,6 +515,71 @@ def build_av1_validation_candidate_context(
         candidate_lock_payload_sha256=candidate_lock.payload_sha256,
         authorization_payload_sha256=authorization.payload_sha256,
     )
+
+
+def _resolve_authorized_candidate_locks(
+        manifest: AV1ColdStartValidationManifestV1,
+        candidate_locks: Sequence[AV1ColdStartValidationCandidateLockV1],
+        authorization: AV1ColdStartValidationExecutionAuthorizationV1,
+) -> dict[str, AV1ColdStartValidationCandidateLockV1]:
+    try:
+        locks_by_plan = resolve_av1_cold_start_validation_candidate_lock_set(
+            manifest=manifest,
+            candidate_locks=candidate_locks,
+            selection_lock_sha256=authorization.selection_lock_sha256,
+        )
+    except AV1ColdStartValidationError as exc:
+        raise AV1ValidationHarnessError(
+            "AV1 validation holdout requires one approved candidate lock per publication candidate cell"
+        ) from exc
+    authorized_lock_ids = tuple(sorted(lock.candidate_lock_id for lock in locks_by_plan.values()))
+    if authorization.candidate_lock_ids != authorized_lock_ids:
+        raise AV1ValidationHarnessError("AV1 validation authorization does not bind the approved candidate locks")
+    return locks_by_plan
+
+
+def _assert_candidate_lock_is_executable(
+        *,
+        manifest: AV1ColdStartValidationManifestV1,
+        plan: AV1ColdStartValidationCellPlanV1,
+        candidate_lock: AV1ColdStartValidationCandidateLockV1,
+        authorization: AV1ColdStartValidationExecutionAuthorizationV1,
+        configured_min_crf: int,
+        configured_max_crf: int,
+) -> None:
+    if candidate_lock.manifest_id != manifest.manifest_id or candidate_lock.cell_plan_id != plan.cell_plan_id:
+        raise AV1ValidationHarnessError("AV1 validation candidate lock does not match its plan")
+    if not plan.trait_selector.matches(candidate_lock.exact_traits):
+        raise AV1ValidationHarnessError("AV1 validation candidate traits do not match the plan")
+    if candidate_lock.review_state != "approved_for_holdout":
+        raise AV1ValidationHarnessError("AV1 validation candidate lock is not reviewed")
+    if (
+            candidate_lock.derivation_evidence_count < manifest.criteria.minimum_derivation_evidence_count
+            or candidate_lock.derivation_source_count < manifest.criteria.minimum_derivation_source_count
+            or candidate_lock.confidence_level not in {manifest.criteria.confidence_level, "high"}
+            or candidate_lock.confidence_score < manifest.criteria.confidence_score
+            or candidate_lock.derivation_conflict_count != 0
+    ):
+        raise AV1ValidationHarnessError("AV1 validation candidate lock does not satisfy derivation gates")
+    if candidate_lock.selection_lock_sha256 != authorization.selection_lock_sha256:
+        raise AV1ValidationHarnessError("AV1 validation selection-lock binding is inconsistent")
+    oldest_derivation = _parse_timestamp(candidate_lock.derivation_oldest_recorded_at)
+    newest_derivation = _parse_timestamp(candidate_lock.derivation_newest_recorded_at)
+    locked_at = _parse_timestamp(candidate_lock.locked_at)
+    reviewed_at = _parse_timestamp(candidate_lock.reviewed_at)
+    authorized_at = _parse_timestamp(authorization.authorized_at)
+    if not oldest_derivation <= newest_derivation <= locked_at <= reviewed_at < authorized_at:
+        raise AV1ValidationHarnessError("AV1 validation candidate chronology is invalid")
+    if (locked_at - oldest_derivation).days > manifest.criteria.maximum_derivation_age_days:
+        raise AV1ValidationHarnessError("AV1 validation derivation evidence is stale")
+    if (
+            candidate_lock.crf_lower < configured_min_crf
+            or candidate_lock.crf_upper > configured_max_crf
+            or candidate_lock.crf_upper - candidate_lock.crf_lower > manifest.criteria.maximum_candidate_crf_span
+    ):
+        raise AV1ValidationHarnessError("AV1 validation candidate range is not executable")
+    if math.ceil(candidate_lock.crf_lower) > math.floor(candidate_lock.crf_upper):
+        raise AV1ValidationHarnessError("AV1 validation candidate range has no integer probe")
 
 
 def plan_av1_validation_harness_case(

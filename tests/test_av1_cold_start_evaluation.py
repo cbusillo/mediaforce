@@ -13,6 +13,7 @@ from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationCellReportV1,
     AV1ColdStartValidationEvidenceSetV1,
     AV1ColdStartValidationError,
+    AV1ColdStartValidationExecutionAuthorizationV1,
     AV1ColdStartValidationManifestV1,
     AV1ColdStartValidationPredictionStatus,
     AV1ColdStartValidationReportV1,
@@ -579,6 +580,107 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(candidate_lock.minimum_quality_score, 0.0)
 
+    def test_holdout_authorization_binds_every_publication_candidate_lock(self) -> None:
+        manifest = self._manifest()
+        locks = self._publication_locks(manifest)
+        authorization = self._authorization(manifest, locks)
+
+        self.assertEqual(len(locks), 2)
+        self.assertEqual({lock.cell_plan_id for lock in locks}, {
+            plan.cell_plan_id
+            for plan in manifest.cell_plans
+            if plan.mode == "publication_candidate"
+        })
+        self.assertEqual(
+            authorization.candidate_lock_ids,
+            tuple(sorted(lock.candidate_lock_id for lock in locks)),
+        )
+        self.assertEqual(
+            set(authorization.to_payload()),
+            {
+                "authorization_id",
+                "manifest_id",
+                "selection_lock_sha256",
+                "candidate_lock_ids",
+                "review_environment_token",
+                "authorized_at",
+                "review_state",
+                "payload_sha256",
+            },
+        )
+        self.assertEqual(
+            authorization.authorization_id,
+            "av1vauthorization1_ce864ccf6656638bf862a4341cfab23f",
+        )
+        self.assertEqual(
+            authorization.payload_sha256,
+            "sha256:d4441d8c0aa9ab015f0e4aab15bcd80b90c8a58af6bea77498d87f141ecec11a",
+        )
+
+    def test_holdout_authorization_rejects_incomplete_or_padded_lock_sets(self) -> None:
+        manifest = self._manifest()
+        animation = self._plan(manifest, "animation_balanced_candidate")
+        live_action = self._plan(manifest, "typical_live_action_balanced_candidate")
+        fallback = self._plan(manifest, "darkness_risk_fallback")
+        animation_lock = self._candidate_lock(manifest, animation.cell_plan_id, ("animation",))
+        live_action_lock = self._candidate_lock(manifest, live_action.cell_plan_id, ("typical",))
+        lock_sets = {
+            "single_lock": (animation_lock,),
+            "duplicate_cell": (
+                animation_lock,
+                self._candidate_lock(
+                    manifest,
+                    animation.cell_plan_id,
+                    ("animation",),
+                    crf_lower=28.5,
+                ),
+            ),
+            "wrong_cell": (
+                animation_lock,
+                self._candidate_lock(manifest, fallback.cell_plan_id, ("darkness",)),
+            ),
+            "extra_lock": (
+                animation_lock,
+                live_action_lock,
+                self._candidate_lock(manifest, fallback.cell_plan_id, ("darkness",)),
+            ),
+            "wrong_manifest": (
+                animation_lock,
+                self._candidate_lock(
+                    manifest,
+                    live_action.cell_plan_id,
+                    ("typical",),
+                    manifest_id="av1vmanifest2_" + "0" * 32,
+                ),
+            ),
+            "wrong_traits": (
+                animation_lock,
+                self._candidate_lock(manifest, live_action.cell_plan_id, ("animation",)),
+            ),
+            "mixed_selection_locks": (
+                animation_lock,
+                self._candidate_lock(
+                    manifest,
+                    live_action.cell_plan_id,
+                    ("typical",),
+                    selection_lock_sha256="sha256:" + "3" * 64,
+                ),
+            ),
+        }
+
+        for name, locks in lock_sets.items():
+            with self.subTest(name=name), self.assertRaises(AV1ColdStartValidationError):
+                self._authorization(manifest, locks)
+
+        with self.assertRaises(AV1ColdStartValidationError):
+            self._authorization(
+                manifest,
+                (animation_lock, live_action_lock),
+                selection_lock_sha256="sha256:" + "4" * 64,
+            )
+        with self.assertRaises(AV1ColdStartValidationError):
+            replace(animation_lock, review_state="pending_review")
+
     def _manifest(self) -> AV1ColdStartValidationManifestV1:
         return build_preregistered_av1_cold_start_validation_manifest()
 
@@ -606,9 +708,11 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
                 "derivation.source.005",
                 "derivation.source.006",
             ),
+            selection_lock_sha256: str = "sha256:" + "2" * 64,
+            manifest_id: str | None = None,
     ) -> AV1ColdStartValidationCandidateLockV1:
         return build_av1_cold_start_validation_candidate_lock(
-            manifest_id=manifest.manifest_id,
+            manifest_id=manifest_id or manifest.manifest_id,
             cell_plan_id=cell_plan_id,
             exact_traits=traits,
             crf_lower=crf_lower,
@@ -634,9 +738,33 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             derivation_newest_recorded_at=derivation_newest_recorded_at,
             derivation_conflict_count=derivation_conflict_count,
             derivation_snapshot_sha256="sha256:" + "1" * 64,
-            selection_lock_sha256="sha256:" + "2" * 64,
+            selection_lock_sha256=selection_lock_sha256,
             locked_at=locked_at,
             reviewed_at=reviewed_at,
+        )
+
+    def _publication_locks(
+            self,
+            manifest: AV1ColdStartValidationManifestV1,
+    ) -> tuple[AV1ColdStartValidationCandidateLockV1, ...]:
+        return tuple(
+            self._candidate_lock(manifest, plan.cell_plan_id, plan.trait_selector.traits)
+            for plan in manifest.cell_plans
+            if plan.mode == "publication_candidate"
+        )
+
+    def _authorization(
+            self,
+            manifest: AV1ColdStartValidationManifestV1,
+            locks: Sequence[AV1ColdStartValidationCandidateLockV1],
+            selection_lock_sha256: str = "sha256:" + "2" * 64,
+    ) -> AV1ColdStartValidationExecutionAuthorizationV1:
+        return build_av1_cold_start_validation_execution_authorization(
+            manifest=manifest,
+            selection_lock_sha256=selection_lock_sha256,
+            candidate_locks=locks,
+            review_environment_token="review.environment.authorization",
+            authorized_at="2026-07-27T02:30:00Z",
         )
 
     def _candidate_results(
@@ -764,11 +892,9 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
                     )
                 )
         authorization = build_av1_cold_start_validation_execution_authorization(
-            manifest_id=manifest.manifest_id,
+            manifest=manifest,
             selection_lock_sha256="sha256:" + "2" * 64,
-            candidate_lock_ids=tuple(
-                candidate_lock.candidate_lock_id for candidate_lock in resolved_locks
-            ),
+            candidate_locks=resolved_locks,
             review_environment_token="review.environment.authorization",
             authorized_at="2026-07-27T02:30:00Z",
         )
