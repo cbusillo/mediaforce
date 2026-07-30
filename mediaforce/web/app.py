@@ -4316,7 +4316,7 @@ def _active_encode_process_controllers() -> list[ManagedProcessController]:
         return list(ENCODE_QUEUE_PROCESSES.values())
 
 
-def _register_encode_queue_thread(
+def _start_registered_encode_queue_thread(
         job_id: str,
         thread: threading.Thread,
 ) -> None:
@@ -4325,6 +4325,12 @@ def _register_encode_queue_thread(
         if existing is not None and existing.is_alive():
             raise RuntimeError(f"Encode queue job {job_id} is already running")
         ENCODE_QUEUE_THREADS[job_id] = thread
+        try:
+            thread.start()
+        except BaseException:
+            ENCODE_QUEUE_THREADS.pop(job_id, None)
+            ENCODE_QUEUE_THREADS_CONDITION.notify_all()
+            raise
 
 
 def _unregister_encode_queue_thread(
@@ -4339,7 +4345,16 @@ def _unregister_encode_queue_thread(
 
 def _wait_for_encode_queue_threads() -> None:
     with ENCODE_QUEUE_THREADS_CONDITION:
-        while ENCODE_QUEUE_THREADS:
+        while True:
+            finished_job_ids = [
+                job_id
+                for job_id, thread in ENCODE_QUEUE_THREADS.items()
+                if not thread.is_alive()
+            ]
+            for job_id in finished_job_ids:
+                ENCODE_QUEUE_THREADS.pop(job_id, None)
+            if not ENCODE_QUEUE_THREADS:
+                return
             ENCODE_QUEUE_THREADS_CONDITION.wait()
 
 
@@ -4358,8 +4373,7 @@ def _dispatch_encode_job(*, config_path: Path, job_id: str) -> None:
         name=f"encode-job-{job_id}",
     )
     try:
-        _register_encode_queue_thread(job_id, thread)
-        thread.start()
+        _start_registered_encode_queue_thread(job_id, thread)
     except Exception:
         _unregister_encode_queue_thread(job_id, thread)
         _unregister_encode_process_controller(job_id)
@@ -4409,14 +4423,13 @@ def _run_periodic_cleanup(
     )
     with PERIODIC_CLEANUP_THREADS_CONDITION:
         PERIODIC_CLEANUP_THREADS.add(thread)
-    try:
-        thread.start()
-    except BaseException:
-        with PERIODIC_CLEANUP_THREADS_CONDITION:
+        try:
+            thread.start()
+        except BaseException:
             PERIODIC_CLEANUP_THREADS.discard(thread)
             PERIODIC_CLEANUP_THREADS_CONDITION.notify_all()
-        cleanup_lock.release()
-        raise
+            cleanup_lock.release()
+            raise
 
 
 def _request_triggers_periodic_cleanup(method: str) -> bool:
@@ -4435,7 +4448,15 @@ def _run_periodic_cleanup_task(config: MediaforceConfig, cleanup_lock: threading
 
 def _wait_for_periodic_cleanup_threads() -> None:
     with PERIODIC_CLEANUP_THREADS_CONDITION:
-        while PERIODIC_CLEANUP_THREADS:
+        while True:
+            finished_threads = {
+                thread
+                for thread in PERIODIC_CLEANUP_THREADS
+                if not thread.is_alive()
+            }
+            PERIODIC_CLEANUP_THREADS.difference_update(finished_threads)
+            if not PERIODIC_CLEANUP_THREADS:
+                return
             PERIODIC_CLEANUP_THREADS_CONDITION.wait()
 
 
@@ -4473,11 +4494,12 @@ def _start_scan_job_thread(
         if existing is not None and existing.is_alive():
             raise RuntimeError(f"Scan job {job_id} is already running")
         SCAN_JOB_THREADS[job_id] = thread
-    try:
-        thread.start()
-    except BaseException:
-        _unregister_scan_job_thread(job_id, thread)
-        raise
+        try:
+            thread.start()
+        except BaseException:
+            SCAN_JOB_THREADS.pop(job_id, None)
+            SCAN_JOB_THREADS_CONDITION.notify_all()
+            raise
 
 
 def _unregister_scan_job_thread(job_id: str, thread: threading.Thread) -> None:
@@ -4489,7 +4511,16 @@ def _unregister_scan_job_thread(job_id: str, thread: threading.Thread) -> None:
 
 def _wait_for_scan_job_threads() -> None:
     with SCAN_JOB_THREADS_CONDITION:
-        while SCAN_JOB_THREADS:
+        while True:
+            finished_job_ids = [
+                job_id
+                for job_id, thread in SCAN_JOB_THREADS.items()
+                if not thread.is_alive()
+            ]
+            for job_id in finished_job_ids:
+                SCAN_JOB_THREADS.pop(job_id, None)
+            if not SCAN_JOB_THREADS:
+                return
             SCAN_JOB_THREADS_CONDITION.wait()
 
 

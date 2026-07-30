@@ -4,14 +4,13 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
-import socket
 import stat
+import tempfile
 import threading
 
 from mediaforce.core.config import MediaforceConfig
@@ -79,8 +78,7 @@ class MediaforceRuntimeLease:
                 _REGISTERED_RUNTIME_LEASES.pop(id(self), None)
 
 
-_RUNTIME_NAMESPACE_PORT_MIN = 20_000
-_RUNTIME_NAMESPACE_PORT_SPAN = 29_000
+_RUNTIME_NAMESPACE_LOCK_DIRECTORY_NAME = "mediaforce-runtime-namespaces-v1"
 _RUNTIME_LEASE_AUTHORITY = object()
 _RUNTIME_LEASE_REGISTRY_LOCK = threading.Lock()
 _REGISTERED_RUNTIME_LEASES: dict[int, MediaforceRuntimeLease] = {}
@@ -172,45 +170,176 @@ def _runtime_namespace_keys(
     return tuple(sorted(keys))
 
 
-def _runtime_namespace_port(key: str) -> int:
-    payload = f"{os.getuid()}:{key}".encode("utf-8")
-    digest = hashlib.sha256(payload).digest()
-    return (
-        _RUNTIME_NAMESPACE_PORT_MIN
-        + int.from_bytes(digest[:4], "big") % _RUNTIME_NAMESPACE_PORT_SPAN
+def _runtime_namespace_lock_directory() -> Path:
+    try:
+        temporary_directory = Path(tempfile.gettempdir()).resolve(strict=True)
+    except OSError as exc:
+        raise MediaforceRuntimeBusyError(
+            "Mediaforce runtime namespace directory is unavailable"
+        ) from exc
+    return temporary_directory / (
+        f"{_RUNTIME_NAMESPACE_LOCK_DIRECTORY_NAME}-{os.getuid()}"
     )
+
+
+def _runtime_namespace_lock_name(key: str) -> str:
+    payload = f"{os.getuid()}:{key}".encode("utf-8")
+    return f"{hashlib.sha256(payload).hexdigest()}.lock"
 
 
 def _runtime_namespace_path_keys(keys: tuple[str, ...]) -> frozenset[str]:
     return frozenset(key for key in keys if not key.startswith("file:"))
 
 
-def _acquire_runtime_namespace_socket(
-        namespace_keys: tuple[str, ...],
-        lock_path: Path,
-) -> tuple[socket.socket, ...]:
-    namespace_sockets: list[socket.socket] = []
+@dataclass(frozen=True, slots=True)
+class _RuntimeNamespaceLocks:
+    directory_descriptor: int
+    lock_descriptors: tuple[int, ...]
+
+    def close(self) -> None:
+        for descriptor in reversed(self.lock_descriptors):
+            os.close(descriptor)
+        os.close(self.directory_descriptor)
+
+
+def _open_runtime_namespace_directory() -> int:
+    directory_path = _runtime_namespace_lock_directory()
     try:
-        for port in sorted({
-            _runtime_namespace_port(key)
-            for key in namespace_keys
-        }):
-            namespace_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            namespace_sockets.append(namespace_socket)
-            namespace_socket.bind(("127.0.0.1", port))
-        return tuple(namespace_sockets)
+        directory_path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
     except OSError as exc:
-        for namespace_socket in reversed(namespace_sockets):
-            namespace_socket.close()
-        owner = mediaforce_runtime_lock_owner(lock_path)
-        owner_detail = f" ({owner})" if owner else ""
-        if exc.errno == errno.EADDRINUSE:
+        raise MediaforceRuntimeBusyError(
+            "Mediaforce runtime namespace directory is unavailable"
+        ) from exc
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        descriptor = os.open(directory_path, flags)
+    except OSError as exc:
+        raise MediaforceRuntimeBusyError(
+            "Mediaforce runtime namespace directory is invalid"
+        ) from exc
+    try:
+        try:
+            descriptor_info = os.fstat(descriptor)
+            path_info = directory_path.lstat()
+        except OSError as exc:
             raise MediaforceRuntimeBusyError(
-                f"Mediaforce runtime is already active{owner_detail}"
+                "Mediaforce runtime namespace directory is invalid"
             ) from exc
+        if (
+            not stat.S_ISDIR(descriptor_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime namespace directory is invalid"
+            )
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _open_runtime_namespace_lock_file(
+        name: str,
+        *,
+        directory_descriptor: int,
+) -> int:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    try:
+        descriptor = os.open(
+            name,
+            flags,
+            0o600,
+            dir_fd=directory_descriptor,
+        )
+    except OSError as exc:
         raise MediaforceRuntimeBusyError(
             "Mediaforce runtime namespace lock is unavailable"
         ) from exc
+    try:
+        try:
+            descriptor_info = os.fstat(descriptor)
+            path_info = os.stat(
+                name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime namespace lock identity is invalid"
+            ) from exc
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or descriptor_info.st_nlink != 1
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime namespace lock identity is invalid"
+            )
+        try:
+            os.fchmod(descriptor, 0o600)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime namespace lock is unavailable"
+            ) from exc
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _acquire_runtime_namespace_locks(
+        namespace_keys: tuple[str, ...],
+        lock_path: Path,
+) -> _RuntimeNamespaceLocks:
+    directory_descriptor = _open_runtime_namespace_directory()
+    lock_descriptors: list[int] = []
+    try:
+        lock_names = tuple(sorted(
+            _runtime_namespace_lock_name(key)
+            for key in namespace_keys
+        ))
+        if len(set(lock_names)) != len(lock_names):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime namespace lock identity is invalid"
+            )
+        for name in lock_names:
+            descriptor = _open_runtime_namespace_lock_file(
+                name,
+                directory_descriptor=directory_descriptor,
+            )
+            lock_descriptors.append(descriptor)
+            _acquire_nonblocking_lock(
+                descriptor,
+                lock_path=lock_path,
+            )
+        return _RuntimeNamespaceLocks(
+            directory_descriptor=directory_descriptor,
+            lock_descriptors=tuple(lock_descriptors),
+        )
+    except BaseException:
+        for descriptor in reversed(lock_descriptors):
+            os.close(descriptor)
+        os.close(directory_descriptor)
+        raise
 
 
 def _runtime_lock_parent_identity_matches(
@@ -283,7 +412,7 @@ def exclusive_mediaforce_runtime_lock(
         active_lease.assert_active()
         yield active_lease
         return
-    namespace_sockets = _acquire_runtime_namespace_socket(
+    namespace_locks = _acquire_runtime_namespace_locks(
         namespace_keys,
         lock_path,
     )
@@ -362,8 +491,7 @@ def exclusive_mediaforce_runtime_lock(
                 if directory_descriptor >= 0:
                     os.close(directory_descriptor)
             finally:
-                for namespace_socket in reversed(namespace_sockets):
-                    namespace_socket.close()
+                namespace_locks.close()
     if not parent_identity_valid:
         raise MediaforceRuntimeBusyError(
             "Mediaforce runtime lock path changed while active"

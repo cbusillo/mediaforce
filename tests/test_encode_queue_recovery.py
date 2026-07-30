@@ -1,11 +1,13 @@
 import asyncio
 import copy
 import errno
+import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -3857,6 +3859,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             fake_thread = Mock()
+            fake_thread.is_alive.return_value = False
             with patch.object(web_app, "_scan_process_is_alive", return_value=False):
                 with patch.object(web_app.threading, "Thread", return_value=fake_thread):
                     job = web_app._maybe_schedule_scan(connection, self.config, prefix=None)
@@ -3881,6 +3884,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_forced_scan_schedules_even_when_catalog_is_fresh(self) -> None:
         fake_thread = Mock()
+        fake_thread.is_alive.return_value = False
         with open_db(self.config.paths.db_path) as connection, patch(
             "mediaforce.web.runtime.job_runtime.scan_is_stale",
             return_value=False,
@@ -3911,6 +3915,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         )
         fake_thread = Mock()
+        fake_thread.is_alive.return_value = False
         with open_db(self.config.paths.db_path) as connection, patch.object(
             web_app.threading,
             "Thread",
@@ -3923,6 +3928,16 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         self.assertNotEqual(job["job_id"], "recent-failure")
         fake_thread.start.assert_called_once()
+
+    def test_scan_thread_waiter_discards_finished_registry_entries(self) -> None:
+        finished_thread = Mock()
+        finished_thread.is_alive.return_value = False
+        with web_app.SCAN_JOB_THREADS_CONDITION:
+            web_app.SCAN_JOB_THREADS["finished-scan"] = finished_thread
+
+        web_app._wait_for_scan_job_threads()
+
+        self.assertNotIn("finished-scan", web_app.SCAN_JOB_THREADS)
 
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -6395,6 +6410,79 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     pass
 
         self.assertIn("pid 123 on 127.0.0.1:8777", str(raised.exception))
+
+    def test_runtime_namespace_lock_ignores_legacy_tcp_port_collisions(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
+        namespace_keys = runtime_lock_module._runtime_namespace_keys(
+            self.config,
+            lock_path,
+        )
+        listener: socket.socket | None = None
+        for key in namespace_keys:
+            payload = f"{os.getuid()}:{key}".encode("utf-8")
+            digest = hashlib.sha256(payload).digest()
+            legacy_port = 20_000 + int.from_bytes(digest[:4], "big") % 29_000
+            candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                candidate.bind(("127.0.0.1", legacy_port))
+            except OSError:
+                candidate.close()
+                continue
+            listener = candidate
+            break
+        if listener is None:
+            self.skipTest("No legacy namespace port was available for the regression probe")
+
+        with listener:
+            listener.listen(1)
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                self.config,
+                owner_payload={"purpose": "legacy-port-collision-probe"},
+            ):
+                pass
+
+    def test_runtime_namespace_lock_files_are_owner_only(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
+        namespace_keys = runtime_lock_module._runtime_namespace_keys(
+            self.config,
+            lock_path,
+        )
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            self.config,
+            owner_payload={"purpose": "namespace-permission-probe"},
+        ):
+            directory = runtime_lock_module._runtime_namespace_lock_directory()
+            directory_info = directory.stat()
+            self.assertEqual(directory_info.st_uid, os.getuid())
+            self.assertEqual(directory_info.st_mode & 0o777, 0o700)
+            for key in namespace_keys:
+                namespace_path = directory / runtime_lock_module._runtime_namespace_lock_name(key)
+                namespace_info = namespace_path.stat()
+                self.assertEqual(namespace_info.st_uid, os.getuid())
+                self.assertEqual(namespace_info.st_mode & 0o777, 0o600)
+                self.assertEqual(namespace_info.st_size, 0)
+
+    def test_runtime_namespace_lock_rejects_symlink_files(self) -> None:
+        directory = runtime_lock_module._runtime_namespace_lock_directory()
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+        namespace_key = f"symlink-regression:{self.root}"
+        namespace_path = directory / runtime_lock_module._runtime_namespace_lock_name(namespace_key)
+        target = self.root / "namespace-target"
+        target.write_text("unchanged", encoding="utf-8")
+        if namespace_path.exists() or namespace_path.is_symlink():
+            self.skipTest("The unique namespace regression path already exists")
+        namespace_path.symlink_to(target)
+        try:
+            with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
+                runtime_lock_module._acquire_runtime_namespace_locks(
+                    (namespace_key,),
+                    runtime_lock_module.mediaforce_runtime_lock_path(self.config),
+                )
+        finally:
+            namespace_path.unlink()
+        self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
 
     def test_runtime_lock_survives_lock_file_unlink_and_recreation(self) -> None:
         lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
