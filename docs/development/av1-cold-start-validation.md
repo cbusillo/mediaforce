@@ -343,22 +343,26 @@ out of scope until issue `#288`.
 
 Candidate proposal construction, candidate-lock finalization and verification,
 and visual-verdict publication each re-open and fully hash all twenty-four
-derivation sources against the plan commitments while their database
-transaction is active. They never substitute the frozen digest for a current
-byte-level check. Publication payloads are first written and fsynced under a
-hidden owner-only temporary name. Proposal and candidate-lock publication keep
-the active source session through exclusive atomic rename: the session performs
-another quiet and identity check immediately before publication and performs
-its exit check before any database transaction can commit. Exit validation also
-runs when publication raises, so post-rename durability failures cannot skip the
-final source check. The human-verdict path uses a different ordering because its
-database append must remain reversible on a final source-session failure. After
-verdict intent, observation append, the final contract check, and full source
-verification, the source session completes its final quiet/exit boundary while
-the immediate transaction remains open. Only after that boundary succeeds are
-terminal artifacts published. A retry accepts only the exact canonical artifact
-already visible at the final path, re-synchronizes its parent directory, and
-rejects any conflicting or malformed artifact.
+derivation sources against the plan commitments. They never substitute the
+frozen digest for a current byte-level check. Proposal construction is
+non-authoritative and reads current observations and inventory through separate
+read-only snapshots under the same runtime lease. Finalization, verification,
+and verdict publication keep their inventory, observations, and source checks
+inside one immediate database transaction. Publication payloads are first
+written and fsynced under a hidden owner-only temporary name. Proposal and
+candidate-lock publication keep the active source session through exclusive
+atomic rename: the session performs another quiet and identity check immediately
+before publication and performs its exit check before any database transaction
+can commit. Exit validation also runs when publication raises, so post-rename
+durability failures cannot skip the final source check. The human-verdict path
+uses a different ordering because its database append must remain reversible on
+a final source-session failure. After verdict intent, observation append, the
+final contract check, and full source verification, the source session completes
+its final quiet/exit boundary while the immediate transaction remains open. Only
+after that boundary succeeds are terminal artifacts published. A retry accepts
+only the exact canonical artifact already visible at the final path,
+re-synchronizes its parent directory, and rejects any conflicting or malformed
+artifact.
 
 After the immutable assignment claim and before crop, search, encode, or review
 work, the runtime opens the assigned source with no-follow semantics, verifies
@@ -378,6 +382,14 @@ attribute, hardlink, delete, rename, or revoke activity is latched even if bytes
 or names are later restored. The snapshot must keep one link, the source and
 snapshot identities are rechecked, and final guard validation runs even when
 media work raises.
+The assignment claim itself is authorization-deadline-bound by both a live
+pre-rename check and the final inode's kernel change time. After an in-window
+claim, authorization is checked again before database preparation, before the
+source is opened or each snapshot chunk is copied, and before each calibration
+media stage. Expiration at any boundary creates an immutable
+`authorization_expired` attempt and terminal without starting the next media
+step. An orphaned in-window claim still follows the existing interrupted-claim
+recovery path and never reruns media.
 
 Source snapshots are retained as private, write-once assignment artifacts after
 success, failure, cancellation, or interruption and are never reused as runtime
@@ -633,15 +645,17 @@ completion, and any event after quiescence, and treats only LF/CRLF as record
 boundaries so Unicode line separators remain inside their JSON strings.
 The decision is extracted rather than supplied by the operator. Public summaries
 expose only that the runner identity is bound, never the canonical private path.
-Review, verdict, proposal, and lock payload timestamps come from the runtime
-clock only for their first immutable publication; recovery reuses persisted
-timestamps. Fresh proposal, candidate-lock, review-claim, review-envelope,
-verdict-claim, and verdict-intent publication also samples the live clock
-immediately before the exclusive rename and fails closed if authorization
-expired during preparation. After the rename, the writer verifies the inode's
-kernel change time against the same expiration; every loader repeats that check.
-Recovery of an already-published artifact skips the live-clock sampling but
-still rejects a kernel-observable post-expiration publication.
+Review, verdict, proposal, lock, and assignment-claim payload timestamps come
+from the runtime clock only for their first immutable publication; recovery
+reuses persisted timestamps. Fresh assignment-claim, proposal, candidate-lock,
+verdict-claim, and verdict-intent publication samples the live clock immediately
+before the exclusive rename and fails closed if authorization expired during
+preparation. Review claims and envelopes are produced by the bounded reviewer
+path and rely on the stronger final-inode publication receipt. After every
+deadline-bound rename, the writer verifies the inode's kernel change time
+against the same expiration; every loader repeats that check. Recovery of an
+already-published artifact skips live-clock sampling but still rejects a
+kernel-observable post-expiration publication.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write

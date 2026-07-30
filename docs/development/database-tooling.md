@@ -49,7 +49,12 @@ Mediaforce's SQLite schema.
   connection before SQL is issued, and rejects pathname replacement instead of
   adopting a new inode. A runtime that may initialize a missing database must
   call `reserve_mediaforce_database_identity(..., create_if_missing=True)`
-  before its first writable open. Read-only database opens remain exempt.
+  before its first writable open. Read-only opens remain unrestricted outside a
+  runtime lease, but under an active lease they pin the same lease generation
+  and recheck the database pathname before connect, before queries, and on clean
+  context exit. Derivation runtime-context commitments include the database
+  device and inode so a replacement between separately locked phases cannot be
+  adopted as the same frozen context.
 - End SQLite write transactions before starting ffmpeg, ffprobe, ab-av1, remote
   host waits, or other long-running media work.
 - Persist the queued or running state, commit it, perform the media work, then

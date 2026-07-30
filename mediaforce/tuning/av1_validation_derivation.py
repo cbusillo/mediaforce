@@ -3164,6 +3164,8 @@ def write_av1_validation_derivation_assignment_claim(
         plan_id: str,
         authorization_id: str,
         claimed_at: str,
+        before_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> Path:
     bind_av1_validation_derivation_attempt_directory(
         directory,
@@ -3171,26 +3173,37 @@ def write_av1_validation_derivation_assignment_claim(
         authorization_id=authorization_id,
     )
     path = directory / f"{assignment_id}.claim"
-    _write_owner_only(path, canonical_json_bytes({
-        "schema": "mediaforce.av1_cold_start_derivation_assignment_claim",
-        "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
-        "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
-        "plan_id": plan_id,
-        "authorization_id": authorization_id,
-        "assignment_id": assignment_id,
-        "claimed_at": claimed_at,
-    }))
+    _write_owner_only(
+        path,
+        canonical_json_bytes({
+            "schema": "mediaforce.av1_cold_start_derivation_assignment_claim",
+            "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+            "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+            "plan_id": plan_id,
+            "authorization_id": authorization_id,
+            "assignment_id": assignment_id,
+            "claimed_at": claimed_at,
+        }),
+        before_publish=before_publish,
+        published_before=published_before,
+    )
     return path
 
 
 def load_av1_validation_derivation_assignment_claims(
         directory: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
 ) -> tuple[dict[str, Any], ...]:
     if not directory.exists():
         return ()
     claims: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.claim")):
-        payload, raw = _load_owner_only_json(path, "derivation assignment claim")
+        payload, raw = _load_owner_only_json(
+            path,
+            "derivation assignment claim",
+            published_before=plan.authorization.valid_until,
+        )
         _require_exact_keys(payload, {
             "schema", "schema_version", "contract_version", "plan_id",
             "authorization_id", "assignment_id", "claimed_at",
@@ -3216,12 +3229,32 @@ def load_av1_validation_derivation_assignment_claims(
             != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
             or payload.get("contract_version")
             != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
+            or claim["plan_id"] != plan.plan_id
+            or claim["authorization_id"]
+            != plan.authorization.authorization_id
             or raw != canonical_json_bytes(claim)
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation assignment claim is invalid"
             )
-        _parse_timestamp(str(claim["claimed_at"]), "claim timestamp")
+        claim_timestamp = _parse_timestamp(
+            str(claim["claimed_at"]),
+            "claim timestamp",
+        )
+        if not (
+            _parse_timestamp(
+                plan.authorization.authorized_at,
+                "derivation authorization start",
+            )
+            <= claim_timestamp
+            < _parse_timestamp(
+                plan.authorization.valid_until,
+                "derivation authorization expiration",
+            )
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation assignment claim is outside its authorization window"
+            )
         claims.append(claim)
     return tuple(claims)
 

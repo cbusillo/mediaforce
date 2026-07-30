@@ -202,6 +202,26 @@ class _AV1ValidationDerivationVerdictSafetyStop(AV1ValidationDerivationError):
     pass
 
 
+class _AV1ValidationDerivationAuthorizationExpired(AV1ValidationDerivationError):
+    def __init__(self, completed_at: str) -> None:
+        super().__init__("AV1 derivation authorization expired before media work")
+        self.completed_at = completed_at
+
+
+def _authorization_guarded_call(
+        assert_active: Callable[[], None],
+        function: Any,
+) -> Any:
+    if function is None:
+        return None
+
+    def guarded(*args: Any, **kwargs: Any) -> Any:
+        assert_active()
+        return function(*args, **kwargs)
+
+    return guarded
+
+
 def _write_all(descriptor: int, payload: bytes) -> None:
     view = memoryview(payload)
     written = 0
@@ -333,7 +353,9 @@ def _pinned_derivation_source(
         expected_source_sha256: str,
         expected_size_bytes: int,
         process_controller: ManagedProcessController,
+        assert_authorized: Callable[[], None] | None = None,
 ) -> Iterator[_PinnedDerivationSource]:
+    authorization_guard = assert_authorized or (lambda: None)
     snapshot_root = (
         artifact_root / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY
     )
@@ -343,6 +365,7 @@ def _pinned_derivation_source(
     snapshot_descriptor = -1
     snapshot_guard: MacOSFileIntegrityGuard | None = None
     try:
+        authorization_guard()
         snapshot_name = _retained_source_snapshot_name(assignment_id)
         snapshot_path = snapshot_root / snapshot_name
         source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -387,6 +410,7 @@ def _pinned_derivation_source(
             raise OSError("AV1 derivation source snapshot storage floor is not available")
         snapshot_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
         snapshot_flags |= getattr(os, "O_NOFOLLOW", 0)
+        authorization_guard()
         try:
             snapshot_write_descriptor = os.open(
                 snapshot_name,
@@ -418,6 +442,7 @@ def _pinned_derivation_source(
         digest = hashlib.sha256()
         os.lseek(source_descriptor, 0, os.SEEK_SET)
         while True:
+            authorization_guard()
             process_controller.throw_if_cancelled()
             chunk = os.read(
                 source_descriptor,
@@ -531,8 +556,21 @@ def _pinned_derivation_source(
 def av1_validation_derivation_runtime_context_sha256(
         config: MediaforceConfig,
 ) -> str:
+    db_path = config.paths.db_path.expanduser().resolve()
+    try:
+        db_identity = db_path.stat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation database identity is unavailable"
+        ) from exc
+    if not stat.S_ISREG(db_identity.st_mode):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation database identity is not a regular file"
+        )
     payload = {
-        "db_path": str(config.paths.db_path.expanduser().resolve()),
+        "db_path": str(db_path),
+        "db_device": int(db_identity.st_dev),
+        "db_inode": int(db_identity.st_ino),
         "review_dir": str(config.paths.review_dir.expanduser().resolve()),
         "web_state_dir": str(config.paths.web_state_dir.expanduser().resolve()),
     }
@@ -1064,6 +1102,19 @@ def _run_av1_validation_derivation_assignment_locked(
     )
     started_at = clock()
     assert_av1_validation_derivation_authorization_active(plan, at=started_at)
+
+    def assert_fresh_authorization() -> None:
+        checked_at = clock()
+        try:
+            assert_av1_validation_derivation_authorization_active(
+                plan,
+                at=checked_at,
+            )
+        except AV1ValidationDerivationError as exc:
+            raise _AV1ValidationDerivationAuthorizationExpired(
+                checked_at
+            ) from exc
+
     _source_commitment_guard()
     write_av1_validation_derivation_assignment_claim(
         attempts_directory,
@@ -1071,14 +1122,56 @@ def _run_av1_validation_derivation_assignment_locked(
         plan_id=plan.plan_id,
         authorization_id=plan.authorization.authorization_id,
         claimed_at=started_at,
+        before_publish=assert_fresh_authorization,
+        published_before=plan.authorization.valid_until,
     )
     controller = process_controller or ManagedProcessController()
     run_deps = deps or build_av1_validation_derivation_calibration_deps()
+    run_deps = replace(
+        run_deps,
+        quality_toolchain_identity=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.quality_toolchain_identity,
+        ),
+        detect_video_crop=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.detect_video_crop,
+        ),
+        search_quality_for_source=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.search_quality_for_source,
+        ),
+        run_sample_encode=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.run_sample_encode,
+        ),
+        recommend_review_moments=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.recommend_review_moments,
+        ),
+        recommend_review_timestamps=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.recommend_review_timestamps,
+        ),
+        encode_preview_clips=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.encode_preview_clips,
+        ),
+        render_source_review_clips=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.render_source_review_clips,
+        ),
+        generate_compare_clips_from_review_pairs=_authorization_guarded_call(
+            assert_fresh_authorization,
+            run_deps.generate_compare_clips_from_review_pairs,
+        ),
+    )
     attempt: AV1ValidationDerivationAttempt | None = None
     staged_snapshot: dict[str, Any] | None = None
     staged_snapshot_taken = False
     sample_item: dict[str, Any] | None = None
     try:
+        assert_fresh_authorization()
         if (
             shutil.disk_usage(config.paths.review_dir.parent).free
             < AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
@@ -1142,6 +1235,7 @@ def _run_av1_validation_derivation_assignment_locked(
             expected_source_sha256=source_commitment.source_sha256,
             expected_size_bytes=source_commitment.source_size_bytes,
             process_controller=controller,
+            assert_authorized=assert_fresh_authorization,
         ) as pinned_source:
             sample_item["source_snapshot_sha256"] = pinned_source.content_sha256
             sample_item["source_snapshot_size_bytes"] = pinned_source.size_bytes
@@ -1149,6 +1243,7 @@ def _run_av1_validation_derivation_assignment_locked(
                 pinned_source.content_version_fingerprint
             )
             with _owner_only_umask():
+                assert_fresh_authorization()
                 payload, _ = run_sampled_calibration(
                     config=calibration_config,
                     prefix=prefix,
@@ -1162,6 +1257,9 @@ def _run_av1_validation_derivation_assignment_locked(
                     process_controller=controller,
                     deps=run_deps,
                     source_path_override=pinned_source.path,
+                    progress_callback=(
+                        lambda *_args, **_kwargs: assert_fresh_authorization()
+                    ),
                 )
         assert_av1_validation_derivation_execution_contract(manifest, plan)
         current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
@@ -1201,6 +1299,16 @@ def _run_av1_validation_derivation_assignment_locked(
                 status="review_pending",
                 calibration_payload=payload,
             )
+    except _AV1ValidationDerivationAuthorizationExpired as exc:
+        attempt = _failed_attempt(
+            plan=plan,
+            partition=partition,
+            assignment_id=assignment.assignment_id,
+            started_at=started_at,
+            completed_at=exc.completed_at,
+            status="failed",
+            reason_code="authorization_expired",
+        )
     except ProcessCancelledError:
         attempt = _failed_attempt(
             plan=plan,
@@ -2344,7 +2452,10 @@ def _recover_interrupted_derivation_state(
         )
         return True
     attempted_ids = {attempt.assignment_id for attempt in attempts}
-    claims = load_av1_validation_derivation_assignment_claims(attempts_directory)
+    claims = load_av1_validation_derivation_assignment_claims(
+        attempts_directory,
+        plan=plan,
+    )
     orphaned = [
         claim for claim in claims if claim["assignment_id"] not in attempted_ids
     ]

@@ -69,6 +69,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     _finalize_and_write_av1_validation_derivation_candidate_lock as finalize_and_write_av1_validation_derivation_candidate_lock,
     finalize_av1_validation_derivation_candidate_lock,
     load_av1_validation_derivation_candidate_proposal,
+    load_av1_validation_derivation_assignment_claims,
     _load_verified_av1_validation_derivation_candidate_lock as load_verified_av1_validation_derivation_candidate_lock,
     load_av1_validation_derivation_plan,
     load_av1_validation_derivation_attempts,
@@ -251,6 +252,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 web_state_dir=runtime_root / "state",
             )
         )
+        self.runtime_config.paths.db_path.touch(mode=0o600)
         runtime_lock = exclusive_mediaforce_runtime_lock(
             self.runtime_config,
             owner_payload={"purpose": "derivation-test"},
@@ -1768,6 +1770,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "test artifact",
                     published_before=AUTHORIZED_AT,
                 )
+
+    def test_assignment_claim_loader_rejects_post_deadline_publication(self) -> None:
+        claims_directory = self.runtime_artifact_root / "attempts"
+        assignment = self.plan.assignments[0]
+        write_av1_validation_derivation_assignment_claim(
+            claims_directory,
+            assignment_id=assignment.assignment_id,
+            plan_id=self.plan.plan_id,
+            authorization_id=self.plan.authorization.authorization_id,
+            claimed_at="2026-07-28T01:00:00Z",
+        )
+
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                return_value=10**30,
+            ),
+            self.assertRaises(AV1ValidationDerivationPublicationDeadlineError),
+        ):
+            load_av1_validation_derivation_assignment_claims(
+                claims_directory,
+                plan=self.plan,
+            )
 
     def test_exclusive_rename_advances_kernel_change_time(self) -> None:
         self.publication_time_patcher.stop()
@@ -3744,6 +3769,65 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         integrity_probe.assert_called_once_with(self.runtime_artifact_root.resolve())
         self.assertFalse(attempts_dir.exists())
 
+    def test_assignment_expiry_after_claim_stops_before_database_or_media(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        timestamps = iter((
+            "2026-07-31T23:59:57Z",
+            "2026-07-31T23:59:58Z",
+            "2026-07-31T23:59:59Z",
+            VALID_UNTIL,
+        ))
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract"
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+            ) as open_database,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._pinned_derivation_source",
+            ) as pinned_source,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.run_sampled_calibration",
+            ) as calibration,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.purge_transient_artifacts",
+            ),
+        ):
+            attempt = _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: next(timestamps),
+            )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "authorization_expired")
+        open_database.assert_not_called()
+        pinned_source.assert_not_called()
+        calibration.assert_not_called()
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.reason_code, "authorization_expired")
+
     def test_execution_rechecks_live_source_commitments_before_artifact_writes(self) -> None:
         assignment = self.plan.assignments[0]
         attempts_dir = self.runtime_artifact_root / "attempts"
@@ -4020,6 +4104,23 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 mediaforce_runtime_lock_path(real_config),
                 mediaforce_runtime_lock_path(alias_config),
             )
+
+    def test_runtime_context_binds_database_inode(self) -> None:
+        original_context = av1_validation_derivation_runtime_context_sha256(
+            self.runtime_config
+        )
+        db_path = self.runtime_config.paths.db_path
+        replacement_path = db_path.with_name("replacement.sqlite3")
+        replacement_path.write_bytes(db_path.read_bytes())
+        replacement_path.chmod(0o600)
+        replacement_path.replace(db_path)
+
+        self.assertNotEqual(
+            av1_validation_derivation_runtime_context_sha256(
+                self.runtime_config
+            ),
+            original_context,
+        )
 
     def test_pinned_source_snapshot_survives_original_path_swap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -8173,6 +8274,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     web_state_dir=root / "state",
                 )
             )
+            runtime_config.paths.db_path.touch(mode=0o600)
             stdout = io.StringIO()
             retry_stdout = io.StringIO()
             current_inputs = (

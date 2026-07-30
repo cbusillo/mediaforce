@@ -427,6 +427,38 @@ class DatabaseRuntimeTests(unittest.TestCase):
             with open_readonly_db(db_path) as connection:
                 self.assertNotIn("forbidden_write", inspect(connection).get_table_names())
 
+    def test_open_readonly_db_rejects_replacement_under_runtime_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            db_path = root / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "readonly-replacement-probe"},
+            ):
+                replacement_path = root / "replacement.sqlite3"
+                replacement_path.write_bytes(db_path.read_bytes())
+                replacement_path.chmod(0o600)
+                replacement_path.replace(db_path)
+                with self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "identity is not reserved|identity changed",
+                ):
+                    with open_readonly_db(db_path):
+                        pass
+
     def test_open_db_stamps_existing_legacy_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
