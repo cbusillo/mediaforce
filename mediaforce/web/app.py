@@ -4301,14 +4301,13 @@ def _load_next_runnable_encode_job(
     return runtime_load_next_runnable_encode_job(connection, config, _encode_queue_runtime_deps())
 
 
-def _register_encode_process_controller(job_id: str, controller: ManagedProcessController) -> None:
+def _unregister_encode_process_controller(
+        job_id: str,
+        controller: ManagedProcessController,
+) -> None:
     with ENCODE_QUEUE_PROCESSES_LOCK:
-        ENCODE_QUEUE_PROCESSES[job_id] = controller
-
-
-def _unregister_encode_process_controller(job_id: str) -> None:
-    with ENCODE_QUEUE_PROCESSES_LOCK:
-        ENCODE_QUEUE_PROCESSES.pop(job_id, None)
+        if ENCODE_QUEUE_PROCESSES.get(job_id) is controller:
+            ENCODE_QUEUE_PROCESSES.pop(job_id, None)
 
 
 def _active_encode_process_controllers() -> list[ManagedProcessController]:
@@ -4319,16 +4318,21 @@ def _active_encode_process_controllers() -> list[ManagedProcessController]:
 def _start_registered_encode_queue_thread(
         job_id: str,
         thread: threading.Thread,
+        controller: ManagedProcessController,
 ) -> None:
     with ENCODE_QUEUE_THREADS_CONDITION:
         existing = ENCODE_QUEUE_THREADS.get(job_id)
         if existing is not None and existing.is_alive():
             raise RuntimeError(f"Encode queue job {job_id} is already running")
         ENCODE_QUEUE_THREADS[job_id] = thread
+        with ENCODE_QUEUE_PROCESSES_LOCK:
+            ENCODE_QUEUE_PROCESSES[job_id] = controller
         try:
             thread.start()
         except BaseException:
-            ENCODE_QUEUE_THREADS.pop(job_id, None)
+            if ENCODE_QUEUE_THREADS.get(job_id) is thread:
+                ENCODE_QUEUE_THREADS.pop(job_id, None)
+            _unregister_encode_process_controller(job_id, controller)
             ENCODE_QUEUE_THREADS_CONDITION.notify_all()
             raise
 
@@ -4366,18 +4370,12 @@ def _cancel_active_encode_processes() -> None:
 
 def _dispatch_encode_job(*, config_path: Path, job_id: str) -> None:
     controller = ManagedProcessController()
-    _register_encode_process_controller(job_id, controller)
     thread = threading.Thread(
         target=_run_encode_job,
         kwargs={"config_path": config_path, "job_id": job_id, "process_controller": controller},
         name=f"encode-job-{job_id}",
     )
-    try:
-        _start_registered_encode_queue_thread(job_id, thread)
-    except Exception:
-        _unregister_encode_queue_thread(job_id, thread)
-        _unregister_encode_process_controller(job_id)
-        raise
+    _start_registered_encode_queue_thread(job_id, thread, controller)
 
 
 def _run_encode_job(
@@ -4399,7 +4397,7 @@ def _run_encode_job(
         )
     finally:
         if process_controller is not None:
-            _unregister_encode_process_controller(job_id)
+            _unregister_encode_process_controller(job_id, controller)
         _unregister_encode_queue_thread(job_id, threading.current_thread())
 
 

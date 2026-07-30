@@ -14604,6 +14604,143 @@ raise SystemExit(0)
                 handle.join()
                 self.assertFalse(handle.thread.is_alive())
 
+    def test_concurrent_duplicate_encode_dispatch_preserves_owner_and_shutdown_drain(self) -> None:
+        job_id = "duplicate-dispatch"
+        started = threading.Event()
+        cancellation_observed = threading.Event()
+        cleanup_requested = threading.Event()
+        dispatch_gate = threading.Barrier(3)
+        outcomes: list[BaseException | None] = []
+        outcomes_lock = threading.Lock()
+        worker_controllers: list[ManagedProcessController] = []
+
+        def wait_for_cancellation(
+                *,
+                config_path: Path,
+                job_id: str,
+                process_controller: ManagedProcessController,
+                deps: encode_runtime.EncodeQueueRuntimeDeps,
+        ) -> None:
+            self.assertEqual(config_path, self.config.paths.config_path)
+            self.assertEqual(job_id, "duplicate-dispatch")
+            self.assertIsNotNone(deps)
+            worker_controllers.append(process_controller)
+            started.set()
+            while not process_controller.cancelled:
+                if cleanup_requested.wait(0.01):
+                    return
+            cancellation_observed.set()
+
+        def dispatch() -> None:
+            dispatch_gate.wait()
+            try:
+                web_app._dispatch_encode_job(
+                    config_path=self.config.paths.config_path,
+                    job_id=job_id,
+                )
+            except BaseException as exc:
+                outcome: BaseException | None = exc
+            else:
+                outcome = None
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        controller: ManagedProcessController | None = None
+        with patch(
+            "mediaforce.web.app.runtime_run_encode_job",
+            side_effect=wait_for_cancellation,
+        ), patch.object(web_app.ENCODE_QUEUE_PROCESS, "cancel"):
+            try:
+                dispatch_threads = [
+                    threading.Thread(
+                        target=dispatch,
+                        name=f"duplicate-dispatch-caller-{index}",
+                    )
+                    for index in range(2)
+                ]
+                for dispatch_thread in dispatch_threads:
+                    dispatch_thread.start()
+                dispatch_gate.wait()
+                for dispatch_thread in dispatch_threads:
+                    dispatch_thread.join()
+
+                self.assertEqual(len(outcomes), 2)
+                self.assertEqual(sum(outcome is None for outcome in outcomes), 1)
+                rejected = [
+                    outcome
+                    for outcome in outcomes
+                    if outcome is not None
+                ]
+                self.assertEqual(len(rejected), 1)
+                self.assertIsInstance(rejected[0], RuntimeError)
+                self.assertIn("already running", str(rejected[0]))
+                self.assertTrue(started.wait(1))
+                with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+                    controller = web_app.ENCODE_QUEUE_PROCESSES[job_id]
+                with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+                    thread = web_app.ENCODE_QUEUE_THREADS[job_id]
+                self.assertTrue(thread.is_alive())
+                with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+                    self.assertIs(web_app.ENCODE_QUEUE_PROCESSES[job_id], controller)
+                with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+                    self.assertIs(web_app.ENCODE_QUEUE_THREADS[job_id], thread)
+
+                web_app._cancel_active_encode_processes()
+                self.assertTrue(controller.cancelled)
+                self.assertTrue(cancellation_observed.wait(1))
+                web_app._wait_for_encode_queue_threads()
+            finally:
+                cleanup_requested.set()
+                for worker_controller in worker_controllers:
+                    worker_controller.cancel()
+                web_app._wait_for_encode_queue_threads()
+
+        with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+            self.assertNotIn(job_id, web_app.ENCODE_QUEUE_PROCESSES)
+        with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+            self.assertNotIn(job_id, web_app.ENCODE_QUEUE_THREADS)
+
+    def test_encode_dispatch_start_failure_clears_matching_registration(self) -> None:
+        failing_thread = Mock(spec=threading.Thread)
+        failing_thread.start.side_effect = RuntimeError("thread start failed")
+        failing_thread.is_alive.return_value = False
+
+        with patch(
+            "mediaforce.web.app.threading.Thread",
+            return_value=failing_thread,
+        ) as thread_factory:
+            with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                web_app._dispatch_encode_job(
+                    config_path=self.config.paths.config_path,
+                    job_id="start-failure",
+                )
+
+        controller = thread_factory.call_args.kwargs["kwargs"]["process_controller"]
+        self.assertIsInstance(controller, ManagedProcessController)
+        with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+            self.assertNotIn("start-failure", web_app.ENCODE_QUEUE_PROCESSES)
+        with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+            self.assertNotIn("start-failure", web_app.ENCODE_QUEUE_THREADS)
+
+    def test_encode_controller_unregistration_keeps_replacement_owner(self) -> None:
+        job_id = "controller-replacement"
+        stale_controller = ManagedProcessController()
+        replacement_controller = ManagedProcessController()
+        with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+            web_app.ENCODE_QUEUE_PROCESSES[job_id] = replacement_controller
+        try:
+            web_app._unregister_encode_process_controller(job_id, stale_controller)
+            with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+                self.assertIs(
+                    web_app.ENCODE_QUEUE_PROCESSES[job_id],
+                    replacement_controller,
+                )
+        finally:
+            web_app._unregister_encode_process_controller(
+                job_id,
+                replacement_controller,
+            )
+
     def test_background_worker_start_failure_stops_workers_and_releases_lease(self) -> None:
         lease = Mock(spec=WorkerLeadershipLease)
         calibration_handle = Mock()
