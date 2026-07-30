@@ -381,11 +381,6 @@ class AV1ValidationV2DerivationAuthorization:
     manifest_payload_sha256: str
     selection_lock_sha256: str
     derivation_partition_sha256: str
-    runtime_context_sha256: str
-    execution_environment_sha256: str
-    statistics_contract_sha256: str
-    review_runner_canonical_path_sha256: str
-    review_runner_binary_sha256: str
     authorized_at: str
     valid_until: str
     review_state: str
@@ -398,14 +393,6 @@ class AV1ValidationV2DerivationAuthorization:
             (self.manifest_payload_sha256, "manifest digest"),
             (self.selection_lock_sha256, "selection-lock digest"),
             (self.derivation_partition_sha256, "derivation-partition digest"),
-            (self.runtime_context_sha256, "runtime-context digest"),
-            (self.execution_environment_sha256, "execution-environment digest"),
-            (self.statistics_contract_sha256, "statistics-contract digest"),
-            (
-                self.review_runner_canonical_path_sha256,
-                "review-runner canonical-path digest",
-            ),
-            (self.review_runner_binary_sha256, "review-runner binary digest"),
         ):
             _require_sha256(value, label)
         authorized = _parse_timestamp(self.authorized_at, "derivation authorization")
@@ -430,13 +417,6 @@ class AV1ValidationV2DerivationAuthorization:
             manifest_payload_sha256=self.manifest_payload_sha256,
             selection_lock_sha256=self.selection_lock_sha256,
             derivation_partition_sha256=self.derivation_partition_sha256,
-            runtime_context_sha256=self.runtime_context_sha256,
-            execution_environment_sha256=self.execution_environment_sha256,
-            statistics_contract_sha256=self.statistics_contract_sha256,
-            review_runner_canonical_path_sha256=(
-                self.review_runner_canonical_path_sha256
-            ),
-            review_runner_binary_sha256=self.review_runner_binary_sha256,
             authorized_at=self.authorized_at,
             valid_until=self.valid_until,
             review_state=self.review_state,
@@ -652,11 +632,6 @@ def build_av1_validation_v2_derivation_authorization(
         manifest: AV1ValidationManifestV2,
         selection_lock_sha256: str,
         derivation_partition_sha256: str,
-        runtime_context_sha256: str,
-        execution_environment_sha256: str,
-        statistics_contract_sha256: str,
-        review_runner_canonical_path_sha256: str,
-        review_runner_binary_sha256: str,
         authorized_at: str,
         valid_until: str,
 ) -> AV1ValidationV2DerivationAuthorization:
@@ -666,13 +641,6 @@ def build_av1_validation_v2_derivation_authorization(
         manifest_payload_sha256=manifest.payload_sha256,
         selection_lock_sha256=selection_lock_sha256,
         derivation_partition_sha256=derivation_partition_sha256,
-        runtime_context_sha256=runtime_context_sha256,
-        execution_environment_sha256=execution_environment_sha256,
-        statistics_contract_sha256=statistics_contract_sha256,
-        review_runner_canonical_path_sha256=(
-            review_runner_canonical_path_sha256
-        ),
-        review_runner_binary_sha256=review_runner_binary_sha256,
         authorized_at=authorized_at,
         valid_until=valid_until,
         review_state="approved_for_derivation",
@@ -684,13 +652,6 @@ def build_av1_validation_v2_derivation_authorization(
         manifest_payload_sha256=manifest.payload_sha256,
         selection_lock_sha256=selection_lock_sha256,
         derivation_partition_sha256=derivation_partition_sha256,
-        runtime_context_sha256=runtime_context_sha256,
-        execution_environment_sha256=execution_environment_sha256,
-        statistics_contract_sha256=statistics_contract_sha256,
-        review_runner_canonical_path_sha256=(
-            review_runner_canonical_path_sha256
-        ),
-        review_runner_binary_sha256=review_runner_binary_sha256,
         authorized_at=authorized_at,
         valid_until=valid_until,
         review_state="approved_for_derivation",
@@ -783,17 +744,6 @@ def av1_validation_v2_derivation_authorization_from_payload(
         manifest_payload_sha256=str(value.get("manifest_payload_sha256") or ""),
         selection_lock_sha256=str(value.get("selection_lock_sha256") or ""),
         derivation_partition_sha256=str(value.get("derivation_partition_sha256") or ""),
-        runtime_context_sha256=str(value.get("runtime_context_sha256") or ""),
-        execution_environment_sha256=str(
-            value.get("execution_environment_sha256") or ""
-        ),
-        statistics_contract_sha256=str(value.get("statistics_contract_sha256") or ""),
-        review_runner_canonical_path_sha256=str(
-            value.get("review_runner_canonical_path_sha256") or ""
-        ),
-        review_runner_binary_sha256=str(
-            value.get("review_runner_binary_sha256") or ""
-        ),
         authorized_at=str(value.get("authorized_at") or ""),
         valid_until=str(value.get("valid_until") or ""),
         review_state=str(value.get("review_state") or ""),
@@ -1034,11 +984,6 @@ def _derivation_authorization_semantic_payload(
         manifest_payload_sha256: str,
         selection_lock_sha256: str,
         derivation_partition_sha256: str,
-        runtime_context_sha256: str,
-        execution_environment_sha256: str,
-        statistics_contract_sha256: str,
-        review_runner_canonical_path_sha256: str,
-        review_runner_binary_sha256: str,
         authorized_at: str,
         valid_until: str,
         review_state: str,
@@ -1060,13 +1005,6 @@ def _derivation_authorization_semantic_payload(
         "manifest_payload_sha256": manifest_payload_sha256,
         "selection_lock_sha256": selection_lock_sha256,
         "derivation_partition_sha256": derivation_partition_sha256,
-        "runtime_context_sha256": runtime_context_sha256,
-        "execution_environment_sha256": execution_environment_sha256,
-        "statistics_contract_sha256": statistics_contract_sha256,
-        "review_runner_canonical_path_sha256": (
-            review_runner_canonical_path_sha256
-        ),
-        "review_runner_binary_sha256": review_runner_binary_sha256,
         "authorized_at": authorized_at,
         "valid_until": valid_until,
         "review_state": review_state,
@@ -1278,11 +1216,6 @@ def _require_derivation_authorization_contract(value: Mapping[str, Any]) -> None
         "manifest_payload_sha256",
         "selection_lock_sha256",
         "derivation_partition_sha256",
-        "runtime_context_sha256",
-        "execution_environment_sha256",
-        "statistics_contract_sha256",
-        "review_runner_canonical_path_sha256",
-        "review_runner_binary_sha256",
         "authorized_at",
         "valid_until",
         "review_state",

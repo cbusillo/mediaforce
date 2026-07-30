@@ -51,6 +51,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
+    AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationReviewDecision,
     AV1ValidationDerivationReviewLane,
@@ -59,7 +60,9 @@ from mediaforce.tuning.av1_validation_derivation import (
     av1_validation_derivation_candidate_evaluation_public_summary,
     av1_validation_derivation_plan_public_summary,
     av1_validation_derivation_statistics_contract_sha256,
+    assert_av1_validation_derivation_source_commitments,
     build_av1_validation_derivation_plan,
+    build_av1_validation_derivation_source_commitments,
     build_av1_validation_derivation_review_prompt,
     build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
@@ -477,7 +480,15 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                             token_key=token_key,
                             expected_token_key_id=args.expected_token_key_id,
                             selected_at=args.selected_at,
-                            source_sha256_resolver=source_sha256_resolver,
+                        )
+                        build_av1_validation_derivation_source_commitments(
+                            partition=partition,
+                            assignments=tuple(
+                                assignment
+                                for assignment in partition.assignments
+                                if assignment.role == "derivation"
+                            ),
+                            resolver=source_sha256_resolver,
                         )
                         source_sha256_resolver.verify()
                         write_av1_validation_private_partition(
@@ -507,19 +518,13 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                 connection,
                 config=config,
             )
-            with av1_validation_partition_source_sha256_resolver(
-                connection,
-                config=config,
-            ) as source_sha256_resolver:
-                validate_av1_validation_partition_current_inputs(
-                    partition,
-                    manifest=manifest,
-                    sources=inventory.sources,
-                    expectations=inventory.expectations,
-                    token_key=token_key,
-                    source_sha256_resolver=source_sha256_resolver,
-                )
-                source_sha256_resolver.verify()
+            validate_av1_validation_partition_current_inputs(
+                partition,
+                manifest=manifest,
+                sources=inventory.sources,
+                expectations=inventory.expectations,
+                token_key=token_key,
+            )
     _print_partition_payload(
         av1_validation_partition_public_summary(partition),
         json_output=args.json_output,
@@ -805,7 +810,13 @@ def _run_derivation_plan_action(
     with _load_current_derivation_inputs(
         args,
         config=config,
-    ) as (manifest, partition, _token_key, source_sha256_session):
+    ) as (
+        manifest,
+        partition,
+        _token_key,
+        source_sha256_session,
+        source_commitments,
+    ):
         runtime_context_sha256 = (
             av1_validation_derivation_runtime_context_sha256(config)
         )
@@ -859,13 +870,6 @@ def _run_derivation_plan_action(
                     manifest=manifest,
                     selection_lock_sha256=partition.selection_lock_sha256,
                     derivation_partition_sha256=partition.derivation_partition_sha256,
-                    runtime_context_sha256=runtime_context_sha256,
-                    execution_environment_sha256=execution_environment_sha256,
-                    statistics_contract_sha256=statistics_contract_sha256,
-                    review_runner_canonical_path_sha256=(
-                        review_runner_canonical_path_sha256
-                    ),
-                    review_runner_binary_sha256=review_runner_binary_sha256,
                     authorized_at=_now_iso(),
                     valid_until=args.valid_until,
                 )
@@ -874,6 +878,13 @@ def _run_derivation_plan_action(
                     partition=partition,
                     authorization=authorization,
                     runtime_context_sha256=runtime_context_sha256,
+                    execution_environment_sha256=execution_environment_sha256,
+                    statistics_contract_sha256=statistics_contract_sha256,
+                    review_runner_canonical_path_sha256=(
+                        review_runner_canonical_path_sha256
+                    ),
+                    review_runner_binary_sha256=review_runner_binary_sha256,
+                    source_commitments=source_commitments,
                 )
                 artifact_root = _derivation_artifact_root_for_plan(
                     config=config,
@@ -886,13 +897,13 @@ def _run_derivation_plan_action(
                 config=config,
             )
         if (
-            plan.authorization.execution_environment_sha256
+            plan.execution_environment_sha256
             != execution_environment_sha256
-            or plan.authorization.statistics_contract_sha256
+            or plan.statistics_contract_sha256
             != statistics_contract_sha256
-            or plan.authorization.review_runner_canonical_path_sha256
+            or plan.review_runner_canonical_path_sha256
             != review_runner_canonical_path_sha256
-            or plan.authorization.review_runner_binary_sha256
+            or plan.review_runner_binary_sha256
             != review_runner_binary_sha256
         ):
             raise AV1ValidationDerivationError(
@@ -903,6 +914,13 @@ def _run_derivation_plan_action(
             partition=partition,
             authorization=plan.authorization,
             runtime_context_sha256=runtime_context_sha256,
+            execution_environment_sha256=execution_environment_sha256,
+            statistics_contract_sha256=statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=review_runner_binary_sha256,
+            source_commitments=source_commitments,
         )
         if rebuilt != plan:
             raise AV1ValidationDerivationError(
@@ -934,18 +952,19 @@ def _run_derivation_proposal_action(
         assert_private_artifact_path(path, repository_root=REPOSITORY_ROOT)
     manifest = load_av1_validation_manifest_v2(args.manifest)
     assert_preregistered_av1_validation_manifest_v2(manifest)
+    plan, artifact_root = _load_canonical_derivation_plan(
+        plan_path=args.plan,
+        config_path=args.config,
+        config=config,
+    )
     with _load_derivation_partition_for_evaluation(
         manifest=manifest,
         partition_path=args.partition,
         key_path=args.key,
         config_path=args.config,
         config=config,
+        plan=plan,
     ) as (partition, source_sha256_session):
-        plan, artifact_root = _load_canonical_derivation_plan(
-            plan_path=args.plan,
-            config_path=args.config,
-            config=config,
-        )
         assert_av1_validation_derivation_execution_environment(plan)
         attempts = load_av1_validation_derivation_attempts(
             artifact_root / "attempts"
@@ -995,6 +1014,7 @@ def _load_current_derivation_inputs(
     AV1ValidationPrivatePartition,
     bytes,
     AV1ValidationPartitionSourceSHA256Session,
+    tuple[AV1ValidationDerivationSourceCommitment, ...],
 ]]:
     for path in (args.eligibility, args.partition, args.key):
         assert_private_artifact_path(path, repository_root=REPOSITORY_ROOT)
@@ -1025,10 +1045,26 @@ def _load_current_derivation_inputs(
                 sources=inventory.sources,
                 expectations=inventory.expectations,
                 token_key=token_key,
-                source_sha256_resolver=source_sha256_resolver,
+            )
+            source_commitments = (
+                build_av1_validation_derivation_source_commitments(
+                    partition=partition,
+                    assignments=tuple(
+                        assignment
+                        for assignment in partition.assignments
+                        if assignment.role == "derivation"
+                    ),
+                    resolver=source_sha256_resolver,
+                )
             )
             source_sha256_resolver.verify()
-            yield manifest, partition, token_key, source_sha256_resolver
+            yield (
+                manifest,
+                partition,
+                token_key,
+                source_sha256_resolver,
+                source_commitments,
+            )
 
 
 @contextmanager
@@ -1039,6 +1075,7 @@ def _load_derivation_partition_for_evaluation(
         key_path: Path,
         config_path: Path,
         config: MediaforceConfig | None = None,
+        plan: AV1ValidationDerivationPlan,
 ) -> Iterator[tuple[
     AV1ValidationPrivatePartition,
     AV1ValidationPartitionSourceSHA256Session,
@@ -1066,7 +1103,10 @@ def _load_derivation_partition_for_evaluation(
                 sources=inventory.sources,
                 expectations=inventory.expectations,
                 token_key=token_key,
-                source_sha256_resolver=source_sha256_resolver,
+            )
+            assert_av1_validation_derivation_source_commitments(
+                plan,
+                resolver=source_sha256_resolver,
             )
             source_sha256_resolver.verify()
             yield partition, source_sha256_resolver
@@ -1193,11 +1233,11 @@ def _authorized_review_runner_identity(
 ) -> tuple[Path, str, str, bytes]:
     identity = _review_runner_identity()
     if (
-        identity[1] != plan.authorization.review_runner_canonical_path_sha256
-        or identity[2] != plan.authorization.review_runner_binary_sha256
+        identity[1] != plan.review_runner_canonical_path_sha256
+        or identity[2] != plan.review_runner_binary_sha256
     ):
         raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code executable drifted from the authorization"
+            "AV1 derivation Every Code executable drifted from the plan"
         )
     return identity
 

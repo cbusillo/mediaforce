@@ -12,7 +12,7 @@ import re
 import secrets
 import stat
 from statistics import median
-from typing import Any, Callable, Literal, Mapping, Sequence, cast
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, cast
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
@@ -37,7 +37,9 @@ from mediaforce.tuning.av1_cold_start_evaluation import (
 from mediaforce.tuning.av1_validation_partition import (
     AV1_VALIDATION_DERIVATION_RESERVATION_COUNT,
     AV1_VALIDATION_MINIMUM_SOURCE_GROUP_COUNT,
+    AV1ValidationPartitionError,
     AV1ValidationPartitionAssignment,
+    AV1ValidationPartitionSource,
     AV1ValidationPrivatePartition,
 )
 from mediaforce.tuning.av1_validation_v2 import (
@@ -55,6 +57,9 @@ from mediaforce.tuning.content_intent_observations import (
 
 
 AV1_VALIDATION_DERIVATION_PLAN_SCHEMA = "mediaforce.av1_cold_start_derivation_plan"
+AV1_VALIDATION_DERIVATION_SOURCE_COMMITMENT_SCHEMA = (
+    "mediaforce.av1_cold_start_derivation_source_commitment"
+)
 AV1_VALIDATION_DERIVATION_ATTEMPT_SCHEMA = "mediaforce.av1_cold_start_derivation_attempt"
 AV1_VALIDATION_DERIVATION_TERMINAL_SCHEMA = "mediaforce.av1_cold_start_derivation_terminal_record"
 AV1_VALIDATION_DERIVATION_VERDICT_INTENT_SCHEMA = (
@@ -173,6 +178,54 @@ def av1_validation_derivation_statistics_contract_sha256(
     })
 
 
+class AV1ValidationDerivationSourceResolver(Protocol):
+    def __call__(self, source: AV1ValidationPartitionSource) -> str: ...
+
+    def source_size_bytes(self, source: AV1ValidationPartitionSource) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class AV1ValidationDerivationSourceCommitment:
+    assignment_id: str
+    local_item_id: int
+    source_identity: str
+    source_sha256: str
+    source_size_bytes: int
+    evidence_summary_sha256: str
+
+    def __post_init__(self) -> None:
+        if not _SAFE_TOKEN_RE.fullmatch(self.assignment_id):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source commitment assignment is invalid"
+            )
+        if self.local_item_id <= 0 or not self.source_identity.strip():
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source commitment identity is invalid"
+            )
+        if self.source_size_bytes <= 0:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source commitment size is invalid"
+            )
+        _require_sha256(self.source_sha256, "source commitment digest")
+        _require_sha256(
+            self.evidence_summary_sha256,
+            "source commitment evidence digest",
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "schema": AV1_VALIDATION_DERIVATION_SOURCE_COMMITMENT_SCHEMA,
+            "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+            "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+            "assignment_id": self.assignment_id,
+            "local_item_id": self.local_item_id,
+            "source_identity": self.source_identity,
+            "source_sha256": self.source_sha256,
+            "source_size_bytes": self.source_size_bytes,
+            "evidence_summary_sha256": self.evidence_summary_sha256,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class AV1ValidationDerivationPlan:
     plan_id: str
@@ -183,8 +236,14 @@ class AV1ValidationDerivationPlan:
     selection_lock_sha256: str
     derivation_partition_sha256: str
     runtime_context_sha256: str
+    execution_environment_sha256: str
+    statistics_contract_sha256: str
+    review_runner_canonical_path_sha256: str
+    review_runner_binary_sha256: str
     authorization: AV1ValidationV2DerivationAuthorization
     assignments: tuple[AV1ValidationPartitionAssignment, ...]
+    source_commitments: tuple[AV1ValidationDerivationSourceCommitment, ...]
+    source_commitment_sha256: str
     payload_sha256: str
 
     def __post_init__(self) -> None:
@@ -194,6 +253,14 @@ class AV1ValidationDerivationPlan:
             (self.selection_lock_sha256, "selection-lock digest"),
             (self.derivation_partition_sha256, "derivation-partition digest"),
             (self.runtime_context_sha256, "runtime-context digest"),
+            (self.execution_environment_sha256, "execution-environment digest"),
+            (self.statistics_contract_sha256, "statistics-contract digest"),
+            (
+                self.review_runner_canonical_path_sha256,
+                "review-runner canonical-path digest",
+            ),
+            (self.review_runner_binary_sha256, "review-runner binary digest"),
+            (self.source_commitment_sha256, "source-commitment digest"),
             (self.payload_sha256, "plan digest"),
         ):
             _require_sha256(value, label)
@@ -209,8 +276,6 @@ class AV1ValidationDerivationPlan:
             raise AV1ValidationDerivationError("AV1 derivation authorization selection lock drifted")
         if self.authorization.derivation_partition_sha256 != self.derivation_partition_sha256:
             raise AV1ValidationDerivationError("AV1 derivation authorization partition drifted")
-        if self.authorization.runtime_context_sha256 != self.runtime_context_sha256:
-            raise AV1ValidationDerivationError("AV1 derivation authorization runtime context drifted")
         if len(self.assignments) != 2 * AV1_VALIDATION_DERIVATION_RESERVATION_COUNT:
             raise AV1ValidationDerivationError("AV1 derivation plan must contain exactly 24 assignments")
         if any(assignment.role != "derivation" for assignment in self.assignments):
@@ -223,6 +288,11 @@ class AV1ValidationDerivationPlan:
             raise AV1ValidationDerivationError("AV1 derivation plan candidate reservations are invalid")
         if self.assignments != tuple(sorted(self.assignments, key=_assignment_sort_key)):
             raise AV1ValidationDerivationError("AV1 derivation plan assignments are not canonical")
+        _validate_plan_source_commitments(
+            assignments=self.assignments,
+            commitments=self.source_commitments,
+            source_commitment_sha256=self.source_commitment_sha256,
+        )
         semantic_payload = self.semantic_payload()
         if self.plan_id != _derivation_id("plan", semantic_payload):
             raise AV1ValidationDerivationError("AV1 derivation plan ID does not match its payload")
@@ -241,6 +311,12 @@ class AV1ValidationDerivationPlan:
             "selection_lock_sha256": self.selection_lock_sha256,
             "derivation_partition_sha256": self.derivation_partition_sha256,
             "runtime_context_sha256": self.runtime_context_sha256,
+            "execution_environment_sha256": self.execution_environment_sha256,
+            "statistics_contract_sha256": self.statistics_contract_sha256,
+            "review_runner_canonical_path_sha256": (
+                self.review_runner_canonical_path_sha256
+            ),
+            "review_runner_binary_sha256": self.review_runner_binary_sha256,
             "authorization": self.authorization.to_payload(),
             "execution_scope": AV1_VALIDATION_DERIVATION_EXECUTION_SCOPE,
             "search_mode": AV1_VALIDATION_DERIVATION_SEARCH_MODE,
@@ -252,6 +328,11 @@ class AV1ValidationDerivationPlan:
             "retry_substitution_backfill_allowed": False,
             "public_bundle_activation_allowed": False,
             "assignments": [assignment.to_payload() for assignment in self.assignments],
+            "source_commitments": [
+                commitment.to_payload()
+                for commitment in self.source_commitments
+            ],
+            "source_commitment_sha256": self.source_commitment_sha256,
         }
 
     def to_payload(self) -> dict[str, Any]:
@@ -260,6 +341,181 @@ class AV1ValidationDerivationPlan:
             **self.semantic_payload(),
             "payload_sha256": self.payload_sha256,
         }
+
+
+def av1_validation_derivation_source_commitment_sha256(
+        commitments: Sequence[AV1ValidationDerivationSourceCommitment],
+) -> str:
+    return _payload_sha256({
+        "schema": AV1_VALIDATION_DERIVATION_SOURCE_COMMITMENT_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+        "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+        "commitments": [
+            commitment.to_payload()
+            for commitment in commitments
+        ],
+    })
+
+
+def build_av1_validation_derivation_source_commitments(
+        *,
+        partition: AV1ValidationPrivatePartition,
+        assignments: Sequence[AV1ValidationPartitionAssignment],
+        resolver: AV1ValidationDerivationSourceResolver,
+) -> tuple[AV1ValidationDerivationSourceCommitment, ...]:
+    sources_by_item_id = {
+        source.local_item_id: source
+        for source in partition.inventory_sources
+    }
+    commitments: list[AV1ValidationDerivationSourceCommitment] = []
+    try:
+        for assignment in assignments:
+            source = sources_by_item_id.get(assignment.local_item_id)
+            if source is None:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation source commitment is absent from the partition"
+                )
+            commitments.append(AV1ValidationDerivationSourceCommitment(
+                assignment_id=assignment.assignment_id,
+                local_item_id=assignment.local_item_id,
+                source_identity=source.source_identity,
+                source_sha256=resolver(source),
+                source_size_bytes=resolver.source_size_bytes(source),
+                evidence_summary_sha256=assignment.evidence_summary_sha256,
+            ))
+    except AV1ValidationPartitionError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source commitments could not be resolved"
+        ) from exc
+    return tuple(sorted(commitments, key=_source_commitment_sort_key))
+
+
+def av1_validation_derivation_plan_source_commitment(
+        plan: AV1ValidationDerivationPlan,
+        assignment_id: str,
+) -> AV1ValidationDerivationSourceCommitment:
+    commitment = next(
+        (
+            item
+            for item in plan.source_commitments
+            if item.assignment_id == assignment_id
+        ),
+        None,
+    )
+    if commitment is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation plan source commitment is unavailable"
+        )
+    return commitment
+
+
+def assert_av1_validation_derivation_source_commitments(
+        plan: AV1ValidationDerivationPlan,
+        *,
+        resolver: AV1ValidationDerivationSourceResolver,
+) -> None:
+    commitments: list[AV1ValidationDerivationSourceCommitment] = []
+    try:
+        for assignment in plan.assignments:
+            expected = av1_validation_derivation_plan_source_commitment(
+                plan,
+                assignment.assignment_id,
+            )
+            source = _source_for_commitment(assignment, expected)
+            commitments.append(AV1ValidationDerivationSourceCommitment(
+                assignment_id=assignment.assignment_id,
+                local_item_id=assignment.local_item_id,
+                source_identity=expected.source_identity,
+                source_sha256=resolver(source),
+                source_size_bytes=resolver.source_size_bytes(source),
+                evidence_summary_sha256=assignment.evidence_summary_sha256,
+            ))
+    except AV1ValidationPartitionError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source commitments could not be revalidated"
+        ) from exc
+    rebuilt = tuple(sorted(commitments, key=_source_commitment_sort_key))
+    if (
+        rebuilt != plan.source_commitments
+        or av1_validation_derivation_source_commitment_sha256(rebuilt)
+        != plan.source_commitment_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source commitments drifted from the immutable plan"
+        )
+
+
+def _validate_plan_source_commitments(
+        *,
+        assignments: Sequence[AV1ValidationPartitionAssignment],
+        commitments: Sequence[AV1ValidationDerivationSourceCommitment],
+        source_commitment_sha256: str,
+) -> None:
+    if len(commitments) != len(assignments):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation plan source commitments are incomplete"
+        )
+    canonical = tuple(sorted(commitments, key=_source_commitment_sort_key))
+    if tuple(commitments) != canonical:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation plan source commitments are not canonical"
+        )
+    assignments_by_id = {
+        assignment.assignment_id: assignment
+        for assignment in assignments
+    }
+    commitment_ids = [commitment.assignment_id for commitment in commitments]
+    if (
+        len(commitment_ids) != len(set(commitment_ids))
+        or set(commitment_ids) != set(assignments_by_id)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation plan source commitments do not cover its assignments"
+        )
+    for commitment in commitments:
+        assignment = assignments_by_id[commitment.assignment_id]
+        if (
+            commitment.local_item_id != assignment.local_item_id
+            or commitment.evidence_summary_sha256
+            != assignment.evidence_summary_sha256
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source commitment does not match its assignment"
+            )
+    if (
+        av1_validation_derivation_source_commitment_sha256(commitments)
+        != source_commitment_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source-commitment digest does not match its payload"
+        )
+
+
+def _source_for_commitment(
+        assignment: AV1ValidationPartitionAssignment,
+        commitment: AV1ValidationDerivationSourceCommitment,
+) -> AV1ValidationPartitionSource:
+    return AV1ValidationPartitionSource(
+        local_item_id=commitment.local_item_id,
+        source_identity=commitment.source_identity,
+        title_identity=assignment.title_token,
+        series_identity=assignment.series_token,
+        source_group_identity=assignment.source_group_token,
+        traits=assignment.traits,
+        compatibility_signature=assignment.compatibility_signature,
+        base_policy_signature=assignment.policy_signature,
+        target_video_bitrate_bps=assignment.target_video_bitrate_bps,
+        quality_metric=assignment.quality_metric,
+        quality_target=assignment.quality_target,
+        minimum_quality_score=assignment.minimum_quality_score,
+        evidence_summary_sha256=commitment.evidence_summary_sha256,
+    )
+
+
+def _source_commitment_sort_key(
+        commitment: AV1ValidationDerivationSourceCommitment,
+) -> str:
+    return commitment.assignment_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -1061,6 +1317,11 @@ def build_av1_validation_derivation_plan(
         partition: AV1ValidationPrivatePartition,
         authorization: AV1ValidationV2DerivationAuthorization,
         runtime_context_sha256: str,
+        execution_environment_sha256: str,
+        statistics_contract_sha256: str,
+        review_runner_canonical_path_sha256: str,
+        review_runner_binary_sha256: str,
+        source_commitments: Sequence[AV1ValidationDerivationSourceCommitment],
 ) -> AV1ValidationDerivationPlan:
     assert_preregistered_av1_validation_manifest_v2(manifest)
     if (
@@ -1078,16 +1339,12 @@ def build_av1_validation_derivation_plan(
         raise AV1ValidationDerivationError("AV1 derivation authorization selection lock does not match")
     if authorization.derivation_partition_sha256 != partition.derivation_partition_sha256:
         raise AV1ValidationDerivationError("AV1 derivation authorization partition does not match")
-    if authorization.runtime_context_sha256 != runtime_context_sha256:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation authorization runtime context does not match"
-        )
     if (
-        authorization.statistics_contract_sha256
+        statistics_contract_sha256
         != av1_validation_derivation_statistics_contract_sha256(manifest)
     ):
         raise AV1ValidationDerivationError(
-            "AV1 derivation authorization statistics contract does not match"
+            "AV1 derivation plan statistics contract does not match"
         )
     selected_at = _parse_timestamp(partition.selected_at, "partition selection")
     authorized_at = _parse_timestamp(authorization.authorized_at, "derivation authorization")
@@ -1110,12 +1367,50 @@ def build_av1_validation_derivation_plan(
     ))
     if {assignment.cell_plan_id for assignment in assignments} != publication_plan_ids:
         raise AV1ValidationDerivationError("AV1 derivation worklist does not cover the candidate plans")
+    if any(assignment.minimum_quality_score <= 0 for assignment in assignments):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation worklist requires a positive quality floor"
+        )
+    canonical_source_commitments = tuple(sorted(
+        source_commitments,
+        key=_source_commitment_sort_key,
+    ))
+    source_commitment_sha256 = (
+        av1_validation_derivation_source_commitment_sha256(
+            canonical_source_commitments
+        )
+    )
+    _validate_plan_source_commitments(
+        assignments=assignments,
+        commitments=canonical_source_commitments,
+        source_commitment_sha256=source_commitment_sha256,
+    )
+    source_identity_by_item_id = {
+        source.local_item_id: source.source_identity
+        for source in partition.inventory_sources
+    }
+    if any(
+        source_identity_by_item_id.get(commitment.local_item_id)
+        != commitment.source_identity
+        for commitment in canonical_source_commitments
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source commitment does not match its partition source"
+        )
     semantic_payload = _plan_semantic_payload(
         manifest=manifest,
         partition=partition,
         authorization=authorization,
         runtime_context_sha256=runtime_context_sha256,
+        execution_environment_sha256=execution_environment_sha256,
+        statistics_contract_sha256=statistics_contract_sha256,
+        review_runner_canonical_path_sha256=(
+            review_runner_canonical_path_sha256
+        ),
+        review_runner_binary_sha256=review_runner_binary_sha256,
         assignments=assignments,
+        source_commitments=canonical_source_commitments,
+        source_commitment_sha256=source_commitment_sha256,
     )
     plan_id = _derivation_id("plan", semantic_payload)
     return AV1ValidationDerivationPlan(
@@ -1127,8 +1422,16 @@ def build_av1_validation_derivation_plan(
         selection_lock_sha256=partition.selection_lock_sha256,
         derivation_partition_sha256=partition.derivation_partition_sha256,
         runtime_context_sha256=runtime_context_sha256,
+        execution_environment_sha256=execution_environment_sha256,
+        statistics_contract_sha256=statistics_contract_sha256,
+        review_runner_canonical_path_sha256=(
+            review_runner_canonical_path_sha256
+        ),
+        review_runner_binary_sha256=review_runner_binary_sha256,
         authorization=authorization,
         assignments=assignments,
+        source_commitments=canonical_source_commitments,
+        source_commitment_sha256=source_commitment_sha256,
         payload_sha256=_payload_sha256({"plan_id": plan_id, **semantic_payload}),
     )
 
@@ -1163,10 +1466,16 @@ def build_av1_validation_derivation_attempt(
     calibration_json = None
     calibration_sha256 = None
     if status == "review_pending":
+        source_commitment = av1_validation_derivation_plan_source_commitment(
+            plan,
+            assignment.assignment_id,
+        )
         _validate_calibration_payload(
             assignment,
             calibration,
             source_identity=source_identity,
+            expected_source_sha256=source_commitment.source_sha256,
+            expected_source_size_bytes=source_commitment.source_size_bytes,
         )
         calibration_json = canonical_json_bytes(calibration).decode("utf-8")
         calibration_sha256 = _payload_sha256(calibration)
@@ -1288,6 +1597,10 @@ def validate_av1_validation_derivation_attempt_binding(
     ):
         raise AV1ValidationDerivationError("AV1 derivation attempt is bound to another work item")
     if attempt.status == "review_pending":
+        source_commitment = av1_validation_derivation_plan_source_commitment(
+            plan,
+            assignment.assignment_id,
+        )
         _validate_calibration_payload(
             assignment,
             attempt.calibration_payload(),
@@ -1295,6 +1608,8 @@ def validate_av1_validation_derivation_attempt_binding(
                 partition,
                 assignment.local_item_id,
             ),
+            expected_source_sha256=source_commitment.source_sha256,
+            expected_source_size_bytes=source_commitment.source_size_bytes,
         )
 
 
@@ -1344,7 +1659,7 @@ def evaluate_av1_validation_derivation_candidate(
     if manifest.manifest_id != plan.manifest_id or manifest.payload_sha256 != plan.manifest_payload_sha256:
         raise AV1ValidationDerivationError("AV1 derivation proposal manifest drifted")
     if (
-        plan.authorization.statistics_contract_sha256
+        plan.statistics_contract_sha256
         != av1_validation_derivation_statistics_contract_sha256(manifest)
     ):
         raise AV1ValidationDerivationError(
@@ -1573,7 +1888,7 @@ def evaluate_av1_validation_derivation_candidate(
         crf_upper=crf_upper,
         crf_mad=crf_mad,
         bitrate_relative_mad=relative_mad,
-        statistics_contract_sha256=plan.authorization.statistics_contract_sha256,
+        statistics_contract_sha256=plan.statistics_contract_sha256,
         minimum_derivation_source_count=(
             manifest.criteria.minimum_derivation_source_count
         ),
@@ -1599,7 +1914,7 @@ def evaluate_av1_validation_derivation_candidate(
         crf_upper=crf_upper,
         crf_mad=crf_mad,
         bitrate_relative_mad=relative_mad,
-        statistics_contract_sha256=plan.authorization.statistics_contract_sha256,
+        statistics_contract_sha256=plan.statistics_contract_sha256,
         minimum_derivation_source_count=(
             manifest.criteria.minimum_derivation_source_count
         ),
@@ -1657,9 +1972,9 @@ def build_av1_validation_derivation_review_claim(
         )
     if (
         review_runner_canonical_path_sha256
-        != plan.authorization.review_runner_canonical_path_sha256
+        != plan.review_runner_canonical_path_sha256
         or review_runner_binary_sha256
-        != plan.authorization.review_runner_binary_sha256
+        != plan.review_runner_binary_sha256
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation review runner does not match the authorization"
@@ -1998,12 +2313,8 @@ def finalize_av1_validation_derivation_candidate_lock(
         derivation_evidence_count=current_proposal.derivation_evidence_count,
         derivation_source_count=current_proposal.derivation_source_count,
         derivation_source_tokens=current_proposal.derivation_source_tokens,
-        derivation_title_tokens=current_proposal.derivation_title_tokens,
         derivation_series_tokens=current_proposal.derivation_series_tokens,
         derivation_source_group_tokens=current_proposal.derivation_source_group_tokens,
-        derivation_source_group_observation_tokens=(
-            current_proposal.derivation_source_group_observation_tokens
-        ),
         derivation_oldest_recorded_at=current_proposal.derivation_oldest_recorded_at,
         derivation_newest_recorded_at=current_proposal.derivation_newest_recorded_at,
         derivation_conflict_count=current_proposal.derivation_conflict_count,
@@ -2044,9 +2355,9 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
             claim.plan_id != plan.plan_id
             or claim.authorization_id != plan.authorization.authorization_id
             or claim.review_runner_canonical_path_sha256
-            != plan.authorization.review_runner_canonical_path_sha256
+            != plan.review_runner_canonical_path_sha256
             or claim.review_runner_binary_sha256
-            != plan.authorization.review_runner_binary_sha256
+            != plan.review_runner_binary_sha256
             for claim in review_claims
         )
     ):
@@ -3010,9 +3321,9 @@ def write_av1_validation_derivation_review_claim(
         or claim.proposal_id != proposal.proposal_id
         or claim.proposal_payload_sha256 != proposal.payload_sha256
         or claim.review_runner_canonical_path_sha256
-        != plan.authorization.review_runner_canonical_path_sha256
+        != plan.review_runner_canonical_path_sha256
         or claim.review_runner_binary_sha256
-        != plan.authorization.review_runner_binary_sha256
+        != plan.review_runner_binary_sha256
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation review claim is bound to another run or proposal"
@@ -3076,9 +3387,9 @@ def load_av1_validation_derivation_review_claims(
             or claim.proposal_payload_sha256 != proposal.payload_sha256
             or claim.lane != path.stem
             or claim.review_runner_canonical_path_sha256
-            != plan.authorization.review_runner_canonical_path_sha256
+            != plan.review_runner_canonical_path_sha256
             or claim.review_runner_binary_sha256
-            != plan.authorization.review_runner_binary_sha256
+            != plan.review_runner_binary_sha256
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation review claim is bound to another run or proposal"
@@ -3510,11 +3821,14 @@ def av1_validation_derivation_plan_from_payload(
         "plan_id", "schema", "schema_version", "contract_version", "manifest_id",
         "manifest_payload_sha256", "partition_id", "partition_payload_sha256",
         "selection_lock_sha256", "derivation_partition_sha256", "runtime_context_sha256",
+        "execution_environment_sha256", "statistics_contract_sha256",
+        "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
         "authorization",
         "execution_scope", "search_mode", "derivation_execution_authorized",
         "cold_start_warm_start_allowed", "validation_harness_allowed", "guided_probe_allowed",
         "holdout_execution_authorized", "retry_substitution_backfill_allowed",
-        "public_bundle_activation_allowed", "assignments", "payload_sha256",
+        "public_bundle_activation_allowed", "assignments", "source_commitments",
+        "source_commitment_sha256", "payload_sha256",
     }, "derivation plan")
     if (
         value.get("schema") != AV1_VALIDATION_DERIVATION_PLAN_SCHEMA
@@ -3545,8 +3859,32 @@ def av1_validation_derivation_plan_from_payload(
             value.get("runtime_context_sha256"),
             "runtime-context digest",
         ),
+        execution_environment_sha256=_required_text(
+            value.get("execution_environment_sha256"),
+            "execution-environment digest",
+        ),
+        statistics_contract_sha256=_required_text(
+            value.get("statistics_contract_sha256"),
+            "statistics-contract digest",
+        ),
+        review_runner_canonical_path_sha256=_required_text(
+            value.get("review_runner_canonical_path_sha256"),
+            "review-runner canonical-path digest",
+        ),
+        review_runner_binary_sha256=_required_text(
+            value.get("review_runner_binary_sha256"),
+            "review-runner binary digest",
+        ),
         authorization=av1_validation_v2_derivation_authorization_from_payload(object_dict(value.get("authorization"))),
         assignments=tuple(_assignment_from_payload(object_dict(item)) for item in object_list(value.get("assignments"))),
+        source_commitments=tuple(
+            _source_commitment_from_payload(object_dict(item))
+            for item in object_list(value.get("source_commitments"))
+        ),
+        source_commitment_sha256=_required_text(
+            value.get("source_commitment_sha256"),
+            "source-commitment digest",
+        ),
         payload_sha256=_required_text(value.get("payload_sha256"), "plan digest"),
     )
     if raw is not None and raw != canonical_json_bytes(plan.to_payload()):
@@ -3979,7 +4317,13 @@ def _plan_semantic_payload(
         partition: AV1ValidationPrivatePartition,
         authorization: AV1ValidationV2DerivationAuthorization,
         runtime_context_sha256: str,
+        execution_environment_sha256: str,
+        statistics_contract_sha256: str,
+        review_runner_canonical_path_sha256: str,
+        review_runner_binary_sha256: str,
         assignments: Sequence[AV1ValidationPartitionAssignment],
+        source_commitments: Sequence[AV1ValidationDerivationSourceCommitment],
+        source_commitment_sha256: str,
 ) -> dict[str, Any]:
     return {
         "schema": AV1_VALIDATION_DERIVATION_PLAN_SCHEMA,
@@ -3992,6 +4336,12 @@ def _plan_semantic_payload(
         "selection_lock_sha256": partition.selection_lock_sha256,
         "derivation_partition_sha256": partition.derivation_partition_sha256,
         "runtime_context_sha256": runtime_context_sha256,
+        "execution_environment_sha256": execution_environment_sha256,
+        "statistics_contract_sha256": statistics_contract_sha256,
+        "review_runner_canonical_path_sha256": (
+            review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": review_runner_binary_sha256,
         "authorization": authorization.to_payload(),
         "execution_scope": AV1_VALIDATION_DERIVATION_EXECUTION_SCOPE,
         "search_mode": AV1_VALIDATION_DERIVATION_SEARCH_MODE,
@@ -4003,6 +4353,11 @@ def _plan_semantic_payload(
         "retry_substitution_backfill_allowed": False,
         "public_bundle_activation_allowed": False,
         "assignments": [assignment.to_payload() for assignment in assignments],
+        "source_commitments": [
+            commitment.to_payload()
+            for commitment in source_commitments
+        ],
+        "source_commitment_sha256": source_commitment_sha256,
     }
 
 
@@ -4341,6 +4696,8 @@ def _validate_calibration_payload(
         calibration: Mapping[str, Any],
         *,
         source_identity: str,
+        expected_source_sha256: str,
+        expected_source_size_bytes: int,
 ) -> None:
     _validate_calibration_execution(calibration)
     sample_item = object_dict(calibration.get("sample_item"))
@@ -4373,8 +4730,8 @@ def _validate_calibration_payload(
         or str(
             sample_item.get("source_snapshot_content_version_fingerprint") or ""
         ) != source_identity
-        or source_snapshot_sha256 != assignment.source_sha256
-        or source_size_bytes <= 0
+        or source_snapshot_sha256 != expected_source_sha256
+        or source_size_bytes != expected_source_size_bytes
         or source_snapshot_size_bytes != source_size_bytes
         or int_value(stream_budget_totals.get("remaining_video_bitrate_bps"))
         != assignment.target_video_bitrate_bps
@@ -4528,12 +4885,22 @@ def _validate_plan_partition(
         ),
         key=_assignment_sort_key,
     ))
+    source_identity_by_item_id = {
+        source.local_item_id: source.source_identity
+        for source in partition.inventory_sources
+    }
+    commitment_source_identities_match = all(
+        source_identity_by_item_id.get(commitment.local_item_id)
+        == commitment.source_identity
+        for commitment in plan.source_commitments
+    )
     if (
         plan.partition_id != partition.partition_id
         or plan.partition_payload_sha256 != partition.payload_sha256
         or plan.selection_lock_sha256 != partition.selection_lock_sha256
         or plan.derivation_partition_sha256 != partition.derivation_partition_sha256
         or plan.assignments != derivation_assignments
+        or not commitment_source_identities_match
     ):
         raise AV1ValidationDerivationError("AV1 derivation plan does not match the private partition")
 
@@ -4569,11 +4936,52 @@ def _assignment_sort_key(assignment: AV1ValidationPartitionAssignment) -> tuple[
     return assignment.cell_plan_id, assignment.ordinal, assignment.assignment_id
 
 
+def _source_commitment_from_payload(
+        payload: Mapping[str, Any],
+) -> AV1ValidationDerivationSourceCommitment:
+    _require_exact_keys(payload, {
+        "schema", "schema_version", "contract_version", "assignment_id",
+        "local_item_id", "source_identity", "source_sha256", "source_size_bytes",
+        "evidence_summary_sha256",
+    }, "derivation source commitment")
+    if (
+        payload.get("schema")
+        != AV1_VALIDATION_DERIVATION_SOURCE_COMMITMENT_SCHEMA
+        or int_value(payload.get("schema_version"))
+        != AV1_VALIDATION_DERIVATION_SCHEMA_VERSION
+        or payload.get("contract_version")
+        != AV1_VALIDATION_DERIVATION_CONTRACT_VERSION
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source commitment contract is invalid"
+        )
+    return AV1ValidationDerivationSourceCommitment(
+        assignment_id=_required_text(
+            payload.get("assignment_id"),
+            "assignment ID",
+        ),
+        local_item_id=int_value(payload.get("local_item_id")),
+        source_identity=_required_text(
+            payload.get("source_identity"),
+            "source identity",
+        ),
+        source_sha256=_required_text(
+            payload.get("source_sha256"),
+            "source digest",
+        ),
+        source_size_bytes=int_value(payload.get("source_size_bytes")),
+        evidence_summary_sha256=_required_text(
+            payload.get("evidence_summary_sha256"),
+            "evidence digest",
+        ),
+    )
+
+
 def _assignment_from_payload(payload: Mapping[str, Any]) -> AV1ValidationPartitionAssignment:
     _require_exact_keys(payload, {
         "assignment_id", "role", "cell_plan_id", "ordinal", "local_item_id", "traits",
         "intent_level", "source_token", "title_token", "series_token", "source_group_token",
-        "compatibility_signature", "policy_signature", "source_sha256", "target_video_bitrate_bps",
+        "compatibility_signature", "policy_signature", "target_video_bitrate_bps",
         "quality_metric", "quality_target", "minimum_quality_score", "evidence_summary_sha256",
     }, "derivation assignment")
     return AV1ValidationPartitionAssignment(
@@ -4590,7 +4998,6 @@ def _assignment_from_payload(payload: Mapping[str, Any]) -> AV1ValidationPartiti
         source_group_token=_required_text(payload.get("source_group_token"), "source-group token"),
         compatibility_signature=_required_text(payload.get("compatibility_signature"), "compatibility signature"),
         policy_signature=_required_text(payload.get("policy_signature"), "policy signature"),
-        source_sha256=_required_text(payload.get("source_sha256"), "source digest"),
         target_video_bitrate_bps=int_value(payload.get("target_video_bitrate_bps")),
         quality_metric=_required_text(payload.get("quality_metric"), "quality metric"),
         quality_target=float_value(payload.get("quality_target")),

@@ -47,6 +47,10 @@ class AV1ValidationV2Tests(unittest.TestCase):
         expected = build_preregistered_av1_validation_manifest_v2()
         self.assertEqual(self.manifest, expected)
         self.assertEqual(V2_MANIFEST_PATH.read_bytes(), serialize_av1_validation_manifest_v2(expected))
+        self.assertEqual(
+            self.manifest.payload_sha256,
+            "sha256:5a24bbfdfe699aa2c6f037b9473ce06607aee20af743f57266f38bf7eb08d268",
+        )
         assert_preregistered_av1_validation_manifest_v2(self.manifest)
 
         v1 = load_av1_cold_start_validation_manifest(V1_MANIFEST_PATH)
@@ -120,11 +124,6 @@ class AV1ValidationV2Tests(unittest.TestCase):
             manifest=self.manifest,
             selection_lock_sha256=f"sha256:{'a' * 64}",
             derivation_partition_sha256=f"sha256:{'b' * 64}",
-            runtime_context_sha256=f"sha256:{'c' * 64}",
-            execution_environment_sha256=f"sha256:{'d' * 64}",
-            statistics_contract_sha256=f"sha256:{'e' * 64}",
-            review_runner_canonical_path_sha256=f"sha256:{'f' * 64}",
-            review_runner_binary_sha256=f"sha256:{'0' * 64}",
             authorized_at="2026-08-01T00:00:00Z",
             valid_until="2026-08-02T00:00:00Z",
         )
@@ -139,12 +138,30 @@ class AV1ValidationV2Tests(unittest.TestCase):
         self.assertFalse(payload["holdout_case_execution_allowed"])
         self.assertFalse(payload["public_bundle_activation_allowed"])
         self.assertEqual(
-            payload["review_runner_canonical_path_sha256"],
-            f"sha256:{'f' * 64}",
-        )
-        self.assertEqual(
-            payload["review_runner_binary_sha256"],
-            f"sha256:{'0' * 64}",
+            set(payload),
+            {
+                "authorization_id",
+                "schema",
+                "schema_version",
+                "contract_version",
+                "authority",
+                "runtime_execution_authorized",
+                "execution_scope",
+                "search_mode",
+                "validation_harness_allowed",
+                "validation_candidate_allowed",
+                "guided_probe_allowed",
+                "holdout_case_execution_allowed",
+                "public_bundle_activation_allowed",
+                "manifest_id",
+                "manifest_payload_sha256",
+                "selection_lock_sha256",
+                "derivation_partition_sha256",
+                "authorized_at",
+                "valid_until",
+                "review_state",
+                "payload_sha256",
+            },
         )
 
         payload["guided_probe_allowed"] = True
@@ -187,14 +204,8 @@ class AV1ValidationV2Tests(unittest.TestCase):
             derivation_evidence_count=12,
             derivation_source_count=6,
             derivation_source_tokens=tuple(f"source_{index}" for index in range(6)),
-            derivation_title_tokens=tuple(
-                f"title_token_{index}" for index in range(12)
-            ),
             derivation_series_tokens=tuple(f"series_{index}" for index in range(12)),
             derivation_source_group_tokens=tuple(f"group_{index:03d}" for index in range(6)),
-            derivation_source_group_observation_tokens=tuple(
-                f"group_{index:03d}" for index in range(6) for _ in range(2)
-            ),
             derivation_oldest_recorded_at="2026-07-01T00:00:00Z",
             derivation_newest_recorded_at="2026-07-10T00:00:00Z",
             derivation_conflict_count=0,

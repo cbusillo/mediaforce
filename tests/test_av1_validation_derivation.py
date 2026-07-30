@@ -33,6 +33,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
     AV1ValidationDerivationReviewClaim,
+    AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationTerminalRecord,
     _attempt_semantic_payload,
     _bind_owner_only_directory,
@@ -45,10 +46,14 @@ from mediaforce.tuning.av1_validation_derivation import (
     _terminal_semantic_payload,
     _write_owner_only,
     assert_av1_validation_derivation_authorization_active,
+    assert_av1_validation_derivation_source_commitments,
     av1_validation_derivation_plan_public_summary,
+    av1_validation_derivation_plan_source_commitment,
+    av1_validation_derivation_source_commitment_sha256,
     av1_validation_derivation_statistics_contract_sha256,
     build_av1_validation_derivation_attempt,
     build_av1_validation_derivation_plan,
+    build_av1_validation_derivation_source_commitments,
     build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_prompt,
     build_av1_validation_derivation_review_attestation,
@@ -142,10 +147,15 @@ SELECTED_AT = "2026-07-27T22:50:00Z"
 AUTHORIZED_AT = "2026-07-28T00:00:00Z"
 VALID_UNTIL = "2026-08-01T00:00:00Z"
 REVIEW_RUNNER_BYTES = b"\xcf\xfa\xed\xfe" + b"test-code-binary"
+SOURCE_SIZE_BYTES = 900_000_000
 
 
 def _source_sha256(source: AV1ValidationPartitionSource) -> str:
-    return f"sha256:{hashlib.sha256(source.source_identity.encode()).hexdigest()}"
+    return _source_sha256_for_identity(source.source_identity)
+
+
+def _source_sha256_for_identity(source_identity: str) -> str:
+    return f"sha256:{hashlib.sha256(source_identity.encode()).hexdigest()}"
 
 
 class _SourceSHA256Session:
@@ -159,6 +169,10 @@ class _SourceSHA256Session:
 
     def __call__(self, source: AV1ValidationPartitionSource) -> str:
         return _source_sha256(source)
+
+    def source_size_bytes(self, source: AV1ValidationPartitionSource) -> int:
+        del source
+        return SOURCE_SIZE_BYTES
 
     def verify(self) -> None:
         if self._on_verify is not None:
@@ -306,7 +320,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             token_key=self.token_key,
             expected_token_key_id=av1_validation_partition_key_id(self.token_key),
             selected_at=SELECTED_AT,
-            source_sha256_resolver=_source_sha256,
         )
         runtime_context_sha256 = av1_validation_derivation_runtime_context_sha256(
             self.runtime_config
@@ -320,6 +333,24 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             manifest=self.manifest,
             selection_lock_sha256=self.partition.selection_lock_sha256,
             derivation_partition_sha256=self.partition.derivation_partition_sha256,
+            authorized_at=AUTHORIZED_AT,
+            valid_until=VALID_UNTIL,
+        )
+        self.source_commitments = (
+            build_av1_validation_derivation_source_commitments(
+                partition=self.partition,
+                assignments=tuple(
+                    assignment
+                    for assignment in self.partition.assignments
+                    if assignment.role == "derivation"
+                ),
+                resolver=_SourceSHA256Session(),
+            )
+        )
+        self.plan = build_av1_validation_derivation_plan(
+            manifest=self.manifest,
+            partition=self.partition,
+            authorization=self.authorization,
             runtime_context_sha256=runtime_context_sha256,
             execution_environment_sha256=execution_environment_sha256,
             statistics_contract_sha256=(
@@ -329,14 +360,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             review_runner_binary_sha256=(
                 f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
             ),
-            authorized_at=AUTHORIZED_AT,
-            valid_until=VALID_UNTIL,
-        )
-        self.plan = build_av1_validation_derivation_plan(
-            manifest=self.manifest,
-            partition=self.partition,
-            authorization=self.authorization,
-            runtime_context_sha256=runtime_context_sha256,
+            source_commitments=self.source_commitments,
         )
         self.runtime_artifact_root = (
             self.runtime_config.paths.web_state_dir
@@ -417,6 +441,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
     def test_plan_contains_only_exact_reserved_derivation_assignments(self) -> None:
         self.assertEqual(len(self.plan.assignments), 24)
+        self.assertEqual(len(self.plan.source_commitments), 24)
+        self.assertEqual(
+            {commitment.assignment_id for commitment in self.plan.source_commitments},
+            {assignment.assignment_id for assignment in self.plan.assignments},
+        )
         self.assertEqual({assignment.role for assignment in self.plan.assignments}, {"derivation"})
         self.assertEqual(
             sorted(
@@ -433,32 +462,220 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertFalse(summary["holdout_execution_authorized"])
         self.assertFalse(summary["guided_probe_allowed"])
 
-    def test_source_digest_drift_invalidates_existing_authorization(self) -> None:
-        changed_item_id = self.partition.assignments[0].local_item_id
+    def test_plan_identity_binds_source_commitments(self) -> None:
+        changed_item_id = self.plan.assignments[0].local_item_id
 
-        def changed_source_sha256(source: AV1ValidationPartitionSource) -> str:
-            if source.local_item_id == changed_item_id:
-                return f"sha256:{'f' * 64}"
-            return _source_sha256(source)
+        class ChangedSourceSession(_SourceSHA256Session):
+            def __call__(self, source: AV1ValidationPartitionSource) -> str:
+                if source.local_item_id == changed_item_id:
+                    return f"sha256:{'f' * 64}"
+                return super().__call__(source)
 
-        drifted_partition = build_av1_validation_private_partition(
-            manifest=self.manifest,
-            eligibility_attestation_id=self.manifest.eligibility_attestation_id,
-            eligibility_payload_sha256=self.manifest.eligibility_payload_sha256,
-            sources=self.sources,
-            expectations=self.expectations,
-            token_key=self.token_key,
-            expected_token_key_id=av1_validation_partition_key_id(self.token_key),
-            selected_at=SELECTED_AT,
-            source_sha256_resolver=changed_source_sha256,
+        commitments = build_av1_validation_derivation_source_commitments(
+            partition=self.partition,
+            assignments=self.plan.assignments,
+            resolver=ChangedSourceSession(),
         )
-        with self.assertRaises(AV1ValidationDerivationError):
+        drifted_plan = build_av1_validation_derivation_plan(
+            manifest=self.manifest,
+            partition=self.partition,
+            authorization=self.authorization,
+            runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=self.plan.execution_environment_sha256,
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            source_commitments=commitments,
+        )
+        self.assertNotEqual(drifted_plan.plan_id, self.plan.plan_id)
+        self.assertNotEqual(
+            drifted_plan.source_commitment_sha256,
+            self.plan.source_commitment_sha256,
+        )
+
+    def test_source_commitment_payload_keys_are_frozen(self) -> None:
+        self.assertEqual(
+            set(self.plan.source_commitments[0].to_payload()),
+            {
+                "schema",
+                "schema_version",
+                "contract_version",
+                "assignment_id",
+                "local_item_id",
+                "source_identity",
+                "source_sha256",
+                "source_size_bytes",
+                "evidence_summary_sha256",
+            },
+        )
+
+    def test_plan_rejects_missing_or_extra_source_commitment(self) -> None:
+        for commitments in (
+            self.plan.source_commitments[:-1],
+            (*self.plan.source_commitments, self.plan.source_commitments[-1]),
+        ):
+            with self.subTest(commitment_count=len(commitments)), self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "source commitments are incomplete",
+            ):
+                build_av1_validation_derivation_plan(
+                    manifest=self.manifest,
+                    partition=self.partition,
+                    authorization=self.authorization,
+                    runtime_context_sha256=self.plan.runtime_context_sha256,
+                    execution_environment_sha256=(
+                        self.plan.execution_environment_sha256
+                    ),
+                    statistics_contract_sha256=(
+                        self.plan.statistics_contract_sha256
+                    ),
+                    review_runner_canonical_path_sha256=(
+                        self.plan.review_runner_canonical_path_sha256
+                    ),
+                    review_runner_binary_sha256=(
+                        self.plan.review_runner_binary_sha256
+                    ),
+                    source_commitments=commitments,
+                )
+
+    def test_plan_rejects_commitment_for_unknown_assignment(self) -> None:
+        commitments = list(self.plan.source_commitments)
+        commitments[0] = replace(
+            commitments[0],
+            assignment_id="unknown_assignment_0001",
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "do not cover its assignments",
+        ):
             build_av1_validation_derivation_plan(
                 manifest=self.manifest,
-                partition=drifted_partition,
+                partition=self.partition,
                 authorization=self.authorization,
                 runtime_context_sha256=self.plan.runtime_context_sha256,
+                execution_environment_sha256=self.plan.execution_environment_sha256,
+                statistics_contract_sha256=self.plan.statistics_contract_sha256,
+                review_runner_canonical_path_sha256=(
+                    self.plan.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+                source_commitments=commitments,
             )
+
+    def test_plan_rejects_commitment_for_unknown_source_identity(self) -> None:
+        commitments = list(self.plan.source_commitments)
+        commitments[0] = replace(
+            commitments[0],
+            source_identity="drifted-source-identity",
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "does not match its partition source",
+        ):
+            build_av1_validation_derivation_plan(
+                manifest=self.manifest,
+                partition=self.partition,
+                authorization=self.authorization,
+                runtime_context_sha256=self.plan.runtime_context_sha256,
+                execution_environment_sha256=self.plan.execution_environment_sha256,
+                statistics_contract_sha256=self.plan.statistics_contract_sha256,
+                review_runner_canonical_path_sha256=(
+                    self.plan.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.plan.review_runner_binary_sha256
+                ),
+                source_commitments=commitments,
+            )
+
+    def test_live_source_byte_drift_fails_before_plan_publication(self) -> None:
+        changed_item_id = self.plan.assignments[0].local_item_id
+
+        class ChangedSourceSession(_SourceSHA256Session):
+            def __call__(self, source: AV1ValidationPartitionSource) -> str:
+                if source.local_item_id == changed_item_id:
+                    return f"sha256:{'f' * 64}"
+                return super().__call__(source)
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "drifted from the immutable plan",
+        ):
+            assert_av1_validation_derivation_source_commitments(
+                self.plan,
+                resolver=ChangedSourceSession(),
+            )
+
+    def test_live_source_size_drift_fails_before_plan_publication(self) -> None:
+        changed_item_id = self.plan.assignments[0].local_item_id
+
+        class ChangedSourceSession(_SourceSHA256Session):
+            def source_size_bytes(
+                    self,
+                    source: AV1ValidationPartitionSource,
+            ) -> int:
+                if source.local_item_id == changed_item_id:
+                    return SOURCE_SIZE_BYTES + 1
+                return super().source_size_bytes(source)
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "drifted from the immutable plan",
+        ):
+            assert_av1_validation_derivation_source_commitments(
+                self.plan,
+                resolver=ChangedSourceSession(),
+            )
+
+    def test_plan_retry_reproduces_frozen_commitments(self) -> None:
+        rebuilt = build_av1_validation_derivation_plan(
+            manifest=self.manifest,
+            partition=self.partition,
+            authorization=self.authorization,
+            runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=self.plan.execution_environment_sha256,
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            source_commitments=build_av1_validation_derivation_source_commitments(
+                partition=self.partition,
+                assignments=self.plan.assignments,
+                resolver=_SourceSHA256Session(),
+            ),
+        )
+        self.assertEqual(rebuilt, self.plan)
+
+    def test_plan_binds_execution_environment_and_runner_digests(self) -> None:
+        changed_environment = build_av1_validation_derivation_plan(
+            manifest=self.manifest,
+            partition=self.partition,
+            authorization=self.authorization,
+            runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=f"sha256:{'e' * 64}",
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            source_commitments=self.plan.source_commitments,
+        )
+        changed_runner = build_av1_validation_derivation_plan(
+            manifest=self.manifest,
+            partition=self.partition,
+            authorization=self.authorization,
+            runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=self.plan.execution_environment_sha256,
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=f"sha256:{'f' * 64}",
+            review_runner_binary_sha256=f"sha256:{'0' * 64}",
+            source_commitments=self.plan.source_commitments,
+        )
+        self.assertNotEqual(changed_environment.plan_id, self.plan.plan_id)
+        self.assertNotEqual(changed_runner.plan_id, self.plan.plan_id)
 
     def test_implementation_drift_invalidates_execution_environment(self) -> None:
         with (
@@ -504,6 +721,37 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         semantic_payload["assignments"] = [
             assignment.to_payload() for assignment in assignments
         ]
+        source_identity = next(
+            source.source_identity
+            for source in self.partition.inventory_sources
+            if source.local_item_id == assignments[0].local_item_id
+        )
+        source_commitments = [
+            replace(
+                commitment,
+                local_item_id=assignments[0].local_item_id,
+                source_identity=source_identity,
+            )
+            if commitment.assignment_id == assignments[0].assignment_id
+            else commitment
+            for commitment in self.plan.source_commitments
+        ]
+        source_commitments = sorted(
+            source_commitments,
+            key=lambda commitment: commitment.assignment_id,
+        )
+        source_commitment_sha256 = (
+            av1_validation_derivation_source_commitment_sha256(
+                source_commitments
+            )
+        )
+        semantic_payload["source_commitments"] = [
+            commitment.to_payload()
+            for commitment in source_commitments
+        ]
+        semantic_payload["source_commitment_sha256"] = (
+            source_commitment_sha256
+        )
         plan_id = _derivation_id("plan", semantic_payload)
         drifted_plan = AV1ValidationDerivationPlan(
             plan_id=plan_id,
@@ -514,8 +762,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             selection_lock_sha256=self.plan.selection_lock_sha256,
             derivation_partition_sha256=self.plan.derivation_partition_sha256,
             runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=self.plan.execution_environment_sha256,
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
             authorization=self.plan.authorization,
             assignments=tuple(assignments),
+            source_commitments=tuple(source_commitments),
+            source_commitment_sha256=source_commitment_sha256,
             payload_sha256=_payload_sha256({
                 "plan_id": plan_id,
                 **semantic_payload,
@@ -1290,10 +1546,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             lane="architecture",
             review_run_id="70000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
+                self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
+                self.plan.review_runner_binary_sha256
             ),
             claimed_at="2026-07-28T03:00:01Z",
         )
@@ -1349,10 +1605,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             lane="architecture",
             review_run_id=agent_id,
             review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
+                self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
+                self.plan.review_runner_binary_sha256
             ),
             claimed_at="2026-07-28T03:00:00Z",
         )
@@ -1413,8 +1669,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "_authorized_review_runner_identity",
                     return_value=(
                         code_binary,
-                        self.authorization.review_runner_canonical_path_sha256,
-                        self.authorization.review_runner_binary_sha256,
+                        self.plan.review_runner_canonical_path_sha256,
+                        self.plan.review_runner_binary_sha256,
                         REVIEW_RUNNER_BYTES,
                     ),
                 ),
@@ -1506,10 +1762,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             lane="architecture",
             review_run_id=agent_id,
             review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
+                self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
+                self.plan.review_runner_binary_sha256
             ),
             claimed_at="2026-07-28T03:00:00Z",
         )
@@ -1542,8 +1798,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "_authorized_review_runner_identity",
                     return_value=(
                         code_binary,
-                        self.authorization.review_runner_canonical_path_sha256,
-                        self.authorization.review_runner_binary_sha256,
+                        self.plan.review_runner_canonical_path_sha256,
+                        self.plan.review_runner_binary_sha256,
                         REVIEW_RUNNER_BYTES,
                     ),
                 ),
@@ -1804,7 +2060,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 return_value=(
                     Path("/private/substitute-code"),
                     f"sha256:{'c' * 64}",
-                    self.authorization.review_runner_binary_sha256,
+                    self.plan.review_runner_binary_sha256,
                     REVIEW_RUNNER_BYTES,
                 ),
             ),
@@ -1814,7 +2070,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ) as run_review,
             self.assertRaisesRegex(
                 AV1ValidationDerivationError,
-                "drifted from the authorization",
+                "drifted from the plan",
             ),
         ):
             verify_av1_cold_start_preregistration._run_code_agent_review(
@@ -1829,14 +2085,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         proposal = self._candidate_proposal()
         before_identity = (
             Path("/private/authorized-code"),
-            self.authorization.review_runner_canonical_path_sha256,
-            self.authorization.review_runner_binary_sha256,
+            self.plan.review_runner_canonical_path_sha256,
+            self.plan.review_runner_binary_sha256,
             REVIEW_RUNNER_BYTES,
         )
         after_identity = (
             Path("/private/substitute-code"),
             f"sha256:{'c' * 64}",
-            self.authorization.review_runner_binary_sha256,
+            self.plan.review_runner_binary_sha256,
             REVIEW_RUNNER_BYTES,
         )
         completed = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1863,7 +2119,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(
                 AV1ValidationDerivationError,
-                "drifted from the authorization",
+                "drifted from the plan",
             ),
         ):
             verify_av1_cold_start_preregistration._run_code_agent_review(
@@ -2117,6 +2373,33 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     calibration_payload=calibration,
                 )
 
+    def test_assignment_execution_rejects_snapshot_digest_not_matching_plan_commitment(
+            self,
+    ) -> None:
+        assignment = self.plan.assignments[0]
+        calibration = _calibration_payload(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            compatibility=_compatibility(assignment),
+        )
+        sample_item = calibration["sample_item"]
+        assert isinstance(sample_item, dict)
+        sample_item["source_snapshot_sha256"] = f"sha256:{'f' * 64}"
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "unchanged measured full search",
+        ):
+            build_av1_validation_derivation_attempt(
+                plan=self.plan,
+                partition=self.partition,
+                assignment_id=assignment.assignment_id,
+                started_at="2026-07-28T01:00:00Z",
+                completed_at="2026-07-28T01:05:00Z",
+                status="review_pending",
+                calibration_payload=calibration,
+            )
+
     def test_review_claim_race_leaves_one_terminal_unresolved_claim(self) -> None:
         proposal = self._candidate_proposal()
         claims = [
@@ -2126,10 +2409,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 lane="architecture",
                 review_run_id=f"20000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
-                    self.authorization.review_runner_canonical_path_sha256
+                    self.plan.review_runner_canonical_path_sha256
                 ),
                 review_runner_binary_sha256=(
-                    self.authorization.review_runner_binary_sha256
+                    self.plan.review_runner_binary_sha256
                 ),
                 claimed_at=f"2026-07-28T03:00:0{index}Z",
             )
@@ -2192,10 +2475,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 lane=lane,
                 review_run_id=f"30000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
-                    self.authorization.review_runner_canonical_path_sha256
+                    self.plan.review_runner_canonical_path_sha256
                 ),
                 review_runner_binary_sha256=(
-                    self.authorization.review_runner_binary_sha256
+                    self.plan.review_runner_binary_sha256
                 ),
                 claimed_at=f"2026-07-28T03:00:{index:02d}Z",
             )
@@ -2242,10 +2525,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             lane="privacy_security",
             review_run_id="40000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
+                self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
+                self.plan.review_runner_binary_sha256
             ),
             claimed_at="2026-07-28T03:10:00Z",
         )
@@ -2289,10 +2572,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             lane="architecture",
             review_run_id="50000000-0000-0000-0000-000000000001",
             review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
+                self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
+                self.plan.review_runner_binary_sha256
             ),
             claimed_at="2026-07-28T03:00:01Z",
         )
@@ -2321,10 +2604,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             lane="architecture",
             review_run_id="50000000-0000-0000-0000-000000000002",
             review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
+                self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
+                self.plan.review_runner_binary_sha256
             ),
             claimed_at="2026-07-28T03:00:01Z",
         )
@@ -2709,19 +2992,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             manifest=self.manifest,
             selection_lock_sha256=self.partition.selection_lock_sha256,
             derivation_partition_sha256=self.partition.derivation_partition_sha256,
-            runtime_context_sha256=self.authorization.runtime_context_sha256,
-            execution_environment_sha256=(
-                self.authorization.execution_environment_sha256
-            ),
-            statistics_contract_sha256=(
-                self.authorization.statistics_contract_sha256
-            ),
-            review_runner_canonical_path_sha256=(
-                self.authorization.review_runner_canonical_path_sha256
-            ),
-            review_runner_binary_sha256=(
-                self.authorization.review_runner_binary_sha256
-            ),
             authorized_at="2026-07-28T00:01:00Z",
             valid_until=VALID_UNTIL,
         )
@@ -2730,6 +3000,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             partition=self.partition,
             authorization=second_authorization,
             runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=self.plan.execution_environment_sha256,
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            source_commitments=self.plan.source_commitments,
         )
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
@@ -3111,6 +3388,88 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         integrity_probe.assert_called_once_with(self.runtime_artifact_root.resolve())
         self.assertFalse(attempts_dir.exists())
 
+    def test_execution_rechecks_live_source_commitments_before_artifact_writes(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        events: list[str] = []
+
+        @contextmanager
+        def source_sha256_resolver_context(
+                *_args: object,
+                **_kwargs: object,
+        ) -> Iterator[object]:
+            session = _SourceSHA256Session(
+                on_verify=lambda: events.append("source-verify"),
+                on_quiet=lambda: events.append("source-quiet"),
+            )
+            yield session
+            session.assert_quiet()
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_partition_source_sha256_resolver",
+                side_effect=source_sha256_resolver_context,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                return_value=SimpleNamespace(free=0),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.purge_transient_artifacts",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.write_av1_validation_derivation_assignment_claim",
+                side_effect=lambda *_args, **_kwargs: events.append("assignment-claim"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.write_av1_validation_derivation_attempt",
+                side_effect=lambda *_args, **_kwargs: events.append("attempt"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.write_av1_validation_derivation_terminal_record",
+                side_effect=lambda *_args, **_kwargs: events.append("terminal-record"),
+            ),
+        ):
+            attempt = _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-30T01:00:00Z",
+            )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "storage_stop")
+        self.assertEqual(events, [
+            "source-verify",
+            "source-quiet",
+            "assignment-claim",
+            "source-quiet",
+            "attempt",
+            "source-quiet",
+            "terminal-record",
+            "source-quiet",
+        ])
+
     def test_assignment_review_identity_drift_is_safety_stop(self) -> None:
         assignment = self.plan.assignments[0]
         source = next(
@@ -3122,13 +3481,17 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         records_dir = self.runtime_artifact_root / "terminal-records"
         sample_item = {
             "library_item_id": assignment.local_item_id,
-            "source_size_bytes": 1,
+            "source_size_bytes": SOURCE_SIZE_BYTES,
             "resolved_policy": {},
         }
+        source_commitment = av1_validation_derivation_plan_source_commitment(
+            self.plan,
+            assignment.assignment_id,
+        )
         pinned_source = SimpleNamespace(
             path=self.runtime_artifact_root / "source-snapshots" / "source.mkv",
-            content_sha256=assignment.source_sha256,
-            size_bytes=1,
+            content_sha256=source_commitment.source_sha256,
+            size_bytes=source_commitment.source_size_bytes,
             content_version_fingerprint=source.source_identity,
         )
 
@@ -5645,12 +6008,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertTrue(lock_held)
             events.append(label)
 
-        def validate_current_inputs(*_args: object, **kwargs: object) -> None:
-            self.assertIsInstance(
-                kwargs.get("source_sha256_resolver"),
-                _SourceSHA256Session,
-            )
+        def validate_current_inputs(*_args: object, **_kwargs: object) -> None:
             record_event("partition-current")
+
+        def validate_source_commitments(
+                _plan: object,
+                *,
+                resolver: object,
+        ) -> None:
+            self.assertIsInstance(resolver, _SourceSHA256Session)
+            record_event("source-commitments")
 
         @contextmanager
         def source_sha256_resolver_context(
@@ -5687,6 +6054,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.validate_av1_validation_partition_current_inputs",
                 side_effect=validate_current_inputs,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_source_commitments",
+                side_effect=validate_source_commitments,
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.av1_validation_partition_source_sha256_resolver",
@@ -5766,6 +6137,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "lock-enter",
             "db-enter",
             "partition-current",
+            "source-commitments",
             "execution-contract",
             "media-recheck",
             "execution-contract",
@@ -5968,7 +6340,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(evaluation.proposal.bitrate_relative_mad, 0.15)
         self.assertEqual(
             evaluation.proposal.statistics_contract_sha256,
-            self.authorization.statistics_contract_sha256,
+            self.plan.statistics_contract_sha256,
         )
         self.assertEqual(evaluation.proposal.derivation_conflict_count, 0)
         self.assertEqual(evaluation.proposal.confidence_level, "moderate")
@@ -6125,10 +6497,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 lane=lane,
                 review_run_id=f"00000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
-                    self.authorization.review_runner_canonical_path_sha256
+                    self.plan.review_runner_canonical_path_sha256
                 ),
                 review_runner_binary_sha256=(
-                    self.authorization.review_runner_binary_sha256
+                    self.plan.review_runner_binary_sha256
                 ),
                 claimed_at=f"2026-07-28T03:00:{index:02d}Z",
             )
@@ -6173,10 +6545,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 lane=lane,
                 review_run_id=f"10000000-0000-0000-0000-{index:012x}",
                 review_runner_canonical_path_sha256=(
-                    self.authorization.review_runner_canonical_path_sha256
+                    self.plan.review_runner_canonical_path_sha256
                 ),
                 review_runner_binary_sha256=(
-                    self.authorization.review_runner_binary_sha256
+                    self.plan.review_runner_binary_sha256
                 ),
                 claimed_at=f"2026-07-28T03:00:{index:02d}Z",
             )
@@ -6431,8 +6803,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 locked_at=locked_at,
             )
 
-    def test_candidate_lock_allows_shared_source_groups(self) -> None:
-        source_tokens = tuple(f"source_token_{index:02d}" for index in range(12))
+    def test_candidate_lock_uses_merged_v1_token_shape(self) -> None:
+        source_tokens = tuple(f"source_token_{index:02d}" for index in range(6))
         series_tokens = tuple(f"series_token_{index:02d}" for index in range(12))
         shared_tokens = tuple(f"shared_token_{index:02d}" for index in range(6))
         candidate_lock_kwargs = {
@@ -6450,16 +6822,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "confidence_level": "moderate",
             "confidence_score": 0.85,
             "derivation_evidence_count": 12,
-            "derivation_source_count": 12,
+            "derivation_source_count": 6,
             "derivation_source_tokens": source_tokens,
-            "derivation_title_tokens": tuple(
-                f"title_{index:02d}_independent" for index in range(12)
-            ),
             "derivation_series_tokens": series_tokens,
             "derivation_source_group_tokens": shared_tokens,
-            "derivation_source_group_observation_tokens": tuple(
-                token for token in shared_tokens for _ in range(2)
-            ),
             "derivation_oldest_recorded_at": "2026-07-28T01:00:00Z",
             "derivation_newest_recorded_at": "2026-07-28T02:00:00Z",
             "derivation_conflict_count": 0,
@@ -6471,89 +6837,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         candidate_lock = build_av1_cold_start_validation_candidate_lock(
             **candidate_lock_kwargs,
         )
-        self.assertEqual(candidate_lock.derivation_source_count, 12)
+        self.assertEqual(candidate_lock.derivation_source_count, 6)
         self.assertEqual(len(candidate_lock.derivation_source_group_tokens), 6)
-        self.assertEqual(
-            len(candidate_lock.derivation_source_group_observation_tokens),
-            12,
+        self.assertNotIn("derivation_title_tokens", candidate_lock.to_payload())
+        self.assertNotIn(
+            "derivation_source_group_observation_tokens",
+            candidate_lock.to_payload(),
         )
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "at least six source groups",
-        ):
-            build_av1_cold_start_validation_candidate_lock(
-                **{
-                    **candidate_lock_kwargs,
-                    "derivation_source_group_tokens": shared_tokens[:5],
-                    "derivation_source_group_observation_tokens": tuple(
-                        shared_tokens[index % 5] for index in range(12)
-                    ),
-                }
-            )
-
-        concentrated_tokens = tuple(f"concentrated_{index:02d}" for index in range(8))
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "concentration is too high",
-        ):
-            build_av1_cold_start_validation_candidate_lock(
-                **{
-                    **candidate_lock_kwargs,
-                    "derivation_source_group_tokens": concentrated_tokens,
-                    "derivation_source_group_observation_tokens": (
-                        (concentrated_tokens[0],) * 5
-                        + concentrated_tokens[1:]
-                    ),
-                }
-            )
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "CRF span is too wide",
-        ):
-            build_av1_cold_start_validation_candidate_lock(
-                **{
-                    **candidate_lock_kwargs,
-                    "crf_lower": 24.0,
-                    "crf_upper": 31.0,
-                }
-            )
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "series tokens are incomplete",
-        ):
-            build_av1_cold_start_validation_candidate_lock(
-                **{
-                    **candidate_lock_kwargs,
-                    "derivation_series_tokens": series_tokens[:-1],
-                }
-            )
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "below the preregistered minimum",
-        ):
-            build_av1_cold_start_validation_candidate_lock(
-                **{
-                    **candidate_lock_kwargs,
-                    "derivation_source_count": 5,
-                    "derivation_source_tokens": source_tokens[:5],
-                }
-            )
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "evidence is stale",
-        ):
-            build_av1_cold_start_validation_candidate_lock(
-                **{
-                    **candidate_lock_kwargs,
-                    "locked_at": "2027-02-01T03:00:00Z",
-                    "reviewed_at": "2027-02-01T03:00:00Z",
-                }
-            )
 
     def test_create_plan_cli_output_is_public_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -6573,6 +6863,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.partition,
                 self.token_key,
                 _SourceSHA256Session(),
+                self.source_commitments,
             )
             argv = [
                 "create-derivation-plan",
@@ -6608,8 +6899,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "_review_runner_identity",
                     return_value=(
                         root / "private-code-runner",
-                        self.authorization.review_runner_canonical_path_sha256,
-                        self.authorization.review_runner_binary_sha256,
+                        self.plan.review_runner_canonical_path_sha256,
+                        self.plan.review_runner_binary_sha256,
                         REVIEW_RUNNER_BYTES,
                     ),
                 ),
@@ -6903,7 +7194,7 @@ def _calibration_payload(
     artifact = f"cira3_{assignment.assignment_id}"
     duration_seconds = 3_600.0
     predicted_video_bytes = round((bitrate * duration_seconds) / 8)
-    source_size_bytes = predicted_video_bytes * 2
+    source_size_bytes = SOURCE_SIZE_BYTES
     candidate = {
         "attempt": 1,
         "role": "target_seed",
@@ -6938,7 +7229,7 @@ def _calibration_payload(
             "library_item_id": assignment.local_item_id,
             "content_version_fingerprint": source_identity,
             "source_size_bytes": source_size_bytes,
-            "source_snapshot_sha256": assignment.source_sha256,
+            "source_snapshot_sha256": _source_sha256_for_identity(source_identity),
             "source_snapshot_size_bytes": source_size_bytes,
             "source_snapshot_content_version_fingerprint": source_identity,
             "duration_seconds": duration_seconds,

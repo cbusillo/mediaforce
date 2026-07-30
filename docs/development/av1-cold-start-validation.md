@@ -185,7 +185,10 @@ aggregate counts.
 Issue `#287` uses `av1vdw2` to turn the reviewed partition into one immutable,
 owner-only derivation plan. Plan creation revalidates the exact partition
 against the current read-only inventory before it embeds the separate
-`acsvda1` authorization and exactly twenty-four derivation assignments:
+merged-shape `acsvda1` authorization, exactly twenty-four derivation
+assignments, and one source commitment for each assignment. Every commitment
+binds the assignment ID, local item ID, content-version identity, full source
+SHA-256, source size, and frozen evidence-summary SHA-256:
 
 ```bash
 uv run python scripts/verify_av1_cold_start_preregistration.py \
@@ -205,15 +208,19 @@ to the first authorization and plan, so a second authorization cannot rerun the
 same reservations under another plan ID.
 The canonical `plan.json` is published before its root binding. A retry loads
 and validates that exact plan, requires the same authorization window, reuses
-its original `authorized_at`, and then creates or verifies the binding; the
-runtime clock is sampled only for the first successful plan payload. A binding
+its original `authorized_at`, re-hashes all twenty-four derivation sources, and
+requires the rebuilt commitments to reproduce the frozen plan exactly before
+it creates or verifies the binding. Retrying plan creation therefore requires
+the selected media to remain present and byte-identical. The runtime clock is
+sampled only for the first successful plan payload. A binding
 without its plan is an explicit interrupted-state failure, not permission to
 mint another authorization. The plan binds a
 privacy-safe digest of the resolved database, review, and web-state locations;
 every later command must use that same machine-local runtime context. Every
 execution, proposal, and finalization also re-compares the plan's complete
 twenty-four-assignment payload with the frozen partition rather than trusting
-top-level digests alone.
+top-level digests alone, and every write-capable source session revalidates the
+plan's complete twenty-four-source commitment set before publication.
 Each assignment has one attempt. Execution cannot select a replacement, retry a
 source, use a holdout, invoke the validation harness, inject a cold-start or
 guided probe, consume local personalization, backfill a historical row, or
@@ -236,9 +243,13 @@ after taking the runtime lock, canonicalize all subsequent artifact access to
 the bound tree, and fail before any artifact or database write when the domains
 differ. Aliases that resolve to the same canonical tree and select the same lock
 file remain in the same lock domain. Artifact roots created before the
-path-bound digest existed are not migrated in place; discard and regenerate
-those private preregistration artifacts from the merged implementation before
-creating execution authorization. Newly created
+path-bound digest existed are not migrated in place. Likewise, any private
+derivation tree created by the pre-remediation branch must be discarded because
+its `plan.json` embeds incompatible in-place extensions of `av1vsp1` and
+`acsvda1`. Regenerate those derivation artifacts from the merged implementation;
+the existing schema-1 partition, token key, selection-lock digest, and
+derivation-partition digest remain authoritative and must not be regenerated.
+Newly created
 claim files and newly created parent directories are fsynced before work can
 continue, so a power loss cannot silently erase assignment or review ownership.
 Every private JSON artifact is completed under a random dot-prefixed
@@ -298,33 +309,39 @@ Descriptor/resource or integrity failure is an affected-cell `safety_stop`, not
 `media_unavailable` or measured evidence.
 
 Private partition creation first performs logical selection without hashing the
-broader eligible library. It then handles only the selected holdout and
-derivation sources: each selected file is opened with no-follow semantics,
-guarded together with its canonical pathname ancestors, and retained as one
-source-integrity cohort. The first pass fully SHA-256 hashes each source and,
-during partition creation, re-analyzes it with the current media-fingerprint
-toolchain. Every descriptor and path-chain guard remains open while the other
-selected sources are processed. A cohort-wide second hash pass and final quiet,
-path, inode, timestamp, and sampled-identity checks complete only after every
-source is pinned. Publication payloads are first written and fsynced under a
+broader eligible library. The merged schema-1 `av1vsp1` payload intentionally
+contains no full source SHA-256 or source-size field: its partition ID,
+selection-lock digest, derivation-partition digest, and payload digest remain
+byte-for-byte compatible with the partition published for issue `#286`.
+Selection-time integrity remains bound by each assignment's immutable
+evidence-summary SHA-256, the sampled content-version identity, and the complete
+inventory snapshot digest. A newly built partition may replay selected
+derivation bytes and fingerprint evidence before durable publication, but those
+transient full hashes do not alter schema-1 payload bytes or digests.
+
+Plan creation is the first durable full-byte freeze for the twenty-four
+derivation assignments. The private `av1vdw2` plan commits each source's full
+SHA-256 and size together with its assignment, local item, source identity, and
+evidence-summary identity. These commitments contribute only to the plan ID and
+plan payload digest; they do not alter `av1vsp1`, the selection lock, the
+derivation-partition digest, or `acsvda1`. This timing is explicit: the plan
+cannot retroactively prove the exact full bytes present when the schema-1
+partition was selected. Full-byte commitments for the holdout cohort remain
+out of scope until issue `#288`.
+
+Candidate proposal construction, candidate-lock finalization and verification,
+and visual-verdict publication each re-open and fully hash all twenty-four
+derivation sources against the plan commitments while their database
+transaction is active. They never substitute the frozen digest for a current
+byte-level check. Publication payloads are first written and fsynced under a
 hidden owner-only temporary name. The active source session performs another
 quiet and identity check immediately before exclusive atomic rename, remains
 active through publication, and performs its exit check before any database
 transaction can commit. Exit validation also runs when publication raises, so
 post-rename durability failures cannot skip the final source check. A retry
-accepts only the exact canonical key or partition already visible at the final
-path, re-synchronizes its parent directory, and rejects any conflicting or
-malformed artifact. The fresh
-canonical fingerprint summary must exactly reproduce the immutable evidence
-digest used for selection. A changed unsampled byte therefore cannot preserve
-stale traits while acquiring a new frozen digest. The selected source SHA-256
-is private assignment data and contributes to the inventory lock, derivation
-partition, authorization, and plan digests; public summaries never expose it.
-Older private partitions without this binding fail closed. Candidate proposal
-construction, candidate-lock finalization and verification, and visual-verdict
-publication each re-open and fully hash every selected source against those
-frozen digests while their database transaction is active. They never substitute
-the frozen digest for a current byte-level check.
+accepts only the exact canonical artifact already visible at the final path,
+re-synchronizes its parent directory, and rejects any conflicting or malformed
+artifact.
 
 After the immutable assignment claim and before crop, search, encode, or review
 work, the runtime opens the assigned source with no-follow semantics, verifies
@@ -367,17 +384,23 @@ path-chain, partition, and derivation tests. Production capability admission
 and runtime monitoring remain fail closed and are never bypassed by these test
 seams.
 
-The authorization binds the resolved database, review, and state roots together
+The `av1vdw2` plan binds the resolved database, review, and state roots together
 with the current machine, Python executable, every regular non-cache file under
 the Mediaforce package tree, the repository-owned preregistration runner,
 `pyproject.toml`, `uv.lock`, the shared CLI/runtime-lock implementation, AV1
 encoder/metric toolchain, source-integrity guard contract, and merged
 statistical contract. Adding, removing, or changing any bound implementation
-file changes the execution-environment digest. It also binds SHA-256 digests of
-the canonical Every Code executable path and binary without persisting or
-printing the private path. Proposal and review publication require the
-executing verifier to be that canonical repository file and re-check the bound
-execution environment immediately before each immutable write. A
+file changes the plan's execution-environment digest. The plan also binds
+SHA-256 digests of the canonical Every Code executable path and binary without
+persisting or printing the private path. The embedded merged-shape `acsvda1`
+authorization continues to bind only the manifest, selection lock, derivation
+partition, authorization window, and derivation-only authority. Because that
+authorization payload is itself embedded in the plan, the plan digest binds the
+authorization, runtime context, execution environment, statistics contract,
+review runner, and source commitments as one immutable unit. Proposal and
+review publication require the executing verifier to be the canonical
+repository file and re-check the plan-bound execution environment immediately
+before each immutable write. A
 real same-filesystem kqueue mutation probe must pass before the immutable
 assignment claim is written. The probe creates a private owner-only file,
 sets its pathname mode to `0400` from creation, mutates only its original

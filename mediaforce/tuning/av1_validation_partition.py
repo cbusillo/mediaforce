@@ -81,11 +81,12 @@ class AV1ValidationPartitionExpectations:
                 raise AV1ValidationPartitionError(f"AV1 partition {label} is invalid")
         if not _QUALITY_METRIC_RE.fullmatch(self.quality_metric):
             raise AV1ValidationPartitionError("AV1 partition quality metric is invalid")
-        if (
-            not math.isfinite(self.quality_target)
-            or self.quality_target < 0
-            or not math.isfinite(self.minimum_quality_score)
-            or self.minimum_quality_score <= 0
+        if not all(
+            math.isfinite(value) and value >= 0
+            for value in (
+                self.quality_target,
+                self.minimum_quality_score,
+            )
         ):
             raise AV1ValidationPartitionError(
                 "AV1 partition quality expectations are invalid"
@@ -203,7 +204,6 @@ class AV1ValidationPartitionAssignment:
     source_group_token: str
     compatibility_signature: str
     policy_signature: str
-    source_sha256: str
     target_video_bitrate_bps: int
     quality_metric: str
     quality_target: float
@@ -260,7 +260,6 @@ class AV1ValidationPartitionAssignment:
             raise AV1ValidationPartitionError(
                 "AV1 partition assignment quality floor exceeds target"
             )
-        _require_sha256(self.source_sha256, "assignment source digest")
         _require_sha256(self.evidence_summary_sha256, "assignment evidence digest")
 
     def token_payload(self) -> dict[str, Any]:
@@ -277,7 +276,6 @@ class AV1ValidationPartitionAssignment:
             "source_group_token": self.source_group_token,
             "compatibility_signature": self.compatibility_signature,
             "policy_signature": self.policy_signature,
-            "source_sha256": self.source_sha256,
             "target_video_bitrate_bps": self.target_video_bitrate_bps,
             "quality_metric": self.quality_metric,
             "quality_target": self.quality_target,
@@ -510,7 +508,6 @@ def build_av1_validation_private_partition(
     token_key: bytes,
     expected_token_key_id: str,
     selected_at: str,
-    source_sha256_resolver: Callable[[AV1ValidationPartitionSource], str],
 ) -> AV1ValidationPrivatePartition:
     assert_preregistered_av1_validation_manifest_v2(manifest)
     _assert_partition_criteria(manifest)
@@ -627,9 +624,6 @@ def build_av1_validation_private_partition(
                     slot,
                     selected[slot.assignment_id],
                     token_key=token_key,
-                    source_sha256=source_sha256_resolver(
-                        selected[slot.assignment_id]
-                    ),
                 )
                 for slot in slots
             ),
@@ -711,9 +705,6 @@ def validate_av1_validation_private_partition(
         token_key=token_key,
         expected_token_key_id=partition.token_key_id,
         selected_at=partition.selected_at,
-        source_sha256_resolver=(
-            av1_validation_partition_frozen_source_sha256_resolver(partition)
-        ),
     )
     if rebuilt != partition:
         raise AV1ValidationPartitionError(
@@ -728,7 +719,6 @@ def validate_av1_validation_partition_current_inputs(
     sources: Sequence[AV1ValidationPartitionSource],
     expectations: AV1ValidationPartitionExpectations,
     token_key: bytes,
-    source_sha256_resolver: Callable[[AV1ValidationPartitionSource], str],
 ) -> None:
     rebuilt = build_av1_validation_private_partition(
         manifest=manifest,
@@ -739,31 +729,11 @@ def validate_av1_validation_partition_current_inputs(
         token_key=token_key,
         expected_token_key_id=partition.token_key_id,
         selected_at=partition.selected_at,
-        source_sha256_resolver=source_sha256_resolver,
     )
     if rebuilt != partition:
         raise AV1ValidationPartitionError(
             "AV1 private partition does not match current inventory or policy inputs"
         )
-
-
-def av1_validation_partition_frozen_source_sha256_resolver(
-    partition: AV1ValidationPrivatePartition,
-) -> Callable[[AV1ValidationPartitionSource], str]:
-    source_sha256_by_item_id = {
-        assignment.local_item_id: assignment.source_sha256
-        for assignment in partition.assignments
-    }
-
-    def resolve(source: AV1ValidationPartitionSource) -> str:
-        source_sha256 = source_sha256_by_item_id.get(source.local_item_id)
-        if source_sha256 is None:
-            raise AV1ValidationPartitionError(
-                "AV1 partition selected source lacks a frozen full digest"
-            )
-        return source_sha256
-
-    return resolve
 
 
 def serialize_av1_validation_private_partition(
@@ -1409,7 +1379,6 @@ def _assignment_for_source(
     source: AV1ValidationPartitionSource,
     *,
     token_key: bytes,
-    source_sha256: str,
 ) -> AV1ValidationPartitionAssignment:
     return AV1ValidationPartitionAssignment(
         assignment_id=slot.assignment_id,
@@ -1435,7 +1404,6 @@ def _assignment_for_source(
         policy_signature=_plan_policy_signature(
             source.base_policy_signature, slot.plan
         ),
-        source_sha256=source_sha256,
         target_video_bitrate_bps=source.target_video_bitrate_bps,
         quality_metric=source.quality_metric,
         quality_target=source.quality_target,
@@ -1991,7 +1959,7 @@ def _read_owner_only_regular_file(path: Path, *, label: str) -> bytes:
     try:
         _, parent_descriptor = open_stable_directory(
             path.parent,
-            require_owner_only=True,
+            require_owner_only=False,
         )
         descriptor = os.open(
             path.name,
@@ -2045,7 +2013,7 @@ def _read_owner_only_regular_file(path: Path, *, label: str) -> bytes:
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise AV1ValidationPartitionError(
-                f"AV1 {label} is not a stable single-link regular file"
+                f"AV1 {label} is not a stable regular file"
             ) from exc
         raise AV1ValidationPartitionError(f"AV1 {label} could not be read safely") from exc
     finally:
@@ -2066,11 +2034,9 @@ def _validate_owner_only_artifact_binding(
         or not stat.S_ISREG(path_info.st_mode)
         or (descriptor_info.st_dev, descriptor_info.st_ino)
         != (path_info.st_dev, path_info.st_ino)
-        or descriptor_info.st_nlink != 1
-        or path_info.st_nlink != 1
     ):
         raise AV1ValidationPartitionError(
-            f"AV1 {label} is not a stable single-link regular file"
+            f"AV1 {label} is not a stable regular file"
         )
     if os.name == "posix" and (
         descriptor_info.st_uid != os.getuid()
@@ -2240,7 +2206,6 @@ def _assignment_from_payload(
             "source_group_token",
             "compatibility_signature",
             "policy_signature",
-            "source_sha256",
             "target_video_bitrate_bps",
             "quality_metric",
             "quality_target",
@@ -2274,7 +2239,6 @@ def _assignment_from_payload(
         policy_signature=_required_text(
             data.get("policy_signature"), "policy signature"
         ),
-        source_sha256=_required_text(data.get("source_sha256"), "source digest"),
         target_video_bitrate_bps=int_value(data.get("target_video_bitrate_bps")),
         quality_metric=_required_text(data.get("quality_metric"), "quality metric"),
         quality_target=float_value(data.get("quality_target")),

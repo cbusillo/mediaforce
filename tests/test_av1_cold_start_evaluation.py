@@ -167,21 +167,17 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         self.assertIn("held_out_series_reused", cell.blocking_reasons)
         self.assertIn("local_evidence_contamination", cell.blocking_reasons)
 
-    def test_wide_candidate_is_rejected_at_the_type_boundary(self) -> None:
+    def test_merged_candidate_contract_allows_wide_range_at_type_boundary(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "CRF span is too wide",
-        ):
-            self._candidate_lock(
-                manifest,
-                plan.cell_plan_id,
-                ("animation",),
-                crf_lower=18.0,
-                crf_upper=45.0,
-            )
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            crf_lower=18.0,
+            crf_upper=45.0,
+        )
+        self.assertEqual(candidate_lock.crf_upper - candidate_lock.crf_lower, 27.0)
 
     def test_derivation_overlap_is_rejected(self) -> None:
         manifest = self._manifest()
@@ -429,20 +425,19 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         self.assertIn("candidate_confidence_insufficient", cell.blocking_reasons)
         self.assertIn("derivation_evidence_conflicting", cell.blocking_reasons)
 
-    def test_stale_derivation_is_rejected_at_the_type_boundary(self) -> None:
+    def test_merged_candidate_contract_allows_stale_timestamp_at_type_boundary(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
-
-        with self.assertRaisesRegex(
-            AV1ColdStartValidationError,
-            "derivation evidence is stale",
-        ):
-            self._candidate_lock(
-                manifest,
-                plan.cell_plan_id,
-                ("animation",),
-                derivation_oldest_recorded_at="2025-01-01T00:00:00Z",
-            )
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            derivation_oldest_recorded_at="2025-01-01T00:00:00Z",
+        )
+        self.assertEqual(
+            candidate_lock.derivation_oldest_recorded_at,
+            "2025-01-01T00:00:00Z",
+        )
 
     def test_oversized_json_number_uses_the_controlled_error_path(self) -> None:
         payload = self._manifest().to_payload()
@@ -453,52 +448,136 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ColdStartValidationError, "too large"):
             av1_cold_start_validation_manifest_from_payload(payload)
 
-    def test_manifest_rejects_unsatisfiable_derivation_evidence_count(self) -> None:
-        payload = self._manifest().to_payload()
-        criteria = dict(payload["criteria"])
-        criteria["minimum_derivation_evidence_count"] = 13
-        payload["criteria"] = criteria
+    def test_merged_criteria_contract_allows_more_than_twelve_observations(self) -> None:
+        criteria = replace(
+            self._manifest().criteria,
+            minimum_derivation_evidence_count=13,
+        )
+        self.assertEqual(criteria.minimum_derivation_evidence_count, 13)
 
-        with self.assertRaisesRegex(AV1ColdStartValidationError, "exactly twelve"):
-            av1_cold_start_validation_manifest_from_payload(payload)
+    def test_merged_candidate_contract_allows_nonfixed_evidence_count(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            derivation_evidence_count=11,
+        )
+        self.assertEqual(candidate_lock.derivation_evidence_count, 11)
 
-    def test_candidate_lock_requires_exact_derivation_evidence_count(self) -> None:
+    def test_candidate_lock_payload_keys_match_frozen_v1_schema(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
         candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
+        self.assertEqual(
+            set(candidate_lock.to_payload()),
+            {
+                "candidate_lock_id",
+                "manifest_id",
+                "cell_plan_id",
+                "exact_traits",
+                "crf_lower",
+                "crf_center",
+                "crf_upper",
+                "compatibility_signature",
+                "policy_signature",
+                "target_video_bitrate_min_bps",
+                "target_video_bitrate_max_bps",
+                "minimum_quality_score",
+                "confidence_level",
+                "confidence_score",
+                "derivation_evidence_count",
+                "derivation_source_count",
+                "derivation_source_tokens",
+                "derivation_series_tokens",
+                "derivation_source_group_tokens",
+                "derivation_oldest_recorded_at",
+                "derivation_newest_recorded_at",
+                "derivation_conflict_count",
+                "derivation_snapshot_sha256",
+                "selection_lock_sha256",
+                "locked_at",
+                "reviewed_at",
+                "review_state",
+                "payload_sha256",
+            },
+        )
 
-        with self.assertRaisesRegex(AV1ColdStartValidationError, "requires exactly 12"):
-            replace(
-                candidate_lock,
-                derivation_evidence_count=11,
-                derivation_title_tokens=candidate_lock.derivation_title_tokens[:-1],
-            )
-
-    def test_candidate_lock_rejects_source_group_concentration(self) -> None:
+    def test_result_and_criteria_payload_keys_match_frozen_v1_schema(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
-        candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+        )
+        result = self._candidate_results(
+            manifest,
+            plan.cell_plan_id,
+            candidate_lock.candidate_lock_id,
+        )[0]
+        self.assertEqual(
+            set(result.to_payload()),
+            {
+                "result_id",
+                "manifest_id",
+                "cell_plan_id",
+                "case_id",
+                "execution_order",
+                "completed_at",
+                "status",
+                "source_token",
+                "series_token",
+                "source_group_token",
+                "content_traits",
+                "intent_level",
+                "compatibility_signature",
+                "policy_signature",
+                "review_environment_token",
+                "target_video_bitrate_bps",
+                "prediction_status",
+                "fallback_reason",
+                "local_evidence_present",
+                "candidate_lock_id",
+                "blinded_visual_review",
+                "duplicate_guided_visual_accepted",
+                "duplicate_review_environment_token",
+                "baseline",
+                "guided",
+                "failure_reason",
+                "payload_sha256",
+            },
+        )
+        self.assertEqual(
+            set(manifest.criteria.to_payload()),
+            {
+                "minimum_derivation_evidence_count",
+                "minimum_derivation_source_count",
+                "minimum_holdout_count",
+                "minimum_holdout_source_count",
+                "maximum_derivation_age_days",
+                "maximum_candidate_crf_span",
+                "range_hit_null_rate",
+                "maximum_one_sided_p_value",
+                "maximum_safety_regression_count",
+                "duplicate_review_fraction",
+                "minimum_duplicate_review_agreement",
+                "confidence_level",
+                "confidence_score",
+            },
+        )
 
-        with self.assertRaisesRegex(AV1ColdStartValidationError, "concentration"):
-            replace(
-                candidate_lock,
-                derivation_source_group_observation_tokens=(
-                    *("derivation.group.001",) * 5,
-                    *("derivation.group.002",) * 3,
-                    "derivation.group.003",
-                    "derivation.group.004",
-                    "derivation.group.005",
-                    "derivation.group.006",
-                ),
-            )
-
-    def test_candidate_lock_rejects_zero_quality_floor(self) -> None:
+    def test_merged_candidate_contract_allows_zero_quality_floor(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
-        candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
-
-        with self.assertRaisesRegex(AV1ColdStartValidationError, "quality floor"):
-            replace(candidate_lock, minimum_quality_score=0.0)
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            minimum_quality_score=0.0,
+        )
+        self.assertEqual(candidate_lock.minimum_quality_score, 0.0)
 
     def _manifest(self) -> AV1ColdStartValidationManifestV1:
         return build_preregistered_av1_cold_start_validation_manifest()
@@ -512,6 +591,8 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             crf_upper: float = 30.0,
             confidence_level: str = "moderate",
             confidence_score: float = 0.7,
+            derivation_evidence_count: int = 12,
+            minimum_quality_score: float = 93.0,
             derivation_oldest_recorded_at: str = "2026-07-20T00:00:00Z",
             derivation_newest_recorded_at: str = "2026-07-26T00:00:00Z",
             derivation_conflict_count: int = 0,
@@ -537,25 +618,17 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             policy_signature="policy.v1.test",
             target_video_bitrate_min_bps=2_000_000,
             target_video_bitrate_max_bps=4_000_000,
-            minimum_quality_score=93.0,
+            minimum_quality_score=minimum_quality_score,
             confidence_level=confidence_level,
             confidence_score=confidence_score,
-            derivation_evidence_count=12,
+            derivation_evidence_count=derivation_evidence_count,
             derivation_source_count=6,
             derivation_source_tokens=derivation_source_tokens,
-            derivation_title_tokens=tuple(
-                f"derivation.title.{index:03d}" for index in range(1, 13)
-            ),
             derivation_series_tokens=tuple(
                 f"derivation.series.{index:03d}" for index in range(1, 13)
             ),
             derivation_source_group_tokens=tuple(
                 f"derivation.group.{index:03d}" for index in range(1, 7)
-            ),
-            derivation_source_group_observation_tokens=tuple(
-                f"derivation.group.{index:03d}"
-                for index in range(1, 7)
-                for _ in range(2)
             ),
             derivation_oldest_recorded_at=derivation_oldest_recorded_at,
             derivation_newest_recorded_at=derivation_newest_recorded_at,
@@ -618,7 +691,6 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             completed_at=f"2026-07-27T{source_index + 2:02d}:00:00Z",
             status="complete",
             source_token=f"source.token.{source_index:03d}",
-            title_token=f"title.token.{source_index:03d}",
             series_token=f"series.token.{source_index:03d}",
             source_group_token=f"source.group.{((source_index - 1) % 6) + 1:02d}",
             content_traits=traits,
@@ -652,7 +724,6 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             "completed_at": result.completed_at,
             "status": result.status,
             "source_token": result.source_token,
-            "title_token": result.title_token,
             "series_token": result.series_token,
             "source_group_token": result.source_group_token,
             "content_traits": result.content_traits,

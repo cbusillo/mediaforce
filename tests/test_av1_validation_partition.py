@@ -48,10 +48,6 @@ V2_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v2.json"
 SELECTED_AT = "2026-07-27T22:50:00Z"
 
 
-def _source_sha256(source: AV1ValidationPartitionSource) -> str:
-    return f"sha256:{hashlib.sha256(source.source_identity.encode()).hexdigest()}"
-
-
 def _summary_sha256(summary: object) -> str:
     payload = json.dumps(summary, separators=(",", ":"), sort_keys=True)
     return f"sha256:{hashlib.sha256(payload.encode()).hexdigest()}"
@@ -132,35 +128,46 @@ class AV1ValidationPartitionTests(unittest.TestCase):
         self.assertFalse(summary["holdout_execution_authorized"])
         self.assertNotIn("local_item_id", json.dumps(summary))
         self.assertNotIn("source_token", json.dumps(summary))
-        self.assertNotIn(partition.assignments[0].source_sha256, json.dumps(summary))
 
-    def test_source_digest_changes_every_locked_partition_identity(self) -> None:
-        expected = self._build()
-        changed_item_id = expected.assignments[0].local_item_id
-
-        def changed_source_sha256(source: AV1ValidationPartitionSource) -> str:
-            if source.local_item_id == changed_item_id:
-                return f"sha256:{'f' * 64}"
-            return _source_sha256(source)
-
-        actual = build_av1_validation_private_partition(
-            manifest=self.manifest,
-            eligibility_attestation_id=self.manifest.eligibility_attestation_id,
-            eligibility_payload_sha256=self.manifest.eligibility_payload_sha256,
-            sources=self.sources,
-            expectations=self.expectations,
-            token_key=self.token_key,
-            expected_token_key_id=self.token_key_id,
-            selected_at=SELECTED_AT,
-            source_sha256_resolver=changed_source_sha256,
+    def test_assignment_payload_keys_match_frozen_schema_1(self) -> None:
+        assignment = self._build().assignments[0]
+        token_keys = {
+            "assignment_id",
+            "role",
+            "cell_plan_id",
+            "ordinal",
+            "traits",
+            "intent_level",
+            "source_token",
+            "title_token",
+            "series_token",
+            "source_group_token",
+            "compatibility_signature",
+            "policy_signature",
+            "target_video_bitrate_bps",
+            "quality_metric",
+            "quality_target",
+            "minimum_quality_score",
+        }
+        self.assertEqual(set(assignment.token_payload()), token_keys)
+        self.assertEqual(
+            set(assignment.to_payload()),
+            token_keys | {"local_item_id", "evidence_summary_sha256"},
         )
-        self.assertNotEqual(actual.selection_lock_sha256, expected.selection_lock_sha256)
-        self.assertNotEqual(
-            actual.derivation_partition_sha256,
-            expected.derivation_partition_sha256,
+
+    def test_partition_identity_is_independent_of_uncommitted_source_bytes(self) -> None:
+        self.assertEqual(self._build(), self._build())
+
+    def test_partition_schema_1_locked_digests_are_golden(self) -> None:
+        partition = self._build()
+        self.assertEqual(
+            partition.selection_lock_sha256,
+            "sha256:e6b9445911f829d3ae41b9ba7e06d271ab89fcf2727b572142a97729b2d38843",
         )
-        self.assertNotEqual(actual.partition_id, expected.partition_id)
-        self.assertNotEqual(actual.payload_sha256, expected.payload_sha256)
+        self.assertEqual(
+            partition.derivation_partition_sha256,
+            "sha256:f540d936f3200daed4ba77289bddd78ad9fa7b7ae2f1788aa230f8773c2e3a04",
+        )
 
     def test_partition_publication_checks_sources_before_atomic_visibility(self) -> None:
         partition = self._build()
@@ -301,7 +308,7 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 ),
                 self.assertRaisesRegex(
                     AV1ValidationPartitionError,
-                    "stable single-link|changed while it was read",
+                    "stable regular file|changed while it was read",
                 ),
             ):
                 load_av1_validation_partition_key(path)
@@ -330,21 +337,9 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                     before_publish=reject_publication,
                 )
 
-    def test_partition_without_frozen_source_digest_fails_closed(self) -> None:
-        payload = copy.deepcopy(self._build().to_payload())
-        del payload["assignments"][0]["source_sha256"]
-        with self.assertRaisesRegex(
-            AV1ValidationPartitionError,
-            "assignment keys are invalid",
-        ):
-            av1_validation_private_partition_from_payload(payload)
-
-    def test_partition_expectations_require_positive_quality_floor(self) -> None:
-        with self.assertRaisesRegex(
-            AV1ValidationPartitionError,
-            "quality expectations",
-        ):
-            replace(self.expectations, minimum_quality_score=0.0)
+    def test_partition_expectations_allow_merged_zero_quality_floor(self) -> None:
+        expectations = replace(self.expectations, minimum_quality_score=0.0)
+        self.assertEqual(expectations.minimum_quality_score, 0.0)
 
     def test_partition_is_deterministic_for_shuffled_inventory(self) -> None:
         expected = self._build()
@@ -357,7 +352,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             token_key=self.token_key,
             expected_token_key_id=self.token_key_id,
             selected_at=SELECTED_AT,
-            source_sha256_resolver=_source_sha256,
         )
         self.assertEqual(actual, expected)
         validate_av1_validation_private_partition(
@@ -371,7 +365,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             sources=self.sources,
             expectations=self.expectations,
             token_key=self.token_key,
-            source_sha256_resolver=_source_sha256,
         )
 
     def test_partition_rejects_selection_outside_manifest_window(self) -> None:
@@ -390,7 +383,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             token_key=self.token_key,
             expected_token_key_id=self.token_key_id,
             selected_at=self.manifest.registered_at,
-            source_sha256_resolver=_source_sha256,
         )
         self.assertEqual(partition.selected_at, self.manifest.registered_at)
 
@@ -426,7 +418,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                         token_key=self.token_key,
                         expected_token_key_id=self.token_key_id,
                         selected_at=selected_at,
-                        source_sha256_resolver=_source_sha256,
                     )
 
     def test_derivation_selection_cannot_remap_frozen_holdouts(self) -> None:
@@ -478,7 +469,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id="av1vkey1_not_the_committed_key",
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_current_input_validation_rejects_a_narrowed_inventory(self) -> None:
@@ -498,7 +488,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             token_key=self.token_key,
             expected_token_key_id=self.token_key_id,
             selected_at=SELECTED_AT,
-            source_sha256_resolver=_source_sha256,
         )
         validate_av1_validation_private_partition(
             narrowed_partition,
@@ -515,7 +504,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 sources=self.sources,
                 expectations=self.expectations,
                 token_key=self.token_key,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_exact_candidate_selector_rejects_trait_supersets(self) -> None:
@@ -537,7 +525,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id=self.token_key_id,
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_partition_fails_closed_when_global_series_disjointness_is_impossible(
@@ -561,7 +548,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id=self.token_key_id,
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_partition_rejects_candidate_source_group_concentration(self) -> None:
@@ -591,7 +577,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id=self.token_key_id,
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_partition_rejects_fewer_than_six_candidate_source_groups(self) -> None:
@@ -617,7 +602,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id=self.token_key_id,
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_partition_rejects_duplicate_content_versions(self) -> None:
@@ -638,7 +622,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id=self.token_key_id,
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_partition_filters_policy_incompatible_sources(self) -> None:
@@ -660,7 +643,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=self.token_key,
                 expected_token_key_id=self.token_key_id,
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
 
     def test_private_key_and_partition_are_owner_only_and_canonical(self) -> None:
@@ -680,7 +662,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 token_key=key,
                 expected_token_key_id=av1_validation_partition_key_id(key),
                 selected_at=SELECTED_AT,
-                source_sha256_resolver=_source_sha256,
             )
             write_av1_validation_private_partition(partition_path, partition)
             self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
@@ -697,6 +678,37 @@ class AV1ValidationPartitionTests(unittest.TestCase):
                 load_av1_validation_partition_key(key_link)
             with self.assertRaisesRegex(AV1ValidationPartitionError, "regular file"):
                 load_av1_validation_private_partition(partition_link)
+
+    def test_schema_1_reads_accept_historical_parent_modes_and_hardlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            private_dir = Path(directory) / "private"
+            private_dir.mkdir(mode=0o700)
+            key_path = private_dir / "partition.key"
+            partition_path = private_dir / "partition.json"
+            create_av1_validation_partition_key(key_path)
+            key = load_av1_validation_partition_key(key_path)
+            partition = build_av1_validation_private_partition(
+                manifest=self.manifest,
+                eligibility_attestation_id=self.manifest.eligibility_attestation_id,
+                eligibility_payload_sha256=self.manifest.eligibility_payload_sha256,
+                sources=self.sources,
+                expectations=self.expectations,
+                token_key=key,
+                expected_token_key_id=av1_validation_partition_key_id(key),
+                selected_at=SELECTED_AT,
+            )
+            write_av1_validation_private_partition(partition_path, partition)
+            key_hardlink = private_dir / "partition-hardlink.key"
+            partition_hardlink = private_dir / "partition-hardlink.json"
+            os.link(key_path, key_hardlink)
+            os.link(partition_path, partition_hardlink)
+            private_dir.chmod(0o755)
+
+            self.assertEqual(load_av1_validation_partition_key(key_hardlink), key)
+            self.assertEqual(
+                load_av1_validation_private_partition(partition_hardlink),
+                partition,
+            )
 
     def test_private_artifact_path_rejects_repository_contents(self) -> None:
         with self.assertRaisesRegex(
@@ -733,7 +745,6 @@ class AV1ValidationPartitionTests(unittest.TestCase):
             token_key=self.token_key,
             expected_token_key_id=self.token_key_id,
             selected_at=SELECTED_AT,
-            source_sha256_resolver=_source_sha256,
         )
 
 
@@ -781,11 +792,13 @@ class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
                     verify_evidence=True,
                 ) as resolver:
                     source_sha256 = resolver(source)
+                    source_size_bytes = resolver.source_size_bytes(source)
                     resolver.verify()
             self.assertEqual(
                 source_sha256,
                 f"sha256:{hashlib.sha256(source_bytes).hexdigest()}",
             )
+            self.assertEqual(source_size_bytes, len(source_bytes))
             self.assertEqual(probe.call_args.args[0], source_path.resolve())
 
     def test_selected_source_digest_rejects_unsampled_evidence_drift(self) -> None:

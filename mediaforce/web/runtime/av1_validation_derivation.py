@@ -74,6 +74,8 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationPlan,
     AV1ValidationDerivationTerminalRecord,
     assert_av1_validation_derivation_authorization_active,
+    assert_av1_validation_derivation_source_commitments,
+    av1_validation_derivation_plan_source_commitment,
     av1_validation_derivation_statistics_contract_sha256,
     build_av1_validation_derivation_attempt,
     build_av1_validation_derivation_terminal_record,
@@ -103,13 +105,14 @@ from mediaforce.tuning.av1_validation_derivation import (
     write_av1_validation_derivation_terminal_record,
 )
 from mediaforce.tuning.av1_validation_partition import (
+    AV1ValidationPartitionAssignment,
     AV1ValidationPartitionError,
     AV1ValidationPrivatePartition,
-    av1_validation_partition_frozen_source_sha256_resolver,
     validate_av1_validation_partition_current_inputs,
     validate_av1_validation_private_partition,
 )
 from mediaforce.tuning.av1_validation_partition_inventory import (
+    AV1ValidationPartitionSourceSHA256Session,
     av1_validation_partition_source_sha256_resolver,
     load_av1_validation_partition_inventory,
 )
@@ -167,6 +170,13 @@ class _PinnedDerivationSource:
     size_bytes: int
     device: int
     inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AV1ValidationDerivationAssignmentPreflight:
+    assignment: AV1ValidationPartitionAssignment
+    artifact_root: Path
+    clock: Callable[[], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -642,7 +652,7 @@ def assert_av1_validation_derivation_execution_environment(
         av1_validation_derivation_execution_environment_sha256(
             quality_metric=next(iter(quality_metrics)),
         )
-        != plan.authorization.execution_environment_sha256
+        != plan.execution_environment_sha256
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation execution environment drifted after authorization"
@@ -656,7 +666,7 @@ def assert_av1_validation_derivation_execution_contract(
     assert_av1_validation_derivation_execution_environment(plan)
     if (
         av1_validation_derivation_statistics_contract_sha256(manifest)
-        != plan.authorization.statistics_contract_sha256
+        != plan.statistics_contract_sha256
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation statistics contract drifted after authorization"
@@ -819,6 +829,47 @@ def build_av1_validation_derivation_calibration_deps() -> CalibrationRunDeps:
     )
 
 
+@contextmanager
+def _live_av1_validation_derivation_source_commitments(
+        *,
+        config: MediaforceConfig,
+        manifest: AV1ValidationManifestV2,
+        partition: AV1ValidationPrivatePartition,
+        token_key: bytes,
+        plan: AV1ValidationDerivationPlan,
+        terminal_records: tuple[AV1ValidationDerivationTerminalRecord, ...],
+) -> Iterator[AV1ValidationPartitionSourceSHA256Session]:
+    with ExitStack() as source_stack:
+        with open_readonly_db(config.paths.db_path) as connection:
+            inventory = load_av1_validation_partition_inventory(
+                connection,
+                config=config,
+            )
+            _assert_derivation_terminal_observations_current(
+                connection=connection,
+                records=terminal_records,
+            )
+            source_sha256_resolver = source_stack.enter_context(
+                av1_validation_partition_source_sha256_resolver(
+                    connection,
+                    config=config,
+                )
+            )
+            validate_av1_validation_partition_current_inputs(
+                partition,
+                manifest=manifest,
+                sources=inventory.sources,
+                expectations=inventory.expectations,
+                token_key=token_key,
+            )
+            assert_av1_validation_derivation_source_commitments(
+                plan,
+                resolver=source_sha256_resolver,
+            )
+            source_sha256_resolver.verify()
+        yield source_sha256_resolver
+
+
 def run_av1_validation_derivation_assignment(
         *,
         config_path: Path,
@@ -876,67 +927,70 @@ def _run_av1_validation_derivation_assignment_locked(
         process_controller: ManagedProcessController | None = None,
         deps: CalibrationRunDeps | None = None,
         now_iso: Callable[[], str] | None = None,
+        _preflight: _AV1ValidationDerivationAssignmentPreflight | None = None,
+        _source_commitment_guard: Callable[[], None] | None = None,
 ) -> AV1ValidationDerivationAttempt:
-    assert_preregistered_av1_validation_manifest_v2(manifest)
-    assignment = next(
-        (item for item in plan.assignments if item.assignment_id == assignment_id),
-        None,
-    )
-    if assignment is None:
-        raise AV1ValidationDerivationError("AV1 derivation assignment is not authorized")
-    validate_av1_validation_private_partition(
-        partition,
-        manifest=manifest,
-        token_key=token_key,
-    )
-    validate_av1_validation_derivation_plan_binding(
-        plan=plan,
-        partition=partition,
-    )
-    artifact_root = attempts_directory.expanduser().resolve().parent
-    if (
-        attempts_directory.resolve()
-        != (artifact_root / "attempts").resolve()
-        or terminal_records_directory.resolve()
-        != (artifact_root / "terminal-records").resolve()
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation runtime artifacts must use the partition-global canonical directory"
+    if _preflight is None:
+        assert_preregistered_av1_validation_manifest_v2(manifest)
+        assignment = next(
+            (item for item in plan.assignments if item.assignment_id == assignment_id),
+            None,
         )
-    artifact_root = _validated_av1_validation_derivation_artifact_root(
-        config=config,
-        plan=plan,
-        artifact_root=artifact_root,
-    )
-    attempts_directory = artifact_root / "attempts"
-    terminal_records_directory = artifact_root / "terminal-records"
-    if load_av1_validation_derivation_plan(artifact_root / "plan.json") != plan:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation runtime plan does not match the frozen artifact root"
+        if assignment is None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation assignment is not authorized"
+            )
+        validate_av1_validation_private_partition(
+            partition,
+            manifest=manifest,
+            token_key=token_key,
         )
-    clock = now_iso or _now_iso
-    recovery_completed_at = clock()
-    interrupted_state_recovered = _recover_interrupted_derivation_state(
-        plan=plan,
-        partition=partition,
-        artifact_root=artifact_root,
-        attempts_directory=attempts_directory,
-        terminal_records_directory=terminal_records_directory,
-        completed_at=recovery_completed_at,
-    )
-    if interrupted_state_recovered:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
+        validate_av1_validation_derivation_plan_binding(
+            plan=plan,
+            partition=partition,
         )
-    assert_av1_validation_derivation_execution_contract(manifest, plan)
-    if stable_absolute_path(
-        av1_validation_derivation_artifact_root(config, plan)
-    ) != artifact_root:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation runtime artifacts drifted from the immutable runtime context"
+        artifact_root = attempts_directory.expanduser().resolve().parent
+        if (
+            attempts_directory.resolve()
+            != (artifact_root / "attempts").resolve()
+            or terminal_records_directory.resolve()
+            != (artifact_root / "terminal-records").resolve()
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation runtime artifacts must use the partition-global canonical directory"
+            )
+        artifact_root = _validated_av1_validation_derivation_artifact_root(
+            config=config,
+            plan=plan,
+            artifact_root=artifact_root,
         )
-    with open_readonly_db(config.paths.db_path) as connection:
-        inventory = load_av1_validation_partition_inventory(connection, config=config)
+        attempts_directory = artifact_root / "attempts"
+        terminal_records_directory = artifact_root / "terminal-records"
+        if load_av1_validation_derivation_plan(artifact_root / "plan.json") != plan:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation runtime plan does not match the frozen artifact root"
+            )
+        clock = now_iso or _now_iso
+        recovery_completed_at = clock()
+        interrupted_state_recovered = _recover_interrupted_derivation_state(
+            plan=plan,
+            partition=partition,
+            artifact_root=artifact_root,
+            attempts_directory=attempts_directory,
+            terminal_records_directory=terminal_records_directory,
+            completed_at=recovery_completed_at,
+        )
+        if interrupted_state_recovered:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation interrupted state was terminalized; retry the next canonical assignment"
+            )
+        assert_av1_validation_derivation_execution_contract(manifest, plan)
+        if stable_absolute_path(
+            av1_validation_derivation_artifact_root(config, plan)
+        ) != artifact_root:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation runtime artifacts drifted from the immutable runtime context"
+            )
         terminal_records = (
             load_av1_validation_derivation_terminal_records(
                 terminal_records_directory
@@ -944,26 +998,51 @@ def _run_av1_validation_derivation_assignment_locked(
             if terminal_records_directory.exists()
             else ()
         )
-        _assert_derivation_terminal_observations_current(
-            connection=connection,
-            records=terminal_records,
+        preflight = _AV1ValidationDerivationAssignmentPreflight(
+            assignment=assignment,
+            artifact_root=artifact_root,
+            clock=clock,
         )
-    validate_av1_validation_partition_current_inputs(
-        partition,
-        manifest=manifest,
-        sources=inventory.sources,
-        expectations=inventory.expectations,
-        token_key=token_key,
-        source_sha256_resolver=(
-            av1_validation_partition_frozen_source_sha256_resolver(partition)
-        ),
-    )
+        with _live_av1_validation_derivation_source_commitments(
+            config=config,
+            manifest=manifest,
+            partition=partition,
+            token_key=token_key,
+            plan=plan,
+            terminal_records=terminal_records,
+        ) as source_sha256_session:
+            return _run_av1_validation_derivation_assignment_locked(
+                config=config,
+                manifest=manifest,
+                partition=partition,
+                token_key=token_key,
+                plan=plan,
+                assignment_id=assignment_id,
+                attempts_directory=attempts_directory,
+                terminal_records_directory=terminal_records_directory,
+                process_controller=process_controller,
+                deps=deps,
+                now_iso=now_iso,
+                _preflight=preflight,
+                _source_commitment_guard=source_sha256_session.assert_quiet,
+            )
+    assignment = _preflight.assignment
+    artifact_root = _preflight.artifact_root
+    clock = _preflight.clock
+    if _source_commitment_guard is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source commitments are not live"
+        )
     source = next(
         (item for item in partition.inventory_sources if item.local_item_id == assignment.local_item_id),
         None,
     )
     if source is None:
         raise AV1ValidationDerivationError("AV1 derivation source is absent from the partition")
+    source_commitment = av1_validation_derivation_plan_source_commitment(
+        plan,
+        assignment.assignment_id,
+    )
     try:
         probe_macos_file_integrity(artifact_root)
     except FileIntegrityError as exc:
@@ -978,6 +1057,7 @@ def _run_av1_validation_derivation_assignment_locked(
     )
     started_at = clock()
     assert_av1_validation_derivation_authorization_active(plan, at=started_at)
+    _source_commitment_guard()
     write_av1_validation_derivation_assignment_claim(
         attempts_directory,
         assignment_id=assignment.assignment_id,
@@ -1052,8 +1132,8 @@ def _run_av1_validation_derivation_assignment_locked(
             assignment_id=assignment.assignment_id,
             source_path=source_path,
             expected_content_version_fingerprint=source.source_identity,
-            expected_source_sha256=assignment.source_sha256,
-            expected_size_bytes=int_value(sample_item.get("source_size_bytes")),
+            expected_source_sha256=source_commitment.source_sha256,
+            expected_size_bytes=source_commitment.source_size_bytes,
             process_controller=controller,
         ) as pinned_source:
             sample_item["source_snapshot_sha256"] = pinned_source.content_sha256
@@ -1213,6 +1293,7 @@ def _run_av1_validation_derivation_assignment_locked(
             )
     if attempt is None:
         raise AV1ValidationDerivationError("AV1 derivation attempt did not reach a terminal state")
+    _source_commitment_guard()
     write_av1_validation_derivation_attempt(attempts_directory, attempt)
     if attempt.status != "review_pending":
         terminal = build_av1_validation_derivation_terminal_record(
@@ -1220,6 +1301,7 @@ def _run_av1_validation_derivation_assignment_locked(
             partition=partition,
             attempt=attempt,
         )
+        _source_commitment_guard()
         write_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
@@ -1343,7 +1425,10 @@ def finalize_av1_validation_derivation_candidate_lock(
                     sources=inventory.sources,
                     expectations=inventory.expectations,
                     token_key=token_key,
-                    source_sha256_resolver=source_sha256_resolver,
+                )
+                assert_av1_validation_derivation_source_commitments(
+                    plan,
+                    resolver=source_sha256_resolver,
                 )
                 current_evaluation = evaluate_av1_validation_derivation_candidate(
                     manifest=manifest,
@@ -1484,7 +1569,10 @@ def load_verified_av1_validation_derivation_candidate_lock(
                     sources=inventory.sources,
                     expectations=inventory.expectations,
                     token_key=token_key,
-                    source_sha256_resolver=source_sha256_resolver,
+                )
+                assert_av1_validation_derivation_source_commitments(
+                    plan,
+                    resolver=source_sha256_resolver,
                 )
                 current_evaluation = evaluate_av1_validation_derivation_candidate(
                     manifest=manifest,
@@ -1716,7 +1804,10 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 sources=inventory.sources,
                 expectations=inventory.expectations,
                 token_key=token_key,
-                source_sha256_resolver=source_sha256_resolver,
+            )
+            assert_av1_validation_derivation_source_commitments(
+                plan,
+                resolver=source_sha256_resolver,
             )
             assert_av1_validation_derivation_execution_contract(manifest, plan)
             review_root = _prepare_derivation_review_root(artifact_root)

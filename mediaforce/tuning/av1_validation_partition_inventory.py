@@ -94,10 +94,12 @@ class AV1ValidationPartitionSourceSHA256Session:
             self,
             *,
             resolve: Callable[[AV1ValidationPartitionSource], str],
+            source_size_bytes: Callable[[AV1ValidationPartitionSource], int],
             verify: Callable[[], None],
             assert_quiet: Callable[[], None],
     ) -> None:
         self._resolve = resolve
+        self._source_size_bytes = source_size_bytes
         self._verify = verify
         self._assert_quiet = assert_quiet
         self._verified = False
@@ -108,6 +110,13 @@ class AV1ValidationPartitionSourceSHA256Session:
                 "AV1 partition source cohort is already verified"
             )
         return self._resolve(source)
+
+    def source_size_bytes(self, source: AV1ValidationPartitionSource) -> int:
+        if self._verified:
+            raise AV1ValidationPartitionError(
+                "AV1 partition source cohort is already verified"
+            )
+        return self._source_size_bytes(source)
 
     def verify(self) -> None:
         if self._verified:
@@ -140,6 +149,7 @@ def av1_validation_partition_source_sha256_resolver(
     verify_evidence: bool = False,
 ) -> Iterator[AV1ValidationPartitionSourceSHA256Session]:
     digest_by_item_id: dict[int, str] = {}
+    size_by_item_id: dict[int, int] = {}
     guarded_sources: list[_GuardedPartitionSource] = []
 
     def resolve(source: AV1ValidationPartitionSource) -> str:
@@ -277,7 +287,13 @@ def av1_validation_partition_source_sha256_resolver(
             if source_descriptor >= 0:
                 os.close(source_descriptor)
         digest_by_item_id[source.local_item_id] = source_sha256
+        size_by_item_id[source.local_item_id] = expected_size_bytes
         return source_sha256
+
+    def source_size_bytes(source: AV1ValidationPartitionSource) -> int:
+        if source.local_item_id not in size_by_item_id:
+            resolve(source)
+        return size_by_item_id[source.local_item_id]
 
     def assert_quiet() -> None:
         try:
@@ -328,6 +344,7 @@ def av1_validation_partition_source_sha256_resolver(
 
     session = AV1ValidationPartitionSourceSHA256Session(
         resolve=resolve,
+        source_size_bytes=source_size_bytes,
         verify=verify,
         assert_quiet=assert_quiet,
     )
