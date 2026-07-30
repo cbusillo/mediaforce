@@ -164,10 +164,7 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     run_sampled_calibration as runtime_run_sampled_calibration, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
 from mediaforce.web.runtime_lock import (
-    MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
-    mediaforce_runtime_lock_owner,
-    mediaforce_runtime_lock_path,
 )
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
@@ -453,6 +450,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
     evidence_runner = BoundedEvidenceRunner(config.paths.config_path)
+    review_dir = config.paths.review_dir
 
     @asynccontextmanager
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -462,7 +460,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
         ):
             migrate_config_state(config)
             review_dir.mkdir(parents=True, exist_ok=True)
-            app.mount("/review-media", StaticFiles(directory=str(review_dir)), name="review_media")
             threading.Thread(
                 target=purge_transient_artifacts,
                 args=(config,),
@@ -508,7 +505,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
                 _cancel_active_encode_processes()
 
     app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
-    review_dir = config.paths.review_dir
+    app.mount(
+        "/review-media",
+        StaticFiles(directory=str(review_dir), check_dir=False),
+        name="review_media",
+    )
     project_frontend_build_dir = config.paths.project_root / "frontend" / "build"
     packaged_frontend_build_dir = Path(__file__).resolve().parent / "frontend_build"
     frontend_build_dir = (
@@ -2281,33 +2282,6 @@ def _default_web_port() -> int:
     return int(port_value)
 
 
-@contextmanager
-def _exclusive_web_server_lock(config: MediaforceConfig, settings: WebStartupSettings) -> Iterator[None]:
-    try:
-        with exclusive_mediaforce_runtime_lock(
-            config,
-            owner_payload=_web_server_lock_payload(config, settings),
-        ):
-            yield
-    except MediaforceRuntimeBusyError as exc:
-        raise SystemExit(str(exc).replace("Mediaforce runtime", "mediaforce-web")) from exc
-
-
-def _web_server_lock_path(config: MediaforceConfig) -> Path:
-    return mediaforce_runtime_lock_path(config)
-
-
-def _web_server_lock_payload(config: MediaforceConfig, settings: WebStartupSettings) -> dict[str, object]:
-    return {
-        "pid": os.getpid(),
-        "host": settings.host,
-        "port": settings.port,
-        "reload": settings.reload_enabled,
-        "config_path": str(config.paths.config_path),
-        "started_at": _now_iso(),
-    }
-
-
 def _lifespan_owner_payload(config: MediaforceConfig) -> dict[str, object]:
     return {
         "host": _default_web_host(),
@@ -2315,12 +2289,6 @@ def _lifespan_owner_payload(config: MediaforceConfig) -> dict[str, object]:
         "config_path": str(config.paths.config_path),
         "started_at": _now_iso(),
     }
-
-
-def _web_server_lock_owner(lock_path: Path) -> str | None:
-    return mediaforce_runtime_lock_owner(lock_path)
-
-
 def create_reloadable_app() -> FastAPI:
     configured_path = _preferred_env("MEDIAFORCE_CONFIG_PATH")
     config_value = configured_path.strip() if configured_path is not None else ""

@@ -6351,40 +6351,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
         self.assertNotIn("reload", uvicorn_run_mock.call_args.kwargs)
 
-    def test_main_migrates_state_after_web_server_lock(self) -> None:
-        lock_held = False
-
-        @contextmanager
-        def runtime_lock(
-                _config: MediaforceConfig,
-                _settings: web_app.WebStartupSettings,
-        ) -> Iterator[None]:
-            nonlocal lock_held
-            lock_held = True
-            try:
-                yield
-            finally:
-                lock_held = False
-
-        def migrate(_config: MediaforceConfig) -> None:
-            self.assertTrue(lock_held)
-
-        with (
-            patch.dict(os.environ, {"MEDIAFORCE_WEB_RELOAD": "false"}, clear=True),
-            patch("mediaforce.web.app.load_config", return_value=self.config),
-            patch(
-                "mediaforce.web.app._exclusive_web_server_lock",
-                side_effect=runtime_lock,
-            ),
-            patch("mediaforce.web.app.migrate_config_state", side_effect=migrate),
-            patch("mediaforce.web.app.create_app", return_value=object()),
-            patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock,
-        ):
-            web_app.main([])
-
-        uvicorn_run_mock.assert_called_once()
-        self.assertFalse(lock_held)
-
     def test_main_uses_cli_config_path_for_reload_app(self) -> None:
         config = self.config
         config_path = self.root / "custom.toml"
@@ -6410,14 +6376,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
 
-    def test_web_server_lock_rejects_second_backend_instance(self) -> None:
-        settings = web_app.WebStartupSettings(
-            config_path=self.config.paths.config_path,
-            host="127.0.0.1",
-            port=8777,
-            reload_enabled=False,
-        )
-        lock_path = web_app._web_server_lock_path(self.config)
+    def test_runtime_lock_rejects_second_backend_instance(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({"pid": 123, "host": "127.0.0.1", "port": 8777}))
 
@@ -6425,8 +6385,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "mediaforce.web.runtime_lock.fcntl.flock",
             side_effect=BlockingIOError,
         ):
-            with self.assertRaises(SystemExit) as raised:
-                with web_app._exclusive_web_server_lock(self.config, settings):
+            with self.assertRaises(
+                runtime_lock_module.MediaforceRuntimeBusyError
+            ) as raised:
+                with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                    self.config,
+                    owner_payload={"purpose": "second-backend-probe"},
+                ):
                     pass
 
         self.assertIn("pid 123 on 127.0.0.1:8777", str(raised.exception))
