@@ -44,6 +44,12 @@ Mediaforce's SQLite schema.
 
 ## Runtime transaction boundaries
 
+- Writable `open_db()` calls automatically honor any active Mediaforce runtime
+  lease. The lease pins one database inode, guards every migration and SQLite
+  connection before SQL is issued, and rejects pathname replacement instead of
+  adopting a new inode. A runtime that may initialize a missing database must
+  call `reserve_mediaforce_database_identity(..., create_if_missing=True)`
+  before its first writable open. Read-only database opens remain exempt.
 - End SQLite write transactions before starting ffmpeg, ffprobe, ab-av1, remote
   host waits, or other long-running media work.
 - Persist the queued or running state, commit it, perform the media work, then

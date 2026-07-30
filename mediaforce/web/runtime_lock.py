@@ -16,6 +16,7 @@ import sys
 import threading
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.db import register_database_identity_provider
 from mediaforce.core.utils import filesystem_collision_key
 
 
@@ -31,6 +32,8 @@ class MediaforceRuntimeLockOwnershipError(RuntimeError):
 class MediaforceRuntimeLease:
     namespace_keys: tuple[str, ...]
     owner_pid: int
+    _database_path_key: str | None = field(default=None, repr=False)
+    _database_identity: tuple[int, int] | None = field(default=None, repr=False)
     _active: bool = field(default=False, init=False, repr=False)
     _state_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -78,6 +81,16 @@ class MediaforceRuntimeLease:
         with self._extension_lock:
             self.assert_active()
             db_path = config.paths.db_path.expanduser().resolve()
+            path_key = f"db_path:{filesystem_collision_key(db_path)}"
+            if self._database_path_key is None:
+                self._database_path_key = path_key
+            if (
+                path_key != self._database_path_key
+                or path_key not in self.namespace_keys
+            ):
+                raise MediaforceRuntimeBusyError(
+                    "Mediaforce runtime db_path namespace changed under the active lease"
+                )
             try:
                 identity = db_path.stat()
             except FileNotFoundError:
@@ -86,14 +99,17 @@ class MediaforceRuntimeLease:
                 raise MediaforceRuntimeBusyError(
                     "Mediaforce runtime db_path identity is unavailable"
                 ) from exc
-            if identity is None and not create_if_missing:
+            if self._database_identity is not None:
+                if identity is None or (
+                    identity.st_dev,
+                    identity.st_ino,
+                ) != self._database_identity:
+                    raise MediaforceRuntimeBusyError(
+                        "Mediaforce runtime db_path identity changed under the active lease"
+                    )
+                self.assert_database_identity_reserved(db_path)
                 return
-            inode_key = (
-                f"file:{identity.st_dev}:{identity.st_ino}"
-                if identity is not None
-                else None
-            )
-            if inode_key is not None and inode_key in self.namespace_keys:
+            if identity is None and not create_if_missing:
                 return
             descriptor = _open_runtime_direct_file_lock(
                 _RuntimeDirectFileLock(
@@ -108,6 +124,22 @@ class MediaforceRuntimeLease:
             )
             try:
                 descriptor_identity = os.fstat(descriptor)
+                try:
+                    current_identity = db_path.stat()
+                except OSError as exc:
+                    raise MediaforceRuntimeBusyError(
+                        "Mediaforce runtime db_path identity changed during reservation"
+                    ) from exc
+                if (
+                    descriptor_identity.st_dev,
+                    descriptor_identity.st_ino,
+                ) != (
+                    current_identity.st_dev,
+                    current_identity.st_ino,
+                ):
+                    raise MediaforceRuntimeBusyError(
+                        "Mediaforce runtime db_path identity changed during reservation"
+                    )
                 inode_key = (
                     f"file:{descriptor_identity.st_dev}:{descriptor_identity.st_ino}"
                 )
@@ -115,9 +147,39 @@ class MediaforceRuntimeLease:
                 self.namespace_keys = tuple(
                     sorted({*self.namespace_keys, inode_key})
                 )
+                self._database_identity = (
+                    descriptor_identity.st_dev,
+                    descriptor_identity.st_ino,
+                )
+                self.assert_database_identity_reserved(db_path)
             except BaseException:
-                os.close(descriptor)
+                if descriptor not in self._extra_descriptors:
+                    os.close(descriptor)
                 raise
+
+    def assert_database_identity_reserved(self, db_path: Path) -> tuple[int, int]:
+        self.assert_active()
+        try:
+            resolved_path = db_path.expanduser().resolve()
+            identity = resolved_path.stat()
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime db_path identity is unavailable"
+            ) from exc
+        path_key = f"db_path:{filesystem_collision_key(resolved_path)}"
+        inode_key = f"file:{identity.st_dev}:{identity.st_ino}"
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or path_key != self._database_path_key
+            or self._database_identity is None
+            or (identity.st_dev, identity.st_ino) != self._database_identity
+            or path_key not in self.namespace_keys
+            or inode_key not in self.namespace_keys
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime db_path identity is not reserved by the active lease"
+            )
+        return self._database_identity
 
     def _activate(self, authority: object) -> None:
         if authority is not _RUNTIME_LEASE_AUTHORITY:
@@ -172,6 +234,58 @@ def reserve_mediaforce_database_identity(
         config,
         create_if_missing=create_if_missing,
     )
+
+
+def assert_mediaforce_database_identity_reserved(
+        db_path: Path,
+        expected_identity: tuple[int, int, int] | None = None,
+) -> tuple[int, int, int] | None:
+    with _RUNTIME_LEASE_REGISTRY_LOCK:
+        leases = tuple(_REGISTERED_RUNTIME_LEASES.values())
+    if not leases:
+        if expected_identity is not None:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce writable database lease ended during database access"
+            )
+        return None
+    resolved_path = db_path.expanduser().resolve()
+    path_key = f"db_path:{filesystem_collision_key(resolved_path)}"
+    matching_leases = tuple(
+        lease for lease in leases if path_key == lease._database_path_key
+    )
+    if not matching_leases:
+        raise MediaforceRuntimeBusyError(
+            "Mediaforce writable database path is outside the active runtime lease"
+        )
+    last_error: MediaforceRuntimeBusyError | None = None
+    for lease in matching_leases:
+        try:
+            file_identity = lease.assert_database_identity_reserved(resolved_path)
+            lease_identity = (
+                id(lease),
+                file_identity[0],
+                file_identity[1],
+            )
+            if (
+                expected_identity is not None
+                and lease_identity != expected_identity
+            ):
+                raise MediaforceRuntimeBusyError(
+                    "Mediaforce writable database identity changed under the active lease"
+                )
+            return lease_identity
+        except MediaforceRuntimeBusyError as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise MediaforceRuntimeBusyError(
+        "Mediaforce writable database identity is not reserved"
+    )
+
+
+register_database_identity_provider(
+    assert_mediaforce_database_identity_reserved,
+)
 
 
 def mediaforce_runtime_lock_path(config: MediaforceConfig) -> Path:
@@ -337,6 +451,8 @@ class _RuntimeNamespaceState:
     keys: tuple[str, ...]
     paths: tuple[_RuntimePathNamespace, ...]
     direct_file_locks: tuple[_RuntimeDirectFileLock, ...]
+    database_path_key: str | None = None
+    database_identity: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +476,8 @@ def _runtime_namespace_state(
         )
     ]
     direct_file_locks: list[_RuntimeDirectFileLock] = []
+    database_path_key: str | None = None
+    database_identity: tuple[int, int] | None = None
     for name in ("config_path", "db_path"):
         value = getattr(config.paths, name, None)
         if value is None:
@@ -371,6 +489,8 @@ def _runtime_namespace_state(
                 f"Mediaforce runtime {name} namespace is unavailable"
             ) from exc
         key = f"{name}:{filesystem_collision_key(resolved)}"
+        if name == "db_path":
+            database_path_key = key
         keys.add(key)
         try:
             identity = resolved.stat()
@@ -382,6 +502,8 @@ def _runtime_namespace_state(
             ) from exc
         if identity is not None:
             keys.add(f"file:{identity.st_dev}:{identity.st_ino}")
+            if name == "db_path":
+                database_identity = (identity.st_dev, identity.st_ino)
         if name == "config_path" and identity is not None:
             direct_file_locks.append(
                 _RuntimeDirectFileLock(
@@ -425,6 +547,8 @@ def _runtime_namespace_state(
                 ),
             )
         ),
+        database_path_key=database_path_key,
+        database_identity=database_identity,
     )
 
 
@@ -935,6 +1059,8 @@ def exclusive_mediaforce_runtime_lock(
             lease = MediaforceRuntimeLease(
                 namespace_keys=namespace_keys,
                 owner_pid=os.getpid(),
+                _database_path_key=namespace_state.database_path_key,
+                _database_identity=namespace_state.database_identity,
             )
             lease._activate(_RUNTIME_LEASE_AUTHORITY)
             lease_binding = _ACTIVE_RUNTIME_LEASE.set(lease)

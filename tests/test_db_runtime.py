@@ -3,7 +3,8 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 # noinspection PyPackageRequirements
 from alembic import command
@@ -12,7 +13,9 @@ from sqlalchemy import inspect
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
+from mediaforce.core import db as db_module
 from mediaforce.core.db import _load_sql_asset
+from mediaforce.core.db import connect
 from mediaforce.core.db import open_db
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db import reset_engine_cache
@@ -23,11 +26,16 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
-from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location
+from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location, run_migrations
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+    reserve_mediaforce_database_identity,
+)
 
 CURRENT_DB_REVISION = "20260726_0019"
 
@@ -35,6 +43,291 @@ CURRENT_DB_REVISION = "20260726_0019"
 class DatabaseRuntimeTests(unittest.TestCase):
     def tearDown(self) -> None:
         reset_engine_cache()
+
+    def test_open_db_requires_missing_database_reservation_under_runtime_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "library.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "missing-db-open-probe"},
+            ):
+                with self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "db_path identity is unavailable",
+                ):
+                    with open_db(db_path):
+                        pass
+
+            self.assertFalse(db_path.exists())
+
+    def test_connect_checks_reserved_identity_before_sqlite_pragmas(self) -> None:
+        connection = Mock()
+        engine = Mock()
+        engine.connect.return_value = connection
+        identity = (7, 11, 22)
+        identity_changed = MediaforceRuntimeBusyError(
+            "database identity changed"
+        )
+
+        with (
+            patch(
+                "mediaforce.core.db._assert_writable_database_identity_reserved",
+                side_effect=[identity, identity, identity_changed],
+            ),
+            patch(
+                "mediaforce.core.db._engine_for_db_path",
+                return_value=engine,
+            ),
+            patch(
+                "mediaforce.core.db._configure_sqlite_connection",
+            ) as configure_sqlite,
+            self.assertRaisesRegex(
+                MediaforceRuntimeBusyError,
+                "database identity changed",
+            ),
+        ):
+            connect(Path("library.sqlite3"))
+
+        connection.close.assert_called_once_with()
+        configure_sqlite.assert_not_called()
+
+    def test_open_db_rejects_lease_loss_before_engine_connect(self) -> None:
+        engine = Mock()
+        lease_identity = (7, 11, 22)
+        lease_ended = MediaforceRuntimeBusyError(
+            "database lease ended"
+        )
+
+        with (
+            patch(
+                "mediaforce.core.db._assert_writable_database_identity_reserved",
+                side_effect=[lease_identity, lease_ended],
+            ),
+            patch(
+                "mediaforce.core.db._engine_for_db_path",
+                return_value=engine,
+            ),
+            self.assertRaisesRegex(
+                MediaforceRuntimeBusyError,
+                "database lease ended",
+            ),
+        ):
+            with open_db(Path("library.sqlite3")):
+                pass
+
+        engine.connect.assert_not_called()
+
+    def test_run_migrations_checks_identity_before_database_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            identity_guard = Mock(side_effect=RuntimeError("identity changed"))
+
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                run_migrations(
+                    db_path,
+                    identity_guard=identity_guard,
+                )
+
+            identity_guard.assert_called_once_with()
+            self.assertFalse(db_path.exists())
+
+    def test_open_db_uses_reserved_missing_database_under_runtime_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "library.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "reserved-db-open-probe"},
+            ) as lease:
+                reserve_mediaforce_database_identity(
+                    config,
+                    create_if_missing=True,
+                )
+                identity = db_path.stat()
+                self.assertEqual(
+                    lease._database_identity,
+                    (identity.st_dev, identity.st_ino),
+                )
+                with open_db(db_path) as connection:
+                    version = connection.execute(
+                        select(alembic_version.c.version_num)
+                    ).scalar_one()
+                    journal_mode = connection.exec_driver_sql(
+                        "PRAGMA journal_mode"
+                    ).scalar_one()
+                    foreign_keys = connection.exec_driver_sql(
+                        "PRAGMA foreign_keys"
+                    ).scalar_one()
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertEqual(str(journal_mode).lower(), "wal")
+            self.assertEqual(foreign_keys, 1)
+
+    def test_open_db_rejects_database_replacement_before_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "library.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "pre-commit-replacement-probe"},
+            ):
+                reserve_mediaforce_database_identity(
+                    config,
+                    create_if_missing=True,
+                )
+                with self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "not reserved by the active lease",
+                ):
+                    with open_db(db_path):
+                        db_path.rename(root / "library-original.sqlite3")
+                        db_path.write_bytes(b"replacement")
+
+                self.assertEqual(db_path.read_bytes(), b"replacement")
+
+    def test_runtime_lease_rejects_replaced_database_inode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "library.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "replaced-db-open-probe"},
+            ) as lease:
+                reserve_mediaforce_database_identity(config)
+                reserved_identity = lease._database_identity
+                db_path.rename(root / "library-original.sqlite3")
+                for suffix in ("-shm", "-wal"):
+                    sidecar = Path(f"{db_path}{suffix}")
+                    if sidecar.exists():
+                        sidecar.unlink()
+                with sqlite3.connect(db_path) as replacement:
+                    replacement.execute("CREATE TABLE sentinel (value INTEGER NOT NULL)")
+                    replacement.execute("INSERT INTO sentinel VALUES (1)")
+
+                with self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "identity changed under the active lease",
+                ):
+                    reserve_mediaforce_database_identity(
+                        config,
+                        create_if_missing=True,
+                    )
+                self.assertEqual(lease._database_identity, reserved_identity)
+                with self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "not reserved by the active lease",
+                ):
+                    with open_db(db_path):
+                        pass
+
+                with sqlite3.connect(db_path) as replacement:
+                    self.assertEqual(
+                        replacement.execute(
+                            "SELECT value FROM sentinel"
+                        ).fetchone(),
+                        (1,),
+                    )
+                    self.assertIsNone(replacement.execute(
+                        "SELECT name FROM sqlite_master WHERE name = 'alembic_version'"
+                    ).fetchone())
+
+    def test_reserved_engine_does_not_recreate_database_removed_during_connect(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "library.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "connect-removal-probe"},
+            ) as lease:
+                reserve_mediaforce_database_identity(
+                    config,
+                    create_if_missing=True,
+                )
+                with open_db(db_path):
+                    pass
+                identity = lease._database_identity
+                self.assertIsNotNone(identity)
+                engine = db_module._engine_for_db_path(
+                    str(db_path.resolve()),
+                    (id(lease), identity[0], identity[1]),
+                )
+                original_path = root / "library-original.sqlite3"
+
+                class _RemovingEngine:
+                    def connect(self) -> object:
+                        db_path.rename(original_path)
+                        return engine.connect()
+
+                with (
+                    patch(
+                        "mediaforce.core.db._engine_for_db_path",
+                        return_value=_RemovingEngine(),
+                    ),
+                    self.assertRaises(OperationalError),
+                ):
+                    connect(db_path)
+
+                self.assertTrue(original_path.exists())
+                self.assertFalse(db_path.exists())
 
     def test_open_db_applies_alembic_schema_to_fresh_database(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -685,7 +978,10 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
         fake = _FakeConnection()
 
-        with patch("mediaforce.core.db.connect", return_value=fake):
+        with patch(
+            "mediaforce.core.db._connect_with_reserved_identity",
+            return_value=fake,
+        ):
             with self.assertRaisesRegex(RuntimeError, "commit failed"):
                 with open_db(Path("/tmp/fake.sqlite3")):
                     pass

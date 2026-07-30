@@ -13,6 +13,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 from typing import Callable, Literal, Sequence
 import unittest
@@ -32,9 +33,11 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
+    AV1ValidationDerivationPublicationDeadlineError,
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationTerminalRecord,
+    AV1ValidationDerivationVerdictRetryMismatchError,
     _attempt_semantic_payload,
     _bind_owner_only_directory,
     _code_review_marker,
@@ -311,6 +314,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         ):
             integrity_patcher.start()
             self.addCleanup(integrity_patcher.stop)
+        self.publication_time_patcher = patch(
+            "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+            return_value=0,
+        )
+        self.publication_time_patcher.start()
+        self.addCleanup(self.publication_time_patcher.stop)
         if not hasattr(__import__("select"), "kqueue"):
             review_guard_patcher = patch.object(
                 verify_av1_cold_start_preregistration,
@@ -1734,6 +1743,54 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
         ):
             load_av1_validation_derivation_plan(plan_path)
+
+    def test_owner_only_publication_rejects_post_deadline_rename(self) -> None:
+        self.publication_time_patcher.stop()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            artifact_path = root / "artifact.json"
+            before_publish = unittest.mock.Mock()
+
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                _write_owner_only(
+                    artifact_path,
+                    b"{}",
+                    before_publish=before_publish,
+                    published_before=AUTHORIZED_AT,
+                )
+
+            before_publish.assert_called_once_with()
+            self.assertTrue(artifact_path.exists())
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                _read_owner_only_bytes(
+                    artifact_path,
+                    "test artifact",
+                    published_before=AUTHORIZED_AT,
+                )
+
+    def test_exclusive_rename_advances_kernel_change_time(self) -> None:
+        self.publication_time_patcher.stop()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            source_path = root / ".artifact.tmp"
+            destination_path = root / "artifact.json"
+            source_path.write_bytes(b"{}")
+            source_path.chmod(0o400)
+            before = source_path.stat().st_ctime_ns
+            time.sleep(0.01)
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                _rename_owner_only_exclusive(
+                    parent_descriptor=descriptor,
+                    source_name=source_path.name,
+                    destination_name=destination_path.name,
+                )
+            finally:
+                os.close(descriptor)
+
+            self.assertGreater(destination_path.stat().st_ctime_ns, before)
 
     def test_immutable_read_preserves_primary_error_when_close_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -5000,6 +5057,104 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 records=(terminal,),
             )
 
+    def test_frozen_verdict_retry_mismatch_is_retryable(self) -> None:
+        attempt = self._review_pending_attempt()
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=["banding"],
+            evidence_ids=["evidence_test"],
+            moment_indexes=[1],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+
+        @contextmanager
+        def database(_path: Path) -> Iterator[SimpleNamespace]:
+            yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationVerdictRetryMismatchError,
+                "does not match its immutable intent",
+            ) as retry_error,
+        ):
+            record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=records_dir,
+                verdict="rejected",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                recorded_at="2026-07-28T01:06:00Z",
+            )
+
+        self.assertFalse(records_dir.exists())
+        self.assertEqual(
+            {
+                "concern_tags": retry_error.exception.frozen_intent[
+                    "concern_tags"
+                ],
+                "evidence_ids": retry_error.exception.frozen_intent[
+                    "evidence_ids"
+                ],
+                "moment_indexes": retry_error.exception.frozen_intent[
+                    "moment_indexes"
+                ],
+                "verdict": retry_error.exception.frozen_intent["verdict"],
+            },
+            {
+                "concern_tags": ["banding"],
+                "evidence_ids": ["evidence_test"],
+                "moment_indexes": [1],
+                "verdict": "approved",
+            },
+        )
+        self.assertIn(
+            'retry with {"concern_tags":["banding"],'
+            '"evidence_ids":["evidence_test"],"moment_indexes":[1],'
+            '"verdict":"approved"}',
+            str(retry_error.exception),
+        )
+
     def test_observed_terminal_blocks_progress_until_database_commit_is_present(self) -> None:
         record = self._observed_record(
             self.plan.assignments[0].assignment_id,
@@ -7814,6 +7969,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 },
                 {review.attestation_id for review in reviews},
             )
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                    return_value=2 ** 63 - 1,
+                ),
+                self.assertRaises(
+                    AV1ValidationDerivationPublicationDeadlineError
+                ),
+            ):
+                load_av1_validation_derivation_review_envelopes(
+                    artifact_root,
+                    plan=self.plan,
+                    proposal=evaluation.proposal,
+                    claims=loaded_claims,
+                )
             candidate_lock_directory = artifact_root / "candidate-locks"
             _bind_owner_only_directory(
                 candidate_lock_directory,

@@ -154,6 +154,32 @@ class AV1ValidationDerivationError(ValueError):
     pass
 
 
+class AV1ValidationDerivationPublicationDeadlineError(
+        AV1ValidationDerivationError,
+):
+    def __init__(self, path: Path, label: str) -> None:
+        self.path = path
+        super().__init__(f"AV1 {label} was published after authorization expired")
+
+
+class AV1ValidationDerivationVerdictRetryMismatchError(
+        AV1ValidationDerivationError,
+):
+    def __init__(self, frozen_intent: Mapping[str, Any]) -> None:
+        self.frozen_intent = dict(frozen_intent)
+        retry_payload = {
+            "concern_tags": self.frozen_intent.get("concern_tags"),
+            "evidence_ids": self.frozen_intent.get("evidence_ids"),
+            "moment_indexes": self.frozen_intent.get("moment_indexes"),
+            "verdict": self.frozen_intent.get("verdict"),
+        }
+        super().__init__(
+            "AV1 derivation verdict retry does not match its immutable intent; "
+            "retry with "
+            f"{canonical_json_bytes(retry_payload).decode('utf-8')}"
+        )
+
+
 class _AV1ValidationDerivationArtifactAlreadyExists(
         AV1ValidationDerivationError,
 ):
@@ -2420,6 +2446,7 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
             path,
             canonical_json_bytes(envelope.to_payload()),
             before_publish=before_publish,
+            published_before=plan.authorization.valid_until,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         existing = _load_av1_validation_derivation_candidate_lock_envelope(
@@ -2467,6 +2494,7 @@ def _load_av1_validation_derivation_candidate_lock_envelope(
     payload, raw = _load_owner_only_json(
         directory / f"{cell_plan_id}.json",
         "derivation candidate-lock envelope",
+        published_before=plan.authorization.valid_until,
     )
     envelope = av1_validation_derivation_candidate_lock_envelope_from_payload(
         payload,
@@ -2754,7 +2782,11 @@ def ensure_av1_validation_derivation_verdict_claim(
     )
     path = directory / f"{attempt.assignment_id}.json"
     if path.exists() or path.is_symlink():
-        existing, raw = _load_owner_only_json(path, "derivation verdict claim")
+        existing, raw = _load_owner_only_json(
+            path,
+            "derivation verdict claim",
+            published_before=plan.authorization.valid_until,
+        )
         _validate_av1_validation_derivation_verdict_claim(
             existing,
             raw=raw,
@@ -2786,12 +2818,17 @@ def ensure_av1_validation_derivation_verdict_claim(
             path,
             canonical_json_bytes(payload),
             before_publish=before_publish,
+            published_before=plan.authorization.valid_until,
         )
         return True
     except _AV1ValidationDerivationArtifactAlreadyExists:
         if not path.exists():
             raise
-    existing, raw = _load_owner_only_json(path, "derivation verdict claim")
+    existing, raw = _load_owner_only_json(
+        path,
+        "derivation verdict claim",
+        published_before=plan.authorization.valid_until,
+    )
     _validate_av1_validation_derivation_verdict_claim(
         existing,
         raw=raw,
@@ -2820,7 +2857,11 @@ def load_av1_validation_derivation_verdict_claims(
     }
     claims: list[dict[str, Any]] = []
     for path in sorted(directory.glob("*.json")):
-        payload, raw = _load_owner_only_json(path, "derivation verdict claim")
+        payload, raw = _load_owner_only_json(
+            path,
+            "derivation verdict claim",
+            published_before=plan.authorization.valid_until,
+        )
         assignment_id = _required_text(
             payload.get("assignment_id"),
             "assignment ID",
@@ -2869,7 +2910,11 @@ def load_av1_validation_derivation_verdict_intent(
     path = directory / f"{attempt.assignment_id}.json"
     if not path.exists() and not path.is_symlink():
         return None
-    payload, raw = _load_owner_only_json(path, "derivation verdict intent")
+    payload, raw = _load_owner_only_json(
+        path,
+        "derivation verdict intent",
+        published_before=plan.authorization.valid_until,
+    )
     _validate_av1_validation_derivation_verdict_intent(
         payload,
         raw=raw,
@@ -2962,12 +3007,17 @@ def resolve_av1_validation_derivation_verdict_intent(
                 path,
                 canonical_json_bytes(payload),
                 before_publish=before_publish,
+                published_before=plan.authorization.valid_until,
             )
             return payload
         except _AV1ValidationDerivationArtifactAlreadyExists:
             if not path.exists():
                 raise
-    existing, raw = _load_owner_only_json(path, "derivation verdict intent")
+    existing, raw = _load_owner_only_json(
+        path,
+        "derivation verdict intent",
+        published_before=plan.authorization.valid_until,
+    )
     _validate_av1_validation_derivation_verdict_intent(
         existing,
         raw=raw,
@@ -2976,9 +3026,7 @@ def resolve_av1_validation_derivation_verdict_intent(
     )
     stable_keys = set(payload) - {"recorded_at", "payload_sha256"}
     if any(existing.get(key) != payload.get(key) for key in stable_keys):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation verdict retry does not match its immutable intent"
-        )
+        raise AV1ValidationDerivationVerdictRetryMismatchError(existing)
     _fsync_owner_only_parent(path, "derivation verdict intent")
     return existing
 
@@ -3267,6 +3315,7 @@ def write_av1_validation_derivation_candidate_proposal(
             path,
             canonical_json_bytes(proposal.to_payload()),
             before_publish=before_publish,
+            published_before=plan.authorization.valid_until,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         existing = load_av1_validation_derivation_candidate_proposal(
@@ -3311,7 +3360,11 @@ def load_av1_validation_derivation_candidate_proposal(
             "AV1 derivation proposal directory binding drifted"
         )
     path = directory / f"{cell_plan_id}.json"
-    payload, raw = _load_owner_only_json(path, "derivation candidate proposal")
+    payload, raw = _load_owner_only_json(
+        path,
+        "derivation candidate proposal",
+        published_before=plan.authorization.valid_until,
+    )
     proposal = av1_validation_derivation_candidate_proposal_from_payload(
         payload,
         raw=raw,
@@ -3359,7 +3412,11 @@ def write_av1_validation_derivation_review_claim(
         binding_digest=proposal.payload_sha256,
     )
     path = directory / f"{claim.lane}.json"
-    _write_owner_only(path, canonical_json_bytes(claim.to_payload()))
+    _write_owner_only(
+        path,
+        canonical_json_bytes(claim.to_payload()),
+        published_before=plan.authorization.valid_until,
+    )
     return path
 
 
@@ -3398,6 +3455,7 @@ def load_av1_validation_derivation_review_claims(
         payload, raw = _load_owner_only_json(
             path,
             "derivation review claim",
+            published_before=plan.authorization.valid_until,
         )
         claim = av1_validation_derivation_review_claim_from_payload(
             payload,
@@ -3455,7 +3513,11 @@ def write_av1_validation_derivation_review_envelope(
     )
     path = directory / f"{review.lane}.json"
     try:
-        _write_owner_only(path, canonical_json_bytes(envelope.to_payload()))
+        _write_owner_only(
+            path,
+            canonical_json_bytes(envelope.to_payload()),
+            published_before=plan.authorization.valid_until,
+        )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         existing = load_av1_validation_derivation_review_envelope(
             root,
@@ -3505,6 +3567,7 @@ def load_av1_validation_derivation_review_envelope(
     payload, raw = _load_owner_only_json(
         directory / f"{claim.lane}.json",
         "derivation review envelope",
+        published_before=plan.authorization.valid_until,
     )
     envelope = av1_validation_derivation_review_envelope_from_payload(
         payload,
@@ -3555,6 +3618,7 @@ def load_av1_validation_derivation_review_envelopes(
         payload, raw = _load_owner_only_json(
             directory / f"{lane}.json",
             "derivation review envelope",
+            published_before=plan.authorization.valid_until,
         )
         envelopes_list.append(
             av1_validation_derivation_review_envelope_from_payload(
@@ -5133,8 +5197,17 @@ def _observation_projection_from_payload(
     )
 
 
-def _load_owner_only_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
-    raw = _read_owner_only_bytes(path, label)
+def _load_owner_only_json(
+        path: Path,
+        label: str,
+        *,
+        published_before: str | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    raw = _read_owner_only_bytes(
+        path,
+        label,
+        published_before=published_before,
+    )
     try:
         return object_dict(json.loads(raw.decode("utf-8"))), raw
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -5146,6 +5219,7 @@ def _write_owner_only(
         data: bytes,
         *,
         before_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> None:
     assert_mediaforce_runtime_lock_held()
     if not path.name or path.name in {".", ".."}:
@@ -5243,6 +5317,13 @@ def _write_owner_only(
         ):
             raise AV1ValidationDerivationError(
                 "AV1 private derivation artifact changed during publication"
+            )
+        if published_before is not None:
+            _assert_owner_only_publication_before(
+                path,
+                "private derivation artifact",
+                info=final_info,
+                published_before=published_before,
             )
         os.fsync(parent_descriptor)
     except FileIntegrityError as exc:
@@ -5436,7 +5517,12 @@ def _assert_owner_only_directory(path: Path) -> None:
     os.close(descriptor)
 
 
-def _read_owner_only_bytes(path: Path, label: str) -> bytes:
+def _read_owner_only_bytes(
+        path: Path,
+        label: str,
+        *,
+        published_before: str | None = None,
+) -> bytes:
     parent_descriptor = -1
     descriptor = -1
     completed = False
@@ -5497,6 +5583,13 @@ def _read_owner_only_bytes(path: Path, label: str) -> bytes:
             raise AV1ValidationDerivationError(
                 f"AV1 {label} changed while it was being read"
             )
+        if published_before is not None:
+            _assert_owner_only_publication_before(
+                path,
+                label,
+                info=final_info,
+                published_before=published_before,
+            )
         result = b"".join(chunks)
         completed = True
         return result
@@ -5520,6 +5613,31 @@ def _read_owner_only_bytes(path: Path, label: str) -> bytes:
             raise AV1ValidationDerivationError(
                 f"AV1 {label} cleanup failed"
             ) from cleanup_error
+
+
+def _assert_owner_only_publication_before(
+        path: Path,
+        label: str,
+        *,
+        info: os.stat_result,
+        published_before: str,
+) -> None:
+    deadline = _parse_timestamp(
+        published_before,
+        "derivation publication deadline",
+    )
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    delta = deadline - epoch
+    deadline_ns = (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
+        + delta.microseconds * 1_000
+    )
+    if _owner_only_publication_time_ns(info) >= deadline_ns:
+        raise AV1ValidationDerivationPublicationDeadlineError(path, label)
+
+
+def _owner_only_publication_time_ns(info: os.stat_result) -> int:
+    return info.st_ctime_ns
 
 
 def _ensure_av1_validation_derivation_terminal_artifact(

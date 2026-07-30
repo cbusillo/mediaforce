@@ -72,6 +72,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationCandidateLockEnvelope,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
+    AV1ValidationDerivationVerdictRetryMismatchError,
     AV1ValidationDerivationTerminalRecord,
     assert_av1_validation_derivation_authorization_active,
     assert_av1_validation_derivation_source_commitments,
@@ -897,7 +898,10 @@ def run_av1_validation_derivation_assignment(
             },
         ):
             migrate_config_state(config)
-            reserve_mediaforce_database_identity(config)
+            reserve_mediaforce_database_identity(
+                config,
+                create_if_missing=True,
+            )
             return _run_av1_validation_derivation_assignment_locked(
                 config=config,
                 manifest=manifest,
@@ -1386,7 +1390,10 @@ def finalize_av1_validation_derivation_candidate_lock(
             },
         ):
             migrate_config_state(config)
-            reserve_mediaforce_database_identity(config)
+            reserve_mediaforce_database_identity(
+                config,
+                create_if_missing=True,
+            )
             artifact_root = _validated_av1_validation_derivation_artifact_root(
                 config=config,
                 plan=plan,
@@ -1548,7 +1555,10 @@ def load_verified_av1_validation_derivation_candidate_lock(
             },
         ):
             migrate_config_state(config)
-            reserve_mediaforce_database_identity(config)
+            reserve_mediaforce_database_identity(
+                config,
+                create_if_missing=True,
+            )
             artifact_root = _validated_av1_validation_derivation_artifact_root(
                 config=config,
                 plan=plan,
@@ -1667,7 +1677,10 @@ def record_av1_validation_derivation_visual_verdict(
             },
         ):
             migrate_config_state(config)
-            reserve_mediaforce_database_identity(config)
+            reserve_mediaforce_database_identity(
+                config,
+                create_if_missing=True,
+            )
             try:
                 return _record_av1_validation_derivation_visual_verdict_locked(
                     config=config,
@@ -1959,6 +1972,8 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 terminal,
             )
     except _AV1ValidationDerivationVerdictSafetyStop:
+        raise
+    except AV1ValidationDerivationVerdictRetryMismatchError:
         raise
     except (
         AV1ValidationDerivationError,

@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib.resources import as_file
 from importlib.resources import files
@@ -9,7 +9,7 @@ from typing import Any, cast
 from alembic import command
 # noinspection PyPackageRequirements
 from alembic.config import Config
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import URL
@@ -19,7 +19,13 @@ SQLITE_BUSY_TIMEOUT_MS = 30_000
 INITIAL_REVISION = "20260401_0001"
 
 
-def database_url(db_path: Path) -> str:
+def database_url(
+        db_path: Path,
+        *,
+        require_existing: bool = False,
+) -> str:
+    if require_existing:
+        return f"sqlite+pysqlite:///file:{db_path}?mode=rw&uri=true"
     return str(URL.create("sqlite+pysqlite", database=str(db_path)))
 
 
@@ -30,29 +36,70 @@ def _alembic_script_location() -> Iterator[str]:
         yield str(path)
 
 
-def create_engine_for_path(db_path: Path) -> Engine:
-    return create_engine(
-        database_url(db_path),
+def create_engine_for_path(
+        db_path: Path,
+        *,
+    identity_guard: Callable[[], None] | None = None,
+) -> Engine:
+    engine = create_engine(
+        database_url(
+            db_path,
+            require_existing=identity_guard is not None,
+        ),
         connect_args={"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
         poolclass=NullPool,
         future=True,
     )
+    if identity_guard is not None:
+        event.listen(
+            engine,
+            "connect",
+            lambda _connection, _record: identity_guard(),
+        )
+    return engine
 
 
-def run_migrations(db_path: Path) -> None:
+def run_migrations(
+        db_path: Path,
+        *,
+        identity_guard: Callable[[], None] | None = None,
+) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine_for_path(db_path)
+    _run_identity_guard(identity_guard)
+    engine = create_engine_for_path(
+        db_path,
+        identity_guard=identity_guard,
+    )
     try:
         with engine.connect() as connection:
+            _run_identity_guard(identity_guard)
             if _has_alembic_version_table(connection):
-                _upgrade_with_alembic(db_path)
+                _upgrade_with_alembic(
+                    db_path,
+                    identity_guard=identity_guard,
+                )
+                _run_identity_guard(identity_guard)
                 return
             if _has_user_tables(connection):
                 _bootstrap_legacy_schema(connection)
-                _stamp_revision(db_path, INITIAL_REVISION)
-                _upgrade_with_alembic(db_path)
+                _run_identity_guard(identity_guard)
+                _stamp_revision(
+                    db_path,
+                    INITIAL_REVISION,
+                    identity_guard=identity_guard,
+                )
+                _upgrade_with_alembic(
+                    db_path,
+                    identity_guard=identity_guard,
+                )
+                _run_identity_guard(identity_guard)
                 return
-        _upgrade_with_alembic(db_path)
+        _run_identity_guard(identity_guard)
+        _upgrade_with_alembic(
+            db_path,
+            identity_guard=identity_guard,
+        )
+        _run_identity_guard(identity_guard)
     finally:
         engine.dispose()
 
@@ -119,20 +166,57 @@ def _ensure_column(connection: Connection, table_name: str, column_name: str, co
     )
 
 
-def _upgrade_with_alembic(db_path: Path) -> None:
+def _upgrade_with_alembic(
+        db_path: Path,
+        *,
+        identity_guard: Callable[[], None] | None = None,
+) -> None:
     with _alembic_script_location() as script_location:
-        config = _alembic_config(db_path, script_location)
+        config = _alembic_config(
+            db_path,
+            script_location,
+            identity_guard=identity_guard,
+        )
         command.upgrade(config, "head")
 
 
-def _stamp_revision(db_path: Path, revision: str) -> None:
+def _stamp_revision(
+        db_path: Path,
+        revision: str,
+        *,
+        identity_guard: Callable[[], None] | None = None,
+) -> None:
     with _alembic_script_location() as script_location:
-        config = _alembic_config(db_path, script_location)
+        config = _alembic_config(
+            db_path,
+            script_location,
+            identity_guard=identity_guard,
+        )
         command.stamp(config, revision)
 
 
-def _alembic_config(db_path: Path, script_location: str) -> Config:
+def _alembic_config(
+        db_path: Path,
+        script_location: str,
+        *,
+        identity_guard: Callable[[], None] | None = None,
+) -> Config:
     config = Config()
     config.set_main_option("script_location", script_location)
-    config.set_main_option("sqlalchemy.url", database_url(db_path))
+    config.set_main_option(
+        "sqlalchemy.url",
+        database_url(
+            db_path,
+            require_existing=identity_guard is not None,
+        ),
+    )
+    if identity_guard is not None:
+        config.attributes["database_identity_guard"] = identity_guard
     return config
+
+
+def _run_identity_guard(
+        identity_guard: Callable[[], None] | None,
+) -> None:
+    if identity_guard is not None:
+        identity_guard()

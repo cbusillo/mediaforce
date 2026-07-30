@@ -3,7 +3,12 @@ import sys
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
-from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError, run_command
+from mediaforce.core.process_control import (
+    ManagedProcessController,
+    ScheduleWindowClosedError,
+    _terminate_process,
+    run_command,
+)
 
 
 class ProcessControlTests(TestCase):
@@ -48,6 +53,47 @@ class ProcessControlTests(TestCase):
         popen_mock.assert_called_once()
         self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
 
+    @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_run_command_terminates_and_reaps_on_base_exception(self, popen_mock: Mock) -> None:
+        process = Mock()
+        process.communicate.side_effect = [KeyboardInterrupt(), ("", "")]
+        popen_mock.return_value = process
+        controller = Mock(spec=ManagedProcessController)
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_command(["echo", "ok"], process_controller=controller)
+
+        controller.attach.assert_called_once_with(
+            process,
+            terminate_process_group=True,
+        )
+        controller.terminate.assert_called_once_with()
+        self.assertEqual(process.communicate.call_count, 2)
+        controller.clear.assert_called_once_with(process)
+
+    @patch("mediaforce.core.process_control._terminate_process")
+    @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_run_command_terminates_when_controller_attach_is_interrupted(
+            self,
+            popen_mock: Mock,
+            terminate_process_mock: Mock,
+    ) -> None:
+        process = Mock()
+        process.communicate.return_value = ("", "")
+        popen_mock.return_value = process
+        controller = Mock(spec=ManagedProcessController)
+        controller.attach.side_effect = KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_command(["echo", "ok"], process_controller=controller)
+
+        terminate_process_mock.assert_called_once_with(
+            process,
+            terminate_process_group=True,
+        )
+        process.communicate.assert_called_once_with()
+        controller.clear.assert_called_once_with(process)
+
     @patch("mediaforce.core.process_control.time.monotonic", side_effect=[0.0, 0.0, 2.0])
     @patch("mediaforce.core.process_control.time.sleep", return_value=None)
     @patch("mediaforce.core.process_control.os.killpg")
@@ -72,7 +118,39 @@ class ProcessControlTests(TestCase):
             killpg_mock.call_args_list,
             [
                 ((4321, signal.SIGTERM),),
+                ((4321, 0),),
+                ((4321, 0),),
                 ((4321, signal.SIGKILL),),
+            ],
+        )
+
+    @patch("mediaforce.core.process_control.time.monotonic", side_effect=[0.0, 0.0, 2.0])
+    @patch("mediaforce.core.process_control.time.sleep", return_value=None)
+    @patch("mediaforce.core.process_control.os.killpg")
+    @patch("mediaforce.core.process_control.os.getpgid", side_effect=ProcessLookupError())
+    def test_termination_kills_descendants_after_group_leader_exits(
+            self,
+            _getpgid_mock: Mock,
+            killpg_mock: Mock,
+            _sleep_mock: Mock,
+            _monotonic_mock: Mock,
+    ) -> None:
+        process = Mock()
+        process.pid = 1234
+        process.poll.return_value = 0
+
+        _terminate_process(
+            process,
+            terminate_process_group=True,
+        )
+
+        self.assertEqual(
+            killpg_mock.call_args_list,
+            [
+                ((1234, signal.SIGTERM),),
+                ((1234, 0),),
+                ((1234, 0),),
+                ((1234, signal.SIGKILL),),
             ],
         )
 

@@ -2,7 +2,7 @@ from logging.config import fileConfig
 
 # noinspection PyPackageRequirements
 from alembic import context
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy import pool
 
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
@@ -32,17 +32,30 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    identity_guard = config.attributes.get("database_identity_guard")
+    if identity_guard is not None:
+        identity_guard()
     connectable = create_engine(
         migration_url(),
         connect_args={"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
         poolclass=pool.NullPool,
     )
+    if identity_guard is not None:
+        event.listen(
+            connectable,
+            "connect",
+            lambda _connection, _record: identity_guard(),
+        )
 
     with connectable.connect() as connection:
+        if identity_guard is not None:
+            identity_guard()
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()
+        if identity_guard is not None:
+            identity_guard()
 
 
 if context.is_offline_mode():

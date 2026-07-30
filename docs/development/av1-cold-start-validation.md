@@ -267,7 +267,10 @@ than resuming the claimed action. A retry that finds an identical published
 artifact re-fsyncs its parent directory before accepting it, so a prior
 directory-sync error cannot be downgraded to an unsynced idempotent success. A
 fresh candidate proposal rechecks the live authorization immediately before its
-exclusive rename. A
+exclusive rename, then verifies that the renamed inode's kernel change time is
+strictly earlier than the immutable authorization expiration. Loaders repeat
+that publication-time check, so a process paused across expiration cannot make
+a late artifact acceptable by retaining an earlier payload timestamp. A
 candidate-proposal retry first loads the canonical existing proposal and reuses
 its original `proposed_at`; it never samples a replacement timestamp. A review
 retry accepts only a complete matching immutable lane claim and envelope,
@@ -632,10 +635,13 @@ The decision is extracted rather than supplied by the operator. Public summaries
 expose only that the runner identity is bound, never the canonical private path.
 Review, verdict, proposal, and lock payload timestamps come from the runtime
 clock only for their first immutable publication; recovery reuses persisted
-timestamps. Fresh proposal, candidate-lock, verdict-claim, and verdict-intent
-publication also samples the live clock immediately before the exclusive rename
-and fails closed if authorization expired during preparation. Recovery of an
-already-published artifact skips that publication check.
+timestamps. Fresh proposal, candidate-lock, review-claim, review-envelope,
+verdict-claim, and verdict-intent publication also samples the live clock
+immediately before the exclusive rename and fails closed if authorization
+expired during preparation. After the rename, the writer verifies the inode's
+kernel change time against the same expiration; every loader repeats that check.
+Recovery of an already-published artifact skips the live-clock sampling but
+still rejects a kernel-observable post-expiration publication.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write

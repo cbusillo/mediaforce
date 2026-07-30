@@ -77,35 +77,59 @@ class ManagedProcessController:
     def _terminate_locked(self) -> None:
         if self._process is None:
             return
-        if self._process.poll() is not None:
-            return
-        process_group_id: int | None = None
-        if self._terminate_process_group:
-            try:
-                process_group_id = os.getpgid(self._process.pid)
-            except OSError:
-                process_group_id = None
+        _terminate_process(
+            self._process,
+            terminate_process_group=self._terminate_process_group,
+        )
+
+
+def _terminate_process(
+        process: subprocess.Popen[str],
+        *,
+        terminate_process_group: bool,
+) -> None:
+    process_group_id: int | None = None
+    if terminate_process_group:
         try:
-            if process_group_id is not None:
-                os.killpg(process_group_id, signal.SIGTERM)
-            else:
-                self._process.terminate()
+            process_group_id = os.getpgid(process.pid)
         except OSError:
-            return
-        if self._process.poll() is not None:
-            return
-        end_time = time.monotonic() + 1.5
-        while time.monotonic() < end_time:
-            if self._process.poll() is not None:
-                return
-            time.sleep(0.05)
+            process_group_id = process.pid
+    elif process.poll() is not None:
+        return
+
+    def target_running() -> bool:
+        if process_group_id is None:
+            return process.poll() is None
+        process.poll()
         try:
-            if process_group_id is not None:
-                os.killpg(process_group_id, signal.SIGKILL)
-            else:
-                self._process.kill()
+            os.killpg(process_group_id, 0)
+        except ProcessLookupError:
+            return False
         except OSError:
+            return True
+        return True
+
+    try:
+        if process_group_id is not None:
+            os.killpg(process_group_id, signal.SIGTERM)
+        else:
+            process.terminate()
+    except OSError:
+        return
+    if not target_running():
+        return
+    end_time = time.monotonic() + 1.5
+    while time.monotonic() < end_time:
+        if not target_running():
             return
+        time.sleep(0.05)
+    try:
+        if process_group_id is not None:
+            os.killpg(process_group_id, signal.SIGKILL)
+        else:
+            process.kill()
+    except OSError:
+        return
 
 
 def run_command(
@@ -142,17 +166,36 @@ def run_command(
         env=env,
         start_new_session=True,
     )
-    process_controller.attach(process, terminate_process_group=True)
+    attached = False
     try:
+        process_controller.attach(process, terminate_process_group=True)
+        attached = True
+        if timeout is None:
+            stdout, stderr = process.communicate(input_text)
+        else:
+            stdout, stderr = process.communicate(input_text, timeout=timeout)
+    except BaseException as exc:
+        cleanup_errors: list[BaseException] = []
         try:
-            if timeout is None:
-                stdout, stderr = process.communicate(input_text)
+            if attached:
+                process_controller.terminate()
             else:
-                stdout, stderr = process.communicate(input_text, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process_controller.terminate()
+                _terminate_process(
+                    process,
+                    terminate_process_group=True,
+                )
+        except BaseException as terminate_error:
+            cleanup_errors.append(terminate_error)
+        try:
             process.communicate()
-            raise
+        except BaseException as reap_error:
+            cleanup_errors.append(reap_error)
+        for error in cleanup_errors:
+            exc.add_note(
+                "Managed process cleanup also failed: "
+                f"{type(error).__name__}: {error}"
+            )
+        raise
     finally:
         process_controller.clear(process)
     process_controller.throw_if_cancelled()
