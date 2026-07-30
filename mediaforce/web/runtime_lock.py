@@ -34,6 +34,11 @@ class MediaforceRuntimeLease:
         init=False,
         repr=False,
     )
+    _extra_descriptors: list[int] = field(
+        default_factory=list,
+        init=False,
+        repr=False,
+    )
 
     def assert_active(self) -> None:
         with self._state_lock:
@@ -54,6 +59,76 @@ class MediaforceRuntimeLease:
             yield self
         finally:
             _ACTIVE_RUNTIME_LEASE.reset(binding)
+
+    def extend_db_inode_reservation(self, config: MediaforceConfig) -> None:
+        """Acquire file:dev:ino reservation for db_path after it has been materialized.
+
+        Must be called while the runtime lock is active, after the db_path file has been
+        created on disk. Extends the held namespace locks to cover the new inode, ensuring
+        that hardlink aliases to the same database file are detected and blocked.
+        """
+        self.assert_active()
+        db_path_value = getattr(config.paths, "db_path", None)
+        if db_path_value is None:
+            return
+        try:
+            resolved = Path(db_path_value).expanduser().resolve()
+        except OSError:
+            return
+        try:
+            identity = resolved.stat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime db_path inode is unavailable"
+            ) from exc
+        inode_key = f"file:{identity.st_dev}:{identity.st_ino}"
+        if inode_key in self.namespace_keys:
+            return
+        lock_path = mediaforce_runtime_lock_path(config)
+        try:
+            shared_directory = mediaforce_runtime_reservation_dir(config).expanduser().resolve()
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime reservation directory is unavailable"
+            ) from exc
+        try:
+            local_directory = (
+                resolved.parent / _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME
+            ).expanduser().resolve()
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime reservation directory is unavailable"
+            ) from exc
+        dirs_by_key: dict[str, Path] = {}
+        for d in (shared_directory, local_directory):
+            dirs_by_key.setdefault(filesystem_collision_key(d), d)
+        new_descriptors: list[int] = []
+        try:
+            for dir_key in sorted(dirs_by_key):
+                directory = dirs_by_key[dir_key]
+                dir_desc = _open_owner_only_runtime_directory(directory)
+                new_descriptors.append(dir_desc)
+                lock_name = _runtime_namespace_lock_name(inode_key)
+                key_dir_desc = _open_runtime_namespace_key_directory(
+                    lock_name,
+                    directory_descriptor=dir_desc,
+                )
+                new_descriptors.append(key_dir_desc)
+                _acquire_nonblocking_lock(key_dir_desc, lock_path=lock_path)
+                lock_desc = _open_runtime_namespace_lock_file(
+                    directory_descriptor=key_dir_desc,
+                )
+                new_descriptors.append(lock_desc)
+                _acquire_nonblocking_lock(lock_desc, lock_path=lock_path)
+            self._extra_descriptors.extend(new_descriptors)
+            new_descriptors = []
+            self.namespace_keys = (*self.namespace_keys, inode_key)
+        except BaseException:
+            for d in reversed(new_descriptors):
+                os.close(d)
+            raise
 
     def _activate(self, authority: object) -> None:
         if authority is not _RUNTIME_LEASE_AUTHORITY:
@@ -166,6 +241,7 @@ class _RuntimePathNamespace:
     key: str
     path: Path
     local_reservation_required: bool
+    inode_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,27 +292,29 @@ def _runtime_namespace_state(
             raise MediaforceRuntimeBusyError(
                 f"Mediaforce runtime {name} identity is unavailable"
             ) from exc
+        inode_key: str | None = None
+        if identity is not None:
+            identity_key = (identity.st_dev, identity.st_ino)
+            inode_key = f"file:{identity.st_dev}:{identity.st_ino}"
+            keys.add(inode_key)
+            if name == "config_path":
+                direct_file_locks.setdefault(
+                    identity_key,
+                    _RuntimeDirectFileLock(
+                        label=name,
+                        path=resolved,
+                        device=identity.st_dev,
+                        inode=identity.st_ino,
+                    ),
+                )
         paths.append(
             _RuntimePathNamespace(
                 key=key,
                 path=resolved,
                 local_reservation_required=name == "db_path",
+                inode_key=inode_key if name == "db_path" else None,
             )
         )
-        if identity is None:
-            continue
-        identity_key = (identity.st_dev, identity.st_ino)
-        keys.add(f"file:{identity.st_dev}:{identity.st_ino}")
-        if name == "config_path":
-            direct_file_locks.setdefault(
-                identity_key,
-                _RuntimeDirectFileLock(
-                    label=name,
-                    path=resolved,
-                    device=identity.st_dev,
-                    inode=identity.st_ino,
-                ),
-            )
     return _RuntimeNamespaceState(
         keys=tuple(sorted(keys)),
         paths=tuple(sorted(paths, key=lambda item: item.key)),
@@ -312,10 +390,10 @@ def _runtime_namespace_reservation_locations(
         add_location(shared_directory, key)
     for path_namespace in namespace_state.paths:
         if path_namespace.local_reservation_required:
-            add_location(
-                path_namespace.path.parent / _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME,
-                path_namespace.key,
-            )
+            local_dir = path_namespace.path.parent / _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME
+            add_location(local_dir, path_namespace.key)
+            if path_namespace.inode_key is not None:
+                add_location(local_dir, path_namespace.inode_key)
     return tuple(
         locations[key]
         for key in sorted(locations)
@@ -753,7 +831,15 @@ def exclusive_mediaforce_runtime_lock(
                 if directory_descriptor >= 0:
                     os.close(directory_descriptor)
             finally:
-                namespace_locks.close()
+                try:
+                    if lease is not None:
+                        for d in reversed(lease._extra_descriptors):
+                            try:
+                                os.close(d)
+                            except OSError:
+                                pass
+                finally:
+                    namespace_locks.close()
     if not parent_identity_valid:
         raise MediaforceRuntimeBusyError(
             "Mediaforce runtime lock path changed while active"

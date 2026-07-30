@@ -165,6 +165,7 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
+    MediaforceRuntimeLease,
     exclusive_mediaforce_runtime_lock,
 )
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
@@ -475,19 +476,33 @@ def _web_runtime_lock(
         *,
         host: str | None,
         port: int | None,
-) -> Iterator[None]:
+) -> Iterator[MediaforceRuntimeLease]:
     acquired = False
     try:
         with exclusive_mediaforce_runtime_lock(
             config,
             owner_payload=_lifespan_owner_payload(host=host, port=port),
-        ):
+        ) as lease:
             acquired = True
-            yield
+            yield lease
     except MediaforceRuntimeBusyError as exc:
         if not acquired:
             LOGGER.error("Mediaforce web startup blocked: %s", exc)
         raise
+
+
+def _ensure_db_inode_reserved(config: MediaforceConfig, lease: MediaforceRuntimeLease) -> None:
+    """If db_path was absent at lock time, materialize it and reserve its inode.
+
+    This must be called before open_db so that hardlink aliases to the newly-created
+    database file are detected and blocked before any reads or writes occur.
+    """
+    db_path = config.paths.db_path
+    if db_path.exists():
+        return
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.touch()
+    lease.extend_db_inode_reservation(config)
 
 
 def create_app(
@@ -509,13 +524,14 @@ def create_app(
             config,
             host=runtime_host,
             port=runtime_port,
-        ):
+        ) as runtime_lease:
             startup_threads: list[threading.Thread] = []
             background_runtime: BackgroundWorkerRuntime | None = None
             try:
                 shutdown_event.clear()
                 migrate_config_state(config)
                 review_dir.mkdir(parents=True, exist_ok=True)
+                _ensure_db_inode_reserved(config, runtime_lease)
                 for thread in (
                     threading.Thread(
                         target=purge_transient_artifacts,

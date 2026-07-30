@@ -6376,7 +6376,9 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         config_path = self.root / "custom.toml"
         with patch.dict(os.environ, {"MEDIAFORCE_WEB_RELOAD": "false"}, clear=True), patch(
                 "mediaforce.web.app.load_config", return_value=config
-        ) as load_config_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+        ) as load_config_mock, patch(
+                "mediaforce.web.app._load_project_env_file"
+        ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
             web_app.main(["--config", str(config_path), "--reload"])
             self.assertEqual(os.environ["MEDIAFORCE_CONFIG_PATH"], str(config.paths.config_path))
             self.assertEqual(os.environ["MEDIAFORCE_WEB_HOST"], "127.0.0.1")
@@ -6969,6 +6971,189 @@ raise SystemExit(0)
                             check=False,
                         )
                         self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_reserves_hardlinked_database_with_different_reservation_dirs(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-hardlink-diffroot-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_db_path = root / "parent.sqlite3"
+            child_db_path = root / "child.sqlite3"
+            parent_config_path = root / "parent.toml"
+            child_config_path = root / "child.toml"
+            parent_db_path.write_bytes(b"database")
+            parent_config_path.write_text("parent", encoding="utf-8")
+            child_config_path.write_text("child", encoding="utf-8")
+            os.link(parent_db_path, child_db_path)
+            parent_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=parent_config_path,
+                    db_path=parent_db_path,
+                    web_state_dir=root / "parent-state",
+                    runtime_reservation_dir=root / "parent-reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                parent_config,
+                owner_payload={"purpose": "parent-hardlink-diffroot-probe"},
+            ):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(child_config_path),
+                        str(child_db_path),
+                        str(root / "child-state"),
+                        str(root / "child-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_acquires_db_inode_reservation_after_late_db_creation(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-late-db-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_db_path = root / "parent.sqlite3"
+            child_db_path = root / "child.sqlite3"
+            parent_config_path = root / "parent.toml"
+            child_config_path = root / "child.toml"
+            parent_config_path.write_text("parent", encoding="utf-8")
+            child_config_path.write_text("child", encoding="utf-8")
+            parent_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=parent_config_path,
+                    db_path=parent_db_path,
+                    web_state_dir=root / "parent-state",
+                    runtime_reservation_dir=root / "parent-reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                parent_config,
+                owner_payload={"purpose": "parent-late-db-probe"},
+            ) as lease:
+                self.assertFalse(parent_db_path.exists())
+                parent_db_path.write_bytes(b"database")
+                os.link(parent_db_path, child_db_path)
+                lease.extend_db_inode_reservation(parent_config)
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(child_config_path),
+                        str(child_db_path),
+                        str(root / "child-state"),
+                        str(root / "child-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_extend_db_inode_reservation_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db_path = root / "db.sqlite3"
+            db_path.write_bytes(b"database")
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "idempotent-extend-probe"},
+            ) as lease:
+                lease.extend_db_inode_reservation(config)
+                keys_after_first = lease.namespace_keys
+                lease.extend_db_inode_reservation(config)
+                self.assertEqual(lease.namespace_keys, keys_after_first)
+
+    def test_extend_db_inode_reservation_noop_when_db_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=root / "absent.sqlite3",
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "absent-db-extend-probe"},
+            ) as lease:
+                initial_keys = lease.namespace_keys
+                lease.extend_db_inode_reservation(config)
+                self.assertEqual(lease.namespace_keys, initial_keys)
 
     def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
         script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")
@@ -15098,10 +15283,10 @@ raise SystemExit(0)
         calibration_controller.cancel.side_effect = lambda: call_order.append("calibration:cancel")
 
         @contextmanager
-        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[Mock]:
             call_order.append("runtime-lock:acquire")
             try:
-                yield
+                yield Mock()
             finally:
                 call_order.append("runtime-lock:release")
 
@@ -15180,9 +15365,9 @@ raise SystemExit(0)
         call_order: list[str] = []
 
         @contextmanager
-        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[Mock]:
             call_order.append("lock_acquired")
-            yield
+            yield Mock()
             call_order.append("lock_released")
 
         def _tracking_migrate(config: object) -> None:
