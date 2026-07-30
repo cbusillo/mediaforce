@@ -1401,12 +1401,6 @@ def finalize_av1_validation_derivation_candidate_lock(
                 proposal=proposal,
                 claims=review_claims,
             )
-            locked_at = _av1_validation_derivation_candidate_locked_at(
-                artifact_root=artifact_root,
-                plan=plan,
-                cell_plan_id=cell_plan_id,
-                clock=clock,
-            )
             with open_db(config.paths.db_path) as connection, ExitStack() as source_stack:
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 inventory = load_av1_validation_partition_inventory(
@@ -1430,6 +1424,19 @@ def finalize_av1_validation_derivation_candidate_lock(
                     plan,
                     resolver=source_sha256_resolver,
                 )
+                current_observations = (
+                    _load_current_derivation_observations_from_connection(
+                        connection=connection,
+                        records=records,
+                    )
+                )
+                source_sha256_resolver.verify()
+                locked_at = _av1_validation_derivation_candidate_locked_at(
+                    artifact_root=artifact_root,
+                    plan=plan,
+                    cell_plan_id=cell_plan_id,
+                    clock=clock,
+                )
                 current_evaluation = evaluate_av1_validation_derivation_candidate(
                     manifest=manifest,
                     plan=plan,
@@ -1437,19 +1444,13 @@ def finalize_av1_validation_derivation_candidate_lock(
                     cell_plan_id=cell_plan_id,
                     attempts=attempts,
                     records=records,
-                    current_observations=(
-                        _load_current_derivation_observations_from_connection(
-                            connection=connection,
-                            records=records,
-                        )
-                    ),
+                    current_observations=current_observations,
                     proposed_at=locked_at,
                 )
                 assert_av1_validation_derivation_execution_contract(
                     manifest,
                     plan,
                 )
-                source_sha256_resolver.verify()
                 return _finalize_and_write_av1_validation_derivation_candidate_lock(
                     artifact_root,
                     plan=plan,
@@ -1786,118 +1787,114 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             ) from exc
     terminal_publication_started = False
     try:
-        with open_db(config.paths.db_path) as connection, ExitStack() as source_stack:
+        with open_db(config.paths.db_path) as connection:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             inventory = load_av1_validation_partition_inventory(
                 connection,
                 config=config,
             )
-            source_sha256_resolver = source_stack.enter_context(
-                av1_validation_partition_source_sha256_resolver(
+            with av1_validation_partition_source_sha256_resolver(
                     connection,
                     config=config,
+            ) as source_sha256_resolver:
+                validate_av1_validation_partition_current_inputs(
+                    partition,
+                    manifest=manifest,
+                    sources=inventory.sources,
+                    expectations=inventory.expectations,
+                    token_key=token_key,
                 )
-            )
-            validate_av1_validation_partition_current_inputs(
-                partition,
-                manifest=manifest,
-                sources=inventory.sources,
-                expectations=inventory.expectations,
-                token_key=token_key,
-            )
-            assert_av1_validation_derivation_source_commitments(
-                plan,
-                resolver=source_sha256_resolver,
-            )
-            assert_av1_validation_derivation_execution_contract(manifest, plan)
-            review_root = _prepare_derivation_review_root(artifact_root)
-            current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
-                review_root=review_root,
-                calibration=calibration,
-            )
-            if (
-                current_review_fingerprint is None
-                or current_review_fingerprint
-                != str(calibration.get("review_artifact_fingerprint") or "")
-            ):
-                raise _AV1ValidationDerivationVerdictSafetyStop(
-                    "AV1 derivation review media is unavailable or changed"
+                assert_av1_validation_derivation_source_commitments(
+                    plan,
+                    resolver=source_sha256_resolver,
                 )
-            assert_av1_validation_derivation_execution_contract(manifest, plan)
-            verdict_intent = resolve_av1_validation_derivation_verdict_intent(
-                artifact_root / "verdict-intents",
-                plan=plan,
-                attempt=attempt,
-                verdict=verdict,
-                concern_tags=concern_tags,
-                evidence_ids=evidence_ids,
-                moment_indexes=moment_indexes,
-                recorded_at=recorded_at,
-            )
-            frozen_verdict = str(verdict_intent["verdict"])
-            frozen_concern_tags = [
-                str(value) for value in object_list(verdict_intent["concern_tags"])
-            ]
-            frozen_evidence_ids = [
-                str(value) for value in object_list(verdict_intent["evidence_ids"])
-            ]
-            frozen_moment_indexes = [
-                int(value) for value in object_list(verdict_intent["moment_indexes"])
-            ]
-            frozen_recorded_at = str(verdict_intent["recorded_at"])
-            calibration["current_review_artifact_fingerprint"] = (
-                current_review_fingerprint
-            )
-            result = build_visual_content_intent_observation(
-                prefix=_derivation_prefix(config, sample_item),
-                sample_item=sample_item,
-                calibration=calibration,
-                verdict=frozen_verdict,
-                concern_tags=frozen_concern_tags,
-                evidence_ids=frozen_evidence_ids,
-                moment_indexes=frozen_moment_indexes,
-                recorded_at=frozen_recorded_at,
-                personalization_eligible=False,
-                personalization_exclusion_reason=(
-                    AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
-                ),
-            )
-            if result.observation is None:
-                terminal = build_av1_validation_derivation_terminal_record(
-                    plan=plan,
-                    partition=partition,
-                    attempt=attempt,
-                    observation_exclusion_reason="content_intent_observation_excluded",
+                assert_av1_validation_derivation_execution_contract(manifest, plan)
+                review_root = _prepare_derivation_review_root(artifact_root)
+                current_review_fingerprint = _current_derivation_review_artifact_fingerprint(
+                    review_root=review_root,
+                    calibration=calibration,
                 )
-            else:
-                terminal = build_av1_validation_derivation_terminal_record(
-                    plan=plan,
-                    partition=partition,
-                    attempt=attempt,
-                    observation=result.observation,
-                )
-            if result.observation is not None:
-                try:
-                    append_content_intent_boundary_observation(
-                        connection,
-                        result.observation,
-                    )
-                except ContentIntentObservationConflictError as exc:
+                if (
+                    current_review_fingerprint is None
+                    or current_review_fingerprint
+                    != str(calibration.get("review_artifact_fingerprint") or "")
+                ):
                     raise _AV1ValidationDerivationVerdictSafetyStop(
-                        "AV1 derivation visual observation conflicts with existing evidence"
-                    ) from exc
-            assert_av1_validation_derivation_execution_contract(manifest, plan)
-            source_sha256_resolver.verify()
+                        "AV1 derivation review media is unavailable or changed"
+                    )
+                assert_av1_validation_derivation_execution_contract(manifest, plan)
+                verdict_intent = resolve_av1_validation_derivation_verdict_intent(
+                    artifact_root / "verdict-intents",
+                    plan=plan,
+                    attempt=attempt,
+                    verdict=verdict,
+                    concern_tags=concern_tags,
+                    evidence_ids=evidence_ids,
+                    moment_indexes=moment_indexes,
+                    recorded_at=recorded_at,
+                )
+                frozen_verdict = str(verdict_intent["verdict"])
+                frozen_concern_tags = [
+                    str(value) for value in object_list(verdict_intent["concern_tags"])
+                ]
+                frozen_evidence_ids = [
+                    str(value) for value in object_list(verdict_intent["evidence_ids"])
+                ]
+                frozen_moment_indexes = [
+                    int(value) for value in object_list(verdict_intent["moment_indexes"])
+                ]
+                frozen_recorded_at = str(verdict_intent["recorded_at"])
+                calibration["current_review_artifact_fingerprint"] = (
+                    current_review_fingerprint
+                )
+                result = build_visual_content_intent_observation(
+                    prefix=_derivation_prefix(config, sample_item),
+                    sample_item=sample_item,
+                    calibration=calibration,
+                    verdict=frozen_verdict,
+                    concern_tags=frozen_concern_tags,
+                    evidence_ids=frozen_evidence_ids,
+                    moment_indexes=frozen_moment_indexes,
+                    recorded_at=frozen_recorded_at,
+                    personalization_eligible=False,
+                    personalization_exclusion_reason=(
+                        AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
+                    ),
+                )
+                if result.observation is None:
+                    terminal = build_av1_validation_derivation_terminal_record(
+                        plan=plan,
+                        partition=partition,
+                        attempt=attempt,
+                        observation_exclusion_reason="content_intent_observation_excluded",
+                    )
+                else:
+                    terminal = build_av1_validation_derivation_terminal_record(
+                        plan=plan,
+                        partition=partition,
+                        attempt=attempt,
+                        observation=result.observation,
+                    )
+                if result.observation is not None:
+                    try:
+                        append_content_intent_boundary_observation(
+                            connection,
+                            result.observation,
+                        )
+                    except ContentIntentObservationConflictError as exc:
+                        raise _AV1ValidationDerivationVerdictSafetyStop(
+                            "AV1 derivation visual observation conflicts with existing evidence"
+                        ) from exc
+                assert_av1_validation_derivation_execution_contract(manifest, plan)
+                source_sha256_resolver.verify()
             terminal_publication_started = True
             ensure_av1_validation_derivation_terminal_intent(
                 artifact_root / "terminal-intents",
                 terminal,
-                before_publish=source_sha256_resolver.assert_quiet,
             )
             ensure_av1_validation_derivation_terminal_record(
                 terminal_records_directory,
                 terminal,
-                before_publish=source_sha256_resolver.assert_quiet,
             )
     except _AV1ValidationDerivationVerdictSafetyStop:
         raise

@@ -3251,11 +3251,23 @@ def write_av1_validation_derivation_candidate_proposal(
         binding_digest=plan.authorization.authorization_id,
     )
     path = directory / f"{proposal.cell_plan_id}.json"
-    _write_owner_only(
-        path,
-        canonical_json_bytes(proposal.to_payload()),
-        before_publish=before_publish,
-    )
+    try:
+        _write_owner_only(
+            path,
+            canonical_json_bytes(proposal.to_payload()),
+            before_publish=before_publish,
+        )
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        existing = load_av1_validation_derivation_candidate_proposal(
+            root,
+            plan=plan,
+            cell_plan_id=proposal.cell_plan_id,
+        )
+        if existing != proposal:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation candidate proposal conflicts with an immutable existing proposal"
+            )
+        _fsync_owner_only_parent(path, "derivation candidate proposal")
     return path
 
 
@@ -3431,8 +3443,75 @@ def write_av1_validation_derivation_review_envelope(
         binding_digest=review.proposal_payload_sha256,
     )
     path = directory / f"{review.lane}.json"
-    _write_owner_only(path, canonical_json_bytes(envelope.to_payload()))
+    try:
+        _write_owner_only(path, canonical_json_bytes(envelope.to_payload()))
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        existing = load_av1_validation_derivation_review_envelope(
+            root,
+            plan=plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        if existing != envelope:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review envelope conflicts with an immutable existing review"
+            )
+        _fsync_owner_only_parent(path, "derivation review envelope")
     return path
+
+
+def load_av1_validation_derivation_review_envelope(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+) -> AV1ValidationDerivationReviewEnvelope:
+    root = _assert_av1_validation_derivation_artifact_root_binding(
+        artifact_root,
+        plan,
+    )
+    if (
+        proposal.plan_id != plan.plan_id
+        or proposal.manifest_id != plan.manifest_id
+        or claim.plan_id != plan.plan_id
+        or claim.authorization_id != plan.authorization.authorization_id
+        or claim.proposal_id != proposal.proposal_id
+        or claim.proposal_payload_sha256 != proposal.payload_sha256
+        or claim.review_runner_canonical_path_sha256
+        != plan.review_runner_canonical_path_sha256
+        or claim.review_runner_binary_sha256
+        != plan.review_runner_binary_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claim is bound to another run or proposal"
+        )
+    directory = root / "reviews" / proposal.proposal_id
+    binding = _load_owner_only_directory_binding(
+        directory,
+        expected_kind="reviews",
+    )
+    payload, raw = _load_owner_only_json(
+        directory / f"{claim.lane}.json",
+        "derivation review envelope",
+    )
+    envelope = av1_validation_derivation_review_envelope_from_payload(
+        payload,
+        raw=raw,
+    )
+    review = envelope.review
+    if (
+        binding["binding_id"] != proposal.proposal_id
+        or binding["binding_digest"] != proposal.payload_sha256
+        or review.lane != claim.lane
+        or review.proposal_id != proposal.proposal_id
+        or review.proposal_payload_sha256 != proposal.payload_sha256
+        or not _av1_validation_derivation_review_matches_claim(review, claim)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review envelope is bound to another run or proposal"
+        )
+    return envelope
 
 
 def load_av1_validation_derivation_review_envelopes(

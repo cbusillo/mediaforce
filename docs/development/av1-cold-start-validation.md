@@ -266,6 +266,13 @@ progress. A surviving orphaned claim is terminalized by that recovery rather
 than resuming the claimed action. A retry that finds an identical published
 artifact re-fsyncs its parent directory before accepting it, so a prior
 directory-sync error cannot be downgraded to an unsynced idempotent success. A
+candidate-proposal retry first loads the canonical existing proposal and reuses
+its original `proposed_at`; it never samples a replacement timestamp. A review
+retry accepts only a complete matching immutable lane claim and envelope,
+reuses the envelope's original `reviewed_at`, re-fsyncs the review parent, and
+returns without launching another agent. A claim with no complete matching
+envelope remains terminal and unresolvable, and any conflicting final artifact
+is rejected. A
 normal pre-publication failure durably removes its temporary and surfaces any
 unlink, close, or cleanup-sync failure. A hard interruption before the rename
 leaves only an ignored temporary; after the rename, the canonical name contains
@@ -334,14 +341,19 @@ and visual-verdict publication each re-open and fully hash all twenty-four
 derivation sources against the plan commitments while their database
 transaction is active. They never substitute the frozen digest for a current
 byte-level check. Publication payloads are first written and fsynced under a
-hidden owner-only temporary name. The active source session performs another
-quiet and identity check immediately before exclusive atomic rename, remains
-active through publication, and performs its exit check before any database
-transaction can commit. Exit validation also runs when publication raises, so
-post-rename durability failures cannot skip the final source check. A retry
-accepts only the exact canonical artifact already visible at the final path,
-re-synchronizes its parent directory, and rejects any conflicting or malformed
-artifact.
+hidden owner-only temporary name. Proposal and candidate-lock publication keep
+the active source session through exclusive atomic rename: the session performs
+another quiet and identity check immediately before publication and performs
+its exit check before any database transaction can commit. Exit validation also
+runs when publication raises, so post-rename durability failures cannot skip the
+final source check. The human-verdict path uses a different ordering because its
+database append must remain reversible on a final source-session failure. After
+verdict intent, observation append, the final contract check, and full source
+verification, the source session completes its final quiet/exit boundary while
+the immediate transaction remains open. Only after that boundary succeeds are
+terminal artifacts published. A retry accepts only the exact canonical artifact
+already visible at the final path, re-synchronizes its parent directory, and
+rejects any conflicting or malformed artifact.
 
 After the immutable assignment claim and before crop, search, encode, or review
 work, the runtime opens the assigned source with no-follow semantics, verifies
@@ -459,18 +471,25 @@ an already-frozen in-window verdict remains eligible for an idempotent retry
 after expiry. After those checks, an immutable verdict intent freezes the first
 human input and runtime timestamp. The validated observation is appended inside
 the immediate database transaction, then the execution contract is checked one
-final time.
-Only after both succeed are the immutable terminal intent and terminal record
+final time. The source cohort then completes full verification and its final
+quiet/exit check while that transaction remains open. A final source-session
+quiet, close, or exit failure after verdict intent therefore rolls back the
+observation before publishing the separate immutable stopped `safety_stop`
+terminal for the affected cell. Only after the source-session boundary succeeds
+are the immutable observed or excluded terminal intent and terminal record
 written, still before the database transaction can commit. An append conflict
-or late contract drift therefore rolls back the observation and produces the
-separate stopped `safety_stop` terminal rather than a false observed terminal.
+or late contract drift uses the same rollback-and-stop path rather than
+producing a false observed terminal.
 A database-open, transaction-begin, inventory-load, current-input, contract,
 review-media, or other pre-publication failure uses the same conversion; when a
 transaction exists, rollback completes before the stopped terminal is
 published.
-A terminal-intent or terminal-record write failure also rolls back the database
-append. If the database commit fails after the immutable record exists, an
-interrupted retry reuses the frozen verdict timestamp and idempotently completes
+A terminal-intent or terminal-record I/O failure occurs after the final source
+quiet boundary, rolls back the database append, and propagates as a retryable
+publication failure rather than being converted into a safety stop. The retry
+reuses the frozen verdict intent and accepts only identical terminal artifacts.
+If the database commit fails after the immutable record exists, an interrupted
+retry likewise reuses the frozen verdict timestamp and idempotently completes
 the same observation without replacing or duplicating evidence. If interruption
 occurs after the terminal intent but before its terminal record, recovery copies
 that exact immutable intent into the canonical terminal-record directory before
@@ -560,8 +579,12 @@ read-only `code exec --json` process itself; it accepts no caller-supplied resul
 path. Before launch it atomically creates one immutable proposal/lane claim that
 binds the run nonce, authorization, proposal, lane, canonical runner-path
 digest, and runner-binary digest. A concurrent or repeated lane cannot replace
-that claim; a crash leaves an unresolved terminal claim, and a rejected review
-remains terminal. The exact PATH-selected runner must match the authorization
+that claim; a crash before a complete lane envelope exists leaves an unresolved
+terminal claim that cannot launch another agent. A retry after the complete
+matching claim and envelope are visible validates both, re-fsyncs the envelope
+parent, returns the original decision and `reviewed_at`, and does not launch a
+second agent. A rejected review remains terminal. The exact PATH-selected runner
+must match the authorization
 before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
 unbound interpreter. Its canonical path must also match the active ancestor Code
@@ -586,16 +609,23 @@ the JSONL parser requires one ordered config record and one ordered prompt,
 rejects duplicate JSON keys, reserved-field mixing, malformed or repeated
 completion, and any event after quiescence, and treats only LF/CRLF as record
 boundaries so Unicode line separators remain inside their JSON strings.
-the decision is extracted rather than supplied by the operator. Public summaries
+The decision is extracted rather than supplied by the operator. Public summaries
 expose only that the runner identity is bound, never the canonical private path.
-Review, verdict, proposal, and lock timestamps come from the runtime clock.
+Review, verdict, proposal, and lock timestamps come from the runtime clock only
+for their first immutable publication; recovery reuses persisted timestamps.
 Finalization requires exactly five resolved claims and five matching approvals;
 any unresolved claim or rejection blocks it permanently.
 Finalization loads configuration once, opens an immediate database write
 transaction, revalidates the frozen partition against inventory in that same
-transaction, rereads current observations, and computes and writes the lock
-through one runtime-owned finalization API. That API derives the canonical root
-from config and the immutable plan path, loads the attempts, terminals,
+transaction, resolves every frozen source commitment, rereads current
+observations, and fully verifies the source cohort. A new `locked_at` is sampled
+exactly once only after those current inputs and evidence are loaded and
+verified; freshness and authorization are then evaluated at that timestamp
+before publication. Recovery of an existing candidate-lock envelope instead
+reuses its persisted `locked_at` and never calls the runtime clock. The lock is
+computed and written through one runtime-owned finalization API. That API
+derives the canonical root from config and the immutable plan path, loads the
+attempts, terminals,
 proposal, review claims, and review envelopes itself, and exposes no
 write-capable caller path that accepts a precomputed evaluation. A finalized
 candidate lock still does not authorize holdout execution or mutate the shipped

@@ -54,6 +54,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationReviewClaim,
     AV1ValidationDerivationReviewDecision,
+    AV1ValidationDerivationReviewEnvelope,
     AV1ValidationDerivationReviewLane,
     _code_review_marker,
     _completed_code_review_message,
@@ -71,6 +72,8 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_plan,
+    load_av1_validation_derivation_review_claims,
+    load_av1_validation_derivation_review_envelope,
     load_av1_validation_derivation_terminal_records,
     validate_av1_validation_derivation_artifact_root_binding,
     write_av1_validation_derivation_candidate_proposal,
@@ -721,24 +724,36 @@ def _run_derivation_action_body(
             plan=plan,
             cell_plan_id=args.cell_plan_id,
         )
-        claim, review_evidence, decision = _run_code_agent_review(
+        existing_review = _load_existing_derivation_review(
             artifact_root=artifact_root,
             plan=plan,
             proposal=proposal,
             lane=args.lane,
         )
-        review_evidence_sha256 = f"sha256:{hashlib.sha256(review_evidence).hexdigest()}"
-        review = build_av1_validation_derivation_review_attestation(
-            proposal=proposal,
-            claim=claim,
-            review_evidence_sha256=review_evidence_sha256,
-            decision=decision,
-            reviewed_at=_now_iso(),
-        )
-        envelope = build_av1_validation_derivation_review_envelope(
-            review=review,
-            evidence=review_evidence,
-        )
+        if existing_review is None:
+            claim, review_evidence, decision = _run_code_agent_review(
+                artifact_root=artifact_root,
+                plan=plan,
+                proposal=proposal,
+                lane=args.lane,
+            )
+            review_evidence_sha256 = (
+                f"sha256:{hashlib.sha256(review_evidence).hexdigest()}"
+            )
+            review = build_av1_validation_derivation_review_attestation(
+                proposal=proposal,
+                claim=claim,
+                review_evidence_sha256=review_evidence_sha256,
+                decision=decision,
+                reviewed_at=_now_iso(),
+            )
+            envelope = build_av1_validation_derivation_review_envelope(
+                review=review,
+                evidence=review_evidence,
+            )
+        else:
+            claim, envelope = existing_review
+            review = envelope.review
         assert_av1_validation_derivation_execution_environment(plan)
         write_av1_validation_derivation_review_envelope(
             artifact_root,
@@ -977,7 +992,18 @@ def _run_derivation_proposal_action(
             config=config,
             records=records,
         )
-        proposed_at = _now_iso()
+        proposal_path = (
+            artifact_root / "proposals" / f"{args.cell_plan_id}.json"
+        )
+        if proposal_path.exists() or proposal_path.is_symlink():
+            persisted_proposal = load_av1_validation_derivation_candidate_proposal(
+                artifact_root,
+                plan=plan,
+                cell_plan_id=args.cell_plan_id,
+            )
+            proposed_at = persisted_proposal.proposed_at
+        else:
+            proposed_at = _now_iso()
         evaluation = evaluate_av1_validation_derivation_candidate(
             manifest=manifest,
             plan=plan,
@@ -1442,6 +1468,59 @@ def _private_review_runner(
             guard.close()
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _load_existing_derivation_review(
+        *,
+        artifact_root: Path,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        lane: AV1ValidationDerivationReviewLane,
+) -> tuple[
+    AV1ValidationDerivationReviewClaim,
+    AV1ValidationDerivationReviewEnvelope,
+] | None:
+    claim_path = (
+        artifact_root
+        / "review-claims"
+        / proposal.proposal_id
+        / f"{lane}.json"
+    )
+    envelope_path = (
+        artifact_root
+        / "reviews"
+        / proposal.proposal_id
+        / f"{lane}.json"
+    )
+    claim_exists = claim_path.exists() or claim_path.is_symlink()
+    envelope_exists = envelope_path.exists() or envelope_path.is_symlink()
+    if not claim_exists:
+        if envelope_exists:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review envelope has no immutable lane claim"
+            )
+        return None
+    claims = load_av1_validation_derivation_review_claims(
+        artifact_root,
+        plan=plan,
+        proposal=proposal,
+    )
+    claim = next((item for item in claims if item.lane == lane), None)
+    if claim is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claim directory lost its requested lane"
+        )
+    if not envelope_exists:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation interrupted review claim is terminal and cannot be resumed"
+        )
+    envelope = load_av1_validation_derivation_review_envelope(
+        artifact_root,
+        plan=plan,
+        proposal=proposal,
+        claim=claim,
+    )
+    return claim, envelope
 
 
 def _run_code_agent_review(
