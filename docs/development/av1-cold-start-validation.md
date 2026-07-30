@@ -434,10 +434,11 @@ real same-filesystem kqueue mutation probe must pass before the immutable
 assignment claim is written. The probe creates a private owner-only file,
 sets its pathname mode to `0400` from creation, mutates only its original
 `O_EXCL | O_RDWR` descriptor, and retains the tiny probe directory instead of
-recursively deleting a mutable pathname. Independent
-review execution follows the same rule: each private copied Every Code runner
-is retained after its lane and retired only out of band while Mediaforce is
-stopped. Assignment execution holds the same exclusive runtime lock as
+recursively deleting a mutable pathname. Independent review execution instead
+uses one private copied Every Code runner and one owner-only committed
+repository snapshot per lane. Both must pass unchanged post-run identity checks
+before their local cleanup can complete. Assignment execution holds the same
+exclusive runtime lock as
 `mediaforce-web`. Every write-capable `mediaforce` CLI command and each direct
 partition-key, partition-build, and derivation artifact-publication action
 acquires that lock too, so web, staging, database, cleanup, proposal, and
@@ -470,10 +471,18 @@ lock path resolves `web_state_dir` symlinks before choosing that domain, so
 aliases cannot create a second one. Guarded SQLite engines verify the reserved
 database identity before and after connection creation, every cursor operation,
 writable transaction commit, and the raw legacy-schema bootstrap. Connection
-creation also snapshots the path's device, inode, change time, and link count so
-a swap-and-restore race cannot attach SQLite to a transient replacement.
+creation also snapshots the path's device, inode, change time, and link count,
+then inspects the newly opened SQLite file descriptor. Its kernel path and
+device/inode/change-time/link-count identity must match the resolved reserved
+database itself; unavailable descriptor inspection fails closed while an
+identity guard is active. Guarded connection creation and connection close are
+serialized so descriptor-number reuse cannot hide the newly opened main
+database descriptor. A database swap-and-restore or transient ancestor symlink
+substitution therefore cannot attach SQLite to another file even when the
+guarded pathname is restored before the connection factory returns.
 Persistent or transient path replacement during connect, query, migration, or
-commit therefore fails closed before later evidence publication can proceed.
+commit fails closed before later evidence publication can proceed without
+weakening read-only URI or WAL behavior.
 Fresh execution installs its absolute authorization deadline before toolchain
 preflight. Every managed command then starts through Mediaforce's private
 isolated deadline runner. The runner refuses to execute the target after the
@@ -482,8 +491,12 @@ watchdog immediately kills the complete target process group at expiration even
 if the parent operator process is stopped. If a group leader exits while its
 descendants remain, the watchdog keeps policing the process group until every
 descendant exits or the deadline kills the group. A dedicated status pipe
-distinguishes deadline expiry from an ordinary target exit code, and unavailable
-watchdog support fails closed. Toolchain and quality-metric capability probes use
+reports explicit clean completion, deadline expiry, or enforcement failure.
+The parent retains the target process-group identity until that final status EOF
+is consumed, so an operator cancellation after the group leader exits still
+terminates descendants. Empty or unexpected status EOF fails closed, and a
+watchdog runtime exception reports enforcement unavailable before killing the
+target group. Toolchain and quality-metric capability probes use
 that same controller and deadline; the assignment's already-frozen quality
 metric and target are selected without launching a second unmanaged probe.
 Fresh execution samples its authorization
@@ -637,10 +650,20 @@ second agent. A rejected review remains terminal. The review command and its
 repository/toolchain probes remain under the plan's absolute authorization
 deadline. Before claim publication, the reviewer records the exact Git commit
 and tree, rejects uncommitted tracked changes, and repeats that repository
-identity check after the run. The prompt, completion marker, and canonical run
-evidence all bind the same commit and tree, so later validation cannot silently
-reinterpret an approval against another repository snapshot. The exact
-PATH-selected runner must match the authorization
+identity check after the run. It never launches Code in that live source
+worktree. Instead it creates an owner-only local clone without shared object
+hardlinks, removes `origin`, checks out the claimed commit detached, and verifies
+the exact HEAD, tree, no-remotes state, and fully clean tracked/untracked state
+before and after the run. Code receives that committed clone as its working
+directory, so an untracked live-worktree file cannot affect the review. Snapshot
+identity drift fails closed, and the stable owner-only temporary root is removed
+through the symlink-safe cleanup path. The prompt, completion marker, and
+canonical run evidence all bind the same commit and tree, so later validation
+cannot silently reinterpret an approval against another repository snapshot.
+All five immutable claims must name exactly that same repository commit and
+tree; both review-set validation and candidate finalization reject a divergent
+lane, and the review-set digest includes the unanimous commit and tree
+explicitly. The exact PATH-selected runner must match the authorization
 before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
 unbound interpreter. Its canonical path must also match the active ancestor Code
@@ -685,8 +708,9 @@ the narrow recovery exception: a claim whose rename landed after expiration is
 loaded only as terminal evidence, marked late in memory, and recovered as
 `failed/authorization_expired`. It can never authorize work or permanently
 poison recovery.
-Finalization requires exactly five resolved claims and five matching approvals;
-any unresolved claim or rejection blocks it permanently.
+Finalization requires exactly five resolved claims and five matching approvals
+over one unanimous repository commit/tree identity; any unresolved, divergent,
+or rejected claim blocks it permanently.
 Finalization loads configuration once, opens an immediate database write
 transaction, revalidates the frozen partition against inventory in that same
 transaction, resolves every frozen source commitment, rereads current
@@ -711,7 +735,8 @@ public bundle.
 
 The candidate-lock file is a provenance envelope, not a standalone lock. It
 commits to the plan and derivation authorization, proposal, five immutable
-review claims, five atomic review envelopes, canonical artifact-root binding,
+review claims, their unanimous repository commit/tree identity, five atomic
+review envelopes, canonical artifact-root binding,
 candidate lock, and terminal snapshot. #288 must load it through the verified
 derivation-chain loader and must reject a raw or synthetic candidate lock. That
 loader also derives the

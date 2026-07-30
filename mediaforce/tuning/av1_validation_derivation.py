@@ -2230,6 +2230,9 @@ def _av1_validation_derivation_review_set_sha256(
         raise AV1ValidationDerivationError(
             "AV1 derivation review set is incomplete or not independent"
         )
+    repository_commit, repository_tree = (
+        _av1_validation_derivation_review_repository_identity(claims)
+    )
     if any(
         not _av1_validation_derivation_review_matches_claim(
             review,
@@ -2242,6 +2245,8 @@ def _av1_validation_derivation_review_set_sha256(
         )
     return _payload_sha256({
         "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+        "repository_commit": repository_commit,
+        "repository_tree": repository_tree,
         "reviews": [
             {
                 "lane": envelope.review.lane,
@@ -2255,6 +2260,20 @@ def _av1_validation_derivation_review_set_sha256(
             for envelope in sorted(envelopes, key=lambda item: item.review.lane)
         ],
     })
+
+
+def _av1_validation_derivation_review_repository_identity(
+        claims: Sequence[AV1ValidationDerivationReviewClaim],
+) -> tuple[str, str]:
+    repository_identities = {
+        (claim.repository_commit, claim.repository_tree)
+        for claim in claims
+    }
+    if len(repository_identities) != 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review claims must share one repository commit and tree"
+        )
+    return next(iter(repository_identities))
 
 
 def _av1_validation_derivation_review_matches_claim(
@@ -2318,6 +2337,7 @@ def finalize_av1_validation_derivation_candidate_lock(
         raise AV1ValidationDerivationError(
             "AV1 derivation candidate requires all five immutable review claims"
         )
+    _av1_validation_derivation_review_repository_identity(review_claims)
     if {review.lane for review in reviews} != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES):
         raise AV1ValidationDerivationError("AV1 derivation candidate requires all five review lanes")
     if len(reviews) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES):

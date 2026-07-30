@@ -5,13 +5,17 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from unittest import TestCase
 from unittest.mock import Mock, patch
 
+from mediaforce.core import _process_deadline as process_deadline_module
 from mediaforce.core import process_control as process_control_module
 from mediaforce.core.process_control import (
     ManagedProcessController,
+    ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
     ProcessDeadlineExpiredError,
     ScheduleWindowClosedError,
     _terminate_process,
@@ -150,6 +154,170 @@ class ProcessControlTests(TestCase):
 
             time.sleep(0.8)
             self.assertFalse(marker_path.exists())
+
+    def test_cancellation_kills_descendant_after_target_leader_exits(self) -> None:
+        controller = ManagedProcessController()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            started_path = root / "descendant-started"
+            finished_path = root / "descendant-finished"
+            descendant_script = "\n".join((
+                "from pathlib import Path",
+                "import sys",
+                "import time",
+                "Path(sys.argv[1]).write_text('started')",
+                "time.sleep(1.5)",
+                "Path(sys.argv[2]).write_text('finished')",
+            ))
+            target_script = "\n".join((
+                "import subprocess",
+                "import sys",
+                "subprocess.Popen([",
+                "    sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3],",
+                "], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)",
+            ))
+            errors: list[BaseException] = []
+
+            def run_target() -> None:
+                try:
+                    with controller.absolute_deadline(
+                        datetime.now(UTC) + timedelta(seconds=5)
+                    ):
+                        run_command(
+                            [
+                                sys.executable,
+                                "-c",
+                                target_script,
+                                descendant_script,
+                                str(started_path),
+                                str(finished_path),
+                            ],
+                            process_controller=controller,
+                        )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=run_target)
+            worker.start()
+            wait_deadline = time.monotonic() + 3
+            while not started_path.exists() and time.monotonic() < wait_deadline:
+                time.sleep(0.02)
+            self.assertTrue(started_path.exists())
+            while (
+                controller.pid is not None
+                and worker.is_alive()
+                and time.monotonic() < wait_deadline
+            ):
+                time.sleep(0.02)
+            self.assertIsNone(controller.pid)
+            self.assertTrue(worker.is_alive())
+
+            controller.cancel()
+            worker.join(timeout=5)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ProcessCancelledError)
+            time.sleep(1.7)
+            self.assertFalse(finished_path.exists())
+
+    @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_deadline_status_unexpected_eof_fails_closed(
+            self,
+            popen_mock: Mock,
+    ) -> None:
+        process = Mock()
+        process.pid = 987654
+        process.returncode = 0
+        process.communicate.return_value = ("", "")
+        popen_mock.return_value = process
+        controller = ManagedProcessController()
+
+        with (
+            controller.absolute_deadline(
+                datetime.now(UTC) + timedelta(seconds=2)
+            ),
+            patch.object(
+                controller,
+                "terminate",
+                wraps=controller.terminate,
+            ) as terminate,
+            self.assertRaisesRegex(
+                ProcessDeadlineEnforcementError,
+                "failed closed",
+            ),
+        ):
+            run_command(["echo", "ok"], process_controller=controller)
+        terminate.assert_called_once_with()
+
+    def test_deadline_watchdog_reports_clean_completion(self) -> None:
+        status_read, status_write = os.pipe()
+        ready_read, ready_write = os.pipe()
+        close_waiter = Mock()
+
+        with (
+            patch.object(process_deadline_module.os, "setsid"),
+            patch.object(process_deadline_module, "_close_standard_streams"),
+            patch.object(
+                process_deadline_module,
+                "_exit_waiter",
+                return_value=(lambda _timeout: True, close_waiter),
+            ),
+            patch.object(
+                process_deadline_module,
+                "_process_group_exists",
+                return_value=False,
+            ),
+            patch.object(process_deadline_module, "_kill_process_group") as kill_group,
+        ):
+            process_deadline_module._watch_target(
+                target_pid=1234,
+                target_process_group=1234,
+                deadline_ns=time.time_ns() + 1_000_000_000,
+                status_descriptor=status_write,
+                ready_descriptor=ready_write,
+            )
+
+        self.assertEqual(os.read(ready_read, 1), b"R")
+        self.assertEqual(os.read(status_read, 1), b"C")
+        os.close(ready_read)
+        os.close(status_read)
+        close_waiter.assert_called_once_with()
+        kill_group.assert_not_called()
+
+    def test_deadline_watchdog_runtime_failure_fails_closed(self) -> None:
+        status_read, status_write = os.pipe()
+        ready_read, ready_write = os.pipe()
+        close_waiter = Mock()
+
+        def fail_wait(_timeout: float) -> bool:
+            raise RuntimeError("watchdog failed")
+
+        with (
+            patch.object(process_deadline_module.os, "setsid"),
+            patch.object(process_deadline_module, "_close_standard_streams"),
+            patch.object(
+                process_deadline_module,
+                "_exit_waiter",
+                return_value=(fail_wait, close_waiter),
+            ),
+            patch.object(process_deadline_module, "_kill_process_group") as kill_group,
+        ):
+            process_deadline_module._watch_target(
+                target_pid=1234,
+                target_process_group=4321,
+                deadline_ns=time.time_ns() + 1_000_000_000,
+                status_descriptor=status_write,
+                ready_descriptor=ready_write,
+            )
+
+        self.assertEqual(os.read(ready_read, 1), b"R")
+        self.assertEqual(os.read(status_read, 1), b"U")
+        os.close(ready_read)
+        os.close(status_read)
+        close_waiter.assert_called_once_with()
+        kill_group.assert_called_once_with(4321)
 
     def test_nested_absolute_deadlines_use_earliest_and_restore_previous(self) -> None:
         controller = ManagedProcessController()
@@ -291,6 +459,7 @@ class ProcessControlTests(TestCase):
         terminate_process_mock.assert_called_once_with(
             process,
             terminate_process_group=True,
+            process_group_id=process.pid,
         )
         process.communicate.assert_called_once_with()
         controller.clear.assert_called_once_with(process)
@@ -298,7 +467,7 @@ class ProcessControlTests(TestCase):
     @patch("mediaforce.core.process_control.time.monotonic", side_effect=[0.0, 0.0, 2.0])
     @patch("mediaforce.core.process_control.time.sleep", return_value=None)
     @patch("mediaforce.core.process_control.os.killpg")
-    @patch("mediaforce.core.process_control.os.getpgid", return_value=4321)
+    @patch("mediaforce.core.process_control.os.getpgid")
     def test_cancel_terminates_process_group(
             self,
             getpgid_mock: Mock,
@@ -314,14 +483,14 @@ class ProcessControlTests(TestCase):
         controller.attach(process, terminate_process_group=True)
         controller.cancel()
 
-        getpgid_mock.assert_called_once_with(1234)
+        getpgid_mock.assert_not_called()
         self.assertEqual(
             killpg_mock.call_args_list,
             [
-                ((4321, signal.SIGTERM),),
-                ((4321, 0),),
-                ((4321, 0),),
-                ((4321, signal.SIGKILL),),
+                ((1234, signal.SIGTERM),),
+                ((1234, 0),),
+                ((1234, 0),),
+                ((1234, signal.SIGKILL),),
             ],
         )
 

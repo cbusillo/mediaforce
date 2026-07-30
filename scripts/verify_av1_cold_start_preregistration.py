@@ -1289,11 +1289,14 @@ def _authorized_review_runner_identity(
 def _repository_review_identity(
         *,
         process_controller: ManagedProcessController,
+        repository_root: Path | None = None,
+        require_clean: bool = False,
 ) -> tuple[str, str]:
+    root = REPOSITORY_ROOT if repository_root is None else repository_root
     identity = run_command(
         ["/usr/bin/git", "rev-parse", "HEAD", "HEAD^{tree}"],
         process_controller=process_controller,
-        cwd=REPOSITORY_ROOT,
+        cwd=root,
         env=_review_runner_environment(),
         timeout=15,
         check=False,
@@ -1314,7 +1317,7 @@ def _repository_review_identity(
     tracked_state = run_command(
         ["/usr/bin/git", "diff", "--quiet", "HEAD", "--"],
         process_controller=process_controller,
-        cwd=REPOSITORY_ROOT,
+        cwd=root,
         env=_review_runner_environment(),
         timeout=15,
         check=False,
@@ -1327,7 +1330,212 @@ def _repository_review_identity(
         raise AV1ValidationDerivationError(
             "AV1 derivation review repository state is unavailable"
         )
+    if require_clean:
+        repository_state = run_command(
+            [
+                "/usr/bin/git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            process_controller=process_controller,
+            cwd=root,
+            env=_review_runner_environment(),
+            timeout=15,
+            check=False,
+        )
+        if repository_state.returncode != 0:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository state is unavailable"
+            )
+        if repository_state.stdout:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository is not clean"
+            )
     return object_ids[0], object_ids[1]
+
+
+def _run_isolated_review_git(
+        command: list[str],
+        *,
+        cwd: Path,
+        process_controller: ManagedProcessController,
+        failure: str,
+) -> str:
+    try:
+        completed = run_command(
+            command,
+            process_controller=process_controller,
+            cwd=cwd,
+            env=_review_runner_environment(),
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AV1ValidationDerivationError(failure) from exc
+    if completed.returncode != 0:
+        raise AV1ValidationDerivationError(failure)
+    return completed.stdout
+
+
+def _cleanup_isolated_review_repository(
+        directory: Path,
+        expected_identity: tuple[int, int],
+) -> None:
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review repository cleanup is unavailable"
+        )
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review repository cleanup identity is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or (info.st_dev, info.st_ino) != expected_identity
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review repository cleanup identity changed"
+        )
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review repository cleanup failed"
+        ) from exc
+
+
+@contextmanager
+def _isolated_review_repository(
+        *,
+        repository_commit: str,
+        repository_tree: str,
+        process_controller: ManagedProcessController,
+) -> Iterator[Path]:
+    directory = Path(tempfile.mkdtemp(prefix="mediaforce-av1-review-repository-"))
+    os.chmod(directory, 0o700)
+    directory_info = directory.lstat()
+    directory_identity = (directory_info.st_dev, directory_info.st_ino)
+    repository = directory / "repository"
+    try:
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.getuid()
+            or stat.S_IMODE(directory_info.st_mode) != 0o700
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository is not owner-only"
+            )
+        _run_isolated_review_git(
+            [
+                "/usr/bin/git",
+                "clone",
+                "--local",
+                "--no-hardlinks",
+                "--no-checkout",
+                "--quiet",
+                "--",
+                str(REPOSITORY_ROOT),
+                str(repository),
+            ],
+            cwd=directory,
+            process_controller=process_controller,
+            failure="AV1 derivation isolated review repository could not be created",
+        )
+        os.chmod(repository, 0o700)
+        repository_info = repository.lstat()
+        repository_identity = (repository_info.st_dev, repository_info.st_ino)
+        if (
+            not stat.S_ISDIR(repository_info.st_mode)
+            or repository_info.st_uid != os.getuid()
+            or stat.S_IMODE(repository_info.st_mode) != 0o700
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository is not owner-only"
+            )
+        _run_isolated_review_git(
+            [
+                "/usr/bin/git",
+                "-C",
+                str(repository),
+                "remote",
+                "remove",
+                "origin",
+            ],
+            cwd=directory,
+            process_controller=process_controller,
+            failure="AV1 derivation isolated review repository origin could not be removed",
+        )
+        _run_isolated_review_git(
+            [
+                "/usr/bin/git",
+                "-C",
+                str(repository),
+                "checkout",
+                "--detach",
+                "--force",
+                repository_commit,
+            ],
+            cwd=directory,
+            process_controller=process_controller,
+            failure="AV1 derivation isolated review repository commit is unavailable",
+        )
+        remotes = _run_isolated_review_git(
+            ["/usr/bin/git", "-C", str(repository), "remote"],
+            cwd=directory,
+            process_controller=process_controller,
+            failure="AV1 derivation isolated review repository remotes are unavailable",
+        )
+        if remotes:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository retained a remote"
+            )
+        before_identity = _repository_review_identity(
+            process_controller=process_controller,
+            repository_root=repository,
+            require_clean=True,
+        )
+        if before_identity != (repository_commit, repository_tree):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository identity does not match its claim"
+            )
+        yield repository
+        after_identity = _repository_review_identity(
+            process_controller=process_controller,
+            repository_root=repository,
+            require_clean=True,
+        )
+        if after_identity != before_identity:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository changed during review"
+            )
+        after_repository_info = repository.lstat()
+        if (
+            not stat.S_ISDIR(after_repository_info.st_mode)
+            or after_repository_info.st_uid != os.getuid()
+            or stat.S_IMODE(after_repository_info.st_mode) != 0o700
+            or (after_repository_info.st_dev, after_repository_info.st_ino)
+            != repository_identity
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository directory changed during review"
+            )
+        remotes = _run_isolated_review_git(
+            ["/usr/bin/git", "-C", str(repository), "remote"],
+            cwd=directory,
+            process_controller=process_controller,
+            failure="AV1 derivation isolated review repository remotes are unavailable",
+        )
+        if remotes:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation isolated review repository gained a remote"
+            )
+    finally:
+        _cleanup_isolated_review_repository(directory, directory_identity)
 
 
 def _assert_native_review_runner(binary_bytes: bytes) -> None:
@@ -1680,7 +1888,11 @@ def _run_code_agent_review_before_deadline(
         with _private_review_runner(
             before_identity[3],
             expected_sha256=before_identity[2],
-        ) as review_runner:
+        ) as review_runner, _isolated_review_repository(
+            repository_commit=claim.repository_commit,
+            repository_tree=claim.repository_tree,
+            process_controller=process_controller,
+        ) as review_repository:
             command = [
                 str(review_runner),
                 "-a",
@@ -1701,7 +1913,7 @@ def _run_code_agent_review_before_deadline(
                 completed = run_command(
                     command,
                     process_controller=process_controller,
-                    cwd=REPOSITORY_ROOT,
+                    cwd=review_repository,
                     input_text=prompt,
                     timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
                     check=False,
@@ -1712,18 +1924,33 @@ def _run_code_agent_review_before_deadline(
                     "AV1 derivation Every Code review did not complete"
                 ) from exc
     finally:
-        after_identity = _authorized_review_runner_identity(plan)
-        if after_identity[:3] != before_identity[:3]:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation Every Code executable changed during review"
+        integrity_errors: list[BaseException] = []
+        try:
+            after_repository_identity = _repository_review_identity(
+                process_controller=process_controller,
             )
-    after_repository_identity = _repository_review_identity(
-        process_controller=process_controller,
-    )
-    if after_repository_identity != before_repository_identity:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository changed during review"
-        )
+            if after_repository_identity != before_repository_identity:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review repository changed during review"
+                )
+        except BaseException as exc:
+            integrity_errors.append(exc)
+        try:
+            after_identity = _authorized_review_runner_identity(plan)
+            if after_identity[:3] != before_identity[:3]:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation Every Code executable changed during review"
+                )
+        except BaseException as exc:
+            integrity_errors.append(exc)
+        if integrity_errors:
+            primary_error = integrity_errors[0]
+            for error in integrity_errors[1:]:
+                primary_error.add_note(
+                    "AV1 review integrity check also failed: "
+                    f"{type(error).__name__}: {error}"
+                )
+            raise primary_error
     if completed.returncode != 0:
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code review failed"

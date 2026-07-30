@@ -1,9 +1,14 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+import importlib
 from importlib.resources import as_file
 from importlib.resources import files
+import os
 from pathlib import Path
 import sqlite3
+import stat
+import sys
+import threading
 from typing import Any, cast
 
 # noinspection PyPackageRequirements
@@ -19,6 +24,15 @@ from sqlalchemy.pool import NullPool
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 INITIAL_REVISION = "20260401_0001"
 SQLiteConnectionFactory = Callable[..., sqlite3.Connection]
+DatabaseConnectionPathSnapshot = tuple[int, int, int, int]
+DatabaseConnectionDescriptorSnapshot = tuple[int, int, int, int, str]
+_DATABASE_CONNECTION_IDENTITY_LOCK = threading.RLock()
+
+
+class _DatabaseIdentityConnection(sqlite3.Connection):
+    def close(self) -> None:
+        with _DATABASE_CONNECTION_IDENTITY_LOCK:
+            super().close()
 
 
 def database_url(
@@ -74,29 +88,37 @@ def database_identity_connection_factory(
     resolved_path = db_path.expanduser().resolve()
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
-        identity_guard()
-        before = _database_connection_path_snapshot(resolved_path)
-        identity_guard()
-        kwargs.pop("factory", None)
-        connection = sqlite3.Connection(*args, **kwargs)
-        try:
+        with _DATABASE_CONNECTION_IDENTITY_LOCK:
             identity_guard()
-            after = _database_connection_path_snapshot(resolved_path)
-            if after != before:
-                raise RuntimeError(
-                    "Mediaforce database identity changed during connection"
-                )
-        except BaseException:
-            connection.close()
-            raise
-        return connection
+            before = _database_connection_path_snapshot(resolved_path)
+            identity_guard()
+            before_descriptors = _database_connection_descriptor_snapshot()
+            kwargs.pop("factory", None)
+            connection = _DatabaseIdentityConnection(*args, **kwargs)
+            try:
+                after_descriptors = _database_connection_descriptor_snapshot()
+                identity_guard()
+                after = _database_connection_path_snapshot(resolved_path)
+                if after != before or not _database_connection_opened_expected_file(
+                    resolved_path,
+                    expected=before,
+                    before=before_descriptors,
+                    after=after_descriptors,
+                ):
+                    raise RuntimeError(
+                        "Mediaforce database identity changed during connection"
+                    )
+            except BaseException:
+                connection.close()
+                raise
+            return connection
 
     return connect
 
 
 def _database_connection_path_snapshot(
         db_path: Path,
-) -> tuple[int, int, int, int]:
+) -> DatabaseConnectionPathSnapshot:
     info = db_path.stat()
     return (
         info.st_dev,
@@ -104,6 +126,82 @@ def _database_connection_path_snapshot(
         info.st_ctime_ns,
         info.st_nlink,
     )
+
+
+def _database_connection_descriptor_snapshot(
+) -> dict[int, DatabaseConnectionDescriptorSnapshot]:
+    if sys.platform == "darwin":
+        try:
+            fcntl = importlib.import_module("fcntl")
+        except ImportError as exc:
+            raise RuntimeError(
+                "Mediaforce database actual-opened identity inspection is unavailable"
+            ) from exc
+        if not hasattr(fcntl, "F_GETPATH"):
+            raise RuntimeError(
+                "Mediaforce database actual-opened identity inspection is unavailable"
+            )
+        descriptor_directory = Path("/dev/fd")
+
+        def descriptor_path(descriptor: int) -> str:
+            raw_path = fcntl.fcntl(
+                descriptor,
+                fcntl.F_GETPATH,
+                b"\0" * 1024,
+            )
+            return os.fsdecode(raw_path.split(b"\0", 1)[0])
+    elif sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
+        descriptor_directory = Path("/proc/self/fd")
+
+        def descriptor_path(descriptor: int) -> str:
+            return os.readlink(descriptor_directory / str(descriptor))
+    else:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
+
+    try:
+        descriptor_names = os.listdir(descriptor_directory)
+    except OSError as exc:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        ) from exc
+    snapshot: dict[int, DatabaseConnectionDescriptorSnapshot] = {}
+    for name in descriptor_names:
+        if not name.isdecimal():
+            continue
+        descriptor = int(name)
+        try:
+            info = os.fstat(descriptor)
+            path = descriptor_path(descriptor)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            snapshot[descriptor] = (
+                info.st_dev,
+                info.st_ino,
+                info.st_ctime_ns,
+                info.st_nlink,
+                path,
+            )
+    return snapshot
+
+
+def _database_connection_opened_expected_file(
+        db_path: Path,
+        *,
+        expected: DatabaseConnectionPathSnapshot,
+        before: dict[int, DatabaseConnectionDescriptorSnapshot],
+        after: dict[int, DatabaseConnectionDescriptorSnapshot],
+) -> bool:
+    expected_descriptor = (*expected, str(db_path))
+    opened_expected_descriptors = [
+        identity
+        for descriptor, identity in after.items()
+        if before.get(descriptor) != identity
+        and identity == expected_descriptor
+    ]
+    return opened_expected_descriptors == [expected_descriptor]
 
 
 def register_database_identity_guards(

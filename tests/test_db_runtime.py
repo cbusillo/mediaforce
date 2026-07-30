@@ -153,6 +153,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
             sqlite3.connect(db_path).close()
             sqlite3.connect(replacement_path).close()
             expected_identity = db_path.stat()
+            stable_path_snapshot = (
+                expected_identity.st_dev,
+                expected_identity.st_ino,
+                expected_identity.st_ctime_ns,
+                expected_identity.st_nlink,
+            )
 
             def identity_guard() -> None:
                 current = db_path.stat()
@@ -185,7 +191,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             with (
                 patch(
-                    "mediaforce.core.db_migrations.sqlite3.Connection",
+                    "mediaforce.core.db_migrations._database_connection_path_snapshot",
+                    return_value=stable_path_snapshot,
+                ),
+                patch(
+                    "mediaforce.core.db_migrations._DatabaseIdentityConnection",
                     side_effect=connect_replacement,
                 ),
                 self.assertRaisesRegex(
@@ -194,6 +204,146 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 ),
             ):
                 factory(str(db_path), check_same_thread=False)
+
+    def test_connection_factory_rejects_ancestor_symlink_swap_and_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            original_root = root / "original"
+            replacement_root = root / "replacement"
+            original_root.mkdir()
+            replacement_root.mkdir()
+            original_path = original_root / "library.sqlite3"
+            replacement_path = replacement_root / "library.sqlite3"
+            sqlite3.connect(original_path).close()
+            sqlite3.connect(replacement_path).close()
+            database_root = root / "database"
+            database_root.symlink_to(original_root, target_is_directory=True)
+            db_path = database_root / "library.sqlite3"
+            resolved_path = db_path.resolve()
+            expected_identity = resolved_path.stat()
+
+            def identity_guard() -> None:
+                current = resolved_path.stat()
+                if (
+                    current.st_dev,
+                    current.st_ino,
+                ) != (
+                    expected_identity.st_dev,
+                    expected_identity.st_ino,
+                ):
+                    raise RuntimeError("database identity changed")
+
+            factory = database_identity_connection_factory(
+                db_path,
+                identity_guard,
+            )
+            assert factory is not None
+            real_connection = sqlite3.Connection
+
+            def connect_replacement(
+                    *args: object,
+                    **kwargs: object,
+            ) -> sqlite3.Connection:
+                database_root.unlink()
+                database_root.symlink_to(
+                    replacement_root,
+                    target_is_directory=True,
+                )
+                try:
+                    return real_connection(*args, **kwargs)
+                finally:
+                    database_root.unlink()
+                    database_root.symlink_to(
+                        original_root,
+                        target_is_directory=True,
+                    )
+
+            with (
+                patch(
+                    "mediaforce.core.db_migrations._DatabaseIdentityConnection",
+                    side_effect=connect_replacement,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "identity changed during connection",
+                ),
+            ):
+                factory(str(db_path), check_same_thread=False)
+
+    def test_connection_factory_fails_closed_without_descriptor_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            sqlite3.connect(db_path).close()
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+            )
+            assert factory is not None
+
+            with (
+                patch(
+                    "mediaforce.core.db_migrations.sys.platform",
+                    "unsupported",
+                ),
+                patch(
+                    "mediaforce.core.db_migrations._DatabaseIdentityConnection",
+                ) as connection,
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "actual-opened identity inspection is unavailable",
+                ),
+            ):
+                factory(str(db_path), check_same_thread=False)
+
+            connection.assert_not_called()
+
+    def test_connection_factory_ignores_unrelated_descriptor_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            sqlite3.connect(db_path).close()
+            resolved_path = db_path.resolve()
+            info = resolved_path.stat()
+            path_snapshot = (
+                info.st_dev,
+                info.st_ino,
+                info.st_ctime_ns,
+                info.st_nlink,
+            )
+            expected_descriptor = (*path_snapshot, str(resolved_path))
+            unrelated_descriptor = (1, 2, 3, 1, "/tmp/unrelated")
+            identity_guard = Mock()
+            connection = Mock()
+            factory = database_identity_connection_factory(
+                resolved_path,
+                identity_guard,
+            )
+            assert factory is not None
+
+            with (
+                patch(
+                    "mediaforce.core.db_migrations._database_connection_path_snapshot",
+                    return_value=path_snapshot,
+                ),
+                patch(
+                    "mediaforce.core.db_migrations._database_connection_descriptor_snapshot",
+                    side_effect=(
+                        {},
+                        {
+                            11: unrelated_descriptor,
+                            12: expected_descriptor,
+                        },
+                    ),
+                ),
+                patch(
+                    "mediaforce.core.db_migrations._DatabaseIdentityConnection",
+                    return_value=connection,
+                ),
+            ):
+                opened = factory(str(resolved_path), check_same_thread=False)
+
+            self.assertIs(opened, connection)
+            connection.close.assert_not_called()
+            self.assertEqual(identity_guard.call_count, 3)
 
     def test_open_db_uses_reserved_missing_database_under_runtime_lease(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

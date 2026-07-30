@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -23,7 +24,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
@@ -46,6 +47,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     _payload_sha256,
     _read_owner_only_bytes,
     _rename_owner_only_exclusive,
+    _av1_validation_derivation_review_set_sha256,
     _terminal_semantic_payload,
     _write_owner_only,
     assert_av1_validation_derivation_authorization_active,
@@ -207,6 +209,35 @@ def _source_sha256_resolver_context(
 @contextmanager
 def _context_value(value: object) -> Iterator[object]:
     yield value
+
+
+def _run_test_git(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Mediaforce Test",
+            "-c",
+            "user.email=mediaforce-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "HOME": str(repository.parent),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    return completed.stdout.strip()
 
 
 class _DescriptorBindingFileIntegrityGuard:
@@ -743,6 +774,20 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 process_controller=controller,
             )
         self.assertIsNone(controller.process_deadline_ns())
+
+    def test_execution_environment_preserves_operator_stop_classification(self) -> None:
+        operator_stop = ProcessCancelledError("operator requested stop")
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_derivation_execution_environment_sha256",
+                side_effect=operator_stop,
+            ),
+            self.assertRaises(ProcessCancelledError) as raised,
+        ):
+            assert_av1_validation_derivation_execution_environment(self.plan)
+
+        self.assertIs(raised.exception, operator_stop)
 
     def test_implementation_identity_covers_complete_runtime_tree(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
@@ -2041,6 +2086,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             code_binary = root / "code"
+            isolated_repository = root / "isolated-repository"
             code_binary.write_bytes(REVIEW_RUNNER_BYTES)
             code_binary.chmod(0o700)
             final_message = (
@@ -2101,6 +2147,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration,
+                    "_isolated_review_repository",
+                    return_value=_context_value(isolated_repository),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
                     "run_command",
                     return_value=completed,
                 ) as run_review,
@@ -2131,6 +2182,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertFalse(launched_runner.parent.exists())
             review_command = run_review.call_args.args[0]
             self.assertIn('shell_environment_policy.inherit="none"', review_command)
+            self.assertEqual(
+                run_review.call_args.kwargs["cwd"],
+                isolated_repository,
+            )
+            self.assertNotEqual(
+                run_review.call_args.kwargs["cwd"],
+                verify_av1_cold_start_preregistration.REPOSITORY_ROOT,
+            )
             review_environment = run_review.call_args.kwargs["env"]
             self.assertEqual(
                 review_environment["PATH"],
@@ -2211,6 +2270,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             code_binary = Path(directory) / "code"
+            isolated_repository = Path(directory) / "isolated-repository"
             code_binary.write_bytes(REVIEW_RUNNER_BYTES)
             code_binary.chmod(0o700)
             completed = SimpleNamespace(
@@ -2246,6 +2306,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         self.plan.review_runner_binary_sha256,
                         REVIEW_RUNNER_BYTES,
                     ),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_isolated_review_repository",
+                    return_value=_context_value(isolated_repository),
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration,
@@ -2572,6 +2637,130 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 process_controller=controller,
             )
 
+    def test_isolated_review_repository_excludes_live_untracked_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_repository = root / "source"
+            source_repository.mkdir()
+            _run_test_git(source_repository, "init", "--quiet")
+            (source_repository / "tracked.txt").write_text(
+                "committed\n",
+                encoding="utf-8",
+            )
+            _run_test_git(source_repository, "add", "tracked.txt")
+            _run_test_git(source_repository, "commit", "--quiet", "-m", "initial")
+            repository_commit = _run_test_git(
+                source_repository,
+                "rev-parse",
+                "HEAD",
+            )
+            repository_tree = _run_test_git(
+                source_repository,
+                "rev-parse",
+                "HEAD^{tree}",
+            )
+            live_worktree = root / "live-worktree"
+            _run_test_git(
+                source_repository,
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                str(live_worktree),
+                repository_commit,
+            )
+            (live_worktree / "live-only.txt").write_text(
+                "must not be reviewed\n",
+                encoding="utf-8",
+            )
+            isolated_root: Path | None = None
+
+            with patch.object(
+                verify_av1_cold_start_preregistration,
+                "REPOSITORY_ROOT",
+                live_worktree,
+            ):
+                with verify_av1_cold_start_preregistration._isolated_review_repository(
+                    repository_commit=repository_commit,
+                    repository_tree=repository_tree,
+                    process_controller=ManagedProcessController(),
+                ) as isolated_repository:
+                    isolated_root = isolated_repository.parent
+                    self.assertEqual(
+                        stat.S_IMODE(isolated_root.stat().st_mode),
+                        0o700,
+                    )
+                    self.assertEqual(
+                        stat.S_IMODE(isolated_repository.stat().st_mode),
+                        0o700,
+                    )
+                    self.assertEqual(
+                        (isolated_repository / "tracked.txt").read_text(
+                            encoding="utf-8"
+                        ),
+                        "committed\n",
+                    )
+                    self.assertFalse(
+                        (isolated_repository / "live-only.txt").exists()
+                    )
+                    self.assertEqual(
+                        _run_test_git(isolated_repository, "remote"),
+                        "",
+                    )
+
+            assert isolated_root is not None
+            self.assertFalse(isolated_root.exists())
+
+    def test_isolated_review_repository_identity_drift_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_repository = root / "source"
+            source_repository.mkdir()
+            _run_test_git(source_repository, "init", "--quiet")
+            tracked_path = source_repository / "tracked.txt"
+            tracked_path.write_text("first\n", encoding="utf-8")
+            _run_test_git(source_repository, "add", "tracked.txt")
+            _run_test_git(source_repository, "commit", "--quiet", "-m", "first")
+            first_commit = _run_test_git(source_repository, "rev-parse", "HEAD")
+            first_tree = _run_test_git(
+                source_repository,
+                "rev-parse",
+                "HEAD^{tree}",
+            )
+            tracked_path.write_text("second\n", encoding="utf-8")
+            _run_test_git(source_repository, "commit", "--quiet", "-am", "second")
+            second_commit = _run_test_git(source_repository, "rev-parse", "HEAD")
+            isolated_root: Path | None = None
+
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "REPOSITORY_ROOT",
+                    source_repository,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "changed during review",
+                ),
+            ):
+                with verify_av1_cold_start_preregistration._isolated_review_repository(
+                    repository_commit=first_commit,
+                    repository_tree=first_tree,
+                    process_controller=ManagedProcessController(),
+                ) as isolated_repository:
+                    isolated_root = isolated_repository.parent
+                    _run_test_git(
+                        isolated_repository,
+                        "checkout",
+                        "--quiet",
+                        "--detach",
+                        "--force",
+                        second_commit,
+                    )
+
+            assert isolated_root is not None
+            self.assertFalse(isolated_root.exists())
+
     def test_review_runner_is_reverified_after_launch(self) -> None:
         proposal = self._candidate_proposal()
         before_identity = (
@@ -2600,6 +2789,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration,
                 "_review_runner_identity",
                 side_effect=(before_identity, after_identity),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_isolated_review_repository",
+                return_value=_context_value(Path("/private/isolated-review")),
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
@@ -8091,6 +8285,66 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             current_observations=self._current_observations(records),
             proposed_at=locked_at,
         )
+        divergent_claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=evaluation.proposal,
+            repository_commit="3" * 40,
+            repository_tree="4" * 40,
+            lane=review_claims[-1].lane,
+            review_run_id=review_claims[-1].review_run_id,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=(
+                self.plan.review_runner_binary_sha256
+            ),
+            claimed_at=review_claims[-1].claimed_at,
+        )
+        divergent_evidence = _review_run_evidence(
+            proposal=evaluation.proposal,
+            claim=divergent_claim,
+        )
+        divergent_review = build_av1_validation_derivation_review_attestation(
+            proposal=evaluation.proposal,
+            claim=divergent_claim,
+            review_evidence_sha256=(
+                f"sha256:{hashlib.sha256(divergent_evidence).hexdigest()}"
+            ),
+            decision="approved",
+            reviewed_at=reviews[-1].reviewed_at,
+        )
+        divergent_claims = [*review_claims[:-1], divergent_claim]
+        divergent_reviews = [*reviews[:-1], divergent_review]
+        divergent_envelopes = [
+            build_av1_validation_derivation_review_envelope(
+                review=review,
+                evidence=(
+                    divergent_evidence
+                    if review is divergent_review
+                    else review_evidence[review.lane]
+                ),
+            )
+            for review in divergent_reviews
+        ]
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "share one repository commit and tree",
+        ):
+            _av1_validation_derivation_review_set_sha256(
+                divergent_claims,
+                divergent_envelopes,
+            )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "share one repository commit and tree",
+        ):
+            finalize_av1_validation_derivation_candidate_lock(
+                proposal=evaluation.proposal,
+                review_claims=divergent_claims,
+                reviews=divergent_reviews,
+                current_evaluation=current_evaluation,
+                locked_at=locked_at,
+            )
         with self.assertRaisesRegex(AV1ValidationDerivationError, "all five"):
             finalize_av1_validation_derivation_candidate_lock(
                 proposal=evaluation.proposal,

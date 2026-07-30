@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 _STATUS_EXPIRED = b"E"
 _STATUS_UNAVAILABLE = b"U"
+_STATUS_COMPLETE = b"C"
 _WATCHDOG_READY = b"R"
 _WATCHDOG_FAILED = b"F"
 _WATCHDOG_POLL_SECONDS = 0.25
@@ -88,6 +89,15 @@ def _process_group_exists(process_group: int) -> bool:
     return True
 
 
+def _kill_process_group(process_group: int) -> None:
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        pass
+
+
 def _watch_target(
         *,
         target_pid: int,
@@ -115,18 +125,13 @@ def _watch_target(
             pass
 
     target_exited = False
+    status = _STATUS_UNAVAILABLE
     try:
         while True:
             remaining_ns = deadline_ns - time.time_ns()
             if remaining_ns <= 0:
-                _notify(status_descriptor, _STATUS_EXPIRED)
-                try:
-                    os.killpg(target_process_group, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                except OSError:
-                    pass
-                return
+                status = _STATUS_EXPIRED
+                break
             timeout = min(
                 remaining_ns / 1_000_000_000,
                 (
@@ -137,15 +142,25 @@ def _watch_target(
             )
             if target_exited:
                 if not _process_group_exists(target_process_group):
-                    return
+                    status = _STATUS_COMPLETE
+                    break
                 time.sleep(timeout)
             elif wait_for_exit(timeout):
                 target_exited = True
                 if not _process_group_exists(target_process_group):
-                    return
+                    status = _STATUS_COMPLETE
+                    break
+    except BaseException:
+        status = _STATUS_UNAVAILABLE
     finally:
         if close_waiter is not None:
-            close_waiter()
+            try:
+                close_waiter()
+            except BaseException:
+                status = _STATUS_UNAVAILABLE
+        _notify(status_descriptor, status)
+        if status in {_STATUS_EXPIRED, _STATUS_UNAVAILABLE}:
+            _kill_process_group(target_process_group)
         try:
             os.close(status_descriptor)
         except OSError:
@@ -211,6 +226,7 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
         os.execvpe(command[0], command, os.environ)
     except OSError as exc:
         _stop_watchdog(watchdog_pid)
+        _notify(status_descriptor, _STATUS_COMPLETE)
         os.write(2, f"Mediaforce process launch failed: {exc}\n".encode())
         return 127
 

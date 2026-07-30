@@ -34,6 +34,7 @@ class ManagedProcessController:
         self._cancel_error_type: type[ProcessCancelledError] = ProcessCancelledError
         self._cancel_message = "Operation was cancelled."
         self._terminate_process_group = False
+        self._process_group_id: int | None = None
         self._activity_guard: Callable[[], None] | None = None
         self._process_deadline_ns: int | None = None
 
@@ -41,14 +42,28 @@ class ManagedProcessController:
         with self._lock:
             self._process = process
             self._terminate_process_group = terminate_process_group
+            self._process_group_id = process.pid if terminate_process_group else None
             if self._cancel_requested:
                 self._terminate_locked()
 
-    def clear(self, process: subprocess.Popen[str]) -> None:
+    def clear(
+            self,
+            process: subprocess.Popen[str],
+            *,
+            retain_process_group: bool = False,
+    ) -> None:
         with self._lock:
             if self._process is process:
                 self._process = None
+                if not retain_process_group:
+                    self._terminate_process_group = False
+                    self._process_group_id = None
+
+    def release_process_group(self, process_group_id: int) -> None:
+        with self._lock:
+            if self._process_group_id == process_group_id:
                 self._terminate_process_group = False
+                self._process_group_id = None
 
     def cancel(self, error: ProcessCancelledError | None = None) -> None:
         with self._lock:
@@ -69,6 +84,7 @@ class ManagedProcessController:
             self._cancel_message = "Operation was cancelled."
             self._process = None
             self._terminate_process_group = False
+            self._process_group_id = None
             self._activity_guard = None
             self._process_deadline_ns = None
 
@@ -144,32 +160,39 @@ class ManagedProcessController:
             return self._process.pid if self._process is not None else None
 
     def _terminate_locked(self) -> None:
-        if self._process is None:
+        if self._process is None and self._process_group_id is None:
             return
         _terminate_process(
             self._process,
             terminate_process_group=self._terminate_process_group,
+            process_group_id=self._process_group_id,
         )
 
 
 def _terminate_process(
-        process: subprocess.Popen[str],
+        process: subprocess.Popen[str] | None,
         *,
         terminate_process_group: bool,
+        process_group_id: int | None = None,
 ) -> None:
-    process_group_id: int | None = None
     if terminate_process_group:
-        try:
-            process_group_id = os.getpgid(process.pid)
-        except OSError:
-            process_group_id = process.pid
-    elif process.poll() is not None:
+        if process_group_id is None:
+            if process is None:
+                return
+            try:
+                process_group_id = os.getpgid(process.pid)
+            except OSError:
+                process_group_id = process.pid
+    elif process is None or process.poll() is not None:
         return
 
     def target_running() -> bool:
         if process_group_id is None:
+            if process is None:
+                return False
             return process.poll() is None
-        process.poll()
+        if process is not None:
+            process.poll()
         try:
             os.killpg(process_group_id, 0)
         except ProcessLookupError:
@@ -181,7 +204,7 @@ def _terminate_process(
     try:
         if process_group_id is not None:
             os.killpg(process_group_id, signal.SIGTERM)
-        else:
+        elif process is not None:
             process.terminate()
     except OSError:
         return
@@ -195,7 +218,7 @@ def _terminate_process(
     try:
         if process_group_id is not None:
             os.killpg(process_group_id, signal.SIGKILL)
-        else:
+        elif process is not None:
             process.kill()
     except OSError:
         return
@@ -281,6 +304,7 @@ def run_command(
     if deadline_status_write_descriptor >= 0:
         os.close(deadline_status_write_descriptor)
     attached = False
+    communication_completed = False
     try:
         process_controller.attach(process, terminate_process_group=True)
         attached = True
@@ -288,6 +312,7 @@ def run_command(
             stdout, stderr = process.communicate(input_text)
         else:
             stdout, stderr = process.communicate(input_text, timeout=timeout)
+        communication_completed = True
     except BaseException as exc:
         cleanup_errors: list[BaseException] = []
         try:
@@ -297,6 +322,7 @@ def run_command(
                 _terminate_process(
                     process,
                     terminate_process_group=True,
+                    process_group_id=process.pid,
                 )
         except BaseException as terminate_error:
             cleanup_errors.append(terminate_error)
@@ -313,22 +339,35 @@ def run_command(
             os.close(deadline_status_descriptor)
         raise
     finally:
-        process_controller.clear(process)
+        if communication_completed and deadline_status_descriptor >= 0:
+            process_controller.clear(process, retain_process_group=True)
+        else:
+            process_controller.clear(process)
     deadline_status = b""
     if deadline_status_descriptor >= 0:
         try:
-            chunks: list[bytes] = []
-            while chunk := os.read(deadline_status_descriptor, 16):
-                chunks.append(chunk)
-            deadline_status = b"".join(chunks)
+            try:
+                chunks: list[bytes] = []
+                while chunk := os.read(deadline_status_descriptor, 16):
+                    chunks.append(chunk)
+                deadline_status = b"".join(chunks)
+            except OSError as exc:
+                process_controller.terminate()
+                raise ProcessDeadlineEnforcementError(
+                    "Absolute process deadline enforcement status is unavailable."
+                ) from exc
+            if deadline_status == b"E":
+                raise ProcessDeadlineExpiredError(
+                    "Process authorization deadline expired."
+                )
+            if deadline_status != b"C":
+                process_controller.terminate()
+                raise ProcessDeadlineEnforcementError(
+                    "Absolute process deadline enforcement failed closed."
+                )
         finally:
             os.close(deadline_status_descriptor)
-    if b"E" in deadline_status:
-        raise ProcessDeadlineExpiredError("Process authorization deadline expired.")
-    if b"U" in deadline_status:
-        raise ProcessDeadlineEnforcementError(
-            "Absolute process deadline enforcement failed closed."
-        )
+            process_controller.release_process_group(process.pid)
     process_controller.throw_if_cancelled()
     completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if check and completed.returncode:
