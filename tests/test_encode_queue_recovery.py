@@ -14537,7 +14537,14 @@ raise SystemExit(0)
         metric_refresh_mock = Mock(side_effect=AssertionError("metric refresh should not run synchronously"))
         safe_collect_mock = Mock(return_value=[])
         observation_backfill_mock = Mock(return_value=Mock(inserted=0))
+
+        @contextmanager
+        def _noop_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+            yield
+
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _noop_runtime_lock
+        ), patch("mediaforce.web.app.migrate_config_state"), patch(
                 "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
         ), patch(
                 "mediaforce.web.app._refresh_metric_support", metric_refresh_mock
@@ -14573,6 +14580,115 @@ raise SystemExit(0)
         self.assertEqual(metric_thread.args, ())
         self.assertEqual(metric_thread.kwargs, {})
         self.assertTrue(metric_thread.daemon)
+
+    def test_app_lifespan_acquires_runtime_lock_before_db_operations(self) -> None:
+        call_order: list[str] = []
+
+        @contextmanager
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+            call_order.append("lock_acquired")
+            yield
+            call_order.append("lock_released")
+
+        def _tracking_migrate(config: object) -> None:
+            call_order.append("migrate_config_state")
+
+        def _tracking_backfill(connection: object, *, as_of: object) -> object:
+            call_order.append("backfill_quality_search_observations")
+            return Mock(inserted=0)
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _tracking_runtime_lock
+        ), patch(
+                "mediaforce.web.app.migrate_config_state", _tracking_migrate
+        ), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._refresh_metric_support"), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._safe_collect_host_statuses", Mock(return_value=[])
+        ), patch(
+                "mediaforce.web.app.backfill_quality_search_observations",
+                _tracking_backfill,
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+            async def exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            asyncio.run(exercise_lifespan())
+
+        lock_idx = call_order.index("lock_acquired")
+        migrate_idx = call_order.index("migrate_config_state")
+        backfill_idx = call_order.index("backfill_quality_search_observations")
+        release_idx = call_order.index("lock_released")
+        self.assertLess(lock_idx, migrate_idx, "lock must be acquired before migrate_config_state")
+        self.assertLess(migrate_idx, backfill_idx, "migrate_config_state must run before DB operations")
+        self.assertLess(backfill_idx, release_idx, "lock must be held during DB operations")
+
+    def test_runtime_namespace_keys_normalize_case_equivalent_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            web_state_dir = root / "web"
+            web_state_dir.mkdir()
+            config_lower = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / "config.toml",
+                    db_path=root / "library.sqlite3",
+                    web_state_dir=web_state_dir,
+                ),
+            )
+            lock_path = runtime_lock_module.mediaforce_runtime_lock_path_for_web_state_dir(web_state_dir)
+            keys_lower = runtime_lock_module._runtime_namespace_keys(config_lower, lock_path)
+
+            upper_root = Path(str(root).upper()) if str(root)[0].isalpha() else root
+            config_upper = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=upper_root / "CONFIG.TOML",
+                    db_path=upper_root / "LIBRARY.SQLITE3",
+                    web_state_dir=upper_root / "WEB",
+                ),
+            )
+            lock_path_upper = runtime_lock_module.mediaforce_runtime_lock_path_for_web_state_dir(
+                upper_root / "WEB"
+            )
+            keys_upper = runtime_lock_module._runtime_namespace_keys(config_upper, lock_path_upper)
+
+            self.assertEqual(
+                keys_lower,
+                keys_upper,
+                "case-equivalent paths must produce identical namespace keys",
+            )
+
+    def test_runtime_namespace_keys_are_stable_across_equivalent_unicode_forms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            web_state_dir = root / "web"
+            web_state_dir.mkdir()
+            import unicodedata
+            nfc_name = unicodedata.normalize("NFC", "café")
+            nfd_name = unicodedata.normalize("NFD", "café")
+            config_nfc = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / f"{nfc_name}.toml",
+                    web_state_dir=web_state_dir,
+                ),
+            )
+            config_nfd = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / f"{nfd_name}.toml",
+                    web_state_dir=web_state_dir,
+                ),
+            )
+            lock_path = runtime_lock_module.mediaforce_runtime_lock_path_for_web_state_dir(web_state_dir)
+            keys_nfc = runtime_lock_module._runtime_namespace_keys(config_nfc, lock_path)
+            keys_nfd = runtime_lock_module._runtime_namespace_keys(config_nfd, lock_path)
+            self.assertEqual(
+                keys_nfc,
+                keys_nfd,
+                "NFC and NFD Unicode paths must produce identical namespace keys",
+            )
 
     def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
         source_path = self._create_source_file("episode-folder.mkv")

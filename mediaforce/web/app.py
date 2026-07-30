@@ -456,49 +456,56 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        threading.Thread(
-            target=purge_transient_artifacts,
-            args=(config,),
-            kwargs={"force": True},
-            name="transient-cleanup",
-            daemon=True,
-        ).start()
-        threading.Thread(
-            target=_refresh_metric_support,
-            name="metric-support-refresh",
-            daemon=True,
-        ).start()
-        with open_db(config.paths.db_path) as connection:
-            try:
-                backfill_result = backfill_quality_search_observations(
-                    connection,
-                    as_of=datetime.now(UTC),
-                )
-                connection.commit()
-                if backfill_result.inserted:
-                    LOGGER.info(
-                        "Backfilled %s accepted quality-search observations.",
-                        backfill_result.inserted,
+        with exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload=_lifespan_owner_payload(config),
+        ):
+            migrate_config_state(config)
+            review_dir.mkdir(parents=True, exist_ok=True)
+            app.mount("/review-media", StaticFiles(directory=str(review_dir)), name="review_media")
+            threading.Thread(
+                target=purge_transient_artifacts,
+                args=(config,),
+                kwargs={"force": True},
+                name="transient-cleanup",
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=_refresh_metric_support,
+                name="metric-support-refresh",
+                daemon=True,
+            ).start()
+            with open_db(config.paths.db_path) as connection:
+                try:
+                    backfill_result = backfill_quality_search_observations(
+                        connection,
+                        as_of=datetime.now(UTC),
                     )
-            except Exception:
-                connection.rollback()
-                LOGGER.exception("Quality-search observation backfill failed; it will retry at next startup.")
-            repaired_host_rows = repair_persisted_encode_job_hosts(connection)
-            if repaired_host_rows:
-                LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)
-            ensure_queue_state(connection, updated_at=_now_iso())
-            ensure_background_work_state(connection, updated_at=_now_iso())
-            ensure_evidence_queue_state(connection, updated_at=_now_iso())
-            _recover_calibration_jobs(connection, config)
-            _recover_encode_queue(connection, config)
-        _start_background_workers(config)
-        _safe_collect_host_statuses(config)
-        try:
-            yield
-        finally:
-            for controller in _active_calibration_process_controllers():
-                controller.cancel()
-            _cancel_active_encode_processes()
+                    connection.commit()
+                    if backfill_result.inserted:
+                        LOGGER.info(
+                            "Backfilled %s accepted quality-search observations.",
+                            backfill_result.inserted,
+                        )
+                except Exception:
+                    connection.rollback()
+                    LOGGER.exception("Quality-search observation backfill failed; it will retry at next startup.")
+                repaired_host_rows = repair_persisted_encode_job_hosts(connection)
+                if repaired_host_rows:
+                    LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)
+                ensure_queue_state(connection, updated_at=_now_iso())
+                ensure_background_work_state(connection, updated_at=_now_iso())
+                ensure_evidence_queue_state(connection, updated_at=_now_iso())
+                _recover_calibration_jobs(connection, config)
+                _recover_encode_queue(connection, config)
+            _start_background_workers(config)
+            _safe_collect_host_statuses(config)
+            try:
+                yield
+            finally:
+                for controller in _active_calibration_process_controllers():
+                    controller.cancel()
+                _cancel_active_encode_processes()
 
     app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
     review_dir = config.paths.review_dir
@@ -507,8 +514,6 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     frontend_build_dir = (
         project_frontend_build_dir if project_frontend_build_dir.exists() else packaged_frontend_build_dir
     )
-    review_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/review-media", StaticFiles(directory=str(review_dir)), name="review_media")
 
     @app.middleware("http")
     async def ensure_review_media_root(
@@ -2214,20 +2219,18 @@ def main(argv: list[str] | None = None) -> None:
     _load_project_env_file()
     settings = _web_startup_settings(args)
     config = load_config(settings.config_path)
-    with _exclusive_web_server_lock(config, settings):
-        migrate_config_state(config)
-        if settings.reload_enabled:
-            os.environ["MEDIAFORCE_CONFIG_PATH"] = str(config.paths.config_path)
-            uvicorn.run(
-                "mediaforce.web.app:create_reloadable_app",
-                host=settings.host,
-                port=settings.port,
-                reload=True,
-                factory=True,
-                log_level="info",
-            )
-            return
-        uvicorn.run(create_app(config.paths.config_path), host=settings.host, port=settings.port, log_level="info")
+    if settings.reload_enabled:
+        os.environ["MEDIAFORCE_CONFIG_PATH"] = str(config.paths.config_path)
+        uvicorn.run(
+            "mediaforce.web.app:create_reloadable_app",
+            host=settings.host,
+            port=settings.port,
+            reload=True,
+            factory=True,
+            log_level="info",
+        )
+        return
+    uvicorn.run(create_app(config.paths.config_path), host=settings.host, port=settings.port, log_level="info")
 
 
 def _parse_web_startup_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2300,6 +2303,15 @@ def _web_server_lock_payload(config: MediaforceConfig, settings: WebStartupSetti
         "host": settings.host,
         "port": settings.port,
         "reload": settings.reload_enabled,
+        "config_path": str(config.paths.config_path),
+        "started_at": _now_iso(),
+    }
+
+
+def _lifespan_owner_payload(config: MediaforceConfig) -> dict[str, object]:
+    return {
+        "host": _default_web_host(),
+        "port": _default_web_port(),
         "config_path": str(config.paths.config_path),
         "started_at": _now_iso(),
     }

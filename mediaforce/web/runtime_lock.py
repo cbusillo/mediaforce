@@ -10,6 +10,7 @@ import socket
 import stat
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.utils import filesystem_collision_key
 
 
 class MediaforceRuntimeBusyError(RuntimeError):
@@ -69,13 +70,12 @@ def _runtime_namespace_keys(
         config: MediaforceConfig,
         lock_path: Path,
 ) -> tuple[str, ...]:
-    keys = {f"lock:{lock_path}"}
+    keys = {f"lock:{filesystem_collision_key(lock_path)}"}
     for name in ("config_path", "db_path"):
         value = getattr(config.paths, name, None)
         if value is not None:
-            keys.add(
-                f"{name}:{Path(value).expanduser().resolve()}"
-            )
+            resolved = Path(value).expanduser().resolve()
+            keys.add(f"{name}:{filesystem_collision_key(resolved)}")
     return tuple(sorted(keys))
 
 
