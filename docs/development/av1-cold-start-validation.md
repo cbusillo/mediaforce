@@ -429,18 +429,26 @@ loading itself is read-only; legacy state-path migration runs only after the
 exclusive lock is held. Machine or toolchain drift before the claim or after
 measurement is a safety stop rather than a newly compatible cohort.
 The shared lock uses a stable parent-directory guard in addition to the metadata
-file. It also holds deterministic loopback kernel-namespace reservations keyed
-independently by the canonical config path, database path, and lock path. A
-supported runtime that observes an atomically replaced config therefore still
-shares at least the config reservation with the previous runtime; separate
-configs that address one database share the database reservation; and lock-file
-or parent replacement remains covered by the lock-path reservation. Unlinking
-the lock file, changing configured state paths, or renaming and replacing its
-parent cannot create a second lock domain for another compliant runtime.
-Lock-file access remains descriptor-relative to the pinned parent. The lock path
-resolves `web_state_dir` symlinks before choosing that domain, so aliases cannot
-create a second one. Fresh execution samples its authorization timestamp only
-after all preflight checks and immediately before the immutable claim.
+file. It also holds deterministic persistent reservations under the configured
+`state.runtime_reservation_dir`, with path-local anchors for the writable
+database and metadata-lock namespaces. Config directories remain read-only.
+Normalized namespace keys are represented only by SHA-256 directory names;
+reservation directories are owner-only, their lock files are empty and
+owner-only, and runtime shutdown never unlinks either one.
+Each reservation locks both the key directory and its lock file, so removing and
+recreating the lock-file pathname cannot split an active reservation. Existing
+config inodes are also locked directly. Existing database device/inode identity
+is added to the shared hashed reservation set instead of flocking the SQLite
+file, preserving hardlinked-alias exclusion without interfering with SQLite WAL
+locking. The stable configured reservation root covers lock-parent replacement,
+while descriptor-relative `O_NOFOLLOW` opens and device/inode rechecks protect
+every reservation, direct config lock, and metadata-lock handoff. Unlinking the
+metadata lock, changing configured state paths, or renaming and replacing its
+parent cannot create a second lock domain for another compliant runtime. The
+lock path resolves `web_state_dir` symlinks before choosing that domain, so
+aliases cannot create a second one. Fresh execution samples its authorization
+timestamp only after all preflight checks and immediately before the immutable
+claim.
 `scripts/mediaforce-dev.sh` leaves that persistent lock path in place when
 stopping the backend.
 

@@ -54,6 +54,7 @@ class ConfigPaths:
     web_state_dir: Path
     review_dir: Path
     runtime_settings_path: Path
+    runtime_reservation_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -307,14 +308,22 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
     _merge_local_folder_policy_overrides(raw, runtime_settings)
 
     state = raw["state"]
+    web_state_dir = _resolve_path(project_root, state.get("web_state_dir", "state/web"))
+    configured_runtime_reservation_dir = state.get("runtime_reservation_dir")
+    runtime_reservation_dir = (
+        _resolve_path(project_root, configured_runtime_reservation_dir)
+        if configured_runtime_reservation_dir is not None
+        else web_state_dir.parent.parent / "mediaforce-runtime-reservations"
+    )
     paths = ConfigPaths(
         project_root=project_root,
         config_path=resolved_config_path,
         db_path=_resolve_path(project_root, state["db_path"]),
         run_manifest_dir=_resolve_path(project_root, state["run_manifest_dir"]),
-        web_state_dir=_resolve_path(project_root, state.get("web_state_dir", "state/web")),
+        web_state_dir=web_state_dir,
         review_dir=_resolve_path(project_root, state.get("review_dir", "state/review")),
         runtime_settings_path=runtime_settings_path,
+        runtime_reservation_dir=runtime_reservation_dir,
     )
     return MediaforceConfig(raw=raw, paths=paths)
 

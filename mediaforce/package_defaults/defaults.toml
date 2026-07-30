@@ -6,6 +6,7 @@ db_path = "~/Library/Application Support/mediaforce/library.sqlite3"
 run_manifest_dir = "~/Library/Application Support/mediaforce/runs"
 web_state_dir = "~/Library/Application Support/mediaforce/web"
 review_dir = "~/Library/Caches/mediaforce/review"
+runtime_reservation_dir = "~/Library/Application Support/mediaforce-runtime-reservations"
 
 [state.cleanup]
 transient_artifact_retention_days = 14

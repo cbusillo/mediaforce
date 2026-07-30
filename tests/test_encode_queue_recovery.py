@@ -6358,9 +6358,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 clear=True,
         ), patch("mediaforce.web.app.load_config", return_value=config), patch(
                 "mediaforce.web.app.create_app", return_value=object()
-        ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+        ) as create_app_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
             web_app.main(["--host", "127.0.0.9", "--port", "8777", "--no-reload"])
 
+        create_app_mock.assert_called_once_with(
+            config.paths.config_path,
+            runtime_host="127.0.0.9",
+            runtime_port=8777,
+        )
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
@@ -6374,6 +6379,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         ) as load_config_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
             web_app.main(["--config", str(config_path), "--reload"])
             self.assertEqual(os.environ["MEDIAFORCE_CONFIG_PATH"], str(config.paths.config_path))
+            self.assertEqual(os.environ["MEDIAFORCE_WEB_HOST"], "127.0.0.1")
+            self.assertEqual(os.environ["MEDIAFORCE_WEB_PORT"], "8777")
 
         load_config_mock.assert_called_once_with(config_path)
         uvicorn_run_mock.assert_called_once()
@@ -6443,7 +6450,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_runtime_namespace_lock_files_are_owner_only(self) -> None:
         lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
-        namespace_keys = runtime_lock_module._runtime_namespace_keys(
+        namespace_state = runtime_lock_module._runtime_namespace_state(
             self.config,
             lock_path,
         )
@@ -6452,23 +6459,38 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.config,
             owner_payload={"purpose": "namespace-permission-probe"},
         ):
-            directory = runtime_lock_module._runtime_namespace_lock_directory()
-            directory_info = directory.stat()
-            self.assertEqual(directory_info.st_uid, os.getuid())
-            self.assertEqual(directory_info.st_mode & 0o777, 0o700)
-            for key in namespace_keys:
-                namespace_path = directory / runtime_lock_module._runtime_namespace_lock_name(key)
+            locations = runtime_lock_module._runtime_namespace_reservation_locations(
+                self.config,
+                namespace_state,
+            )
+            for location in locations:
+                self.assertRegex(location.name, r"^[0-9a-f]{64}$")
+                self.assertNotIn(self.root.name, location.name)
+                directory_info = location.directory.stat()
+                self.assertEqual(directory_info.st_uid, os.getuid())
+                self.assertEqual(directory_info.st_mode & 0o777, 0o700)
+                namespace_directory = location.directory / location.name
+                namespace_directory_info = namespace_directory.stat()
+                self.assertEqual(namespace_directory_info.st_uid, os.getuid())
+                self.assertEqual(namespace_directory_info.st_mode & 0o777, 0o700)
+                namespace_path = namespace_directory / "lock"
                 namespace_info = namespace_path.stat()
                 self.assertEqual(namespace_info.st_uid, os.getuid())
                 self.assertEqual(namespace_info.st_mode & 0o777, 0o600)
                 self.assertEqual(namespace_info.st_size, 0)
 
     def test_runtime_namespace_lock_rejects_symlink_files(self) -> None:
-        directory = runtime_lock_module._runtime_namespace_lock_directory()
+        directory = runtime_lock_module.mediaforce_runtime_reservation_dir(
+            self.config
+        )
         directory.mkdir(mode=0o700, exist_ok=True)
         directory.chmod(0o700)
         namespace_key = f"symlink-regression:{self.root}"
-        namespace_path = directory / runtime_lock_module._runtime_namespace_lock_name(namespace_key)
+        namespace_path = runtime_lock_module._runtime_namespace_lock_path(
+            directory,
+            namespace_key,
+        )
+        namespace_path.parent.mkdir(mode=0o700)
         target = self.root / "namespace-target"
         target.write_text("unchanged", encoding="utf-8")
         if namespace_path.exists() or namespace_path.is_symlink():
@@ -6477,12 +6499,95 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         try:
             with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
                 runtime_lock_module._acquire_runtime_namespace_locks(
-                    (namespace_key,),
+                    self.config,
+                    runtime_lock_module._RuntimeNamespaceState(
+                        keys=(namespace_key,),
+                        paths=(),
+                        direct_file_locks=(),
+                    ),
                     runtime_lock_module.mediaforce_runtime_lock_path(self.config),
                 )
         finally:
             namespace_path.unlink()
         self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+
+    def test_runtime_reservation_survives_lock_path_removal_and_recreation(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        web_state_dir=Path(sys.argv[1]),
+        runtime_reservation_dir=Path(sys.argv[2]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-reservation-recreation-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        alias_root = self.root / "alias"
+        alias_root.symlink_to(self.root, target_is_directory=True)
+        reservation_dir = self.root / ".mediaforce-runtime-reservations"
+        config = SimpleNamespace(
+            paths=SimpleNamespace(
+                web_state_dir=self.root / "web",
+                runtime_reservation_dir=reservation_dir,
+            ),
+        )
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(config)
+        lock_key = next(
+            key
+            for key in runtime_lock_module._runtime_namespace_keys(
+                config,
+                lock_path,
+            )
+            if key.startswith("lock:")
+        )
+        reservation_path = runtime_lock_module._runtime_namespace_lock_path(
+            reservation_dir,
+            lock_key,
+        )
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload={"purpose": "parent-reservation-recreation-probe"},
+        ):
+            reservation_path.unlink()
+            reservation_path.write_text("", encoding="utf-8")
+            reservation_path.chmod(0o600)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(alias_root / "web"),
+                    str(alias_root / ".mediaforce-runtime-reservations"),
+                ],
+                cwd=Path.cwd(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 23, completed.stderr)
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload={"purpose": "post-reservation-recreation-probe"},
+        ):
+            pass
 
     def test_runtime_lock_survives_lock_file_unlink_and_recreation(self) -> None:
         lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
@@ -6497,7 +6602,10 @@ from mediaforce.web.runtime_lock import (
 )
 
 config = SimpleNamespace(
-    paths=SimpleNamespace(web_state_dir=Path(sys.argv[1])),
+    paths=SimpleNamespace(
+        web_state_dir=Path(sys.argv[1]),
+        runtime_reservation_dir=Path(sys.argv[2]),
+    ),
 )
 try:
     with exclusive_mediaforce_runtime_lock(
@@ -6525,6 +6633,7 @@ raise SystemExit(0)
                     "-c",
                     child,
                     str(self.config.paths.web_state_dir),
+                    str(self.config.paths.runtime_reservation_dir),
                 ],
                 cwd=Path.cwd(),
                 text=True,
@@ -6546,7 +6655,10 @@ raise SystemExit(0)
             web_state_dir = active_parent / "state"
             web_state_dir.mkdir(parents=True)
             config = SimpleNamespace(
-                paths=SimpleNamespace(web_state_dir=web_state_dir),
+                paths=SimpleNamespace(
+                    web_state_dir=web_state_dir,
+                    runtime_reservation_dir=root / "runtime-reservations",
+                ),
             )
             retired_parent = root / "retired-runtime"
             child = """
@@ -6560,7 +6672,10 @@ from mediaforce.web.runtime_lock import (
 )
 
 config = SimpleNamespace(
-    paths=SimpleNamespace(web_state_dir=Path(sys.argv[1])),
+    paths=SimpleNamespace(
+        web_state_dir=Path(sys.argv[1]),
+        runtime_reservation_dir=Path(sys.argv[2]),
+    ),
 )
 try:
     with exclusive_mediaforce_runtime_lock(
@@ -6584,6 +6699,7 @@ raise SystemExit(0)
                         "-c",
                         child,
                         str(web_state_dir),
+                        str(root / "runtime-reservations"),
                     ],
                     cwd=Path.cwd(),
                     text=True,
@@ -6610,6 +6726,7 @@ config = SimpleNamespace(
         config_path=Path(sys.argv[1]),
         db_path=Path(sys.argv[2]),
         web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
     ),
 )
 try:
@@ -6659,6 +6776,7 @@ raise SystemExit(0)
                             config_path=parent_config_path,
                             db_path=parent_db_path,
                             web_state_dir=parent_web_state_dir,
+                            runtime_reservation_dir=root / "runtime-reservations",
                         ),
                     )
                     with runtime_lock_module.exclusive_mediaforce_runtime_lock(
@@ -6673,6 +6791,7 @@ raise SystemExit(0)
                                 str(child_config_path),
                                 str(child_db_path),
                                 str(child_web_state_dir),
+                                str(root / "runtime-reservations"),
                             ],
                             cwd=Path.cwd(),
                             text=True,
@@ -6680,6 +6799,71 @@ raise SystemExit(0)
                             check=False,
                         )
                         self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_reserves_replaced_config_path(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-replaced-config-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text("original", encoding="utf-8")
+            parent_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=root / "parent.sqlite3",
+                    web_state_dir=root / "parent-state",
+                    runtime_reservation_dir=root / "shared-reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                parent_config,
+                owner_payload={"purpose": "parent-replaced-config-probe"},
+            ):
+                replacement_path = root / "replacement.toml"
+                replacement_path.write_text("replacement", encoding="utf-8")
+                os.replace(replacement_path, config_path)
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(config_path),
+                        str(root / "child.sqlite3"),
+                        str(root / "child-state"),
+                        str(root / "shared-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
 
     def test_runtime_lock_reserves_hardlinked_config_and_database_namespaces(self) -> None:
         child = """
@@ -6697,6 +6881,7 @@ config = SimpleNamespace(
         config_path=Path(sys.argv[1]),
         db_path=Path(sys.argv[2]),
         web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
     ),
 )
 try:
@@ -6745,22 +6930,26 @@ raise SystemExit(0)
                             config_path=parent_shared_path,
                             db_path=parent_other_path,
                             web_state_dir=root / "parent-config-state",
+                            runtime_reservation_dir=root / "parent-config-reservations",
                         )
                         child_args = (
                             child_shared_path,
                             child_other_path,
                             root / "child-config-state",
+                            root / "child-config-reservations",
                         )
                     else:
                         parent_paths = SimpleNamespace(
                             config_path=parent_other_path,
                             db_path=parent_shared_path,
                             web_state_dir=root / "parent-db-state",
+                            runtime_reservation_dir=root / "shared-db-reservations",
                         )
                         child_args = (
                             child_other_path,
                             child_shared_path,
                             root / "child-db-state",
+                            root / "shared-db-reservations",
                         )
                     parent_config = SimpleNamespace(paths=parent_paths)
                     with runtime_lock_module.exclusive_mediaforce_runtime_lock(
@@ -15033,6 +15222,58 @@ raise SystemExit(0)
         self.assertLess(migrate_idx, backfill_idx, "migrate_config_state must run before DB operations")
         self.assertLess(backfill_idx, release_idx, "lock must be held during DB operations")
 
+    def test_app_lifespan_logs_busy_runtime_owner_without_reacquiring(self) -> None:
+        busy_error = runtime_lock_module.MediaforceRuntimeBusyError(
+            "Mediaforce runtime is already active (pid 4321 on 127.0.0.1:8777)"
+        )
+
+        @contextmanager
+        def busy_runtime_lock(
+                _config: object,
+                *,
+                owner_payload: object,
+        ) -> Iterator[None]:
+            self.assertIsNotNone(owner_payload)
+            raise busy_error
+            yield
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock",
+                side_effect=busy_runtime_lock,
+        ) as runtime_lock_mock:
+            app = web_app.create_app(self.config.paths.config_path)
+
+            async def exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            with self.assertLogs(web_app.LOGGER.name, level="ERROR") as captured:
+                with self.assertRaisesRegex(
+                    runtime_lock_module.MediaforceRuntimeBusyError,
+                    "pid 4321 on 127.0.0.1:8777",
+                ):
+                    asyncio.run(exercise_lifespan())
+
+        runtime_lock_mock.assert_called_once()
+        self.assertEqual(
+            captured.output,
+            [
+                "ERROR:mediaforce.web.app:Mediaforce web startup blocked: "
+                "Mediaforce runtime is already active (pid 4321 on 127.0.0.1:8777)"
+            ],
+        )
+
+    def test_lifespan_owner_payload_does_not_persist_private_paths(self) -> None:
+        payload = web_app._lifespan_owner_payload(
+            host="127.0.0.9",
+            port=9888,
+        )
+
+        self.assertNotIn("config_path", payload)
+        self.assertNotIn(str(self.config.paths.config_path), json.dumps(payload))
+        self.assertEqual(payload["host"], "127.0.0.9")
+        self.assertEqual(payload["port"], 9888)
+
     def test_runtime_namespace_keys_normalize_case_equivalent_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -21525,6 +21766,7 @@ raise SystemExit(0)
             web_state_dir=self.root / "web",
             review_dir=self.root / "review",
             runtime_settings_path=self.root / "runtime.json",
+            runtime_reservation_dir=self.root / "runtime-reservations",
         )
         raw = {
             "state": {"cleanup": {"transient_artifact_retention_days": 14}},

@@ -164,6 +164,7 @@ from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
     run_sampled_calibration as runtime_run_sampled_calibration, \
     remove_path as runtime_remove_path, snapshot_staged_artifact as runtime_snapshot_staged_artifact
 from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
 )
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
@@ -468,7 +469,33 @@ def _record_run_verdict(config: MediaforceConfig, prefix: str, calibration_paylo
     )
 
 
-def create_app(config_path: Path | None = None) -> FastAPI:
+@contextmanager
+def _web_runtime_lock(
+        config: MediaforceConfig,
+        *,
+        host: str | None,
+        port: int | None,
+) -> Iterator[None]:
+    acquired = False
+    try:
+        with exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload=_lifespan_owner_payload(host=host, port=port),
+        ):
+            acquired = True
+            yield
+    except MediaforceRuntimeBusyError as exc:
+        if not acquired:
+            LOGGER.error("Mediaforce web startup blocked: %s", exc)
+        raise
+
+
+def create_app(
+        config_path: Path | None = None,
+        *,
+        runtime_host: str | None = None,
+        runtime_port: int | None = None,
+) -> FastAPI:
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
@@ -478,9 +505,10 @@ def create_app(config_path: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        with exclusive_mediaforce_runtime_lock(
+        with _web_runtime_lock(
             config,
-            owner_payload=_lifespan_owner_payload(config),
+            host=runtime_host,
+            port=runtime_port,
         ):
             startup_threads: list[threading.Thread] = []
             background_runtime: BackgroundWorkerRuntime | None = None
@@ -2271,6 +2299,8 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config(settings.config_path)
     if settings.reload_enabled:
         os.environ["MEDIAFORCE_CONFIG_PATH"] = str(config.paths.config_path)
+        os.environ["MEDIAFORCE_WEB_HOST"] = settings.host
+        os.environ["MEDIAFORCE_WEB_PORT"] = str(settings.port)
         uvicorn.run(
             "mediaforce.web.app:create_reloadable_app",
             host=settings.host,
@@ -2280,7 +2310,16 @@ def main(argv: list[str] | None = None) -> None:
             log_level="info",
         )
         return
-    uvicorn.run(create_app(config.paths.config_path), host=settings.host, port=settings.port, log_level="info")
+    uvicorn.run(
+        create_app(
+            config.paths.config_path,
+            runtime_host=settings.host,
+            runtime_port=settings.port,
+        ),
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
 
 
 def _parse_web_startup_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2331,13 +2370,18 @@ def _default_web_port() -> int:
     return int(port_value)
 
 
-def _lifespan_owner_payload(config: MediaforceConfig) -> dict[str, object]:
+def _lifespan_owner_payload(
+        *,
+        host: str | None = None,
+        port: int | None = None,
+) -> dict[str, object]:
     return {
-        "host": _default_web_host(),
-        "port": _default_web_port(),
-        "config_path": str(config.paths.config_path),
+        "host": host or _default_web_host(),
+        "port": port if port is not None else _default_web_port(),
         "started_at": _now_iso(),
     }
+
+
 def create_reloadable_app() -> FastAPI:
     configured_path = _preferred_env("MEDIAFORCE_CONFIG_PATH")
     config_value = configured_path.strip() if configured_path is not None else ""
