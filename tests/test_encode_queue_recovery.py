@@ -6593,6 +6593,106 @@ raise SystemExit(0)
                         )
                         self.assertEqual(completed.returncode, 23, completed.stderr)
 
+    def test_runtime_lock_reserves_hardlinked_config_and_database_namespaces(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-hardlink-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_config_path = root / "parent.toml"
+            parent_db_path = root / "parent.sqlite3"
+            parent_config_path.write_text("parent", encoding="utf-8")
+            parent_db_path.write_bytes(b"database")
+            cases = (
+                (
+                    "hardlinked-config",
+                    parent_config_path,
+                    root / "child.toml",
+                    parent_db_path,
+                    root / "child-config.sqlite3",
+                ),
+                (
+                    "hardlinked-database",
+                    parent_db_path,
+                    root / "child.sqlite3",
+                    parent_config_path,
+                    root / "child-db.toml",
+                ),
+            )
+            for (
+                name,
+                parent_shared_path,
+                child_shared_path,
+                parent_other_path,
+                child_other_path,
+            ) in cases:
+                with self.subTest(name=name):
+                    os.link(parent_shared_path, child_shared_path)
+                    if name == "hardlinked-config":
+                        parent_paths = SimpleNamespace(
+                            config_path=parent_shared_path,
+                            db_path=parent_other_path,
+                            web_state_dir=root / "parent-config-state",
+                        )
+                        child_args = (
+                            child_shared_path,
+                            child_other_path,
+                            root / "child-config-state",
+                        )
+                    else:
+                        parent_paths = SimpleNamespace(
+                            config_path=parent_other_path,
+                            db_path=parent_shared_path,
+                            web_state_dir=root / "parent-db-state",
+                        )
+                        child_args = (
+                            child_other_path,
+                            child_shared_path,
+                            root / "child-db-state",
+                        )
+                    parent_config = SimpleNamespace(paths=parent_paths)
+                    with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                        parent_config,
+                        owner_payload={"purpose": f"parent-{name}-probe"},
+                    ):
+                        completed = subprocess.run(
+                            [
+                                sys.executable,
+                                "-c",
+                                child,
+                                *(str(value) for value in child_args),
+                            ],
+                            cwd=Path.cwd(),
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(completed.returncode, 23, completed.stderr)
+
     def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
         script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")
         lock_deletions = [
@@ -14354,24 +14454,87 @@ raise SystemExit(0)
         second.release()
 
     def test_start_background_workers_skips_startup_without_leadership(self) -> None:
-        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=False), patch(
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=None), patch(
                 "mediaforce.web.app._start_calibration_queue_worker"
         ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
-            started = web_app._start_background_workers(self.config)
+            runtime = web_app._start_background_workers(self.config)
 
-        self.assertFalse(started)
+        self.assertIsNone(runtime)
         start_calibration.assert_not_called()
         start_encode.assert_not_called()
 
     def test_start_background_workers_starts_both_workers_when_leader(self) -> None:
-        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=True), patch(
-                "mediaforce.web.app._start_calibration_queue_worker"
-        ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
-            started = web_app._start_background_workers(self.config)
+        lease = Mock(spec=WorkerLeadershipLease)
+        calibration_handle = Mock()
+        encode_handle = Mock()
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=lease), patch(
+                "mediaforce.web.app._start_calibration_queue_worker",
+                return_value=calibration_handle,
+        ) as start_calibration, patch(
+                "mediaforce.web.app._start_encode_queue_worker",
+                return_value=encode_handle,
+        ) as start_encode:
+            runtime = web_app._start_background_workers(self.config)
 
-        self.assertTrue(started)
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertIs(runtime.lease, lease)
+        self.assertEqual(runtime.handles, (calibration_handle, encode_handle))
         start_calibration.assert_called_once_with(self.config)
         start_encode.assert_called_once_with(self.config)
+
+    def test_queue_worker_handles_are_stoppable_non_daemon_threads(self) -> None:
+        def wait_for_stop(
+                *,
+                config_path: Path,
+                stop_event: threading.Event,
+        ) -> None:
+            self.assertEqual(config_path, self.config.paths.config_path)
+            stop_event.wait()
+
+        cases = (
+            (
+                "calibration",
+                web_app._start_calibration_queue_worker,
+                "mediaforce.web.app._calibration_queue_worker_loop",
+            ),
+            (
+                "encode",
+                web_app._start_encode_queue_worker,
+                "mediaforce.web.app._encode_queue_worker_loop",
+            ),
+        )
+        for name, start_worker, target_path in cases:
+            with self.subTest(name=name), patch(
+                target_path,
+                side_effect=wait_for_stop,
+            ):
+                handle = start_worker(self.config)
+                self.assertFalse(handle.thread.daemon)
+                self.assertTrue(handle.thread.is_alive())
+                handle.stop()
+                handle.join()
+                self.assertFalse(handle.thread.is_alive())
+
+    def test_background_worker_start_failure_stops_workers_and_releases_lease(self) -> None:
+        lease = Mock(spec=WorkerLeadershipLease)
+        calibration_handle = Mock()
+        with patch(
+            "mediaforce.web.app._acquire_background_worker_leadership",
+            return_value=lease,
+        ), patch(
+            "mediaforce.web.app._start_calibration_queue_worker",
+            return_value=calibration_handle,
+        ), patch(
+            "mediaforce.web.app._start_encode_queue_worker",
+            side_effect=RuntimeError("worker start failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worker start failed"):
+                web_app._start_background_workers(self.config)
+
+        calibration_handle.stop.assert_called_once_with()
+        calibration_handle.join.assert_called_once_with()
+        lease.release.assert_called_once_with()
 
     def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:
         cancel_queue_process = Mock()
@@ -14476,10 +14639,11 @@ raise SystemExit(0)
             folder_route_paths.index("/api/folders/{prefix:path}"),
         )
 
-    def test_app_lifespan_does_not_wait_for_transient_cleanup(self) -> None:
+    def test_app_lifespan_joins_writers_and_releases_leadership_before_runtime_lock(self) -> None:
         startup_threads: list[Any] = []
+        call_order: list[str] = []
 
-        class FakeCleanupThread:
+        class FakeLifecycleThread:
             def __init__(
                     self,
                     *,
@@ -14497,29 +14661,71 @@ raise SystemExit(0)
 
             def start(self) -> None:
                 startup_threads.append(self)
+                call_order.append(f"start:{self.name}")
+
+            def join(self) -> None:
+                call_order.append(f"join:{self.name}")
+
+        class FakeBackgroundRuntime:
+            def stop(self) -> None:
+                call_order.append("workers:stop")
+
+            def join(self) -> None:
+                call_order.append("workers:join")
+
+            def release(self) -> None:
+                call_order.append("leadership:release")
 
         cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
         metric_refresh_mock = Mock(side_effect=AssertionError("metric refresh should not run synchronously"))
         safe_collect_mock = Mock(return_value=[])
         observation_backfill_mock = Mock(return_value=Mock(inserted=0))
+        calibration_controller = Mock()
+        calibration_controller.cancel.side_effect = lambda: call_order.append("calibration:cancel")
 
         @contextmanager
-        def _noop_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
-            yield
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+            call_order.append("runtime-lock:acquire")
+            try:
+                yield
+            finally:
+                call_order.append("runtime-lock:release")
 
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
-                "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _noop_runtime_lock
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _tracking_runtime_lock
         ), patch("mediaforce.web.app.migrate_config_state"), patch(
                 "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
         ), patch(
                 "mediaforce.web.app._refresh_metric_support", metric_refresh_mock
-        ), patch("mediaforce.web.app.threading.Thread", FakeCleanupThread), patch(
-                "mediaforce.web.app._start_calibration_queue_worker"
-        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+        ), patch("mediaforce.web.app.threading.Thread", FakeLifecycleThread), patch(
+                "mediaforce.web.app._start_background_workers",
+                return_value=FakeBackgroundRuntime(),
+        ), patch(
                 "mediaforce.web.app._safe_collect_host_statuses", safe_collect_mock
         ), patch(
                 "mediaforce.web.app.backfill_quality_search_observations",
                 observation_backfill_mock,
+        ), patch(
+                "mediaforce.web.app._active_calibration_process_controllers",
+                return_value=[calibration_controller],
+        ), patch(
+                "mediaforce.web.app._cancel_active_encode_processes",
+                side_effect=lambda: call_order.append("encode:cancel"),
+        ), patch(
+                "mediaforce.web.app._wait_for_calibration_submissions",
+                side_effect=lambda: call_order.append("calibration:joined"),
+        ), patch(
+                "mediaforce.web.app._wait_for_encode_queue_threads",
+                side_effect=lambda: call_order.append("encode:joined"),
+        ), patch(
+                "mediaforce.web.app._wait_for_scan_job_threads",
+                side_effect=lambda: call_order.append("scan:joined"),
+        ), patch(
+                "mediaforce.web.app.BoundedEvidenceRunner.join",
+                side_effect=lambda: call_order.append("evidence:joined"),
+        ), patch(
+                "mediaforce.web.app._wait_for_periodic_cleanup_threads",
+                side_effect=lambda: call_order.append("cleanup:joined"),
         ):
             app = web_app.create_app(self.config.paths.config_path)
 
@@ -14539,12 +14745,22 @@ raise SystemExit(0)
         self.assertIs(cleanup_thread.target, cleanup_mock)
         self.assertEqual(cleanup_thread.args, (self.config,))
         self.assertEqual(cleanup_thread.kwargs, {"force": True})
-        self.assertTrue(cleanup_thread.daemon)
+        self.assertIsNone(cleanup_thread.daemon)
         metric_thread = threads_by_name["metric-support-refresh"]
         self.assertIs(metric_thread.target, metric_refresh_mock)
         self.assertEqual(metric_thread.args, ())
         self.assertEqual(metric_thread.kwargs, {})
-        self.assertTrue(metric_thread.daemon)
+        self.assertIsNone(metric_thread.daemon)
+        self.assertLess(call_order.index("calibration:cancel"), call_order.index("workers:stop"))
+        self.assertLess(call_order.index("workers:stop"), call_order.index("workers:join"))
+        self.assertLess(call_order.index("workers:join"), call_order.index("calibration:joined"))
+        self.assertLess(call_order.index("calibration:joined"), call_order.index("encode:joined"))
+        self.assertLess(call_order.index("encode:joined"), call_order.index("scan:joined"))
+        self.assertLess(call_order.index("scan:joined"), call_order.index("evidence:joined"))
+        self.assertLess(call_order.index("evidence:joined"), call_order.index("cleanup:joined"))
+        self.assertLess(call_order.index("cleanup:joined"), call_order.index("join:transient-cleanup"))
+        self.assertLess(call_order.index("join:metric-support-refresh"), call_order.index("leadership:release"))
+        self.assertLess(call_order.index("leadership:release"), call_order.index("runtime-lock:release"))
 
     def test_app_lifespan_acquires_runtime_lock_before_db_operations(self) -> None:
         call_order: list[str] = []
@@ -14654,6 +14870,57 @@ raise SystemExit(0)
                 keys_nfd,
                 "NFC and NFD Unicode paths must produce identical namespace keys",
             )
+
+    def test_runtime_namespace_keys_include_existing_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "config.toml"
+            alias = root / "config-alias.toml"
+            original.write_text("config", encoding="utf-8")
+            os.link(original, alias)
+            first_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=original,
+                    web_state_dir=root / "first-state",
+                )
+            )
+            second_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=alias,
+                    web_state_dir=root / "second-state",
+                )
+            )
+
+            first_keys = runtime_lock_module._runtime_namespace_keys(
+                first_config,
+                runtime_lock_module.mediaforce_runtime_lock_path(first_config),
+            )
+            second_keys = runtime_lock_module._runtime_namespace_keys(
+                second_config,
+                runtime_lock_module.mediaforce_runtime_lock_path(second_config),
+            )
+
+            first_identity_keys = {key for key in first_keys if key.startswith("file:")}
+            second_identity_keys = {key for key in second_keys if key.startswith("file:")}
+            self.assertEqual(first_identity_keys, second_identity_keys)
+            self.assertEqual(len(first_identity_keys), 1)
+
+    def test_runtime_namespace_identity_stat_errors_fail_closed(self) -> None:
+        config = SimpleNamespace(
+            paths=SimpleNamespace(
+                config_path=self.root / "config.toml",
+                web_state_dir=self.root / "state",
+            )
+        )
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(config)
+
+        with patch.object(
+            Path,
+            "stat",
+            side_effect=PermissionError("identity denied"),
+        ):
+            with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
+                runtime_lock_module._runtime_namespace_keys(config, lock_path)
 
     def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
         source_path = self._create_source_file("episode-folder.mkv")
@@ -14907,15 +15174,20 @@ raise SystemExit(0)
         deps.logger = Mock()
         deps.encode_queue_poll_seconds = 1.0
 
-        wait_gate = Mock()
-        wait_gate.wait.side_effect = KeyboardInterrupt()
+        stop_event = Mock(spec=threading.Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.side_effect = KeyboardInterrupt()
 
         with patch(
                 "mediaforce.web.runtime.encode_runtime.process_encode_queue_once",
                 side_effect=RuntimeError("boom"),
-        ), patch("mediaforce.web.runtime.worker_supervision.threading.Event", return_value=wait_gate):
+        ):
             with self.assertRaises(KeyboardInterrupt):
-                encode_runtime.encode_queue_worker_loop(config_path=self.config.paths.config_path, deps=deps)
+                encode_runtime.encode_queue_worker_loop(
+                    config_path=self.config.paths.config_path,
+                    deps=deps,
+                    stop_event=stop_event,
+                )
 
         deps.logger.exception.assert_called_once_with("Encode queue worker pass failed")
 
@@ -14924,18 +15196,20 @@ raise SystemExit(0)
         deps.calibration_queue_poll_seconds = 1.0
         logger = Mock()
 
-        wait_gate = Mock()
-        wait_gate.wait.side_effect = KeyboardInterrupt()
+        stop_event = Mock(spec=threading.Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.side_effect = KeyboardInterrupt()
 
         with patch(
                 "mediaforce.web.runtime.job_runtime.process_calibration_queue_once",
                 side_effect=RuntimeError("boom"),
-        ), patch("mediaforce.web.runtime.worker_supervision.threading.Event", return_value=wait_gate):
+        ):
             with self.assertRaises(KeyboardInterrupt):
                 job_runtime.calibration_queue_worker_loop(
                     config_path=self.config.paths.config_path,
                     deps=deps,
                     logger=logger,
+                    stop_event=stop_event,
                 )
 
         logger.exception.assert_called_once_with("Calibration queue worker pass failed")

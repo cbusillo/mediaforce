@@ -54,6 +54,7 @@ class JobRuntimeDeps:
     scan_interrupted_error: str
     save_catalog_signature: Any
     reset_folder_card_cache: Any
+    start_scan_job_thread: Callable[..., None] | None = None
 
 
 @dataclass(slots=True)
@@ -559,16 +560,20 @@ def maybe_schedule_scan(
         "stats": None,
     }
     deps.save_scan_job_state(config, prefix, job_payload)
-    thread = threading.Thread(
-        target=deps.run_scan_job,
-        kwargs={
-            "config_path": config.paths.config_path,
-            "prefix": prefix,
-            "job_id": str(job_payload["job_id"]),
-        },
-        daemon=True,
-    )
-    thread.start()
+    thread_kwargs = {
+        "config_path": config.paths.config_path,
+        "prefix": prefix,
+        "job_id": str(job_payload["job_id"]),
+    }
+    if deps.start_scan_job_thread is not None:
+        deps.start_scan_job_thread(**thread_kwargs)
+    else:
+        thread = threading.Thread(
+            target=deps.run_scan_job,
+            kwargs=thread_kwargs,
+            name=f"scan-job-{job_payload['job_id']}",
+        )
+        thread.start()
     return job_payload
 
 
@@ -714,10 +719,12 @@ def calibration_queue_worker_loop(
         config_path: Any,
         deps: CalibrationQueueRuntimeDeps,
         logger: Any,
+        stop_event: threading.Event,
 ) -> None:
     run_supervised_worker_loop(
         process_once_fn=lambda: process_calibration_queue_once(config_path=config_path, deps=deps),
         poll_seconds=deps.calibration_queue_poll_seconds,
+        stop_event=stop_event,
         logger=logger,
         failure_message="Calibration queue worker pass failed",
     )

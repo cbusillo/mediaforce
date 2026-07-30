@@ -39,15 +39,15 @@ class WorkerLeadershipLease:
             return
         self._handle = None
         try:
+            try:
+                self.metadata_path.unlink()
+            except FileNotFoundError:
+                pass
             import fcntl
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
-        try:
-            self.metadata_path.unlink()
-        except FileNotFoundError:
-            pass
 
     def owner_metadata(self) -> dict[str, Any] | None:
         if not self.metadata_path.exists():

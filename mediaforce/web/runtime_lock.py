@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 import errno
 import fcntl
 import hashlib
@@ -8,6 +12,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import threading
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.utils import filesystem_collision_key
@@ -17,8 +22,82 @@ class MediaforceRuntimeBusyError(RuntimeError):
     pass
 
 
+class MediaforceRuntimeLockOwnershipError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class MediaforceRuntimeLease:
+    namespace_keys: tuple[str, ...]
+    owner_pid: int
+    _active: bool = field(default=False, init=False, repr=False)
+    _state_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+
+    def assert_active(self) -> None:
+        with self._state_lock:
+            active = self._active
+        with _RUNTIME_LEASE_REGISTRY_LOCK:
+            registered = _REGISTERED_RUNTIME_LEASES.get(id(self)) is self
+        if not active or not registered or self.owner_pid != os.getpid():
+            raise MediaforceRuntimeLockOwnershipError(
+                "Mediaforce runtime lock ownership is not active"
+            )
+
+    @contextmanager
+    def bind(self) -> Iterator[MediaforceRuntimeLease]:
+        self.assert_active()
+        binding = _ACTIVE_RUNTIME_LEASE.set(self)
+        try:
+            self.assert_active()
+            yield self
+        finally:
+            _ACTIVE_RUNTIME_LEASE.reset(binding)
+
+    def _activate(self, authority: object) -> None:
+        if authority is not _RUNTIME_LEASE_AUTHORITY:
+            raise MediaforceRuntimeLockOwnershipError(
+                "Mediaforce runtime lease activation is not authorized"
+            )
+        with _RUNTIME_LEASE_REGISTRY_LOCK:
+            _REGISTERED_RUNTIME_LEASES[id(self)] = self
+        with self._state_lock:
+            self._active = True
+
+    def _deactivate(self, authority: object) -> None:
+        if authority is not _RUNTIME_LEASE_AUTHORITY:
+            raise MediaforceRuntimeLockOwnershipError(
+                "Mediaforce runtime lease deactivation is not authorized"
+            )
+        with self._state_lock:
+            self._active = False
+        with _RUNTIME_LEASE_REGISTRY_LOCK:
+            if _REGISTERED_RUNTIME_LEASES.get(id(self)) is self:
+                _REGISTERED_RUNTIME_LEASES.pop(id(self), None)
+
+
 _RUNTIME_NAMESPACE_PORT_MIN = 20_000
 _RUNTIME_NAMESPACE_PORT_SPAN = 29_000
+_RUNTIME_LEASE_AUTHORITY = object()
+_RUNTIME_LEASE_REGISTRY_LOCK = threading.Lock()
+_REGISTERED_RUNTIME_LEASES: dict[int, MediaforceRuntimeLease] = {}
+_ACTIVE_RUNTIME_LEASE: ContextVar[MediaforceRuntimeLease | None] = ContextVar(
+    "mediaforce_active_runtime_lease",
+    default=None,
+)
+
+
+def assert_mediaforce_runtime_lock_held() -> MediaforceRuntimeLease:
+    lease = _ACTIVE_RUNTIME_LEASE.get()
+    if lease is None:
+        raise MediaforceRuntimeLockOwnershipError(
+            "Mediaforce runtime lock ownership is required"
+        )
+    lease.assert_active()
+    return lease
 
 
 def mediaforce_runtime_lock_path(config: MediaforceConfig) -> Path:
@@ -74,8 +153,22 @@ def _runtime_namespace_keys(
     for name in ("config_path", "db_path"):
         value = getattr(config.paths, name, None)
         if value is not None:
-            resolved = Path(value).expanduser().resolve()
+            try:
+                resolved = Path(value).expanduser().resolve()
+            except OSError as exc:
+                raise MediaforceRuntimeBusyError(
+                    f"Mediaforce runtime {name} namespace is unavailable"
+                ) from exc
             keys.add(f"{name}:{filesystem_collision_key(resolved)}")
+            try:
+                identity = resolved.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise MediaforceRuntimeBusyError(
+                    f"Mediaforce runtime {name} identity is unavailable"
+                ) from exc
+            keys.add(f"file:{identity.st_dev}:{identity.st_ino}")
     return tuple(sorted(keys))
 
 
@@ -88,15 +181,19 @@ def _runtime_namespace_port(key: str) -> int:
     )
 
 
+def _runtime_namespace_path_keys(keys: tuple[str, ...]) -> frozenset[str]:
+    return frozenset(key for key in keys if not key.startswith("file:"))
+
+
 def _acquire_runtime_namespace_socket(
-        config: MediaforceConfig,
+        namespace_keys: tuple[str, ...],
         lock_path: Path,
 ) -> tuple[socket.socket, ...]:
     namespace_sockets: list[socket.socket] = []
     try:
         for port in sorted({
             _runtime_namespace_port(key)
-            for key in _runtime_namespace_keys(config, lock_path)
+            for key in namespace_keys
         }):
             namespace_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             namespace_sockets.append(namespace_socket)
@@ -175,13 +272,27 @@ def exclusive_mediaforce_runtime_lock(
         config: MediaforceConfig,
         *,
         owner_payload: Mapping[str, object],
-) -> Iterator[None]:
+) -> Iterator[MediaforceRuntimeLease]:
     lock_path = mediaforce_runtime_lock_path(config)
-    namespace_sockets = _acquire_runtime_namespace_socket(config, lock_path)
+    namespace_keys = _runtime_namespace_keys(config, lock_path)
+    active_lease = _ACTIVE_RUNTIME_LEASE.get()
+    if active_lease is not None and (
+        _runtime_namespace_path_keys(active_lease.namespace_keys)
+        == _runtime_namespace_path_keys(namespace_keys)
+    ):
+        active_lease.assert_active()
+        yield active_lease
+        return
+    namespace_sockets = _acquire_runtime_namespace_socket(
+        namespace_keys,
+        lock_path,
+    )
     directory_descriptor = -1
     lock_descriptor = -1
     directory_locked = False
     parent_identity_valid = True
+    lease: MediaforceRuntimeLease | None = None
+    lease_binding = None
     try:
         lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory_flags = os.O_RDONLY
@@ -219,9 +330,18 @@ def exclusive_mediaforce_runtime_lock(
             lock_file.write("\n")
             lock_file.flush()
             os.fsync(lock_file.fileno())
+            lease = MediaforceRuntimeLease(
+                namespace_keys=namespace_keys,
+                owner_pid=os.getpid(),
+            )
+            lease._activate(_RUNTIME_LEASE_AUTHORITY)
+            lease_binding = _ACTIVE_RUNTIME_LEASE.set(lease)
             try:
-                yield
+                yield lease
             finally:
+                lease._deactivate(_RUNTIME_LEASE_AUTHORITY)
+                if lease_binding is not None:
+                    _ACTIVE_RUNTIME_LEASE.reset(lease_binding)
                 parent_identity_valid = _runtime_lock_parent_identity_matches(
                     lock_path,
                     directory_descriptor,

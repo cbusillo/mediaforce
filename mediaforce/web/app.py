@@ -168,6 +168,7 @@ from mediaforce.web.runtime_lock import (
 )
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
+from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     clear_stale_encoding_items_when_idle as runtime_clear_stale_encoding_items_when_idle, \
     encode_job_heartbeat_loop as runtime_encode_job_heartbeat_loop, \
@@ -321,17 +322,39 @@ CALIBRATION_EXECUTORS = {
 }
 CALIBRATION_SUBMISSIONS: set[str] = set()
 CALIBRATION_SUBMISSIONS_LOCK = threading.Lock()
+CALIBRATION_SUBMISSIONS_CONDITION = threading.Condition(
+    CALIBRATION_SUBMISSIONS_LOCK
+)
 CALIBRATION_QUEUE_PROCESSES: dict[str, ManagedProcessController] = {}
 CALIBRATION_QUEUE_PROCESSES_LOCK = threading.Lock()
-CALIBRATION_QUEUE_WORKER_LOCK = threading.Lock()
-CALIBRATION_QUEUE_WORKER_STARTED = False
 ENCODE_QUEUE_PROCESS = ManagedProcessController()
 ENCODE_QUEUE_PROCESSES: dict[str, ManagedProcessController] = {}
 ENCODE_QUEUE_PROCESSES_LOCK = threading.Lock()
-ENCODE_QUEUE_WORKER_LOCK = threading.Lock()
-ENCODE_QUEUE_WORKER_STARTED = False
+ENCODE_QUEUE_THREADS: dict[str, threading.Thread] = {}
+ENCODE_QUEUE_THREADS_CONDITION = threading.Condition()
+SCAN_JOB_THREADS: dict[str, threading.Thread] = {}
+SCAN_JOB_THREADS_CONDITION = threading.Condition()
+PERIODIC_CLEANUP_THREADS: set[threading.Thread] = set()
+PERIODIC_CLEANUP_THREADS_CONDITION = threading.Condition()
 BACKGROUND_WORKER_LEASES: dict[Path, WorkerLeadershipLease] = {}
 BACKGROUND_WORKER_LEASES_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundWorkerRuntime:
+    lease: WorkerLeadershipLease
+    handles: tuple[SupervisedWorkerHandle, ...]
+
+    def stop(self) -> None:
+        for handle in self.handles:
+            handle.stop()
+
+    def join(self) -> None:
+        for handle in self.handles:
+            handle.join()
+
+    def release(self) -> None:
+        self.lease.release()
 
 
 _parse_audio_bitrate_kbps = runtime_parse_audio_bitrate_kbps
@@ -449,6 +472,7 @@ def create_app(config_path: Path | None = None) -> FastAPI:
     config = load_config(config_path or DEFAULT_CONFIG_PATH)
     advisor_routing = advisor_routing_from_config(config)
     cleanup_lock = threading.Lock()
+    shutdown_event = threading.Event()
     evidence_runner = BoundedEvidenceRunner(config.paths.config_path)
     review_dir = config.paths.review_dir
 
@@ -458,51 +482,72 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             config,
             owner_payload=_lifespan_owner_payload(config),
         ):
-            migrate_config_state(config)
-            review_dir.mkdir(parents=True, exist_ok=True)
-            threading.Thread(
-                target=purge_transient_artifacts,
-                args=(config,),
-                kwargs={"force": True},
-                name="transient-cleanup",
-                daemon=True,
-            ).start()
-            threading.Thread(
-                target=_refresh_metric_support,
-                name="metric-support-refresh",
-                daemon=True,
-            ).start()
-            with open_db(config.paths.db_path) as connection:
-                try:
-                    backfill_result = backfill_quality_search_observations(
-                        connection,
-                        as_of=datetime.now(UTC),
-                    )
-                    connection.commit()
-                    if backfill_result.inserted:
-                        LOGGER.info(
-                            "Backfilled %s accepted quality-search observations.",
-                            backfill_result.inserted,
-                        )
-                except Exception:
-                    connection.rollback()
-                    LOGGER.exception("Quality-search observation backfill failed; it will retry at next startup.")
-                repaired_host_rows = repair_persisted_encode_job_hosts(connection)
-                if repaired_host_rows:
-                    LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)
-                ensure_queue_state(connection, updated_at=_now_iso())
-                ensure_background_work_state(connection, updated_at=_now_iso())
-                ensure_evidence_queue_state(connection, updated_at=_now_iso())
-                _recover_calibration_jobs(connection, config)
-                _recover_encode_queue(connection, config)
-            _start_background_workers(config)
-            _safe_collect_host_statuses(config)
+            startup_threads: list[threading.Thread] = []
+            background_runtime: BackgroundWorkerRuntime | None = None
             try:
+                shutdown_event.clear()
+                migrate_config_state(config)
+                review_dir.mkdir(parents=True, exist_ok=True)
+                for thread in (
+                    threading.Thread(
+                        target=purge_transient_artifacts,
+                        args=(config,),
+                        kwargs={"force": True},
+                        name="transient-cleanup",
+                    ),
+                    threading.Thread(
+                        target=_refresh_metric_support,
+                        name="metric-support-refresh",
+                    ),
+                ):
+                    thread.start()
+                    startup_threads.append(thread)
+                with open_db(config.paths.db_path) as connection:
+                    try:
+                        backfill_result = backfill_quality_search_observations(
+                            connection,
+                            as_of=datetime.now(UTC),
+                        )
+                        connection.commit()
+                        if backfill_result.inserted:
+                            LOGGER.info(
+                                "Backfilled %s accepted quality-search observations.",
+                                backfill_result.inserted,
+                            )
+                    except Exception:
+                        connection.rollback()
+                        LOGGER.exception("Quality-search observation backfill failed; it will retry at next startup.")
+                    repaired_host_rows = repair_persisted_encode_job_hosts(connection)
+                    if repaired_host_rows:
+                        LOGGER.warning("Repaired %s persisted encode job host payloads.", repaired_host_rows)
+                    ensure_queue_state(connection, updated_at=_now_iso())
+                    ensure_background_work_state(connection, updated_at=_now_iso())
+                    ensure_evidence_queue_state(connection, updated_at=_now_iso())
+                    _recover_calibration_jobs(connection, config)
+                    _recover_encode_queue(connection, config)
+                background_runtime = _start_background_workers(config)
+                _safe_collect_host_statuses(config)
                 yield
             finally:
+                shutdown_event.set()
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
                 _cancel_active_encode_processes()
+                if background_runtime is not None:
+                    background_runtime.stop()
+                    background_runtime.join()
+                for controller in _active_calibration_process_controllers():
+                    controller.cancel()
+                _cancel_active_encode_processes()
+                _wait_for_calibration_submissions()
+                _wait_for_encode_queue_threads()
+                _wait_for_scan_job_threads()
+                evidence_runner.join()
+                _wait_for_periodic_cleanup_threads()
+                for thread in startup_threads:
+                    thread.join()
+                if background_runtime is not None:
+                    background_runtime.release()
 
     app = FastAPI(title="Mediaforce Calibration Bench", lifespan=_app_lifespan)
     app.mount(
@@ -535,7 +580,11 @@ def create_app(config_path: Path | None = None) -> FastAPI:
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         if _request_triggers_periodic_cleanup(request.method):
-            _run_periodic_cleanup(config, cleanup_lock)
+            _run_periodic_cleanup(
+                config,
+                cleanup_lock,
+                shutdown_event=shutdown_event,
+            )
         return await call_next(request)
 
     def _settings_page_payload(
@@ -3371,6 +3420,7 @@ def _job_runtime_deps() -> JobRuntimeDeps:
         scan_interrupted_error=SCAN_INTERRUPTED_ERROR,
         save_catalog_signature=_save_catalog_signature,
         reset_folder_card_cache=_reset_folder_card_cache,
+        start_scan_job_thread=_start_scan_job_thread,
     )
 
 
@@ -3951,26 +4001,32 @@ def _dispatch_calibration_job(config: MediaforceConfig, job_payload: dict[str, A
     runtime_dispatch_calibration_job(config, job_payload, _calibration_queue_runtime_deps())
 
 
-def _start_calibration_queue_worker(config: MediaforceConfig) -> None:
-    global CALIBRATION_QUEUE_WORKER_STARTED
-    with CALIBRATION_QUEUE_WORKER_LOCK:
-        if CALIBRATION_QUEUE_WORKER_STARTED:
-            return
-        thread = threading.Thread(
-            target=_calibration_queue_worker_loop,
-            kwargs={"config_path": config.paths.config_path},
-            daemon=True,
-            name="calibration-queue-worker",
-        )
-        thread.start()
-        CALIBRATION_QUEUE_WORKER_STARTED = True
+def _start_calibration_queue_worker(
+        config: MediaforceConfig,
+) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_calibration_queue_worker_loop,
+        kwargs={
+            "config_path": config.paths.config_path,
+            "stop_event": stop_event,
+        },
+        name="calibration-queue-worker",
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
 
 
-def _calibration_queue_worker_loop(*, config_path: Path) -> None:
+def _calibration_queue_worker_loop(
+        *,
+        config_path: Path,
+        stop_event: threading.Event,
+) -> None:
     runtime_calibration_queue_worker_loop(
         config_path=config_path,
         deps=_calibration_queue_runtime_deps(),
         logger=LOGGER,
+        stop_event=stop_event,
     )
 
 
@@ -3979,8 +4035,15 @@ def _process_calibration_queue_once(*, config_path: Path) -> None:
 
 
 def _mark_calibration_submission_complete(job_id: str) -> None:
-    with CALIBRATION_SUBMISSIONS_LOCK:
+    with CALIBRATION_SUBMISSIONS_CONDITION:
         CALIBRATION_SUBMISSIONS.discard(job_id)
+        CALIBRATION_SUBMISSIONS_CONDITION.notify_all()
+
+
+def _wait_for_calibration_submissions() -> None:
+    with CALIBRATION_SUBMISSIONS_CONDITION:
+        while CALIBRATION_SUBMISSIONS:
+            CALIBRATION_SUBMISSIONS_CONDITION.wait()
 
 
 def _register_calibration_process_controller(job_id: str, controller: ManagedProcessController) -> None:
@@ -4084,15 +4147,20 @@ def _summarize_calibration_result(calibration_payload: dict[str, Any]) -> dict[s
     return runtime_summarize_calibration_result(calibration_payload)
 
 
-def _start_encode_queue_worker(config: MediaforceConfig) -> None:
-    global ENCODE_QUEUE_WORKER_STARTED
-    with ENCODE_QUEUE_WORKER_LOCK:
-        if ENCODE_QUEUE_WORKER_STARTED:
-            return
-        thread = threading.Thread(target=_encode_queue_worker_loop, kwargs={"config_path": config.paths.config_path},
-                                  daemon=True)
-        thread.start()
-        ENCODE_QUEUE_WORKER_STARTED = True
+def _start_encode_queue_worker(
+        config: MediaforceConfig,
+) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_encode_queue_worker_loop,
+        kwargs={
+            "config_path": config.paths.config_path,
+            "stop_event": stop_event,
+        },
+        name="encode-queue-worker",
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
 
 
 def _background_worker_lease(config: MediaforceConfig) -> WorkerLeadershipLease:
@@ -4105,10 +4173,12 @@ def _background_worker_lease(config: MediaforceConfig) -> WorkerLeadershipLease:
         return lease
 
 
-def _acquire_background_worker_leadership(config: MediaforceConfig) -> bool:
+def _acquire_background_worker_leadership(
+        config: MediaforceConfig,
+) -> WorkerLeadershipLease | None:
     lease = _background_worker_lease(config)
     if lease.acquire():
-        return True
+        return lease
     owner = lease.owner_metadata() or {}
     owner_copy = ", ".join(
         f"{key}={owner[key]}"
@@ -4119,15 +4189,27 @@ def _acquire_background_worker_leadership(config: MediaforceConfig) -> bool:
         LOGGER.warning("Background workers disabled; lock %s is already held by %s.", lease.lock_path, owner_copy)
     else:
         LOGGER.warning("Background workers disabled; lock %s is already held by another process.", lease.lock_path)
-    return False
+    return None
 
 
-def _start_background_workers(config: MediaforceConfig) -> bool:
-    if not _acquire_background_worker_leadership(config):
-        return False
-    _start_calibration_queue_worker(config)
-    _start_encode_queue_worker(config)
-    return True
+def _start_background_workers(
+        config: MediaforceConfig,
+) -> BackgroundWorkerRuntime | None:
+    lease = _acquire_background_worker_leadership(config)
+    if lease is None:
+        return None
+    handles: list[SupervisedWorkerHandle] = []
+    try:
+        handles.append(_start_calibration_queue_worker(config))
+        handles.append(_start_encode_queue_worker(config))
+    except BaseException:
+        for handle in handles:
+            handle.stop()
+        for handle in handles:
+            handle.join()
+        lease.release()
+        raise
+    return BackgroundWorkerRuntime(lease=lease, handles=tuple(handles))
 
 
 def _reset_background_worker_leadership_for_tests() -> None:
@@ -4197,8 +4279,16 @@ def _sweep_orphaned_encode_processes(config: MediaforceConfig, *, prefixes: list
             LOGGER.warning("Orphan encode sweep failed for %s: %s", host_label, exc)
 
 
-def _encode_queue_worker_loop(*, config_path: Path) -> None:
-    runtime_encode_queue_worker_loop(config_path=config_path, deps=_encode_queue_runtime_deps())
+def _encode_queue_worker_loop(
+        *,
+        config_path: Path,
+        stop_event: threading.Event,
+) -> None:
+    runtime_encode_queue_worker_loop(
+        config_path=config_path,
+        deps=_encode_queue_runtime_deps(),
+        stop_event=stop_event,
+    )
 
 
 def _process_encode_queue_once(*, config_path: Path) -> None:
@@ -4226,6 +4316,33 @@ def _active_encode_process_controllers() -> list[ManagedProcessController]:
         return list(ENCODE_QUEUE_PROCESSES.values())
 
 
+def _register_encode_queue_thread(
+        job_id: str,
+        thread: threading.Thread,
+) -> None:
+    with ENCODE_QUEUE_THREADS_CONDITION:
+        existing = ENCODE_QUEUE_THREADS.get(job_id)
+        if existing is not None and existing.is_alive():
+            raise RuntimeError(f"Encode queue job {job_id} is already running")
+        ENCODE_QUEUE_THREADS[job_id] = thread
+
+
+def _unregister_encode_queue_thread(
+        job_id: str,
+        thread: threading.Thread,
+) -> None:
+    with ENCODE_QUEUE_THREADS_CONDITION:
+        if ENCODE_QUEUE_THREADS.get(job_id) is thread:
+            ENCODE_QUEUE_THREADS.pop(job_id, None)
+            ENCODE_QUEUE_THREADS_CONDITION.notify_all()
+
+
+def _wait_for_encode_queue_threads() -> None:
+    with ENCODE_QUEUE_THREADS_CONDITION:
+        while ENCODE_QUEUE_THREADS:
+            ENCODE_QUEUE_THREADS_CONDITION.wait()
+
+
 def _cancel_active_encode_processes() -> None:
     for controller in _active_encode_process_controllers():
         controller.cancel()
@@ -4238,12 +4355,13 @@ def _dispatch_encode_job(*, config_path: Path, job_id: str) -> None:
     thread = threading.Thread(
         target=_run_encode_job,
         kwargs={"config_path": config_path, "job_id": job_id, "process_controller": controller},
-        daemon=True,
         name=f"encode-job-{job_id}",
     )
     try:
+        _register_encode_queue_thread(job_id, thread)
         thread.start()
     except Exception:
+        _unregister_encode_queue_thread(job_id, thread)
         _unregister_encode_process_controller(job_id)
         raise
 
@@ -4268,18 +4386,37 @@ def _run_encode_job(
     finally:
         if process_controller is not None:
             _unregister_encode_process_controller(job_id)
+        _unregister_encode_queue_thread(job_id, threading.current_thread())
 
 
-def _run_periodic_cleanup(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:
+def _run_periodic_cleanup(
+        config: MediaforceConfig,
+        cleanup_lock: threading.Lock,
+        *,
+        shutdown_event: threading.Event | None = None,
+) -> None:
+    if shutdown_event is not None and shutdown_event.is_set():
+        return
     if not cleanup_lock.acquire(blocking=False):
+        return
+    if shutdown_event is not None and shutdown_event.is_set():
+        cleanup_lock.release()
         return
     thread = threading.Thread(
         target=_run_periodic_cleanup_task,
         args=(config, cleanup_lock),
         name="mediaforce-periodic-cleanup",
-        daemon=True,
     )
-    thread.start()
+    with PERIODIC_CLEANUP_THREADS_CONDITION:
+        PERIODIC_CLEANUP_THREADS.add(thread)
+    try:
+        thread.start()
+    except BaseException:
+        with PERIODIC_CLEANUP_THREADS_CONDITION:
+            PERIODIC_CLEANUP_THREADS.discard(thread)
+            PERIODIC_CLEANUP_THREADS_CONDITION.notify_all()
+        cleanup_lock.release()
+        raise
 
 
 def _request_triggers_periodic_cleanup(method: str) -> bool:
@@ -4291,6 +4428,15 @@ def _run_periodic_cleanup_task(config: MediaforceConfig, cleanup_lock: threading
         purge_transient_artifacts(config)
     finally:
         cleanup_lock.release()
+        with PERIODIC_CLEANUP_THREADS_CONDITION:
+            PERIODIC_CLEANUP_THREADS.discard(threading.current_thread())
+            PERIODIC_CLEANUP_THREADS_CONDITION.notify_all()
+
+
+def _wait_for_periodic_cleanup_threads() -> None:
+    with PERIODIC_CLEANUP_THREADS_CONDITION:
+        while PERIODIC_CLEANUP_THREADS:
+            PERIODIC_CLEANUP_THREADS_CONDITION.wait()
 
 
 def _snapshot_staged_artifact(connection: DBClient, library_item_id: int) -> dict[str, Any] | None:
@@ -4307,8 +4453,56 @@ def _remove_path(path: Path | None) -> None:
     runtime_remove_path(path)
 
 
+def _start_scan_job_thread(
+        *,
+        config_path: Path,
+        prefix: str | None,
+        job_id: str,
+) -> None:
+    thread = threading.Thread(
+        target=_run_scan_job,
+        kwargs={
+            "config_path": config_path,
+            "prefix": prefix,
+            "job_id": job_id,
+        },
+        name=f"scan-job-{job_id}",
+    )
+    with SCAN_JOB_THREADS_CONDITION:
+        existing = SCAN_JOB_THREADS.get(job_id)
+        if existing is not None and existing.is_alive():
+            raise RuntimeError(f"Scan job {job_id} is already running")
+        SCAN_JOB_THREADS[job_id] = thread
+    try:
+        thread.start()
+    except BaseException:
+        _unregister_scan_job_thread(job_id, thread)
+        raise
+
+
+def _unregister_scan_job_thread(job_id: str, thread: threading.Thread) -> None:
+    with SCAN_JOB_THREADS_CONDITION:
+        if SCAN_JOB_THREADS.get(job_id) is thread:
+            SCAN_JOB_THREADS.pop(job_id, None)
+            SCAN_JOB_THREADS_CONDITION.notify_all()
+
+
+def _wait_for_scan_job_threads() -> None:
+    with SCAN_JOB_THREADS_CONDITION:
+        while SCAN_JOB_THREADS:
+            SCAN_JOB_THREADS_CONDITION.wait()
+
+
 def _run_scan_job(*, config_path: Path, prefix: str | None, job_id: str) -> None:
-    runtime_run_scan_job(config_path=config_path, prefix=prefix, job_id=job_id, deps=_job_runtime_deps())
+    try:
+        runtime_run_scan_job(
+            config_path=config_path,
+            prefix=prefix,
+            job_id=job_id,
+            deps=_job_runtime_deps(),
+        )
+    finally:
+        _unregister_scan_job_thread(job_id, threading.current_thread())
 
 
 def _run_calibration_job(

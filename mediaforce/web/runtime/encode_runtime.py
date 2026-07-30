@@ -1852,10 +1852,16 @@ def encode_job_schedule_deadline_loop(
         process_controller.cancel(ScheduleWindowClosedError(SCHEDULE_CLOSE_ERROR_MESSAGE))
 
 
-def encode_queue_worker_loop(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
+def encode_queue_worker_loop(
+        *,
+        config_path: Path,
+        deps: EncodeQueueRuntimeDeps,
+        stop_event: threading.Event,
+) -> None:
     run_supervised_worker_loop(
         process_once_fn=lambda: process_encode_queue_once(config_path=config_path, deps=deps),
         poll_seconds=deps.encode_queue_poll_seconds,
+        stop_event=stop_event,
         logger=deps.logger,
         failure_message="Encode queue worker pass failed",
     )
@@ -2239,7 +2245,6 @@ def run_encode_job(
             "process_controller": process_controller,
             "deps": deps,
         },
-        daemon=True,
         name=f"encode-heartbeat-{job_id}",
     )
     heartbeat_thread.start()
@@ -2253,7 +2258,6 @@ def run_encode_job(
                 "stop_event": schedule_deadline_stop,
                 "process_controller": process_controller,
             },
-            daemon=True,
             name=f"encode-schedule-deadline-{job_id}",
         )
         schedule_deadline_thread.start()
@@ -2285,7 +2289,7 @@ def run_encode_job(
             )
         schedule_deadline_stop.set()
         if schedule_deadline_thread is not None:
-            schedule_deadline_thread.join(timeout=1.0)
+            schedule_deadline_thread.join()
         process_controller.throw_if_cancelled()
         final_status = "completed"
     except ScheduleWindowClosedError:
@@ -2300,14 +2304,14 @@ def run_encode_job(
     finally:
         schedule_deadline_stop.set()
         if schedule_deadline_thread is not None:
-            schedule_deadline_thread.join(timeout=1.0)
+            schedule_deadline_thread.join()
         if started_host_for_job and not _host_has_other_running_jobs(config, job_id, job.get("host")):
             try:
                 deps.stop_encode_host_if_configured(config, job.get("host"))
             except Exception as exc:
                 deps.logger.warning("Encode host stop command failed for %s: %s", job_id, exc)
         heartbeat_stop.set()
-        heartbeat_thread.join(timeout=1.0)
+        heartbeat_thread.join()
         with open_db(config.paths.db_path) as connection:
             job = load_encode_job(connection, job_id)
             if job is not None:

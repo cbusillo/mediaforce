@@ -184,7 +184,6 @@ def _run_evidence_claim(
             "stop_event": heartbeat_stop,
             "deps": deps,
         },
-        daemon=True,
         name=f"evidence-heartbeat-{claim.library_item_id}-{claim.evidence_kind}",
     )
     heartbeat_thread.start()
@@ -222,7 +221,7 @@ def _run_evidence_claim(
         return
     finally:
         heartbeat_stop.set()
-        heartbeat_thread.join(timeout=1.0)
+        heartbeat_thread.join()
         process_controller.reset()
 
     final_availability, final_fingerprint = _source_fingerprint(config, claim, source_path)

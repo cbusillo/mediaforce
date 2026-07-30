@@ -101,7 +101,6 @@ class _CalibrationTelemetry:
         self.thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"calibration-heartbeat-{self.job_id[:8]}",
-            daemon=True,
         )
         self.thread.start()
 
