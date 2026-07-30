@@ -143,6 +143,7 @@ from mediaforce.web.runtime_lock import (
     exclusive_mediaforce_runtime_lock,
     mediaforce_runtime_lock_path,
     mediaforce_runtime_lock_path_for_web_state_dir,
+    reserve_mediaforce_database_identity,
 )
 
 
@@ -895,6 +896,7 @@ def run_av1_validation_derivation_assignment(
             },
         ):
             migrate_config_state(config)
+            reserve_mediaforce_database_identity(config)
             return _run_av1_validation_derivation_assignment_locked(
                 config=config,
                 manifest=manifest,
@@ -1374,6 +1376,7 @@ def finalize_av1_validation_derivation_candidate_lock(
             },
         ):
             migrate_config_state(config)
+            reserve_mediaforce_database_identity(config)
             artifact_root = _validated_av1_validation_derivation_artifact_root(
                 config=config,
                 plan=plan,
@@ -1520,6 +1523,7 @@ def load_verified_av1_validation_derivation_candidate_lock(
             },
         ):
             migrate_config_state(config)
+            reserve_mediaforce_database_identity(config)
             artifact_root = _validated_av1_validation_derivation_artifact_root(
                 config=config,
                 plan=plan,
@@ -1636,6 +1640,7 @@ def record_av1_validation_derivation_visual_verdict(
             },
         ):
             migrate_config_state(config)
+            reserve_mediaforce_database_identity(config)
             try:
                 return _record_av1_validation_derivation_visual_verdict_locked(
                     config=config,

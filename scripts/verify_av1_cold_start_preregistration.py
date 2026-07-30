@@ -97,6 +97,7 @@ from mediaforce.web.runtime import (
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
+    reserve_mediaforce_database_identity,
 )
 from mediaforce.tuning.av1_validation_partition import (
     AV1ValidationPartitionError,
@@ -342,6 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     owner_payload={"purpose": "av1-partition-key-create"},
                 ):
                     migrate_config_state(config)
+                    reserve_mediaforce_database_identity(config)
                     token_key_id, created = ensure_av1_validation_partition_key(
                         args.key
                     )
@@ -464,6 +466,7 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                 owner_payload={"purpose": "av1-partition-build"},
             ):
                 migrate_config_state(config)
+                reserve_mediaforce_database_identity(config)
                 with open_readonly_db(config.paths.db_path) as connection:
                     inventory = load_av1_validation_partition_inventory(
                         connection,
@@ -555,6 +558,7 @@ def _run_derivation_action(
                 },
             ):
                 migrate_config_state(config)
+                reserve_mediaforce_database_identity(config)
                 return _run_derivation_action_body(
                     args,
                     locked_config=config,

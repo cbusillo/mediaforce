@@ -3,13 +3,16 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+import ctypes
 from dataclasses import dataclass, field
+import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import sys
 import threading
 
 from mediaforce.core.config import MediaforceConfig
@@ -30,6 +33,11 @@ class MediaforceRuntimeLease:
     owner_pid: int
     _active: bool = field(default=False, init=False, repr=False)
     _state_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+    _extension_lock: threading.Lock = field(
         default_factory=threading.Lock,
         init=False,
         repr=False,
@@ -60,75 +68,56 @@ class MediaforceRuntimeLease:
         finally:
             _ACTIVE_RUNTIME_LEASE.reset(binding)
 
-    def extend_db_inode_reservation(self, config: MediaforceConfig) -> None:
-        """Acquire file:dev:ino reservation for db_path after it has been materialized.
-
-        Must be called while the runtime lock is active, after the db_path file has been
-        created on disk. Extends the held namespace locks to cover the new inode, ensuring
-        that hardlink aliases to the same database file are detected and blocked.
-        """
+    def reserve_database_identity(
+            self,
+            config: MediaforceConfig,
+            *,
+            create_if_missing: bool,
+    ) -> None:
         self.assert_active()
-        db_path_value = getattr(config.paths, "db_path", None)
-        if db_path_value is None:
-            return
-        try:
-            resolved = Path(db_path_value).expanduser().resolve()
-        except OSError:
-            return
-        try:
-            identity = resolved.stat()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Mediaforce runtime db_path inode is unavailable"
-            ) from exc
-        inode_key = f"file:{identity.st_dev}:{identity.st_ino}"
-        if inode_key in self.namespace_keys:
-            return
-        lock_path = mediaforce_runtime_lock_path(config)
-        try:
-            shared_directory = mediaforce_runtime_reservation_dir(config).expanduser().resolve()
-        except OSError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Mediaforce runtime reservation directory is unavailable"
-            ) from exc
-        try:
-            local_directory = (
-                resolved.parent / _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME
-            ).expanduser().resolve()
-        except OSError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Mediaforce runtime reservation directory is unavailable"
-            ) from exc
-        dirs_by_key: dict[str, Path] = {}
-        for d in (shared_directory, local_directory):
-            dirs_by_key.setdefault(filesystem_collision_key(d), d)
-        new_descriptors: list[int] = []
-        try:
-            for dir_key in sorted(dirs_by_key):
-                directory = dirs_by_key[dir_key]
-                dir_desc = _open_owner_only_runtime_directory(directory)
-                new_descriptors.append(dir_desc)
-                lock_name = _runtime_namespace_lock_name(inode_key)
-                key_dir_desc = _open_runtime_namespace_key_directory(
-                    lock_name,
-                    directory_descriptor=dir_desc,
+        with self._extension_lock:
+            self.assert_active()
+            db_path = config.paths.db_path.expanduser().resolve()
+            try:
+                identity = db_path.stat()
+            except FileNotFoundError:
+                identity = None
+            except OSError as exc:
+                raise MediaforceRuntimeBusyError(
+                    "Mediaforce runtime db_path identity is unavailable"
+                ) from exc
+            if identity is None and not create_if_missing:
+                return
+            inode_key = (
+                f"file:{identity.st_dev}:{identity.st_ino}"
+                if identity is not None
+                else None
+            )
+            if inode_key is not None and inode_key in self.namespace_keys:
+                return
+            descriptor = _open_runtime_direct_file_lock(
+                _RuntimeDirectFileLock(
+                    label="db_path",
+                    path=db_path,
+                    device=identity.st_dev if identity is not None else None,
+                    inode=identity.st_ino if identity is not None else None,
+                    create_if_missing=True,
+                    database_identity_lock=True,
+                ),
+                lock_path=mediaforce_runtime_lock_path(config),
+            )
+            try:
+                descriptor_identity = os.fstat(descriptor)
+                inode_key = (
+                    f"file:{descriptor_identity.st_dev}:{descriptor_identity.st_ino}"
                 )
-                new_descriptors.append(key_dir_desc)
-                _acquire_nonblocking_lock(key_dir_desc, lock_path=lock_path)
-                lock_desc = _open_runtime_namespace_lock_file(
-                    directory_descriptor=key_dir_desc,
+                self._extra_descriptors.append(descriptor)
+                self.namespace_keys = tuple(
+                    sorted({*self.namespace_keys, inode_key})
                 )
-                new_descriptors.append(lock_desc)
-                _acquire_nonblocking_lock(lock_desc, lock_path=lock_path)
-            self._extra_descriptors.extend(new_descriptors)
-            new_descriptors = []
-            self.namespace_keys = (*self.namespace_keys, inode_key)
-        except BaseException:
-            for d in reversed(new_descriptors):
-                os.close(d)
-            raise
+            except BaseException:
+                os.close(descriptor)
+                raise
 
     def _activate(self, authority: object) -> None:
         if authority is not _RUNTIME_LEASE_AUTHORITY:
@@ -154,6 +143,7 @@ class MediaforceRuntimeLease:
 
 _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME = ".mediaforce-runtime-reservations"
 _RUNTIME_NAMESPACE_LOCK_FILE_NAME = "lock"
+_RUNTIME_DATABASE_LOCK_OFFSET = 1 << 62
 _RUNTIME_LEASE_AUTHORITY = object()
 _RUNTIME_LEASE_REGISTRY_LOCK = threading.Lock()
 _REGISTERED_RUNTIME_LEASES: dict[int, MediaforceRuntimeLease] = {}
@@ -171,6 +161,17 @@ def assert_mediaforce_runtime_lock_held() -> MediaforceRuntimeLease:
         )
     lease.assert_active()
     return lease
+
+
+def reserve_mediaforce_database_identity(
+        config: MediaforceConfig,
+        *,
+        create_if_missing: bool = False,
+) -> None:
+    assert_mediaforce_runtime_lock_held().reserve_database_identity(
+        config,
+        create_if_missing=create_if_missing,
+    )
 
 
 def mediaforce_runtime_lock_path(config: MediaforceConfig) -> Path:
@@ -228,12 +229,100 @@ def _acquire_nonblocking_lock(
         ) from exc
 
 
+class _DarwinFileLock(ctypes.Structure):
+    _fields_ = [
+        ("l_start", ctypes.c_longlong),
+        ("l_len", ctypes.c_longlong),
+        ("l_pid", ctypes.c_int),
+        ("l_type", ctypes.c_short),
+        ("l_whence", ctypes.c_short),
+    ]
+
+
+class _LinuxFileLock(ctypes.Structure):
+    _fields_ = [
+        ("l_type", ctypes.c_short),
+        ("l_whence", ctypes.c_short),
+        ("l_start", ctypes.c_longlong),
+        ("l_len", ctypes.c_longlong),
+        ("l_pid", ctypes.c_int),
+    ]
+
+
+def _database_identity_lock_payload() -> bytes:
+    if sys.platform == "darwin":
+        if ctypes.sizeof(_DarwinFileLock) != 24:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime database identity lock layout is invalid"
+            )
+        lock = _DarwinFileLock(
+            l_start=_RUNTIME_DATABASE_LOCK_OFFSET,
+            l_len=1,
+            l_pid=0,
+            l_type=fcntl.F_WRLCK,
+            l_whence=os.SEEK_SET,
+        )
+    elif sys.platform.startswith("linux"):
+        expected_size = 32 if ctypes.sizeof(ctypes.c_void_p) == 8 else 24
+        if ctypes.sizeof(_LinuxFileLock) != expected_size:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime database identity lock layout is invalid"
+            )
+        lock = _LinuxFileLock(
+            l_type=fcntl.F_WRLCK,
+            l_whence=os.SEEK_SET,
+            l_start=_RUNTIME_DATABASE_LOCK_OFFSET,
+            l_len=1,
+            l_pid=0,
+        )
+    else:
+        raise MediaforceRuntimeBusyError(
+            "Mediaforce runtime database identity locking is unavailable"
+        )
+    return bytes(lock)
+
+
+def _acquire_database_identity_lock(
+        descriptor: int,
+        *,
+        lock_path: Path,
+) -> None:
+    command = getattr(fcntl, "F_OFD_SETLK", None)
+    if command is None:
+        raise MediaforceRuntimeBusyError(
+            "Mediaforce runtime database identity locking is unavailable"
+        )
+    try:
+        fcntl.fcntl(
+            descriptor,
+            command,
+            _database_identity_lock_payload(),
+        )
+    except OSError as exc:
+        if exc.errno == errno.ENOLCK:
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime database identity lock is unavailable "
+                "(kernel lock table full)"
+            ) from exc
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce runtime database identity lock is unavailable"
+            ) from exc
+        owner = mediaforce_runtime_lock_owner(lock_path)
+        owner_detail = f" ({owner})" if owner else ""
+        raise MediaforceRuntimeBusyError(
+            f"Mediaforce runtime is already active{owner_detail}"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class _RuntimeDirectFileLock:
     label: str
     path: Path
-    device: int
-    inode: int
+    device: int | None
+    inode: int | None
+    create_if_missing: bool
+    database_identity_lock: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,7 +330,6 @@ class _RuntimePathNamespace:
     key: str
     path: Path
     local_reservation_required: bool
-    inode_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +359,7 @@ def _runtime_namespace_state(
             local_reservation_required=True,
         )
     ]
-    direct_file_locks: dict[tuple[int, int], _RuntimeDirectFileLock] = {}
+    direct_file_locks: list[_RuntimeDirectFileLock] = []
     for name in ("config_path", "db_path"):
         value = getattr(config.paths, name, None)
         if value is None:
@@ -292,27 +380,35 @@ def _runtime_namespace_state(
             raise MediaforceRuntimeBusyError(
                 f"Mediaforce runtime {name} identity is unavailable"
             ) from exc
-        inode_key: str | None = None
         if identity is not None:
-            identity_key = (identity.st_dev, identity.st_ino)
-            inode_key = f"file:{identity.st_dev}:{identity.st_ino}"
-            keys.add(inode_key)
-            if name == "config_path":
-                direct_file_locks.setdefault(
-                    identity_key,
-                    _RuntimeDirectFileLock(
-                        label=name,
-                        path=resolved,
-                        device=identity.st_dev,
-                        inode=identity.st_ino,
-                    ),
+            keys.add(f"file:{identity.st_dev}:{identity.st_ino}")
+        if name == "config_path" and identity is not None:
+            direct_file_locks.append(
+                _RuntimeDirectFileLock(
+                    label=name,
+                    path=resolved,
+                    device=identity.st_dev,
+                    inode=identity.st_ino,
+                    create_if_missing=False,
+                    database_identity_lock=False,
                 )
+            )
+        elif name == "db_path" and identity is not None:
+            direct_file_locks.append(
+                _RuntimeDirectFileLock(
+                    label=name,
+                    path=resolved,
+                    device=identity.st_dev,
+                    inode=identity.st_ino,
+                    create_if_missing=False,
+                    database_identity_lock=True,
+                )
+            )
         paths.append(
             _RuntimePathNamespace(
                 key=key,
                 path=resolved,
                 local_reservation_required=name == "db_path",
-                inode_key=inode_key if name == "db_path" else None,
             )
         )
     return _RuntimeNamespaceState(
@@ -320,8 +416,13 @@ def _runtime_namespace_state(
         paths=tuple(sorted(paths, key=lambda item: item.key)),
         direct_file_locks=tuple(
             sorted(
-                direct_file_locks.values(),
-                key=lambda item: (item.device, item.inode, item.label),
+                direct_file_locks,
+                key=lambda item: (
+                    item.path.as_posix(),
+                    item.label,
+                    item.device if item.device is not None else -1,
+                    item.inode if item.inode is not None else -1,
+                ),
             )
         ),
     )
@@ -390,10 +491,10 @@ def _runtime_namespace_reservation_locations(
         add_location(shared_directory, key)
     for path_namespace in namespace_state.paths:
         if path_namespace.local_reservation_required:
-            local_dir = path_namespace.path.parent / _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME
-            add_location(local_dir, path_namespace.key)
-            if path_namespace.inode_key is not None:
-                add_location(local_dir, path_namespace.inode_key)
+            add_location(
+                path_namespace.path.parent / _RUNTIME_NAMESPACE_LOCAL_DIRECTORY_NAME,
+                path_namespace.key,
+            )
     return tuple(
         locations[key]
         for key in sorted(locations)
@@ -569,7 +670,18 @@ def _open_runtime_namespace_lock_file(
         raise
 
 
-def _open_runtime_direct_file_lock(file_lock: _RuntimeDirectFileLock) -> int:
+def _open_runtime_direct_file_lock(
+        file_lock: _RuntimeDirectFileLock,
+        *,
+        lock_path: Path,
+) -> int:
+    if file_lock.create_if_missing:
+        try:
+            file_lock.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                f"Mediaforce runtime {file_lock.label} identity is unavailable"
+            ) from exc
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         directory_flags |= os.O_DIRECTORY
@@ -592,7 +704,12 @@ def _open_runtime_direct_file_lock(file_lock: _RuntimeDirectFileLock) -> int:
             raise MediaforceRuntimeBusyError(
                 f"Mediaforce runtime {file_lock.label} identity is invalid"
             )
-        file_flags = os.O_RDONLY
+        if file_lock.database_identity_lock:
+            file_flags = os.O_RDWR
+            if file_lock.create_if_missing:
+                file_flags |= os.O_CREAT
+        else:
+            file_flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
             file_flags |= os.O_NOFOLLOW
         if hasattr(os, "O_CLOEXEC"):
@@ -600,24 +717,36 @@ def _open_runtime_direct_file_lock(file_lock: _RuntimeDirectFileLock) -> int:
         descriptor = os.open(
             file_lock.path.name,
             file_flags,
+            0o600,
             dir_fd=directory_descriptor,
         )
+        if file_lock.create_if_missing:
+            os.fchmod(descriptor, 0o600)
         descriptor_info = os.fstat(descriptor)
         path_info = os.stat(
             file_lock.path.name,
             dir_fd=directory_descriptor,
             follow_symlinks=False,
         )
-        expected_identity = (file_lock.device, file_lock.inode)
         if (
             not stat.S_ISREG(descriptor_info.st_mode)
             or stat.S_ISLNK(path_info.st_mode)
             or (descriptor_info.st_dev, descriptor_info.st_ino)
-            != expected_identity
-            or (path_info.st_dev, path_info.st_ino) != expected_identity
+            != (path_info.st_dev, path_info.st_ino)
         ):
             raise MediaforceRuntimeBusyError(
                 f"Mediaforce runtime {file_lock.label} identity is invalid"
+            )
+        if file_lock.device is not None and file_lock.inode is not None:
+            expected_identity = (file_lock.device, file_lock.inode)
+            if (descriptor_info.st_dev, descriptor_info.st_ino) != expected_identity:
+                raise MediaforceRuntimeBusyError(
+                    f"Mediaforce runtime {file_lock.label} identity is invalid"
+                )
+        if file_lock.database_identity_lock:
+            _acquire_database_identity_lock(
+                descriptor,
+                lock_path=lock_path,
             )
         return descriptor
     except OSError as exc:
@@ -674,12 +803,16 @@ def _acquire_runtime_namespace_locks(
                     lock_path=lock_path,
                 )
         for file_lock in namespace_state.direct_file_locks:
-            descriptor = _open_runtime_direct_file_lock(file_lock)
-            descriptors.append(descriptor)
-            _acquire_nonblocking_lock(
-                descriptor,
+            descriptor = _open_runtime_direct_file_lock(
+                file_lock,
                 lock_path=lock_path,
             )
+            descriptors.append(descriptor)
+            if not file_lock.database_identity_lock:
+                _acquire_nonblocking_lock(
+                    descriptor,
+                    lock_path=lock_path,
+                )
         return _RuntimeNamespaceLocks(descriptors=tuple(descriptors))
     except BaseException:
         for descriptor in reversed(descriptors):
@@ -833,9 +966,9 @@ def exclusive_mediaforce_runtime_lock(
             finally:
                 try:
                     if lease is not None:
-                        for d in reversed(lease._extra_descriptors):
+                        for descriptor in reversed(lease._extra_descriptors):
                             try:
-                                os.close(d)
+                                os.close(descriptor)
                             except OSError:
                                 pass
                 finally:

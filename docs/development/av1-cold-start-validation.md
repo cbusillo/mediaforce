@@ -437,10 +437,14 @@ reservation directories are owner-only, their lock files are empty and
 owner-only, and runtime shutdown never unlinks either one.
 Each reservation locks both the key directory and its lock file, so removing and
 recreating the lock-file pathname cannot split an active reservation. Existing
-config inodes are also locked directly. Existing database device/inode identity
-is added to the shared hashed reservation set instead of flocking the SQLite
-file, preserving hardlinked-alias exclusion without interfering with SQLite WAL
-locking. The stable configured reservation root covers lock-parent replacement,
+config inodes are also locked directly. Existing databases additionally receive
+a nonblocking open-file-description byte-range lock on one Mediaforce-owned byte
+that is disjoint from SQLite's lock bytes. That inode-bound reservation works
+across hardlink aliases and configured reservation roots without interfering
+with SQLite WAL locking. A missing database is materialized and receives the
+same reservation after legacy state-path migration and before any other database
+work, while the global runtime lock remains held. The stable configured
+reservation root covers lock-parent replacement,
 while descriptor-relative `O_NOFOLLOW` opens and device/inode rechecks protect
 every reservation, direct config lock, and metadata-lock handoff. Unlinking the
 metadata lock, changing configured state paths, or renaming and replacing its

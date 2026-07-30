@@ -44,6 +44,7 @@ from mediaforce.tuning.av1_trait_feasibility import (
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
+    reserve_mediaforce_database_identity,
 )
 
 
@@ -300,6 +301,10 @@ def _run_locked_command(
         config: MediaforceConfig,
 ) -> int:
     migrate_config_state(config)
+    reserve_mediaforce_database_identity(
+        config,
+        create_if_missing=True,
+    )
     purge_transient_artifacts(config)
     default_review_dir = config.paths.review_dir
 

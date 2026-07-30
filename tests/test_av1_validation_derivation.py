@@ -282,7 +282,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "mediaforce.web.runtime.av1_validation_derivation.migrate_config_state",
             ),
             patch(
+                "mediaforce.web.runtime.av1_validation_derivation.reserve_mediaforce_database_identity",
+            ),
+            patch(
                 "scripts.verify_av1_cold_start_preregistration.migrate_config_state",
+            ),
+            patch(
+                "scripts.verify_av1_cold_start_preregistration.reserve_mediaforce_database_identity",
             ),
         ):
             migration_patcher.start()

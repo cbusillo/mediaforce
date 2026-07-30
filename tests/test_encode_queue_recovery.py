@@ -7003,8 +7003,12 @@ raise SystemExit(0)
 """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            parent_db_path = root / "parent.sqlite3"
-            child_db_path = root / "child.sqlite3"
+            parent_root = root / "parent"
+            child_root = root / "child"
+            parent_root.mkdir()
+            child_root.mkdir()
+            parent_db_path = parent_root / "database.sqlite3"
+            child_db_path = child_root / "database.sqlite3"
             parent_config_path = root / "parent.toml"
             child_config_path = root / "child.toml"
             parent_db_path.write_bytes(b"database")
@@ -7071,8 +7075,12 @@ raise SystemExit(0)
 """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            parent_db_path = root / "parent.sqlite3"
-            child_db_path = root / "child.sqlite3"
+            parent_root = root / "parent"
+            child_root = root / "child"
+            parent_root.mkdir()
+            child_root.mkdir()
+            parent_db_path = parent_root / "database.sqlite3"
+            child_db_path = child_root / "database.sqlite3"
             parent_config_path = root / "parent.toml"
             child_config_path = root / "child.toml"
             parent_config_path.write_text("parent", encoding="utf-8")
@@ -7088,11 +7096,14 @@ raise SystemExit(0)
             with runtime_lock_module.exclusive_mediaforce_runtime_lock(
                 parent_config,
                 owner_payload={"purpose": "parent-late-db-probe"},
-            ) as lease:
+            ):
                 self.assertFalse(parent_db_path.exists())
-                parent_db_path.write_bytes(b"database")
+                runtime_lock_module.reserve_mediaforce_database_identity(
+                    parent_config,
+                    create_if_missing=True,
+                )
+                self.assertTrue(parent_db_path.exists())
                 os.link(parent_db_path, child_db_path)
-                lease.extend_db_inode_reservation(parent_config)
                 completed = subprocess.run(
                     [
                         sys.executable,
@@ -7110,11 +7121,10 @@ raise SystemExit(0)
                 )
                 self.assertEqual(completed.returncode, 23, completed.stderr)
 
-    def test_extend_db_inode_reservation_is_idempotent(self) -> None:
+    def test_database_identity_lock_does_not_block_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             db_path = root / "db.sqlite3"
-            db_path.write_bytes(b"database")
             config_path = root / "config.toml"
             config_path.write_text("config", encoding="utf-8")
             config = SimpleNamespace(
@@ -7127,14 +7137,22 @@ raise SystemExit(0)
             )
             with runtime_lock_module.exclusive_mediaforce_runtime_lock(
                 config,
-                owner_payload={"purpose": "idempotent-extend-probe"},
-            ) as lease:
-                lease.extend_db_inode_reservation(config)
-                keys_after_first = lease.namespace_keys
-                lease.extend_db_inode_reservation(config)
-                self.assertEqual(lease.namespace_keys, keys_after_first)
+                owner_payload={"purpose": "sqlite-compatibility-probe"},
+            ):
+                runtime_lock_module.reserve_mediaforce_database_identity(
+                    config,
+                    create_if_missing=True,
+                )
+                with sqlite3.connect(db_path) as connection:
+                    connection.execute("CREATE TABLE probe (value INTEGER NOT NULL)")
+                    connection.execute("INSERT INTO probe VALUES (1)")
+                    connection.commit()
+                    self.assertEqual(
+                        connection.execute("SELECT value FROM probe").fetchone(),
+                        (1,),
+                    )
 
-    def test_extend_db_inode_reservation_noop_when_db_absent(self) -> None:
+    def test_database_identity_lock_fails_closed_when_ofd_locks_are_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config_path = root / "config.toml"
@@ -7147,13 +7165,74 @@ raise SystemExit(0)
                     runtime_reservation_dir=root / "reservations",
                 ),
             )
+            with patch.object(runtime_lock_module.fcntl, "F_OFD_SETLK", None):
+                with self.assertRaisesRegex(
+                    runtime_lock_module.MediaforceRuntimeBusyError,
+                    "database identity locking is unavailable",
+                ):
+                    with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "missing-ofd-lock-probe"},
+                    ):
+                        runtime_lock_module.reserve_mediaforce_database_identity(
+                            config,
+                            create_if_missing=True,
+                        )
+
+    def test_database_identity_reservation_does_not_create_optional_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "absent.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
             with runtime_lock_module.exclusive_mediaforce_runtime_lock(
                 config,
-                owner_payload={"purpose": "absent-db-extend-probe"},
-            ) as lease:
-                initial_keys = lease.namespace_keys
-                lease.extend_db_inode_reservation(config)
-                self.assertEqual(lease.namespace_keys, initial_keys)
+                owner_payload={"purpose": "optional-db-reservation-probe"},
+            ):
+                runtime_lock_module.reserve_mediaforce_database_identity(config)
+                self.assertFalse(db_path.exists())
+
+    def test_database_identity_reservation_preserves_legacy_database_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_database_path = root / "state" / "library.sqlite3"
+            legacy_database_path.parent.mkdir()
+            legacy_database_path.write_bytes(b"legacy-database")
+            paths = ConfigPaths(
+                project_root=root,
+                config_path=root / "config" / "defaults.toml",
+                db_path=root / "runtime" / "library.sqlite3",
+                run_manifest_dir=root / "runtime" / "runs",
+                web_state_dir=root / "runtime" / "web",
+                review_dir=root / "runtime" / "review",
+                runtime_settings_path=root / "runtime" / "runtime-settings.json",
+                runtime_reservation_dir=root / "runtime-reservations",
+            )
+            paths.config_path.parent.mkdir()
+            paths.config_path.write_text("config", encoding="utf-8")
+            config = MediaforceConfig(raw={}, paths=paths)
+
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-database-migration-probe"},
+            ):
+                self.assertFalse(paths.db_path.exists())
+                config_runtime.migrate_config_state(config)
+                runtime_lock_module.reserve_mediaforce_database_identity(config)
+                self.assertEqual(
+                    paths.db_path.read_bytes(),
+                    b"legacy-database",
+                )
+                self.assertFalse(legacy_database_path.exists())
 
     def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
         script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")
@@ -15283,16 +15362,18 @@ raise SystemExit(0)
         calibration_controller.cancel.side_effect = lambda: call_order.append("calibration:cancel")
 
         @contextmanager
-        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[Mock]:
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
             call_order.append("runtime-lock:acquire")
             try:
-                yield Mock()
+                yield
             finally:
                 call_order.append("runtime-lock:release")
 
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
                 "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _tracking_runtime_lock
         ), patch("mediaforce.web.app.migrate_config_state"), patch(
+                "mediaforce.web.app.reserve_mediaforce_database_identity"
+        ), patch(
                 "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
         ), patch(
                 "mediaforce.web.app._refresh_metric_support", metric_refresh_mock
@@ -15365,13 +15446,21 @@ raise SystemExit(0)
         call_order: list[str] = []
 
         @contextmanager
-        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[Mock]:
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
             call_order.append("lock_acquired")
-            yield Mock()
+            yield
             call_order.append("lock_released")
 
         def _tracking_migrate(config: object) -> None:
             call_order.append("migrate_config_state")
+
+        def _tracking_reserve(
+                config: object,
+                *,
+                create_if_missing: bool,
+        ) -> None:
+            self.assertTrue(create_if_missing)
+            call_order.append("reserve_database_identity")
 
         def _tracking_backfill(connection: object, *, as_of: object) -> object:
             call_order.append("backfill_quality_search_observations")
@@ -15381,6 +15470,9 @@ raise SystemExit(0)
                 "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _tracking_runtime_lock
         ), patch(
                 "mediaforce.web.app.migrate_config_state", _tracking_migrate
+        ), patch(
+                "mediaforce.web.app.reserve_mediaforce_database_identity",
+                _tracking_reserve,
         ), patch(
                 "mediaforce.web.app.purge_transient_artifacts"
         ), patch("mediaforce.web.app._refresh_metric_support"), patch(
@@ -15401,10 +15493,12 @@ raise SystemExit(0)
 
         lock_idx = call_order.index("lock_acquired")
         migrate_idx = call_order.index("migrate_config_state")
+        reserve_idx = call_order.index("reserve_database_identity")
         backfill_idx = call_order.index("backfill_quality_search_observations")
         release_idx = call_order.index("lock_released")
         self.assertLess(lock_idx, migrate_idx, "lock must be acquired before migrate_config_state")
-        self.assertLess(migrate_idx, backfill_idx, "migrate_config_state must run before DB operations")
+        self.assertLess(migrate_idx, reserve_idx, "migration must run before database identity reservation")
+        self.assertLess(reserve_idx, backfill_idx, "database identity must be reserved before DB operations")
         self.assertLess(backfill_idx, release_idx, "lock must be held during DB operations")
 
     def test_app_lifespan_logs_busy_runtime_owner_without_reacquiring(self) -> None:

@@ -1099,6 +1099,11 @@ class AV1ValidationPartitionCliTests(unittest.TestCase):
                 ),
                 patch.object(
                     verify_av1_cold_start_preregistration,
+                    "reserve_mediaforce_database_identity",
+                    side_effect=migrate,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
                     "ensure_av1_validation_partition_key",
                     side_effect=create_key,
                 ),

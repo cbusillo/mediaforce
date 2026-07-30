@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -827,7 +828,11 @@ class MovieWorkflowTests(unittest.TestCase):
         lock_held = False
 
         @contextmanager
-        def runtime_lock(_config: MediaforceConfig, *, owner_payload: dict[str, object]):
+        def runtime_lock(
+                _config: MediaforceConfig,
+                *,
+                owner_payload: dict[str, object],
+        ) -> Iterator[None]:
             nonlocal lock_held
             self.assertEqual(owner_payload["purpose"], "mediaforce-cli")
             self.assertEqual(owner_payload["command"], "report")
@@ -843,6 +848,14 @@ class MovieWorkflowTests(unittest.TestCase):
         def migrate(_config: MediaforceConfig) -> None:
             self.assertTrue(lock_held)
 
+        def reserve_database_identity(
+                _config: MediaforceConfig,
+                *,
+                create_if_missing: bool,
+        ) -> None:
+            self.assertTrue(lock_held)
+            self.assertTrue(create_if_missing)
+
         with (
             patch("mediaforce.cli.load_config", return_value=self.config),
             patch(
@@ -850,6 +863,10 @@ class MovieWorkflowTests(unittest.TestCase):
                 side_effect=runtime_lock,
             ),
             patch("mediaforce.cli.migrate_config_state", side_effect=migrate),
+            patch(
+                "mediaforce.cli.reserve_mediaforce_database_identity",
+                side_effect=reserve_database_identity,
+            ),
             patch("mediaforce.cli.purge_transient_artifacts", side_effect=purge),
         ):
             exit_code = cli_main([
