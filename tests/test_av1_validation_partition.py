@@ -41,6 +41,10 @@ from mediaforce.tuning.av1_validation_partition_inventory import (
     av1_validation_partition_source_sha256_resolver,
 )
 from mediaforce.tuning.av1_validation_v2 import load_av1_validation_manifest_v2
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeLockOwnershipError,
+    exclusive_mediaforce_runtime_lock,
+)
 from scripts import verify_av1_cold_start_preregistration
 
 
@@ -87,6 +91,22 @@ class _DescriptorBindingFileIntegrityGuard:
 
 class AV1ValidationPartitionTests(unittest.TestCase):
     def setUp(self) -> None:
+        runtime_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_directory.cleanup)
+        runtime_root = Path(runtime_directory.name)
+        runtime_config = SimpleNamespace(
+            paths=SimpleNamespace(
+                config_path=runtime_root / "config.toml",
+                db_path=runtime_root / "mediaforce.sqlite3",
+                web_state_dir=runtime_root / "state",
+            )
+        )
+        runtime_lock = exclusive_mediaforce_runtime_lock(
+            runtime_config,
+            owner_payload={"purpose": "partition-test"},
+        )
+        runtime_lock.__enter__()
+        self.addCleanup(runtime_lock.__exit__, None, None, None)
         self.manifest = load_av1_validation_manifest_v2(V2_MANIFEST_PATH)
         self.expectations = AV1ValidationPartitionExpectations(
             compatibility_signature="av1vcompat1_test_contract",
@@ -966,6 +986,68 @@ class AV1ValidationPartitionSourceDigestTests(unittest.TestCase):
                     resolver.verify()
                     source_path.write_bytes(b"Z" * len(source_bytes))
                     raise RuntimeError("simulated publication failure")
+
+
+class AV1ValidationPartitionLockOwnershipTests(unittest.TestCase):
+    def test_partition_writers_reject_calls_without_runtime_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            key_path = root / "private" / "partition.key"
+            partition_path = root / "private" / "partition.json"
+
+            with self.assertRaises(MediaforceRuntimeLockOwnershipError):
+                ensure_av1_validation_partition_key(key_path)
+            with self.assertRaises(MediaforceRuntimeLockOwnershipError):
+                write_av1_validation_private_partition(
+                    partition_path,
+                    Mock(spec=AV1ValidationPrivatePartition),
+                )
+
+            self.assertFalse(key_path.parent.exists())
+
+    def test_partition_writers_accept_active_runtime_lock(self) -> None:
+        manifest = load_av1_validation_manifest_v2(V2_MANIFEST_PATH)
+        expectations = AV1ValidationPartitionExpectations(
+            compatibility_signature="av1vcompat1_test_contract",
+            base_policy_signature="av1vbasepolicy1_test_contract",
+            quality_metric="vmaf",
+            quality_target=85.0,
+            minimum_quality_score=80.0,
+        )
+        token_key = b"k" * 32
+        partition = build_av1_validation_private_partition(
+            manifest=manifest,
+            eligibility_attestation_id=manifest.eligibility_attestation_id,
+            eligibility_payload_sha256=manifest.eligibility_payload_sha256,
+            sources=_partition_sources(expectations),
+            expectations=expectations,
+            token_key=token_key,
+            expected_token_key_id=av1_validation_partition_key_id(token_key),
+            selected_at=SELECTED_AT,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / "config.toml",
+                    db_path=root / "mediaforce.sqlite3",
+                    web_state_dir=root / "state",
+                )
+            )
+            key_path = root / "private" / "partition.key"
+            partition_path = root / "private" / "partition.json"
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "partition-writer-test"},
+            ):
+                ensure_av1_validation_partition_key(key_path)
+                write_av1_validation_private_partition(
+                    partition_path,
+                    partition,
+                )
+
+            self.assertTrue(key_path.is_file())
+            self.assertTrue(partition_path.is_file())
 
 
 class AV1ValidationPartitionCliTests(unittest.TestCase):

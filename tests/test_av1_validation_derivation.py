@@ -110,6 +110,9 @@ from mediaforce.web.runtime.av1_validation_derivation import (
 )
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
+    MediaforceRuntimeLease,
+    MediaforceRuntimeLockOwnershipError,
+    exclusive_mediaforce_runtime_lock,
     mediaforce_runtime_lock_path,
 )
 from mediaforce.tuning.av1_cold_start_evaluation import (
@@ -239,11 +242,18 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         runtime_root = Path(runtime_directory.name)
         self.runtime_config = SimpleNamespace(
             paths=SimpleNamespace(
+                config_path=runtime_root / "config.toml",
                 db_path=runtime_root / "mediaforce.sqlite3",
                 review_dir=runtime_root / "review",
                 web_state_dir=runtime_root / "state",
             )
         )
+        runtime_lock = exclusive_mediaforce_runtime_lock(
+            self.runtime_config,
+            owner_payload={"purpose": "derivation-test"},
+        )
+        self.runtime_lease = runtime_lock.__enter__()
+        self.addCleanup(runtime_lock.__exit__, None, None, None)
         toolchain_patcher = patch(
             "mediaforce.web.runtime.av1_validation_derivation.quality_toolchain_identity",
             return_value={
@@ -2671,15 +2681,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
         def write_claim(claim: AV1ValidationDerivationReviewClaim) -> bool:
             barrier.wait()
-            try:
-                write_av1_validation_derivation_review_claim(
-                    self.runtime_artifact_root,
-                    plan=self.plan,
-                    proposal=proposal,
-                    claim=claim,
-                )
-            except AV1ValidationDerivationError:
-                return False
+            with self.runtime_lease.bind():
+                try:
+                    write_av1_validation_derivation_review_claim(
+                        self.runtime_artifact_root,
+                        plan=self.plan,
+                        proposal=proposal,
+                        claim=claim,
+                    )
+                except AV1ValidationDerivationError:
+                    return False
             return True
 
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -8001,6 +8012,66 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 recorded_at=record.observation.recorded_at,
             )
         return observations
+
+
+class AV1ValidationDerivationLockOwnershipTests(unittest.TestCase):
+    def test_forged_runtime_lease_cannot_authorize_writes(self) -> None:
+        forged_lease = MediaforceRuntimeLease(
+            namespace_keys=(),
+            owner_pid=os.getpid(),
+        )
+
+        with self.assertRaises(MediaforceRuntimeLockOwnershipError):
+            with forged_lease.bind():
+                pass
+
+    def test_derivation_writers_reject_calls_without_runtime_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            artifact_path = root / "private" / "artifact.json"
+            binding_path = root / "private" / "attempts"
+
+            with self.assertRaises(MediaforceRuntimeLockOwnershipError):
+                _write_owner_only(artifact_path, b"{}")
+            with self.assertRaises(MediaforceRuntimeLockOwnershipError):
+                _bind_owner_only_directory(
+                    binding_path,
+                    kind="attempts",
+                    binding_id="av1vdplan1_test",
+                    binding_digest="av1vdauth2_test",
+                )
+
+            self.assertFalse(artifact_path.parent.exists())
+
+    def test_derivation_writers_accept_only_active_runtime_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / "config.toml",
+                    db_path=root / "mediaforce.sqlite3",
+                    web_state_dir=root / "state",
+                )
+            )
+            artifact_path = root / "private" / "artifact.json"
+            binding_path = root / "private" / "attempts"
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "derivation-writer-test"},
+            ) as lease:
+                _write_owner_only(artifact_path, b"{}")
+                _bind_owner_only_directory(
+                    binding_path,
+                    kind="attempts",
+                    binding_id="av1vdplan1_test",
+                    binding_digest="av1vdauth2_test",
+                )
+
+            self.assertTrue(artifact_path.is_file())
+            self.assertTrue((binding_path / ".binding").is_file())
+            with self.assertRaises(MediaforceRuntimeLockOwnershipError):
+                with lease.bind():
+                    pass
 
 
 def _observation(

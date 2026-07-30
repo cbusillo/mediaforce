@@ -30,6 +30,7 @@ from mediaforce.tuning.av1_validation_v2 import (
     AV1ValidationV2CellPlan,
     assert_preregistered_av1_validation_manifest_v2,
 )
+from mediaforce.web.runtime_lock import assert_mediaforce_runtime_lock_held
 
 
 AV1_VALIDATION_PARTITION_SCHEMA = "mediaforce.av1_cold_start_private_source_partition"
@@ -923,6 +924,7 @@ def create_av1_validation_partition_key(path: Path) -> str:
 
 
 def ensure_av1_validation_partition_key(path: Path) -> tuple[str, bool]:
+    assert_mediaforce_runtime_lock_held()
     existing_key_id = _existing_av1_validation_partition_key_id(path)
     if existing_key_id is not None:
         return existing_key_id, False
@@ -960,6 +962,7 @@ def write_av1_validation_private_partition(
     *,
     before_publish: Callable[[], None] | None = None,
 ) -> None:
+    assert_mediaforce_runtime_lock_held()
     if _existing_private_partition_matches(path, partition):
         return
     data = serialize_av1_validation_private_partition(partition)
@@ -1014,6 +1017,7 @@ def _write_owner_only_partition_artifact(
         label: str,
         before_publish: Callable[[], None] | None = None,
 ) -> None:
+    assert_mediaforce_runtime_lock_held()
     if not path.name or path.name in {".", ".."}:
         raise AV1ValidationPartitionError(
             f"AV1 {label} name is invalid"
@@ -1153,6 +1157,7 @@ def _write_owner_only_partition_artifact(
 
 
 def _fsync_partition_artifact_parent(path: Path, *, label: str) -> None:
+    assert_mediaforce_runtime_lock_held()
     parent_descriptor = -1
     try:
         _, parent_descriptor = ensure_owner_only_directory(path.parent)

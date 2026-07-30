@@ -54,6 +54,7 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_boundary_compatibility_from_payload,
     content_intent_boundary_observation_integrity_valid,
 )
+from mediaforce.web.runtime_lock import assert_mediaforce_runtime_lock_held
 
 
 AV1_VALIDATION_DERIVATION_PLAN_SCHEMA = "mediaforce.av1_cold_start_derivation_plan"
@@ -5136,6 +5137,7 @@ def _write_owner_only(
         *,
         before_publish: Callable[[], None] | None = None,
 ) -> None:
+    assert_mediaforce_runtime_lock_held()
     if not path.name or path.name in {".", ".."}:
         raise AV1ValidationDerivationError(
             "AV1 private derivation artifact name is invalid"
@@ -5279,6 +5281,7 @@ def _rename_owner_only_exclusive(
         source_name: str,
         destination_name: str,
 ) -> None:
+    assert_mediaforce_runtime_lock_held()
     rename_exclusive(
         source_directory_descriptor=parent_descriptor,
         source_name=source_name,
@@ -5288,10 +5291,12 @@ def _rename_owner_only_exclusive(
 
 
 def _fsync_owner_only_artifact(descriptor: int) -> None:
+    assert_mediaforce_runtime_lock_held()
     fsync_durable_file(descriptor)
 
 
 def _fsync_owner_only_parent(path: Path, label: str) -> None:
+    assert_mediaforce_runtime_lock_held()
     parent_descriptor = -1
     completed = False
     try:
@@ -5321,6 +5326,7 @@ def _fsync_owner_only_parent(path: Path, label: str) -> None:
 
 
 def _ensure_owner_only_directory(path: Path) -> None:
+    assert_mediaforce_runtime_lock_held()
     try:
         _, descriptor = ensure_owner_only_directory(path)
     except FileIntegrityError as exc:
@@ -5351,6 +5357,7 @@ def _bind_owner_only_directory(
         binding_id: str,
         binding_digest: str,
 ) -> None:
+    assert_mediaforce_runtime_lock_held()
     _ensure_owner_only_directory(path)
     payload = {
         "schema": AV1_VALIDATION_DERIVATION_DIRECTORY_BINDING_SCHEMA,
