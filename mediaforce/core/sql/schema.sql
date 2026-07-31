@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS scan_runs
     scan_id          TEXT PRIMARY KEY,
     started_at       TEXT    NOT NULL,
     completed_at     TEXT,
+    status           TEXT    NOT NULL DEFAULT 'running',
+    error            TEXT,
     owner_pid        INTEGER,
     last_progress_at TEXT,
     roots_json       TEXT    NOT NULL,

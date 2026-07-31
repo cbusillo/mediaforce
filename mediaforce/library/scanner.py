@@ -85,12 +85,48 @@ def scan_library(
             roots_json=roots_json,
             scope=scope,
             prefixes_json=json.dumps(normalized_prefixes) if normalized_prefixes else None,
+            status="running",
+            error=None,
         )
     )
     connection.commit()
-    _throw_if_scan_cancelled(process_controller)
-
     stats = ScanStats(scan_id=scan_id)
+    try:
+        _throw_if_scan_cancelled(process_controller)
+        return _execute_scan_library(
+            connection,
+            config,
+            scan_id=scan_id,
+            started_at=started_at,
+            normalized_prefixes=normalized_prefixes,
+            scan_source_roots=scan_source_roots,
+            limit=limit,
+            stats=stats,
+            process_controller=process_controller,
+        )
+    except BaseException as exc:
+        try:
+            mark_scan_run_failed(connection, scan_id, stats=stats, error=exc)
+        except BaseException as cleanup_error:
+            exc.add_note(
+                "Scan run failure state update also failed: "
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
+        raise
+
+
+def _execute_scan_library(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        scan_id: str,
+        started_at: str,
+        normalized_prefixes: list[str],
+        scan_source_roots: dict[str, Path],
+        limit: int | None,
+        stats: ScanStats,
+        process_controller: ManagedProcessController | None,
+) -> ScanStats:
     seen_paths_by_root: dict[str, set[str]] = {}
     reconcilable_roots: set[str] = set()
     pending_writes = 0
@@ -373,14 +409,56 @@ def scan_library(
         .values(
             completed_at=completed_at,
             last_progress_at=completed_at,
+            status="completed",
+            error=None,
             file_count=stats.total_seen,
             reprobed_count=stats.reprobed + stats.discovered,
             unchanged_count=stats.unchanged,
         )
     )
     connection.commit()
-    _throw_if_scan_cancelled(process_controller)
     return stats
+
+
+def mark_scan_run_failed(
+        connection: DBClient,
+        scan_id: str,
+        *,
+        stats: ScanStats | None,
+        error: BaseException | str,
+) -> None:
+    rollback = getattr(connection, "rollback", None)
+    in_transaction = getattr(connection, "in_transaction", None)
+    if callable(rollback) and callable(in_transaction) and in_transaction():
+        rollback()
+    failed_at = timestamp()
+    values: dict[str, Any] = {
+        "completed_at": failed_at,
+        "last_progress_at": failed_at,
+        "status": "failed",
+        "error": _scan_run_error_message(error),
+    }
+    if stats is not None:
+        values.update(
+            file_count=stats.total_seen,
+            reprobed_count=stats.reprobed + stats.discovered,
+            unchanged_count=stats.unchanged,
+        )
+    connection.execute(
+        update(scan_runs)
+        .where(scan_runs.c.scan_id == scan_id)
+        .values(**values)
+    )
+    connection.commit()
+
+
+def _scan_run_error_message(error: BaseException | str) -> str:
+    if isinstance(error, str):
+        return error
+    detail = str(error).strip()
+    if detail:
+        return f"{type(error).__name__}: {detail}"
+    return type(error).__name__
 
 
 def _commit_scan_progress_before_probe(

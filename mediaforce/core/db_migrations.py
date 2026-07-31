@@ -627,6 +627,8 @@ def _bootstrap_legacy_schema(
     _ensure_column(connection, "scan_runs", "prefixes_json", "TEXT")
     _ensure_column(connection, "scan_runs", "owner_pid", "INTEGER")
     _ensure_column(connection, "scan_runs", "last_progress_at", "TEXT")
+    _ensure_column(connection, "scan_runs", "status", "TEXT NOT NULL DEFAULT 'running'")
+    _ensure_column(connection, "scan_runs", "error", "TEXT")
     _ensure_column(connection, "encode_jobs", "bypass_schedule", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "encode_jobs", "last_host_json", "TEXT NOT NULL DEFAULT '{}' ".strip())
     _ensure_column(connection, "encode_jobs", "attempt_count", "INTEGER NOT NULL DEFAULT 0")

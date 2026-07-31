@@ -28,6 +28,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location, run_migrations
 from mediaforce.core.db_migrations import create_engine_for_path
 from mediaforce.core.db_migrations import database_url
@@ -43,7 +44,7 @@ from mediaforce.web.runtime_lock import (
     reserve_mediaforce_database_identity,
 )
 
-CURRENT_DB_REVISION = "20260726_0019"
+CURRENT_DB_REVISION = "20260731_0020"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -815,6 +816,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 }
                 library_columns = {str(column["name"]) for column in inspector.get_columns("library_items")}
                 encode_columns = {str(column["name"]) for column in inspector.get_columns("encode_jobs")}
+                scan_columns = {str(column["name"]) for column in inspector.get_columns("scan_runs")}
                 quality_observation_columns = {
                     str(column["name"])
                     for column in inspector.get_columns("quality_search_observations")
@@ -826,6 +828,9 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertGreaterEqual(len(table_names), 10)
+            self.assertEqual(scan_runs.c.status.server_default.arg, "running")
+            self.assertIn("status", scan_columns)
+            self.assertIn("error", scan_columns)
             self.assertIn("idx_encode_jobs_status_retry_ready", indexes)
             self.assertIn("schedule_close_deadline_at", encode_columns)
             self.assertIn("shadow_json", quality_observation_columns)
@@ -1145,6 +1150,33 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("attachment_summary_json", library_columns)
             self.assertIn("attachment_summary_json", staged_columns)
+
+    def test_open_db_adds_scan_run_terminal_columns_to_previous_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute("ALTER TABLE scan_runs DROP COLUMN status")
+                raw_connection.execute("ALTER TABLE scan_runs DROP COLUMN error")
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260726_0019",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                columns = {str(column["name"]) for column in inspect(connection).get_columns("scan_runs")}
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("status", columns)
+            self.assertIn("error", columns)
 
     def test_open_db_adds_media_fingerprint_column_to_previous_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

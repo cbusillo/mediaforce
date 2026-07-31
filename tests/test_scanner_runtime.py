@@ -841,7 +841,47 @@ class ScannerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(stats.total_seen, 0)
         self.assertEqual(scan_row["scope"], "limited")
+        self.assertEqual(scan_row["status"], "completed")
+        self.assertIsNone(scan_row["error"])
         self.assertEqual(scan_row["file_count"], 0)
+
+    def test_cancelled_scan_run_row_is_marked_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            (media_root / "Feature.mkv").write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+            process_controller = ManagedProcessController()
+
+            def cancelled_probe(
+                    _path: Path,
+                    *,
+                    process_controller: ManagedProcessController | None = None,
+            ) -> ProbeSummary:
+                assert process_controller is not None
+                process_controller.cancel(ProcessCancelledError("shutdown"))
+                raise ProcessCancelledError("shutdown")
+
+            try:
+                with open_db(config.paths.db_path) as connection, patch(
+                    "mediaforce.library.scanner.probe_media",
+                    side_effect=cancelled_probe,
+                ):
+                    with self.assertRaises(ProcessCancelledError):
+                        scan_library(
+                            connection,
+                            config,
+                            process_controller=process_controller,
+                        )
+                    scan_row = connection.execute(select(scan_runs)).mappings().one()
+            finally:
+                reset_engine_cache()
+
+        self.assertEqual(scan_row["status"], "failed")
+        self.assertIsNotNone(scan_row["completed_at"])
+        self.assertIn("ProcessCancelledError", str(scan_row["error"]))
+        self.assertEqual(scan_row["file_count"], 1)
 
     def test_scan_preserves_canonical_evidence_and_marks_changed_source_pending(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

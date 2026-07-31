@@ -1,9 +1,12 @@
+import os
 import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
+
+from sqlalchemy import select
 
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
@@ -14,7 +17,9 @@ from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_
     start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.scanner import ScanStats
-from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, load_scan_status, maybe_schedule_scan, run_scan_job
+from mediaforce.web import app as web_app
+from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, latest_scan_completed_at, \
+    load_scan_status, maybe_schedule_scan, repair_stale_scan_runs, run_scan_job, scan_is_stale
 from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload
 
 
@@ -191,6 +196,8 @@ class OperatorWorkTests(unittest.TestCase):
                     scan_id="newer-scan",
                     started_at="2026-07-19T12:00:00+00:00",
                     completed_at="2026-07-19T12:05:00+00:00",
+                    status="completed",
+                    error=None,
                     owner_pid=None,
                     last_progress_at="2026-07-19T12:05:00+00:00",
                     roots_json='["tv"]',
@@ -204,6 +211,129 @@ class OperatorWorkTests(unittest.TestCase):
             status = load_scan_status(connection, self.config, None, deps)
 
         self.assertIsNone(status)
+
+    def test_failed_scan_run_does_not_refresh_catalog(self) -> None:
+        deps = self._job_runtime_deps(load_scan_job_state=lambda _config, _prefix: None)
+        now = "2026-07-19T12:00:00+00:00"
+        self._insert_item()
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="failed-scan",
+                    started_at=now,
+                    completed_at=now,
+                    status="failed",
+                    error="interrupted",
+                    owner_pid=os.getpid(),
+                    last_progress_at=now,
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=1,
+                    reprobed_count=0,
+                    unchanged_count=1,
+                )
+            )
+            latest = latest_scan_completed_at(connection, prefix=None)
+            stale = scan_is_stale(connection, self.config, None, deps)
+
+        self.assertIsNone(latest)
+        self.assertTrue(stale)
+
+    def test_active_scan_from_db_honors_same_pid_terminal_failed_job_state(self) -> None:
+        now = "2026-07-19T12:00:00+00:00"
+        terminal_job = {
+            "job_id": "scan-terminal-job",
+            "status": "failed",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": os.getpid(),
+            "created_at": now,
+            "started_at": now,
+            "finished_at": now,
+            "error": "fixture failure",
+            "stats": None,
+        }
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: terminal_job,
+            save_scan_job_state=Mock(),
+        )
+        deps.scan_process_is_alive = lambda _pid: True
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="same-pid-row",
+                    started_at=now,
+                    completed_at=None,
+                    status="running",
+                    error=None,
+                    owner_pid=os.getpid(),
+                    last_progress_at=now,
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=0,
+                    reprobed_count=0,
+                    unchanged_count=0,
+                )
+            )
+            status = active_scan_from_db(connection, self.config, None, deps)
+            row = connection.execute(select(scan_runs).where(scan_runs.c.scan_id == "same-pid-row")).mappings().one()
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"], "fixture failure")
+        self.assertEqual(row["status"], "failed")
+        self.assertIsNotNone(row["completed_at"])
+
+    def test_startup_repair_marks_dead_scan_run_failed_and_saves_job_failure(self) -> None:
+        now = "2026-07-19T12:00:00+00:00"
+        running_job = {
+            "job_id": "scan-job",
+            "status": "running",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": 999999,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        save_scan_job_state = Mock()
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: running_job,
+            save_scan_job_state=save_scan_job_state,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="stale-running-row",
+                    started_at=now,
+                    completed_at=None,
+                    status="running",
+                    error=None,
+                    owner_pid=999999,
+                    last_progress_at=now,
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=0,
+                    reprobed_count=0,
+                    unchanged_count=0,
+                )
+            )
+            repaired = repair_stale_scan_runs(connection, self.config, deps)
+            row = connection.execute(select(scan_runs).where(scan_runs.c.scan_id == "stale-running-row")).mappings().one()
+
+        self.assertEqual(repaired, 1)
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["error"], "interrupted")
+        self.assertIsNotNone(row["completed_at"])
+        saved_job = save_scan_job_state.call_args.args[2]
+        self.assertEqual(saved_job["status"], "failed")
+        self.assertEqual(saved_job["error"], "interrupted")
 
     def test_queued_scan_rechecks_global_pause_before_media_work_starts(self) -> None:
         queued_job = {
@@ -302,6 +432,34 @@ class OperatorWorkTests(unittest.TestCase):
             ManagedProcessController,
         )
         fallback_thread.start.assert_called_once_with()
+
+    def test_stuck_scan_thread_shutdown_uses_injected_process_terminator(self) -> None:
+        stuck_thread = Mock()
+        stuck_thread.is_alive.return_value = True
+        process_controller = ManagedProcessController()
+        exit_codes: list[int] = []
+
+        def record_exit(code: int) -> None:
+            exit_codes.append(code)
+
+        try:
+            with web_app.SCAN_JOB_THREADS_CONDITION:
+                web_app.SCAN_JOB_THREADS["stuck-scan"] = stuck_thread
+                web_app.SCAN_JOB_PROCESS_CONTROLLERS["stuck-scan"] = process_controller
+            with self.assertLogs(web_app.LOGGER.name, level="CRITICAL") as captured:
+                with self.assertRaisesRegex(RuntimeError, "terminator returned"):
+                    web_app._wait_for_scan_job_threads(
+                        grace_seconds=0,
+                        terminate_process=record_exit,
+                    )
+        finally:
+            with web_app.SCAN_JOB_THREADS_CONDITION:
+                web_app.SCAN_JOB_THREADS.pop("stuck-scan", None)
+                web_app.SCAN_JOB_PROCESS_CONTROLLERS.pop("stuck-scan", None)
+                web_app.SCAN_JOB_THREADS_CONDITION.notify_all()
+
+        self.assertEqual(exit_codes, [web_app.SCAN_FORCED_SHUTDOWN_EXIT_CODE])
+        self.assertIn("stuck-scan", captured.output[0])
 
     def test_bounded_runner_rejects_duplicate_process_local_start(self) -> None:
         started = threading.Event()

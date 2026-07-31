@@ -22292,6 +22292,8 @@ raise SystemExit(0)
 
     @staticmethod
     def _insert_scan_run(connection: DBClient, **values: object) -> None:
+        values.setdefault("status", "completed" if values.get("completed_at") else "running")
+        values.setdefault("error", None)
         connection.execute(scan_runs.insert().values(**values))
 
     @staticmethod

@@ -176,8 +176,10 @@ Guidance:
   - library inventory orchestration and catalog updates
   - all inventory rows preserve canonical evidence without launching deep analysis
   - managed web scans cooperatively honor cancellation across enumeration,
-    database progress, and ffprobe so shutdown can join them before releasing
-    the runtime lease
+    database progress, and ffprobe; web shutdown waits only for a bounded grace
+    period before forcing process exit while the runtime lease is still held,
+    because Python cannot kill a thread blocked inside filesystem calls on an
+    unavailable media mount
 - `evidence_state.py`
   - rebuildable per-item/per-kind projection of canonical cadence and
     fingerprint JSON

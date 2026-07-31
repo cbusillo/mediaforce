@@ -235,6 +235,7 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     load_scan_status as runtime_load_scan_status, \
     maybe_schedule_scan as runtime_maybe_schedule_scan, \
     process_calibration_queue_once as runtime_process_calibration_queue_once, \
+    repair_stale_scan_runs as runtime_repair_stale_scan_runs, \
     run_scan_job as runtime_run_scan_job, save_job_state as runtime_save_job_state, \
     save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
     scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
@@ -273,6 +274,8 @@ FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
 SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
+SCAN_SHUTDOWN_GRACE_SECONDS = 10.0
+SCAN_FORCED_SHUTDOWN_EXIT_CODE = 70
 CALIBRATION_JOB_NOTICE_AFTER = timedelta(hours=1)
 SAMPLE_CALIBRATION_CONCURRENCY = 2
 FULL_CALIBRATION_CONCURRENCY = 1
@@ -557,6 +560,9 @@ def create_app(
                     ensure_queue_state(connection, updated_at=_now_iso())
                     ensure_background_work_state(connection, updated_at=_now_iso())
                     ensure_evidence_queue_state(connection, updated_at=_now_iso())
+                    repaired_scan_rows = _repair_stale_scan_runs(connection, config)
+                    if repaired_scan_rows:
+                        LOGGER.warning("Repaired %s interrupted scan runs.", repaired_scan_rows)
                     _recover_calibration_jobs(connection, config)
                     _recover_encode_queue(connection, config)
                 background_runtime = _start_background_workers(config)
@@ -3660,6 +3666,10 @@ def _scan_process_is_alive(pid: JSONValue) -> bool:
     return runtime_scan_process_is_alive(pid)
 
 
+def _repair_stale_scan_runs(connection: DBClient, config: MediaforceConfig) -> int:
+    return runtime_repair_stale_scan_runs(connection, config, _job_runtime_deps())
+
+
 def _active_scan_from_db(
         connection: DBClient, config: MediaforceConfig, prefix: str | None
 ) -> dict[str, Any] | None:
@@ -4581,7 +4591,12 @@ def _cancel_active_scan_processes() -> None:
             LOGGER.exception("Unable to cancel active scan job %s", job_id)
 
 
-def _wait_for_scan_job_threads() -> None:
+def _wait_for_scan_job_threads(
+        *,
+        grace_seconds: float = SCAN_SHUTDOWN_GRACE_SECONDS,
+        terminate_process: Callable[[int], None] | None = None,
+) -> None:
+    deadline = monotonic() + max(0.0, grace_seconds)
     with SCAN_JOB_THREADS_CONDITION:
         while True:
             finished_job_ids = [
@@ -4594,7 +4609,31 @@ def _wait_for_scan_job_threads() -> None:
                 SCAN_JOB_PROCESS_CONTROLLERS.pop(job_id, None)
             if not SCAN_JOB_THREADS:
                 return
-            SCAN_JOB_THREADS_CONDITION.wait()
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                stuck_job_ids = tuple(sorted(SCAN_JOB_THREADS))
+                break
+            SCAN_JOB_THREADS_CONDITION.wait(timeout=min(remaining, 0.25))
+    _force_terminate_stuck_scan_shutdown(
+        stuck_job_ids,
+        terminate_process=terminate_process,
+    )
+
+
+def _force_terminate_stuck_scan_shutdown(
+        job_ids: tuple[str, ...],
+        *,
+        terminate_process: Callable[[int], None] | None,
+) -> None:
+    LOGGER.critical(
+        "Scan shutdown grace expired with live scan threads still registered: %s. "
+        "Forcing process exit before releasing the runtime lease; startup repair will mark stale scan state failed.",
+        ", ".join(job_ids),
+    )
+    if terminate_process is None:
+        terminate_process = os._exit
+    terminate_process(SCAN_FORCED_SHUTDOWN_EXIT_CODE)
+    raise RuntimeError("Scan shutdown terminator returned without stopping the process.")
 
 
 def _run_scan_job(

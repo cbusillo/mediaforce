@@ -35,6 +35,9 @@ from mediaforce.core.type_defs import JSONValue, float_value, int_value, object_
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 
 _MISSING = object()
+ACTIVE_SCAN_JOB_STATUSES = {"queued", "running"}
+TERMINAL_SCAN_JOB_STATUSES = {"completed", "failed", "stopped", "paused"}
+SUCCESSFUL_SCAN_RUN_STATUS = "completed"
 
 
 @dataclass(slots=True)
@@ -522,20 +525,20 @@ def maybe_schedule_scan(
         return active_scan
     if prefix is not None:
         full_job = deps.load_scan_job_state(config, None)
-        if full_job and full_job.get("status") in {"queued", "running"} and not scan_job_belongs_to_current_process(
+        if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not scan_job_belongs_to_current_process(
                 full_job,
                 deps.scan_process_is_alive,
         ):
             full_job = _expire_scan_job(config, None, full_job, deps)
-        if full_job and full_job.get("status") in {"queued", "running"}:
+        if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
             return full_job
     job = deps.load_scan_job_state(config, prefix)
-    if job and job.get("status") in {"queued", "running"} and not scan_job_belongs_to_current_process(
+    if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not scan_job_belongs_to_current_process(
             job,
             deps.scan_process_is_alive,
     ):
         job = _expire_scan_job(config, prefix, job, deps)
-    if job and job.get("status") in {"queued", "running"}:
+    if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
         return job
     if background_work_is_paused(connection):
         return job
@@ -589,7 +592,7 @@ def load_scan_status(
         return active_scan
     if prefix is not None:
         full_job = _current_scan_job_snapshot(connection, config, None, deps)
-        if full_job and full_job.get("status") in {"queued", "running"}:
+        if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
             return full_job
     return _current_scan_job_snapshot(connection, config, prefix, deps)
 
@@ -864,13 +867,16 @@ def latest_scan_completed_at(connection: DBClient, prefix: str | None) -> dateti
             scan_runs.c.started_at,
             scan_runs.c.scope,
             scan_runs.c.prefixes_json,
+            scan_runs.c.status,
         )
         .order_by(scan_runs.c.started_at.desc())
         .limit(250)
     ).mappings().fetchall()
     for row in rows:
+        if not scan_run_completed_successfully(row):
+            continue
         scope = str(row["scope"] or "unknown")
-        completed = _parse_iso(row["completed_at"] or row["started_at"])
+        completed = _parse_iso(row["completed_at"])
         if completed is None:
             continue
         if prefix is None:
@@ -912,6 +918,8 @@ def active_scan_from_db(
             scan_runs.c.file_count,
             scan_runs.c.reprobed_count,
             scan_runs.c.unchanged_count,
+            scan_runs.c.status,
+            scan_runs.c.error,
         )
         .where(scan_runs.c.completed_at.is_(None))
         .order_by(scan_runs.c.started_at.desc())
@@ -923,11 +931,33 @@ def active_scan_from_db(
             continue
 
         scope = str(row["scope"] or "unknown")
+        row_status = str(row["status"] or "running")
         job_prefix = None if scope in {"full", "unknown"} else str(matched_prefix)
         job = deps.load_scan_job_state(config, job_prefix)
-        if job and job.get("status") in {"queued", "running"} and not deps.scan_process_is_alive(job.get("owner_pid")):
+        job_status = str(job.get("status") or "") if job else ""
+        if job and job_status in TERMINAL_SCAN_JOB_STATUSES:
+            if repair_stale and job_status != SUCCESSFUL_SCAN_RUN_STATUS:
+                _expire_scan_run(
+                    connection,
+                    str(row["scan_id"]),
+                    str(job.get("error") or deps.scan_interrupted_error),
+                )
+            return _scan_job_payload_for_prefix(job, prefix=prefix)
+        if row_status in TERMINAL_SCAN_JOB_STATUSES:
+            if row_status == "failed" and job and job_status in ACTIVE_SCAN_JOB_STATUSES and repair_stale:
+                deps.save_scan_job_state(
+                    config,
+                    job_prefix,
+                    _interrupted_scan_job(
+                        job,
+                        deps,
+                        finished_at=row["completed_at"] or row["last_progress_at"] or row["started_at"],
+                    ),
+                )
+            return _scan_run_terminal_job(row, prefix=prefix, job_prefix=job_prefix)
+        if job and job_status in ACTIVE_SCAN_JOB_STATUSES and not deps.scan_process_is_alive(job.get("owner_pid")):
             job = (
-                _expire_scan_job(config, job_prefix, job, deps)
+                _expire_scan_job(config, job_prefix, job, deps, connection=connection, scan_id=str(row["scan_id"]))
                 if repair_stale
                 else _interrupted_scan_job(
                     job,
@@ -950,7 +980,7 @@ def active_scan_from_db(
                 "stats": _scan_job_progress(row),
             }
 
-        if job and job.get("status") in {"queued", "running"}:
+        if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
             return {
                 "job_id": str(job.get("job_id") or row["scan_id"]),
                 "status": str(job.get("status") or "running"),
@@ -964,8 +994,46 @@ def active_scan_from_db(
             }
 
         if job is not None and repair_stale:
-            _expire_scan_run(connection, str(row["scan_id"]))
+            _expire_scan_run(connection, str(row["scan_id"]), deps.scan_interrupted_error)
     return None
+
+
+def repair_stale_scan_runs(
+        connection: DBClient,
+        config: MediaforceConfig,
+        deps: JobRuntimeDeps,
+) -> int:
+    rows = connection.execute(
+        select(
+            scan_runs.c.scan_id,
+            scan_runs.c.started_at,
+            scan_runs.c.scope,
+            scan_runs.c.prefixes_json,
+            scan_runs.c.owner_pid,
+            scan_runs.c.status,
+            scan_runs.c.error,
+        )
+        .where(scan_runs.c.completed_at.is_(None))
+        .order_by(scan_runs.c.started_at.desc())
+    ).mappings().fetchall()
+    repaired = 0
+    for row in rows:
+        status = str(row["status"] or "running")
+        if status in TERMINAL_SCAN_JOB_STATUSES:
+            continue
+        if deps.scan_process_is_alive(row["owner_pid"]):
+            continue
+        scope = str(row["scope"] or "unknown")
+        job_prefixes = [None]
+        if scope == "prefix":
+            job_prefixes = _prefixes_for_scan_run(row)
+        for job_prefix in job_prefixes:
+            job = deps.load_scan_job_state(config, job_prefix)
+            if job and str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
+                deps.save_scan_job_state(config, job_prefix, _interrupted_scan_job(job, deps, finished_at=deps.now_iso()))
+        _expire_scan_run(connection, str(row["scan_id"]), deps.scan_interrupted_error)
+        repaired += 1
+    return repaired
 
 
 def scan_process_is_alive(pid: JSONValue) -> bool:
@@ -1039,13 +1107,60 @@ def _scan_run_matches_prefix(row: DBRow, prefix: str | None) -> str | None | obj
     return _MISSING
 
 
-def _expire_scan_run(connection: DBClient, scan_id: str) -> None:
+def _expire_scan_run(connection: DBClient, scan_id: str, error: str) -> None:
+    expired_at = _now_iso()
     connection.execute(
         update(scan_runs)
         .where(scan_runs.c.scan_id == scan_id)
-        .values(completed_at=func.coalesce(scan_runs.c.completed_at, _now_iso()))
+        .values(
+            completed_at=func.coalesce(scan_runs.c.completed_at, expired_at),
+            last_progress_at=func.coalesce(scan_runs.c.last_progress_at, expired_at),
+            status="failed",
+            error=error,
+        )
     )
     connection.commit()
+
+
+def scan_run_completed_successfully(row: DBRow) -> bool:
+    return str(row["status"] or "") == SUCCESSFUL_SCAN_RUN_STATUS and bool(row["completed_at"])
+
+
+def _scan_run_terminal_job(
+        row: DBRow,
+        *,
+        prefix: str | None,
+        job_prefix: str | None,
+) -> dict[str, Any]:
+    status = str(row["status"] or "failed")
+    finished_at = row["completed_at"] or row["last_progress_at"] or row["started_at"]
+    return {
+        "job_id": str(row["scan_id"]),
+        "status": status,
+        "scope": str(row["scope"] or "unknown"),
+        "prefix": None if prefix is None else (job_prefix or prefix),
+        "created_at": row["started_at"],
+        "started_at": row["started_at"],
+        "last_progress_at": row["last_progress_at"] or row["started_at"],
+        "finished_at": finished_at,
+        "error": row["error"],
+        "stats": _scan_job_progress(row),
+    }
+
+
+def _scan_job_payload_for_prefix(job: dict[str, Any], *, prefix: str | None) -> dict[str, Any]:
+    if prefix is None:
+        return {**job, "prefix": None}
+    return job
+
+
+def _prefixes_for_scan_run(row: DBRow) -> list[str | None]:
+    try:
+        values = json.loads(row["prefixes_json"] or "[]")
+    except json.JSONDecodeError:
+        values = []
+    prefixes = [str(value).strip("/") for value in values if str(value).strip("/")]
+    return prefixes or [None]
 
 
 def _scan_job_progress(row: DBRow) -> dict[str, int]:
@@ -1061,9 +1176,14 @@ def _expire_scan_job(
         prefix: str | None,
         job: dict[str, Any],
         deps: JobRuntimeDeps,
+        *,
+        connection: DBClient | None = None,
+        scan_id: str | None = None,
 ) -> dict[str, Any]:
     expired = _interrupted_scan_job(job, deps, finished_at=deps.now_iso())
     deps.save_scan_job_state(config, prefix, expired)
+    if connection is not None and scan_id:
+        _expire_scan_run(connection, scan_id, str(expired.get("error") or deps.scan_interrupted_error))
     return expired
 
 
@@ -1075,7 +1195,7 @@ def _scan_job_snapshot(
     job = deps.load_scan_job_state(config, prefix)
     if not job:
         return None
-    if job.get("status") in {"queued", "running"} and not deps.scan_process_is_alive(job.get("owner_pid")):
+    if job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not deps.scan_process_is_alive(job.get("owner_pid")):
         return _interrupted_scan_job(
             job,
             deps,
@@ -1091,7 +1211,7 @@ def _current_scan_job_snapshot(
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
     job = _scan_job_snapshot(config, prefix, deps)
-    if not job or job.get("status") in {"queued", "running"}:
+    if not job or job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
         return job
     latest_completed = latest_scan_completed_at(connection, prefix)
     if latest_completed is None:
