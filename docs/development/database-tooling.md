@@ -92,8 +92,9 @@ Mediaforce's SQLite schema.
   The configured destination parent is then retained by descriptor. Publication
   links the staging inode through that descriptor, fsyncs it, validates the
   exact bytes through the platform-pinned directory path, and atomically advances
-  the intent to `cleaning` with the exact identity, size, timestamps, ownership,
-  mode, and guard-origin flag for every bound source sidecar. The configured
+  the version-4 intent to `cleaning` with the exact identity, size, timestamps,
+  ownership, mode, guard-origin flag, and SHA-256 for the main database and every
+  bound source sidecar. The configured
   parent is rechecked before every source retirement. A destination-parent swap
   therefore rolls back publication or stops cleanup before the legacy main is
   retired. Cleanup claims the exact legacy main first with an exclusive rename
@@ -101,8 +102,9 @@ Mediaforce's SQLite schema.
   validates the claimed inode, removes it, and syncs again; WAL, SHM, and the
   rollback journal follow in the same order. Live cleanup consumes the durable
   `cleaning` manifest rather than recapturing current sidecar metadata: every
-  sidecar must still match all recorded fields before its exclusive claim, and
-  only the expected rename-induced ctime change is relaxed afterward. A
+  main/sidecar inode must still match all recorded fields and its descriptor-
+  read SHA-256 before its exclusive claim and again while quarantined; only the
+  expected rename-induced ctime change is relaxed afterward. A
   crash-surviving quarantine entry
   is durable cleanup progress, not an orphan, and recovery validates it against
   the intent before removal. If another inode appears between the final live-name
@@ -120,12 +122,18 @@ Mediaforce's SQLite schema.
   completing source/staging cleanup and intent removal. The retained source
   authority rechecks that the main, all three live sidecar names, and every
   matching retirement quarantine remain absent through the final intent
-  deletion. Version-2 `ready` intents predate the sidecar manifest; if their
-  main file is already retired, recovery preserves and logs any unidentified
-  residual sidecar or quarantine artifact instead of deleting data it cannot
-  authorize. Parent replacement, source recreation, unknown version-3
-  quarantine state, metadata-only divergence, or any other ambiguous state
-  fails closed.
+  deletion. Intent removal performs another retained-source check after its
+  directory fsync and restores the exact cleaning intent through the already-
+  bound destination directory descriptor on failure. A later
+  startup also fails closed if both legacy and configured databases exist
+  without a resumable intent. Version-2 `ready` intents and version-3 `cleaning`
+  intents predate the digest manifest. When their live main still exists, gated
+  recovery upgrades version 3 to the version-4 digest format before deleting
+  anything. When the main is already retired, recovery preserves and logs any
+  stat-bound main quarantine plus unidentified sidecar or quarantine artifacts
+  instead of deleting data it cannot authorize. Parent replacement, source
+  recreation, malformed legacy quarantine state, metadata-only divergence, or
+  any other ambiguous state fails closed.
   Startup reserves the published destination only after migration or recovery
   returns.
 - SQLite URLs use URI modes explicitly: `rwc` for first-use creation, `rw` for

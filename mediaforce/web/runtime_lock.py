@@ -600,10 +600,17 @@ class LegacySQLiteMigrationSource:
         self.assert_stable()
         return snapshot
 
+    def cleanup_sha256(self) -> str:
+        self.assert_stable()
+        digest = _legacy_sqlite_descriptor_sha256(self._file_descriptor)
+        self.assert_stable()
+        return digest
+
     def discard_after_publish(
             self,
             *,
             before_remove: Callable[[], None],
+            expected_main_sha256: str,
             expected_sidecar_snapshots: dict[str, dict[str, object]],
     ) -> None:
         sidecar_snapshots = _legacy_sqlite_sidecar_cleanup_snapshots(
@@ -617,6 +624,7 @@ class LegacySQLiteMigrationSource:
                 directory_descriptor=self._directory_descriptor,
                 name=self.path.name,
                 expected_snapshot=self._file_snapshot,
+                expected_sha256=expected_main_sha256,
                 descriptor=self._file_descriptor,
             )
         except (FileIntegrityError, OSError) as exc:
@@ -653,6 +661,12 @@ class _LegacySQLiteSidecarBinding:
     descriptor: int
     identity: tuple[int, int, int]
     created_snapshot: tuple[int, int, int, int, int, int, int, int] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacySQLiteCleanupSnapshot:
+    stat: tuple[int, int, int, int, int, int, int, int]
+    sha256: str
 
 
 class _LegacySQLiteMutationGuard:
@@ -909,6 +923,9 @@ class _LegacySQLiteMutationGuard:
                 "uid": info.st_uid,
                 "mode": stat.S_IMODE(info.st_mode),
                 "guard_created": binding.created_snapshot is not None,
+                "sha256": _legacy_sqlite_descriptor_sha256(
+                    binding.descriptor
+                ),
             }
         self.assert_quiet()
         return snapshot
@@ -927,7 +944,7 @@ class _LegacySQLiteMutationGuard:
             self,
             suffix: str,
             *,
-            expected_snapshot: tuple[int, int, int, int, int, int, int, int],
+            expected_snapshot: _LegacySQLiteCleanupSnapshot,
     ) -> None:
         self.assert_sidecar_bound(suffix)
         name = f"{self._path.name}{suffix}"
@@ -939,22 +956,78 @@ class _LegacySQLiteMutationGuard:
         _retire_bound_legacy_sqlite_entry(
             directory_descriptor=self._directory_descriptor,
             name=name,
-            expected_snapshot=expected_snapshot,
+            expected_snapshot=expected_snapshot.stat,
+            expected_sha256=expected_snapshot.sha256,
             descriptor=binding.descriptor,
         )
 
     def assert_cleanup_complete(self) -> None:
         if self._cleanup_sealed:
             file_changed, directory_changed, directory_names = (
-                self._drain_mutation_events()
+                self._drain_mutation_events(
+                    collect_all_directory_names=True,
+                )
             )
-            if file_changed or directory_changed or directory_names:
+            if self._cleanup_events_are_relevant(
+                    file_changed=file_changed,
+                    directory_changed=directory_changed,
+                    directory_names=directory_names,
+            ):
                 raise FileIntegrityError(
                     "legacy SQLite source cleanup namespace changed"
                 )
         else:
             self._drain_mutation_events()
+        if self._cleanup_namespace_entries():
+            raise FileIntegrityError(
+                "legacy SQLite source cleanup namespace is not empty"
+            )
+        file_changed, directory_changed, directory_names = (
+            self._drain_mutation_events(
+                collect_all_directory_names=True,
+            )
+        )
+        if self._cleanup_events_are_relevant(
+                file_changed=file_changed,
+                directory_changed=directory_changed,
+                directory_names=directory_names,
+        ):
+            raise FileIntegrityError(
+                "legacy SQLite source cleanup namespace changed"
+            )
+        if self._cleanup_namespace_entries():
+            raise FileIntegrityError(
+                "legacy SQLite source cleanup namespace is not empty"
+            )
+        self._cleanup_sealed = True
+
+    def _cleanup_namespace_entries(self) -> set[str]:
         names = set(os.listdir(self._directory_descriptor))
+        live_names = {
+            self._path.name,
+            *self._sidecar_names,
+        }
+        quarantine_prefixes = tuple(
+            f".{name}.mediaforce-retired-"
+            for name in live_names
+        )
+        return {
+            name
+            for name in names
+            if (
+            name in live_names or name.startswith(quarantine_prefixes)
+            )
+        }
+
+    def _cleanup_events_are_relevant(
+            self,
+            *,
+            file_changed: bool,
+            directory_changed: bool,
+            directory_names: set[str],
+    ) -> bool:
+        if file_changed:
+            return True
         live_names = {
             self._path.name,
             *self._sidecar_names,
@@ -965,21 +1038,20 @@ class _LegacySQLiteMutationGuard:
         )
         if any(
             name in live_names or name.startswith(quarantine_prefixes)
-            for name in names
+            for name in directory_names
         ):
-            raise FileIntegrityError(
-                "legacy SQLite source cleanup namespace is not empty"
-            )
-        file_changed, directory_changed, directory_names = (
-            self._drain_mutation_events()
+            return True
+        return (
+            directory_changed
+            and not directory_names
+            and sys.platform.startswith("linux")
         )
-        if file_changed or directory_changed or directory_names:
-            raise FileIntegrityError(
-                "legacy SQLite source cleanup namespace changed"
-            )
-        self._cleanup_sealed = True
 
-    def _drain_mutation_events(self) -> tuple[bool, bool, set[str]]:
+    def _drain_mutation_events(
+            self,
+            *,
+            collect_all_directory_names: bool = False,
+    ) -> tuple[bool, bool, set[str]]:
         file_changed = False
         directory_changed = False
         directory_names: set[str] = set()
@@ -1022,11 +1094,12 @@ class _LegacySQLiteMutationGuard:
                 elif watch == self._file_watch or watch in self._sidecar_watches:
                     file_changed = True
                 elif watch == self._directory_watch and (
-                    not name or name in self._watched_directory_names
+                    collect_all_directory_names
+                    or not name
+                    or name in self._watched_directory_names
                 ):
                     directory_changed = True
-                    if name:
-                        directory_names.add(name)
+                    directory_names.add(name)
         return file_changed, directory_changed, directory_names
 
     def _open_sidecar_binding(
@@ -1312,6 +1385,9 @@ class _LegacySQLiteMutationGuard:
                         descriptor_info.st_nlink,
                         descriptor_info.st_uid,
                         stat.S_IMODE(descriptor_info.st_mode),
+                    ),
+                    expected_sha256=_legacy_sqlite_descriptor_sha256(
+                        binding.descriptor
                     ),
                     descriptor=binding.descriptor,
                 )
@@ -1822,19 +1898,37 @@ def _legacy_sqlite_source_snapshot(
     )
 
 
+def _legacy_sqlite_descriptor_sha256(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(descriptor, 1024 * 1024, offset)
+        if not chunk:
+            break
+        digest.update(chunk)
+        offset += len(chunk)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _legacy_sqlite_sha256_is_valid(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == len("sha256:") + 64
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
 def _legacy_sqlite_sidecar_cleanup_snapshots(
         value: object,
-) -> dict[str, tuple[int, int, int, int, int, int, int, int]]:
+) -> dict[str, _LegacySQLiteCleanupSnapshot]:
     if not isinstance(value, dict) or set(value) != {
         "-wal",
         "-shm",
         "-journal",
     }:
         raise FileIntegrityError("legacy SQLite cleanup manifest is invalid")
-    snapshots: dict[
-        str,
-        tuple[int, int, int, int, int, int, int, int],
-    ] = {}
+    snapshots: dict[str, _LegacySQLiteCleanupSnapshot] = {}
     required = {
         "device",
         "inode",
@@ -1845,6 +1939,7 @@ def _legacy_sqlite_sidecar_cleanup_snapshots(
         "uid",
         "mode",
         "guard_created",
+        "sha256",
     }
     for suffix in ("-wal", "-shm", "-journal"):
         snapshot = value.get(suffix)
@@ -1874,11 +1969,15 @@ def _legacy_sqlite_sidecar_cleanup_snapshots(
             or values[6] != os.getuid()
             or not 0 <= values[7] <= 0o777
             or type(snapshot.get("guard_created")) is not bool
+            or not _legacy_sqlite_sha256_is_valid(snapshot.get("sha256"))
         ):
             raise FileIntegrityError(
                 "legacy SQLite cleanup manifest is invalid"
             )
-        snapshots[suffix] = values
+        snapshots[suffix] = _LegacySQLiteCleanupSnapshot(
+            stat=values,
+            sha256=str(snapshot["sha256"]),
+        )
     return snapshots
 
 
@@ -1887,10 +1986,13 @@ def _retire_bound_legacy_sqlite_entry(
         directory_descriptor: int,
         name: str,
         expected_snapshot: tuple[int, ...],
+        expected_sha256: str,
         descriptor: int,
 ) -> None:
     if len(expected_snapshot) not in {6, 8}:
         raise FileIntegrityError("legacy SQLite cleanup snapshot is invalid")
+    if not _legacy_sqlite_sha256_is_valid(expected_sha256):
+        raise FileIntegrityError("legacy SQLite cleanup digest is invalid")
     descriptor_info = os.fstat(descriptor)
     path_info = os.stat(
         name,
@@ -1908,6 +2010,7 @@ def _retire_bound_legacy_sqlite_entry(
         )
         or (descriptor_info.st_dev, descriptor_info.st_ino)
         != (path_info.st_dev, path_info.st_ino)
+        or _legacy_sqlite_descriptor_sha256(descriptor) != expected_sha256
     ):
         raise FileIntegrityError(
             "legacy SQLite cleanup source changed before claim"
@@ -1954,6 +2057,7 @@ def _retire_bound_legacy_sqlite_entry(
         )
         or (descriptor_info.st_dev, descriptor_info.st_ino)
         != (quarantine_info.st_dev, quarantine_info.st_ino)
+        or _legacy_sqlite_descriptor_sha256(descriptor) != expected_sha256
     ):
         raise FileIntegrityError(
             "legacy SQLite cleanup claimed an unexpected entry"
@@ -1967,7 +2071,7 @@ def _retire_bound_legacy_sqlite_entry(
     if not _legacy_sqlite_retired_snapshot_matches(
             quarantine_info,
             expected_snapshot,
-    ):
+    ) or _legacy_sqlite_descriptor_sha256(descriptor) != expected_sha256:
         raise FileIntegrityError(
             "legacy SQLite cleanup quarantine identity changed"
         )
