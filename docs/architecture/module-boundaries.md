@@ -53,16 +53,30 @@ after the package consolidation pass. Avoid growing them with new helper logic.
   - macOS uses Darwin unique parent identities plus audit-token signaling; a
     uniquely live process that cannot provide a signal token remains live and
     makes cleanup unprovable rather than being classified as exited
-  - the parent retains the supervisor's private process group for best-effort
-    cleanup if the supervisor or status pipe is lost, but status loss can never
-    claim descendant cleanup was proven
+  - each supervisor receives the read side of a parent-liveness pipe whose write
+    side exists only in the Mediaforce parent; parent exit therefore produces
+    EOF even when the target forks or detaches, and a surviving supervisor must
+    terminate and reap its entire observed tree before exiting
+  - the target closes the liveness descriptor before `exec`, so target
+    descendants cannot delay parent-death detection
+  - if the supervisor or containment status is lost before a complete/expired
+    proof, the parent immediately performs best-effort private-process-group
+    cleanup, retains that group authority, and permanently poisons the managed
+    controller; reset and reuse fail closed, and cancellation, deadline, or
+    command success cannot replace the primary containment-enforcement error
+  - arbitrary supervisor `SIGKILL` remains a deliberate residual-risk boundary:
+    a descendant that already created a new session can outlive the private
+    process group because the supervisor's pidfds or Darwin identity tokens die
+    with it. Without a kernel-owned job container established before launch,
+    the parent cannot safely rediscover ownership after reparenting and PID
+    reuse, so Mediaforce reports cleanup as unproven instead of claiming it
   - Darwin `EVFILT_PROC` fork notifications are aggregated, and the local SDK
     documents kernel child tracking (`NOTE_TRACK`) as unsupported since macOS
     10.5. Every fork event therefore triggers global identity reconciliation
     and permanently marks ownership unproven. Compatibility consequence: a
     managed command that forks cannot report successful completion on macOS;
-    deadline and cancellation outcomes remain primary but include unproven
-    cleanup diagnostics when applicable
+    unproven cleanup remains the primary enforcement failure even when a
+    deadline or cancellation also occurred
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
     back to same-user process scans or signals

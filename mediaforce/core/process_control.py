@@ -27,7 +27,7 @@ class ProcessDeadlineEnforcementError(RuntimeError):
     pass
 
 
-class _ContainmentReportedUnavailableError(RuntimeError):
+class _ContainmentReportedUnavailableError(ProcessDeadlineEnforcementError):
     pass
 
 
@@ -45,11 +45,17 @@ class ManagedProcessController:
         self._cancel_message = "Operation was cancelled."
         self._terminate_process_group = False
         self._process_group_id: int | None = None
+        self._cleanup_unproven = False
         self._activity_guard: Callable[[], None] | None = None
         self._process_deadline_ns: int | None = None
 
     def attach(self, process: subprocess.Popen[str], *, terminate_process_group: bool = False) -> None:
         with self._lock:
+            if self._cleanup_unproven:
+                raise ProcessDeadlineEnforcementError(
+                    "Managed process controller cannot be reused because prior "
+                    "containment cleanup is unproven."
+                )
             self._process = process
             self._terminate_process_group = terminate_process_group
             self._process_group_id = process.pid if terminate_process_group else None
@@ -63,15 +69,15 @@ class ManagedProcessController:
             retain_process_group: bool = False,
     ) -> None:
         with self._lock:
+            if self._process is not None and self._process is not process:
+                return
             if self._process is process:
                 self._process = None
-                if not retain_process_group:
-                    self._terminate_process_group = False
-                    self._process_group_id = None
-
-    def release_process_group(self, process_group_id: int) -> None:
-        with self._lock:
-            if self._process_group_id == process_group_id:
+            if retain_process_group:
+                self._terminate_process_group = True
+                self._process_group_id = process.pid
+                self._cleanup_unproven = True
+            elif not self._cleanup_unproven:
                 self._terminate_process_group = False
                 self._process_group_id = None
 
@@ -89,6 +95,11 @@ class ManagedProcessController:
 
     def reset(self) -> None:
         with self._lock:
+            if self._cleanup_unproven:
+                raise ProcessDeadlineEnforcementError(
+                    "Managed process controller cannot be reset because prior "
+                    "containment cleanup is unproven."
+                )
             self._cancel_requested = False
             self._cancel_error_type = ProcessCancelledError
             self._cancel_message = "Operation was cancelled."
@@ -143,11 +154,17 @@ class ManagedProcessController:
 
     def throw_if_cancelled(self) -> None:
         with self._lock:
+            cleanup_unproven = self._cleanup_unproven
             activity_guard = self._activity_guard
             cancelled = self._cancel_requested
             error_type = self._cancel_error_type
             message = self._cancel_message
             process_deadline_ns = self._process_deadline_ns
+        if cleanup_unproven:
+            raise ProcessDeadlineEnforcementError(
+                "Managed process controller cannot be reused because prior "
+                "containment cleanup is unproven."
+            )
         if cancelled:
             raise error_type(message)
         if activity_guard is not None:
@@ -163,6 +180,11 @@ class ManagedProcessController:
     def cancelled(self) -> bool:
         with self._lock:
             return self._cancel_requested
+
+    @property
+    def cleanup_unproven(self) -> bool:
+        with self._lock:
+            return self._cleanup_unproven
 
     @property
     def pid(self) -> int | None:
@@ -341,7 +363,7 @@ class _ContainmentStatusMonitor:
             self._status = _read_deadline_status(self._status_descriptor)
             if self._status == b"U":
                 self._error = _ContainmentReportedUnavailableError(
-                    "Managed process containment reported unavailable."
+                    "Managed process containment cleanup is unproven."
                 )
                 self._failure_detected.set()
                 self._terminate_target()
@@ -516,37 +538,6 @@ def _finish_containment_status_failure(
     return False
 
 
-def _reported_containment_error(
-        *,
-        error: BaseException,
-        process_controller: ManagedProcessController,
-        process: subprocess.Popen[str],
-) -> BaseException:
-    if not isinstance(error, _ContainmentReportedUnavailableError):
-        return error
-    mapped_error: BaseException
-    if process_controller.cancelled is True:
-        try:
-            process_controller.throw_if_cancelled()
-        except ProcessCancelledError as cancellation_error:
-            mapped_error = cancellation_error
-        else:
-            mapped_error = ProcessDeadlineEnforcementError(
-                "Managed process containment failed closed."
-            )
-    elif process.returncode == 124:
-        mapped_error = ProcessDeadlineExpiredError(
-            "Process authorization deadline expired."
-        )
-    else:
-        mapped_error = ProcessDeadlineEnforcementError(
-            "Managed process containment failed closed."
-        )
-    for note in getattr(error, "__notes__", ()):
-        mapped_error.add_note(note)
-    return mapped_error
-
-
 def run_command(
         cmd: list[str],
         *,
@@ -580,6 +571,12 @@ def run_command(
             "Managed process containment is unavailable."
         )
     deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
+    try:
+        parent_liveness_descriptor, parent_liveness_write_descriptor = os.pipe()
+    except BaseException:
+        os.close(deadline_status_descriptor)
+        os.close(deadline_status_write_descriptor)
+        raise
     helper_path = Path(__file__).with_name("_process_deadline.py")
     process_cmd = [
         sys.executable,
@@ -587,103 +584,112 @@ def run_command(
         str(helper_path),
         str(process_deadline_ns if process_deadline_ns is not None else -1),
         str(deadline_status_write_descriptor),
+        str(parent_liveness_descriptor),
         "--",
         *cmd,
     ]
     try:
-        process = subprocess.Popen(
-            process_cmd,
-            stdin=subprocess.PIPE if input_text is not None else None,
-            stdout=stdout_pipe,
-            stderr=stderr_pipe,
-            text=text,
-            cwd=cwd,
-            env=env,
-            start_new_session=True,
-            pass_fds=(deadline_status_write_descriptor,),
-        )
-    except BaseException:
-        os.close(deadline_status_descriptor)
-        os.close(deadline_status_write_descriptor)
-        raise
-    os.close(deadline_status_write_descriptor)
-    attached = False
-    containment_finalized = False
-    status_monitor = _ContainmentStatusMonitor(
-        status_descriptor=deadline_status_descriptor,
-        process_controller=process_controller,
-        process=process,
-    )
-    status_monitor.start()
-    try:
-        process_controller.attach(process, terminate_process_group=True)
-        attached = True
-        stdout, stderr = _communicate_with_containment_monitor(
-            process,
-            cmd=cmd,
-            input_text=input_text,
-            timeout=timeout,
-            monitor=status_monitor,
-        )
-        if not status_monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
-            raise ProcessDeadlineEnforcementError(
-                "Managed process containment status is unavailable."
-            )
-        status_error = status_monitor.error()
-        if status_error is not None:
-            raise status_error
-        deadline_status = status_monitor.status()
-        containment_finalized = True
-        if deadline_status == b"E":
-            raise ProcessDeadlineExpiredError(
-                "Process authorization deadline expired."
-            )
-        process_controller.throw_if_cancelled()
-        completed = subprocess.CompletedProcess(
-            cmd,
-            process.returncode,
-            stdout,
-            stderr,
-        )
-        if check and completed.returncode:
-            raise subprocess.CalledProcessError(
-                completed.returncode,
-                cmd,
-                output=stdout,
-                stderr=stderr,
-            )
-    except BaseException as exc:
-        if not containment_finalized:
-            if status_monitor.error() is exc:
-                cleanup_succeeded = _finish_containment_status_failure(
-                    monitor=status_monitor,
-                    process=process,
-                    error=exc,
-                )
-            else:
-                cleanup_succeeded = _terminate_and_reap_managed_process(
-                    process_controller=process_controller,
-                    process=process,
-                    monitor=status_monitor,
-                    attached=attached,
-                    error=exc,
-                )
-            if not cleanup_succeeded:
-                _add_managed_process_cleanup_note(
-                    exc,
-                    RuntimeError("managed process containment cleanup did not complete"),
-                )
         try:
-            process_controller.clear(process)
-        except BaseException as cleanup_error:
-            _add_managed_process_cleanup_note(exc, cleanup_error)
-        raised_error = _reported_containment_error(
-            error=exc,
+            process = subprocess.Popen(
+                process_cmd,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=stdout_pipe,
+                stderr=stderr_pipe,
+                text=text,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+                close_fds=True,
+                pass_fds=(
+                    deadline_status_write_descriptor,
+                    parent_liveness_descriptor,
+                ),
+            )
+        except BaseException:
+            os.close(deadline_status_descriptor)
+            os.close(deadline_status_write_descriptor)
+            os.close(parent_liveness_descriptor)
+            raise
+        os.close(deadline_status_write_descriptor)
+        os.close(parent_liveness_descriptor)
+        attached = False
+        containment_finalized = False
+        status_monitor = _ContainmentStatusMonitor(
+            status_descriptor=deadline_status_descriptor,
             process_controller=process_controller,
             process=process,
         )
-        if raised_error is not exc:
-            raise raised_error from None
-        raise
-    process_controller.clear(process)
-    return completed
+        status_monitor.start()
+        try:
+            process_controller.attach(process, terminate_process_group=True)
+            attached = True
+            stdout, stderr = _communicate_with_containment_monitor(
+                process,
+                cmd=cmd,
+                input_text=input_text,
+                timeout=timeout,
+                monitor=status_monitor,
+            )
+            if not status_monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
+                raise ProcessDeadlineEnforcementError(
+                    "Managed process containment status is unavailable."
+                )
+            status_error = status_monitor.error()
+            if status_error is not None:
+                raise status_error
+            deadline_status = status_monitor.status()
+            containment_finalized = True
+            if deadline_status == b"E":
+                raise ProcessDeadlineExpiredError(
+                    "Process authorization deadline expired."
+                )
+            process_controller.throw_if_cancelled()
+            completed = subprocess.CompletedProcess(
+                cmd,
+                process.returncode,
+                stdout,
+                stderr,
+            )
+            if check and completed.returncode:
+                raise subprocess.CalledProcessError(
+                    completed.returncode,
+                    cmd,
+                    output=stdout,
+                    stderr=stderr,
+                )
+        except BaseException as exc:
+            cleanup_succeeded = containment_finalized
+            if not containment_finalized:
+                if status_monitor.error() is exc:
+                    cleanup_succeeded = _finish_containment_status_failure(
+                        monitor=status_monitor,
+                        process=process,
+                        error=exc,
+                    )
+                else:
+                    cleanup_succeeded = _terminate_and_reap_managed_process(
+                        process_controller=process_controller,
+                        process=process,
+                        monitor=status_monitor,
+                        attached=attached,
+                        error=exc,
+                    )
+                if not cleanup_succeeded:
+                    _add_managed_process_cleanup_note(
+                        exc,
+                        RuntimeError(
+                            "managed process containment cleanup did not complete"
+                        ),
+                    )
+            try:
+                process_controller.clear(
+                    process,
+                    retain_process_group=not cleanup_succeeded,
+                )
+            except BaseException as cleanup_error:
+                _add_managed_process_cleanup_note(exc, cleanup_error)
+            raise
+        process_controller.clear(process, retain_process_group=False)
+        return completed
+    finally:
+        os.close(parent_liveness_write_descriptor)

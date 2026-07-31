@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from unittest import TestCase, skipUnless
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from mediaforce.core import _process_deadline as process_deadline_module
 from mediaforce.core import process_control as process_control_module
@@ -25,6 +25,18 @@ from mediaforce.core.process_control import (
 
 
 def _pid_is_alive(pid: int) -> bool:
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            return False
+        except OSError:
+            pass
+        else:
+            separator = stat.rfind(")")
+            fields = stat[separator + 2:].split() if separator >= 0 else []
+            if fields and fields[0] == "Z":
+                return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -308,24 +320,34 @@ class ProcessControlTests(TestCase):
                 "Path(sys.argv[4]).write_text('exited')",
             ))
 
-            with (
-                controller.absolute_deadline(
-                    datetime.now(UTC) + timedelta(seconds=0.4)
-                ),
-                self.assertRaises(ProcessDeadlineExpiredError),
+            expected_error = (
+                ProcessDeadlineEnforcementError
+                if sys.platform == "darwin"
+                else ProcessDeadlineExpiredError
+            )
+            with controller.absolute_deadline(
+                datetime.now(UTC) + timedelta(seconds=0.4)
             ):
-                run_command(
-                    [
-                        sys.executable,
-                        "-c",
-                        target_script,
-                        descendant_script,
-                        str(descendant_started_path),
-                        str(descendant_finished_path),
-                        str(leader_exited_path),
-                    ],
-                    process_controller=controller,
+                with self.assertRaises(expected_error) as raised:
+                    run_command(
+                        [
+                            sys.executable,
+                            "-c",
+                            target_script,
+                            descendant_script,
+                            str(descendant_started_path),
+                            str(descendant_finished_path),
+                            str(leader_exited_path),
+                        ],
+                        process_controller=controller,
+                    )
+
+            if sys.platform == "darwin":
+                self.assertNotIsInstance(
+                    raised.exception,
+                    ProcessDeadlineExpiredError,
                 )
+                self.assertTrue(controller.cleanup_unproven)
 
             self.assertTrue(leader_exited_path.exists())
             self.assertTrue(descendant_started_path.exists())
@@ -401,7 +423,16 @@ class ProcessControlTests(TestCase):
 
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(len(errors), 1)
-                self.assertIsInstance(errors[0], ProcessCancelledError)
+                if sys.platform == "darwin":
+                    self.assertIsInstance(
+                        errors[0],
+                        ProcessDeadlineEnforcementError,
+                    )
+                    self.assertNotIsInstance(errors[0], ProcessCancelledError)
+                    self.assertTrue(controller.cleanup_unproven)
+                else:
+                    self.assertIsInstance(errors[0], ProcessCancelledError)
+                    self.assertFalse(controller.cleanup_unproven)
                 self.assertIsNone(unrelated_process.poll())
                 time.sleep(1.3)
                 self.assertFalse(finished_path.exists())
@@ -442,6 +473,105 @@ class ProcessControlTests(TestCase):
             "containment cleanup did not complete",
             "\n".join(getattr(raised.exception, "__notes__", ())),
         )
+        self.assertTrue(controller.cleanup_unproven)
+        self.assertEqual(controller._process_group_id, process.pid)
+
+    def test_parent_liveness_eof_terminates_observed_detached_descendant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            helper_pid_path = root / "helper.pid"
+            descendant_pid_path = root / "descendant.pid"
+            descendant_started_path = root / "descendant-started"
+            descendant_finished_path = root / "descendant-finished"
+            target_script = "\n".join((
+                "from pathlib import Path",
+                "import os",
+                "import sys",
+                "import time",
+                "child_pid = os.fork()",
+                "if child_pid == 0:",
+                "    os.setsid()",
+                "    Path(sys.argv[1]).write_text('started')",
+                "    Path(sys.argv[2]).write_text(str(os.getpid()))",
+                "    time.sleep(30)",
+                "    Path(sys.argv[3]).write_text('finished')",
+                "    os._exit(0)",
+                "while True:",
+                "    time.sleep(1)",
+            ))
+            harness_script = "\n".join((
+                "from pathlib import Path",
+                "import sys",
+                "import threading",
+                "import time",
+                "from mediaforce.core.process_control import ManagedProcessController, run_command",
+                "controller = ManagedProcessController()",
+                "def publish_helper_pid():",
+                "    deadline = time.monotonic() + 5",
+                "    while controller.pid is None and time.monotonic() < deadline:",
+                "        time.sleep(0.01)",
+                "    if controller.pid is not None:",
+                "        Path(sys.argv[5]).write_text(str(controller.pid))",
+                "threading.Thread(target=publish_helper_pid, daemon=True).start()",
+                "run_command([",
+                "    sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4],",
+                "], process_controller=controller)",
+            ))
+            harness = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    harness_script,
+                    target_script,
+                    str(descendant_started_path),
+                    str(descendant_pid_path),
+                    str(descendant_finished_path),
+                    str(helper_pid_path),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=Path(__file__).resolve().parents[1],
+                start_new_session=True,
+            )
+            helper_pid: int | None = None
+            descendant_pid: int | None = None
+            try:
+                wait_deadline = time.monotonic() + 8
+                while (
+                    not helper_pid_path.exists()
+                    or not descendant_pid_path.exists()
+                    or not descendant_started_path.exists()
+                ) and time.monotonic() < wait_deadline:
+                    time.sleep(0.02)
+                self.assertTrue(helper_pid_path.exists())
+                self.assertTrue(descendant_pid_path.exists())
+                self.assertTrue(descendant_started_path.exists())
+                helper_pid = int(helper_pid_path.read_text())
+                descendant_pid = int(descendant_pid_path.read_text())
+                time.sleep(0.25)
+
+                os.kill(harness.pid, signal.SIGKILL)
+                harness.wait(timeout=5)
+
+                cleanup_deadline = time.monotonic() + 8
+                while (
+                    _pid_is_alive(helper_pid) or _pid_is_alive(descendant_pid)
+                ) and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.02)
+
+                self.assertEqual(harness.returncode, -signal.SIGKILL)
+                self.assertFalse(_pid_is_alive(helper_pid))
+                self.assertFalse(_pid_is_alive(descendant_pid))
+                self.assertFalse(descendant_finished_path.exists())
+            finally:
+                if harness.poll() is None:
+                    _kill_exact_pid(harness.pid)
+                    harness.wait(timeout=5)
+                if helper_pid is not None:
+                    _kill_exact_pid(helper_pid)
+                if descendant_pid is not None:
+                    _kill_exact_pid(descendant_pid)
 
     def test_helper_sigkill_status_eof_never_claims_descendant_cleanup(self) -> None:
         controller = ManagedProcessController()
@@ -499,7 +629,7 @@ class ProcessControlTests(TestCase):
                 descendant_pid = int(descendant_pid_path.read_text())
 
                 os.kill(helper_pid, signal.SIGKILL)
-                worker.join(timeout=8)
+                worker.join(timeout=12)
 
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(len(errors), 1)
@@ -508,7 +638,23 @@ class ProcessControlTests(TestCase):
                     "containment cleanup did not complete",
                     "\n".join(getattr(errors[0], "__notes__", ())),
                 )
+                self.assertTrue(controller.cleanup_unproven)
+                self.assertEqual(controller._process_group_id, helper_pid)
                 self.assertTrue(_pid_is_alive(descendant_pid))
+                with self.assertRaisesRegex(
+                    ProcessDeadlineEnforcementError,
+                    "cannot be reset",
+                ):
+                    controller.reset()
+                with (
+                    patch.object(process_control_module.subprocess, "Popen") as popen,
+                    self.assertRaisesRegex(
+                        ProcessDeadlineEnforcementError,
+                        "cannot be reused",
+                    ),
+                ):
+                    run_command(["echo", "reuse"], process_controller=controller)
+                popen.assert_not_called()
             finally:
                 if descendant_pid is not None:
                     _kill_exact_pid(descendant_pid)
@@ -518,47 +664,45 @@ class ProcessControlTests(TestCase):
                 worker.join(timeout=5)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
-    def test_deadline_status_unavailable_retains_group_until_cleanup(
+    def test_deadline_status_unavailable_poison_retains_group_authority(
             self,
             popen_mock: Mock,
     ) -> None:
         process = Mock()
         process.pid = 987654
-        process.returncode = 0
+        process.returncode = 124
         process.communicate.return_value = ("", "")
         popen_mock.return_value = process
-        controller = Mock(spec=ManagedProcessController)
-        controller.process_deadline_ns.return_value = time.time_ns() + 2_000_000_000
-        events: list[str] = []
-        controller.clear.side_effect = lambda *_args, **_kwargs: events.append("retain")
-        controller.terminate.side_effect = lambda: events.append("terminate")
-        controller.release_process_group.side_effect = (
-            lambda _process_group: events.append("release")
-        )
+        controller = ManagedProcessController()
 
         with (
-            patch.object(process_control_module.os, "pipe", return_value=(101, 102)),
-            patch.object(
-                process_control_module.os,
-                "read",
-                side_effect=(b"U", b""),
+            controller.absolute_deadline(
+                datetime.now(UTC) + timedelta(seconds=2)
             ),
             patch.object(
                 process_control_module.os,
-                "close",
-                side_effect=lambda descriptor: events.append(f"close:{descriptor}"),
+                "pipe",
+                side_effect=((101, 102), (103, 104)),
             ),
+            patch.object(
+                process_control_module,
+                "_read_deadline_status",
+                return_value=b"U",
+            ),
+            patch.object(process_control_module, "_terminate_process"),
+            patch.object(process_control_module.os, "close"),
+            patch.object(controller, "clear", wraps=controller.clear) as clear,
             self.assertRaisesRegex(
                 ProcessDeadlineEnforcementError,
-                "failed closed",
-            ),
+                "cleanup is unproven",
+            ) as raised,
         ):
             run_command(["echo", "ok"], process_controller=controller)
 
-        self.assertEqual(events[0], "close:102")
-        self.assertIn("retain", events)
-        self.assertIn("terminate", events)
-        self.assertIn("close:101", events)
+        self.assertNotIsInstance(raised.exception, ProcessDeadlineExpiredError)
+        clear.assert_called_once_with(process, retain_process_group=True)
+        self.assertTrue(controller.cleanup_unproven)
+        self.assertEqual(controller._process_group_id, process.pid)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_deadline_status_read_base_exceptions_cleanup_before_reraise(
@@ -581,15 +725,11 @@ class ProcessControlTests(TestCase):
                     lambda *_args, **_kwargs: events.append("retain")
                 )
                 controller.terminate.side_effect = lambda: events.append("terminate")
-                controller.release_process_group.side_effect = (
-                    lambda _process_group: events.append("release")
-                )
-
                 with (
                     patch.object(
                         process_control_module.os,
                         "pipe",
-                        return_value=(101, 102),
+                        side_effect=((101, 102), (103, 104)),
                     ),
                     patch.object(
                         process_control_module.os,
@@ -612,6 +752,10 @@ class ProcessControlTests(TestCase):
                 self.assertIn("retain", events)
                 self.assertIn("terminate", events)
                 self.assertIn("close:101", events)
+                controller.clear.assert_called_once_with(
+                    process,
+                    retain_process_group=True,
+                )
 
     @patch(
         "mediaforce.core.process_control._terminate_process",
@@ -634,7 +778,11 @@ class ProcessControlTests(TestCase):
         controller.terminate.side_effect = RuntimeError("controller cleanup failed")
 
         with (
-            patch.object(process_control_module.os, "pipe", return_value=(101, 102)),
+            patch.object(
+                process_control_module.os,
+                "pipe",
+                side_effect=((101, 102), (103, 104)),
+            ),
             patch.object(
                 process_control_module.os,
                 "read",
@@ -724,9 +872,11 @@ class ProcessControlTests(TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             marker_path = Path(temp_dir) / "target-ran"
             status_read, status_write = os.pipe()
+            parent_liveness_read, parent_liveness_write = os.pipe()
             helper_pid = os.fork()
             if helper_pid == 0:
                 os.close(status_read)
+                os.close(parent_liveness_write)
                 with patch.object(
                     process_deadline_module,
                     "_process_tree",
@@ -735,6 +885,7 @@ class ProcessControlTests(TestCase):
                     exit_code = process_deadline_module._run(
                         -1,
                         status_write,
+                        parent_liveness_read,
                         [
                             sys.executable,
                             "-c",
@@ -743,16 +894,55 @@ class ProcessControlTests(TestCase):
                         ],
                     )
                 os.close(status_write)
+                os.close(parent_liveness_read)
                 os._exit(exit_code)
 
             os.close(status_write)
+            os.close(parent_liveness_read)
             _, wait_status = os.waitpid(helper_pid, 0)
             status = os.read(status_read, 16)
             os.close(status_read)
+            os.close(parent_liveness_write)
 
             self.assertEqual(os.waitstatus_to_exitcode(wait_status), 125)
             self.assertEqual(status, b"U")
             self.assertFalse(marker_path.exists())
+
+    def test_parent_loss_cleanup_retries_until_observed_tree_is_empty(self) -> None:
+        tree = Mock()
+        tree.live.side_effect = [True, False]
+        reap = Mock()
+
+        with (
+            patch.object(process_deadline_module, "_terminate_tree") as terminate,
+            patch.object(process_deadline_module.time, "sleep") as sleep,
+        ):
+            process_deadline_module._terminate_tree_after_parent_loss(tree, reap)
+
+        self.assertEqual(terminate.call_count, 2)
+        self.assertEqual(tree.refresh.call_count, 2)
+        self.assertEqual(reap.call_count, 4)
+        sleep.assert_called_once_with(process_deadline_module._TREE_POLL_SECONDS)
+
+    def test_target_child_closes_parent_liveness_before_waiting_on_gate(self) -> None:
+        with (
+            patch.object(process_deadline_module.os, "close") as close,
+            patch.object(process_deadline_module.os, "read", return_value=b""),
+            patch.object(
+                process_deadline_module.os,
+                "_exit",
+                side_effect=SystemExit(125),
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            process_deadline_module._target_child(
+                101,
+                102,
+                103,
+                ["echo", "ok"],
+            )
+
+        self.assertEqual(close.call_args_list[:2], [call(103), call(101)])
 
     @skipUnless(
         sys.platform.startswith("linux") and hasattr(os, "pidfd_open"),
@@ -936,6 +1126,7 @@ class ProcessControlTests(TestCase):
                 "import sys",
                 "from mediaforce.core.process_control import (",
                 "    ManagedProcessController,",
+                "    ProcessDeadlineEnforcementError,",
                 "    ProcessDeadlineExpiredError,",
                 "    run_command,",
                 ")",
@@ -944,7 +1135,9 @@ class ProcessControlTests(TestCase):
                 "    with controller.absolute_deadline(datetime.now(UTC) + timedelta(seconds=1.5)):",
                 "        run_command([sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3]], process_controller=controller)",
                 "except ProcessDeadlineExpiredError:",
-                "    raise SystemExit(0)",
+                "    raise SystemExit(0 if sys.platform != 'darwin' else 4)",
+                "except ProcessDeadlineEnforcementError:",
+                "    raise SystemExit(0 if sys.platform == 'darwin' else 5)",
                 "raise SystemExit(3)",
             ))
             harness = subprocess.Popen(
@@ -988,10 +1181,18 @@ class ProcessControlTests(TestCase):
         process.returncode = 0
         popen_mock.return_value = process
 
-        with patch.object(
-            process_control_module,
-            "_read_deadline_status",
-            return_value=b"C",
+        with (
+            patch.object(
+                process_control_module.os,
+                "pipe",
+                side_effect=((101, 102), (103, 104)),
+            ),
+            patch.object(process_control_module.os, "close") as close,
+            patch.object(
+                process_control_module,
+                "_read_deadline_status",
+                return_value=b"C",
+            ),
         ):
             result = run_command(
                 ["echo", "ok"],
@@ -1001,11 +1202,24 @@ class ProcessControlTests(TestCase):
         self.assertEqual(result.returncode, 0)
         popen_mock.assert_called_once()
         self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
+        self.assertTrue(popen_mock.call_args.kwargs["close_fds"])
         self.assertEqual(
             popen_mock.call_args.args[0][-3:],
             ["--", "echo", "ok"],
         )
-        self.assertEqual(len(popen_mock.call_args.kwargs["pass_fds"]), 1)
+        self.assertEqual(
+            popen_mock.call_args.kwargs["pass_fds"],
+            (102, 103),
+        )
+        self.assertEqual(
+            popen_mock.call_args.args[0][4:6],
+            ["102", "103"],
+        )
+        self.assertNotIn(104, popen_mock.call_args.kwargs["pass_fds"])
+        close.assert_has_calls(
+            [call(102), call(103), call(101), call(104)],
+            any_order=True,
+        )
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_run_command_terminates_and_reaps_on_base_exception(self, popen_mock: Mock) -> None:
@@ -1031,7 +1245,10 @@ class ProcessControlTests(TestCase):
         )
         controller.terminate.assert_called_once_with()
         self.assertEqual(process.communicate.call_count, 2)
-        controller.clear.assert_called_once_with(process)
+        controller.clear.assert_called_once_with(
+            process,
+            retain_process_group=False,
+        )
 
     @patch("mediaforce.core.process_control._terminate_process")
     @patch("mediaforce.core.process_control.subprocess.Popen")
@@ -1063,7 +1280,10 @@ class ProcessControlTests(TestCase):
             process_group_id=process.pid,
         )
         process.communicate.assert_called_once_with(timeout=2.0)
-        controller.clear.assert_called_once_with(process)
+        controller.clear.assert_called_once_with(
+            process,
+            retain_process_group=False,
+        )
 
     @patch(
         "mediaforce.core.process_control._wait_for_target_exit",

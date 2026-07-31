@@ -28,6 +28,18 @@ class _ContainmentUnavailableError(RuntimeError):
     pass
 
 
+class _ParentLivenessMonitor:
+    def __init__(self, descriptor: int) -> None:
+        self._poller = select.poll()
+        self._poller.register(
+            descriptor,
+            select.POLLIN | select.POLLHUP | select.POLLERR,
+        )
+
+    def lost(self) -> bool:
+        return bool(self._poller.poll(0))
+
+
 def _notify(status_descriptor: int, status: bytes) -> None:
     try:
         os.write(status_descriptor, status)
@@ -777,6 +789,7 @@ def _terminate_tree(
         reap()
         tree.refresh(_TREE_POLL_SECONDS)
         if not tree.live():
+            reap()
             return succeeded and not tree.compromised
         succeeded = tree.signal_all(signal.SIGTERM) and succeeded
     succeeded = tree.signal_all(signal.SIGKILL) and succeeded
@@ -785,16 +798,36 @@ def _terminate_tree(
         reap()
         tree.refresh(_TREE_POLL_SECONDS)
         if not tree.live():
+            reap()
             return succeeded and not tree.compromised
         succeeded = tree.signal_all(signal.SIGKILL) and succeeded
     return False
 
 
+def _terminate_tree_after_parent_loss(
+        tree: _LinuxProcessTree | _DarwinProcessTree,
+        reap: Callable[[], None],
+) -> None:
+    while True:
+        try:
+            _terminate_tree(tree, reap)
+            reap()
+            tree.refresh(_TREE_POLL_SECONDS)
+            reap()
+            if not tree.live():
+                return
+        except BaseException:
+            pass
+        time.sleep(_TREE_POLL_SECONDS)
+
+
 def _target_child(
         gate_descriptor: int,
         status_descriptor: int,
+        parent_liveness_descriptor: int,
         command: list[str],
 ) -> None:
+    os.close(parent_liveness_descriptor)
     try:
         gate_status = os.read(gate_descriptor, 1)
     finally:
@@ -822,7 +855,12 @@ def _exit_like_target(wait_status: int) -> int:
     return 128 + signal_number
 
 
-def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
+def _run(
+        deadline_ns: int,
+        status_descriptor: int,
+        parent_liveness_descriptor: int,
+        command: list[str],
+) -> int:
     if not command:
         _notify(status_descriptor, _STATUS_UNAVAILABLE)
         return 125
@@ -841,8 +879,21 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
         signal.signal(signal_number, request_termination)
 
     try:
+        parent_liveness = _ParentLivenessMonitor(parent_liveness_descriptor)
+    except BaseException:
+        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        return 125
+    if parent_liveness.lost():
+        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        return 125
+
+    try:
         tree = _process_tree()
     except BaseException:
+        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        return 125
+    if parent_liveness.lost():
+        tree.close()
         _notify(status_descriptor, _STATUS_UNAVAILABLE)
         return 125
 
@@ -850,7 +901,12 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
     target_pid = os.fork()
     if target_pid == 0:
         os.close(gate_write_descriptor)
-        _target_child(gate_read_descriptor, status_descriptor, command)
+        _target_child(
+            gate_read_descriptor,
+            status_descriptor,
+            parent_liveness_descriptor,
+            command,
+        )
         os._exit(125)
 
     os.close(gate_read_descriptor)
@@ -866,6 +922,11 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
         except BaseException:
             os.close(gate_write_descriptor)
             _terminate_tree(tree, reap)
+            _notify(status_descriptor, _STATUS_UNAVAILABLE)
+            return 125
+        if parent_liveness.lost():
+            os.close(gate_write_descriptor)
+            _terminate_tree_after_parent_loss(tree, reap)
             _notify(status_descriptor, _STATUS_UNAVAILABLE)
             return 125
         if termination_signal != 0:
@@ -892,6 +953,10 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
             reap()
             tree.refresh(_TREE_POLL_SECONDS)
             reap()
+            if parent_liveness.lost():
+                _terminate_tree_after_parent_loss(tree, reap)
+                _notify(status_descriptor, _STATUS_UNAVAILABLE)
+                return 125
             if termination_signal != 0:
                 cleanup_succeeded = _terminate_tree(tree, reap)
                 _notify(
@@ -918,10 +983,13 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
             else:
                 empty_since = None
     except BaseException:
-        try:
-            _terminate_tree(tree, reap)
-        except BaseException:
-            pass
+        if parent_liveness.lost():
+            _terminate_tree_after_parent_loss(tree, reap)
+        else:
+            try:
+                _terminate_tree(tree, reap)
+            except BaseException:
+                pass
         _notify(status_descriptor, _STATUS_UNAVAILABLE)
         return 125
     finally:
@@ -933,14 +1001,24 @@ def main() -> int:
         separator = sys.argv.index("--")
         deadline_ns = int(sys.argv[1])
         status_descriptor = int(sys.argv[2])
+        parent_liveness_descriptor = int(sys.argv[3])
         command = sys.argv[separator + 1:]
     except (ValueError, IndexError):
         return 125
     try:
-        return _run(deadline_ns, status_descriptor, command)
+        return _run(
+            deadline_ns,
+            status_descriptor,
+            parent_liveness_descriptor,
+            command,
+        )
     finally:
         try:
             os.close(status_descriptor)
+        except OSError:
+            pass
+        try:
+            os.close(parent_liveness_descriptor)
         except OSError:
             pass
 
