@@ -14,16 +14,24 @@ down_revision = "20260726_0019"
 branch_labels = None
 depends_on = None
 
+LEGACY_SCAN_BACKFILL_ERROR = "Background scan was interrupted by a web process restart."
+
 
 def upgrade() -> None:
     if not _has_column("scan_runs", "status"):
         op.add_column("scan_runs", sa.Column("status", sa.Text(), nullable=False, server_default="running"))
     if not _has_column("scan_runs", "error"):
         op.add_column("scan_runs", sa.Column("error", sa.Text(), nullable=True))
-    op.execute(sa.text(
-        "UPDATE scan_runs SET status = 'completed' "
-        "WHERE completed_at IS NOT NULL AND status = 'running'"
-    ))
+    op.execute(
+        sa.text(
+            "UPDATE scan_runs SET "
+            "completed_at = COALESCE(completed_at, last_progress_at, started_at), "
+            "last_progress_at = COALESCE(last_progress_at, completed_at, started_at), "
+            "status = 'failed', "
+            "error = COALESCE(error, :error) "
+            "WHERE status = 'running'"
+        ).bindparams(error=LEGACY_SCAN_BACKFILL_ERROR)
+    )
 
 
 def downgrade() -> None:

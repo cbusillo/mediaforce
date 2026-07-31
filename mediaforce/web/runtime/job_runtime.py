@@ -5,10 +5,12 @@ import os
 import threading
 import uuid
 from collections.abc import Callable
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func
@@ -38,6 +40,8 @@ _MISSING = object()
 ACTIVE_SCAN_JOB_STATUSES = {"queued", "running"}
 TERMINAL_SCAN_JOB_STATUSES = {"completed", "failed", "stopped", "paused"}
 SUCCESSFUL_SCAN_RUN_STATUS = "completed"
+DEFAULT_SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
+_SCAN_SCHEDULE_LOCK = threading.Lock()
 
 
 @dataclass(slots=True)
@@ -58,6 +62,7 @@ class JobRuntimeDeps:
     save_catalog_signature: Any
     reset_folder_card_cache: Any
     start_scan_job_thread: Callable[..., None] | None = None
+    list_scan_job_files: Callable[[MediaforceConfig], Iterable[Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -497,10 +502,16 @@ def load_scan_job_state(
         prefix: str | None,
         scan_job_file: Any,
 ) -> dict[str, Any] | None:
-    path = scan_job_file(config, prefix)
+    path = Path(scan_job_file(config, prefix))
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _malformed_scan_job(path)
+    if not isinstance(payload, dict):
+        return _malformed_scan_job(path)
+    return payload
 
 
 def save_scan_job_state(
@@ -509,7 +520,7 @@ def save_scan_job_state(
         payload: dict[str, Any],
         scan_job_file: Any,
 ) -> None:
-    scan_job_file(config, prefix).write_text(json.dumps(payload, indent=2) + "\n")
+    _atomic_write_json(Path(scan_job_file(config, prefix)), payload)
 
 
 def maybe_schedule_scan(
@@ -520,65 +531,79 @@ def maybe_schedule_scan(
         *,
         force: bool = False,
 ) -> dict[str, Any] | None:
-    active_scan = active_scan_from_db(connection, config, prefix, deps)
-    if active_scan is not None:
-        return active_scan
-    if prefix is not None:
-        full_job = deps.load_scan_job_state(config, None)
-        if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not scan_job_belongs_to_current_process(
-                full_job,
+    with _SCAN_SCHEDULE_LOCK:
+        active_scan = active_scan_from_db(connection, config, prefix, deps)
+        if active_scan is not None:
+            return active_scan
+        if prefix is not None:
+            full_job = deps.load_scan_job_state(config, None)
+            if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not scan_job_belongs_to_current_process(
+                    full_job,
+                    deps.scan_process_is_alive,
+            ):
+                full_job = _expire_scan_job(config, None, full_job, deps)
+            if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
+                return full_job
+        job = deps.load_scan_job_state(config, prefix)
+        if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not scan_job_belongs_to_current_process(
+                job,
                 deps.scan_process_is_alive,
         ):
-            full_job = _expire_scan_job(config, None, full_job, deps)
-        if full_job and full_job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
-            return full_job
-    job = deps.load_scan_job_state(config, prefix)
-    if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES and not scan_job_belongs_to_current_process(
-            job,
-            deps.scan_process_is_alive,
-    ):
-        job = _expire_scan_job(config, prefix, job, deps)
-    if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
-        return job
-    if background_work_is_paused(connection):
-        return job
-    if not force and not scan_is_stale(connection, config, prefix, deps):
-        return job
-    if not force and job and job.get("status") == "failed":
-        finished_at = deps.parse_iso(job.get("finished_at") or job.get("started_at"))
-        interrupted_restart = str(job.get("error") or "") == deps.scan_interrupted_error
-        if not interrupted_restart and finished_at and datetime.now(tz=UTC) - finished_at < deps.scan_retry_cooldown:
+            job = _expire_scan_job(config, prefix, job, deps)
+        if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
             return job
+        if background_work_is_paused(connection):
+            return job
+        if not force and not scan_is_stale(connection, config, prefix, deps):
+            return job
+        if not force and job and job.get("status") == "failed":
+            finished_at = deps.parse_iso(job.get("finished_at") or job.get("started_at"))
+            interrupted_restart = str(job.get("error") or "") == deps.scan_interrupted_error
+            if not interrupted_restart and finished_at and datetime.now(tz=UTC) - finished_at < deps.scan_retry_cooldown:
+                return job
 
-    job_payload = {
-        "job_id": uuid.uuid4().hex[:12],
-        "status": "queued",
-        "scope": "full" if prefix is None else "prefix",
-        "prefix": prefix,
-        "owner_pid": os.getpid(),
-        "created_at": deps.now_iso(),
-        "started_at": None,
-        "finished_at": None,
-        "error": None,
-        "stats": None,
-    }
-    deps.save_scan_job_state(config, prefix, job_payload)
-    thread_kwargs = {
-        "config_path": config.paths.config_path,
-        "prefix": prefix,
-        "job_id": str(job_payload["job_id"]),
-        "process_controller": ManagedProcessController(),
-    }
-    if deps.start_scan_job_thread is not None:
-        deps.start_scan_job_thread(**thread_kwargs)
-    else:
-        thread = threading.Thread(
-            target=deps.run_scan_job,
-            kwargs=thread_kwargs,
-            name=f"scan-job-{job_payload['job_id']}",
-        )
-        thread.start()
-    return job_payload
+        job_payload = {
+            "job_id": uuid.uuid4().hex[:12],
+            "status": "queued",
+            "scope": "full" if prefix is None else "prefix",
+            "prefix": prefix,
+            "owner_pid": os.getpid(),
+            "created_at": deps.now_iso(),
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        deps.save_scan_job_state(config, prefix, job_payload)
+        thread_kwargs = {
+            "config_path": config.paths.config_path,
+            "prefix": prefix,
+            "job_id": str(job_payload["job_id"]),
+            "process_controller": ManagedProcessController(),
+        }
+        try:
+            if deps.start_scan_job_thread is not None:
+                deps.start_scan_job_thread(**thread_kwargs)
+            else:
+                thread = threading.Thread(
+                    target=deps.run_scan_job,
+                    kwargs=thread_kwargs,
+                    name=f"scan-job-{job_payload['job_id']}",
+                )
+                thread.start()
+        except BaseException as exc:
+            deps.save_scan_job_state(
+                config,
+                prefix,
+                {
+                    **job_payload,
+                    "status": "failed",
+                    "finished_at": deps.now_iso(),
+                    "error": str(exc) or type(exc).__name__,
+                },
+            )
+            raise
+        return job_payload
 
 
 def load_scan_status(
@@ -922,6 +947,7 @@ def active_scan_from_db(
             scan_runs.c.error,
         )
         .where(scan_runs.c.completed_at.is_(None))
+        .where(~scan_runs.c.status.in_(tuple(TERMINAL_SCAN_JOB_STATUSES)))
         .order_by(scan_runs.c.started_at.desc())
         .limit(25)
     ).mappings().fetchall()
@@ -1014,14 +1040,13 @@ def repair_stale_scan_runs(
             scan_runs.c.error,
         )
         .where(scan_runs.c.completed_at.is_(None))
+        .where(~scan_runs.c.status.in_(tuple(TERMINAL_SCAN_JOB_STATUSES)))
         .order_by(scan_runs.c.started_at.desc())
     ).mappings().fetchall()
     repaired = 0
     for row in rows:
         status = str(row["status"] or "running")
         if status in TERMINAL_SCAN_JOB_STATUSES:
-            continue
-        if deps.scan_process_is_alive(row["owner_pid"]):
             continue
         scope = str(row["scope"] or "unknown")
         job_prefixes = [None]
@@ -1033,6 +1058,16 @@ def repair_stale_scan_runs(
                 deps.save_scan_job_state(config, job_prefix, _interrupted_scan_job(job, deps, finished_at=deps.now_iso()))
         _expire_scan_run(connection, str(row["scan_id"]), deps.scan_interrupted_error)
         repaired += 1
+    if deps.list_scan_job_files is None:
+        return repaired
+    for raw_path in deps.list_scan_job_files(config):
+        path = Path(raw_path)
+        job, malformed = _load_scan_job_file(path)
+        if job is None:
+            continue
+        if malformed or str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
+            _save_scan_job_file(path, _interrupted_scan_job(job, deps, finished_at=deps.now_iso()))
+            repaired += 1
     return repaired
 
 
@@ -1238,6 +1273,73 @@ def _interrupted_scan_job(
         "finished_at": finished_at,
         "error": deps.scan_interrupted_error,
     }
+
+
+def _malformed_scan_job(path: Path) -> dict[str, Any]:
+    return {
+        "job_id": path.stem,
+        "status": "failed",
+        "scope": "unknown",
+        "prefix": None,
+        "owner_pid": None,
+        "created_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "error": DEFAULT_SCAN_INTERRUPTED_ERROR,
+        "stats": None,
+    }
+
+
+def _load_scan_job_file(path: Path) -> tuple[dict[str, Any] | None, bool]:
+    if not path.exists():
+        return None, False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return _malformed_scan_job(path), True
+    if not isinstance(payload, dict):
+        return _malformed_scan_job(path), True
+    return payload, False
+
+
+def _save_scan_job_file(path: Path, payload: dict[str, Any]) -> None:
+    _atomic_write_json(path, payload)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    fd: int | None = None
+    try:
+        fd = os.open(temp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        with os.fdopen(fd, "wb") as handle:
+            fd = None
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if directory_flag:
+        flags |= directory_flag
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _now_iso() -> str:

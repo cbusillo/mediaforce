@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import threading
@@ -18,8 +19,9 @@ from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.scanner import ScanStats
 from mediaforce.web import app as web_app
+from mediaforce.web.runtime import job_runtime as job_runtime_module
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_db, latest_scan_completed_at, \
-    load_scan_status, maybe_schedule_scan, repair_stale_scan_runs, run_scan_job, scan_is_stale
+    load_scan_status, maybe_schedule_scan, repair_stale_scan_runs, run_scan_job, save_scan_job_state, scan_is_stale
 from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload
 
 
@@ -334,6 +336,193 @@ class OperatorWorkTests(unittest.TestCase):
         saved_job = save_scan_job_state.call_args.args[2]
         self.assertEqual(saved_job["status"], "failed")
         self.assertEqual(saved_job["error"], "interrupted")
+
+    def test_startup_repair_does_not_trust_live_pid_for_preexisting_scan_run(self) -> None:
+        now = "2026-07-19T12:00:00+00:00"
+        running_job = {
+            "job_id": "scan-job",
+            "status": "running",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": 1,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        save_scan_job_state = Mock()
+        scan_process_is_alive = Mock(return_value=True)
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: running_job,
+            save_scan_job_state=save_scan_job_state,
+        )
+        deps.scan_process_is_alive = scan_process_is_alive
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="pid-reuse-row",
+                    started_at=now,
+                    completed_at=None,
+                    status="running",
+                    error=None,
+                    owner_pid=1,
+                    last_progress_at=now,
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=0,
+                    reprobed_count=0,
+                    unchanged_count=0,
+                )
+            )
+            repaired = repair_stale_scan_runs(connection, self.config, deps)
+            row = connection.execute(select(scan_runs).where(scan_runs.c.scan_id == "pid-reuse-row")).mappings().one()
+
+        self.assertEqual(repaired, 1)
+        scan_process_is_alive.assert_not_called()
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["error"], "interrupted")
+        saved_job = save_scan_job_state.call_args.args[2]
+        self.assertEqual(saved_job["status"], "failed")
+        self.assertEqual(saved_job["error"], "interrupted")
+
+    def test_startup_repair_fails_preexisting_sidecar_without_scan_row(self) -> None:
+        path = self.config.paths.web_state_dir / "scan-full-catalog.job.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "job_id": "sidecar-only",
+                    "status": "queued",
+                    "scope": "full",
+                    "prefix": None,
+                    "owner_pid": 1,
+                    "created_at": "2026-07-19T12:00:00+00:00",
+                    "started_at": None,
+                    "finished_at": None,
+                    "error": None,
+                    "stats": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: None,
+        )
+        deps.list_scan_job_files = lambda _config: (path,)
+
+        with open_db(self.config.paths.db_path) as connection:
+            repaired = repair_stale_scan_runs(connection, self.config, deps)
+
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(repaired, 1)
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["error"], "interrupted")
+        self.assertEqual(stored["finished_at"], "2026-07-19T12:00:00+00:00")
+
+    def test_malformed_scan_sidecar_fails_closed_for_status_reads(self) -> None:
+        path = self.config.paths.web_state_dir / "scan-full-catalog.job.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not json", encoding="utf-8")
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda config, prefix: job_runtime_module.load_scan_job_state(
+                config,
+                prefix,
+                lambda _config, _prefix: path,
+            ),
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            status = load_scan_status(connection, self.config, None, deps)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"], job_runtime_module.DEFAULT_SCAN_INTERRUPTED_ERROR)
+
+    def test_scan_sidecar_write_uses_same_directory_atomic_replace(self) -> None:
+        path = self.config.paths.web_state_dir / "scan-full-catalog.job.json"
+        replacements: list[tuple[Path, Path]] = []
+        real_replace = os.replace
+
+        def replace_and_record(source: object, destination: object) -> None:
+            source_path = Path(source)
+            destination_path = Path(destination)
+            replacements.append((source_path, destination_path))
+            real_replace(source_path, destination_path)
+
+        with patch.object(job_runtime_module.os, "replace", side_effect=replace_and_record):
+            save_scan_job_state(
+                self.config,
+                None,
+                {"job_id": "atomic", "status": "queued"},
+                lambda _config, _prefix: path,
+            )
+
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["job_id"], "atomic")
+        self.assertEqual(len(replacements), 1)
+        source_path, destination_path = replacements[0]
+        self.assertEqual(source_path.parent, path.parent)
+        self.assertEqual(destination_path, path)
+        self.assertFalse(source_path.exists())
+
+    def test_concurrent_scan_refreshes_publish_and_start_only_one_job(self) -> None:
+        jobs: dict[str | None, dict[str, object]] = {}
+        jobs_lock = threading.Lock()
+        first_save_entered = threading.Event()
+        release_first_save = threading.Event()
+        second_started = threading.Event()
+        started_job_ids: list[str] = []
+
+        def load_job(_config: object, job_prefix: str | None) -> dict[str, object] | None:
+            with jobs_lock:
+                job = jobs.get(job_prefix)
+                return dict(job) if job is not None else None
+
+        def save_job(_config: object, job_prefix: str | None, payload: dict[str, object]) -> None:
+            if not first_save_entered.is_set():
+                first_save_entered.set()
+                self.assertTrue(release_first_save.wait(timeout=1))
+            with jobs_lock:
+                jobs[job_prefix] = dict(payload)
+
+        def start_thread(**kwargs: object) -> None:
+            started_job_ids.append(str(kwargs["job_id"]))
+
+        deps = self._job_runtime_deps(
+            load_scan_job_state=load_job,
+            save_scan_job_state=save_job,
+        )
+        deps.scan_process_is_alive = lambda pid: int(pid) == os.getpid() if pid is not None else False
+        deps.start_scan_job_thread = start_thread
+        results: list[dict[str, object] | None] = []
+
+        def schedule_scan() -> None:
+            with open_db(self.config.paths.db_path) as thread_connection:
+                results.append(maybe_schedule_scan(thread_connection, self.config, None, deps, force=True))
+
+        first = threading.Thread(target=schedule_scan)
+        second = threading.Thread(target=lambda: (second_started.set(), schedule_scan()))
+        first.start()
+        self.assertTrue(first_save_entered.wait(timeout=1))
+        second.start()
+        self.assertTrue(second_started.wait(timeout=1))
+        threading.Event().wait(0.05)
+        self.assertEqual(results, [])
+
+        release_first_save.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(len(results), 2)
+        self.assertIsNotNone(results[0])
+        self.assertIsNotNone(results[1])
+        assert results[0] is not None and results[1] is not None
+        self.assertEqual(results[0]["job_id"], results[1]["job_id"])
+        self.assertEqual(started_job_ids, [str(results[0]["job_id"])])
 
     def test_queued_scan_rechecks_global_pause_before_media_work_starts(self) -> None:
         queued_job = {

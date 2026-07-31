@@ -1549,7 +1549,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIn("attachment_summary_json", library_columns)
             self.assertIn("attachment_summary_json", staged_columns)
 
-    def test_open_db_adds_scan_run_terminal_columns_to_previous_revision(self) -> None:
+    def test_open_db_backfills_ambiguous_legacy_scan_runs_as_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
             with open_db(db_path):
@@ -1591,6 +1591,36 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     ),
                 )
                 raw_connection.execute(
+                    """
+                    INSERT INTO scan_runs (
+                        scan_id,
+                        started_at,
+                        completed_at,
+                        owner_pid,
+                        last_progress_at,
+                        roots_json,
+                        scope,
+                        prefixes_json,
+                        file_count,
+                        reprobed_count,
+                        unchanged_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "historical-interrupted-scan",
+                        "2026-07-30T13:00:00+00:00",
+                        None,
+                        999999,
+                        "2026-07-30T13:01:00+00:00",
+                        '["tv"]',
+                        "full",
+                        None,
+                        3,
+                        1,
+                        2,
+                    ),
+                )
+                raw_connection.execute(
                     "UPDATE alembic_version SET version_num = ?",
                     ("20260726_0019",),
                 )
@@ -1606,11 +1636,31 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         scan_runs.c.scan_id == "historical-completed-scan"
                     )
                 ).scalar_one()
+                historical_error = connection.execute(
+                    select(scan_runs.c.error).where(
+                        scan_runs.c.scan_id == "historical-completed-scan"
+                    )
+                ).scalar_one()
+                interrupted_row = connection.execute(
+                    select(scan_runs.c.status, scan_runs.c.error, scan_runs.c.completed_at).where(
+                        scan_runs.c.scan_id == "historical-interrupted-scan"
+                    )
+                ).mappings().one()
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("status", columns)
             self.assertIn("error", columns)
-            self.assertEqual(historical_status, "completed")
+            self.assertEqual(historical_status, "failed")
+            self.assertEqual(
+                historical_error,
+                "Background scan was interrupted by a web process restart.",
+            )
+            self.assertEqual(interrupted_row["status"], "failed")
+            self.assertEqual(
+                interrupted_row["error"],
+                "Background scan was interrupted by a web process restart.",
+            )
+            self.assertEqual(interrupted_row["completed_at"], "2026-07-30T13:01:00+00:00")
 
     def test_open_db_adds_media_fingerprint_column_to_previous_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

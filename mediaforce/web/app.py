@@ -3341,6 +3341,10 @@ def _scan_job_file(config: MediaforceConfig, prefix: str | None) -> Path:
     return _state_web_dir(config) / f"scan-{_slug(name)}.job.json"
 
 
+def _scan_job_files(config: MediaforceConfig) -> tuple[Path, ...]:
+    return tuple(sorted(_state_web_dir(config).glob("scan-*.job.json")))
+
+
 def _settings_library_rows_for_config(config: MediaforceConfig, *, min_rows: int = 3) -> list[dict[str, Any]]:
     return _settings_library_rows_for_config_runtime(config, min_rows=min_rows)
 
@@ -3479,6 +3483,7 @@ def _job_runtime_deps() -> JobRuntimeDeps:
         save_catalog_signature=_save_catalog_signature,
         reset_folder_card_cache=_reset_folder_card_cache,
         start_scan_job_thread=_start_scan_job_thread,
+        list_scan_job_files=_scan_job_files,
     )
 
 
