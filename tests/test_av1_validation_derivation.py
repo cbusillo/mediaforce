@@ -560,6 +560,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
     def _matching_repository_identity(self) -> tuple[str, str]:
         return self.plan.repository_commit, self.plan.repository_tree
 
+    def _drifted_repository_identity(self) -> tuple[str, str]:
+        return "b" * 40, "c" * 40
+
     def _run_assignment_with_repository_drift(
             self,
             *,
@@ -4165,6 +4168,103 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(terminal.attempt_id, attempt.attempt_id)
         self.assertEqual(snapshot_path.read_bytes(), retained_bytes)
 
+    def test_checkout_drift_does_not_strand_orphaned_assignment_claim(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_assignment_claim(
+            attempts_dir,
+            assignment_id=assignment.assignment_id,
+            plan_id=self.plan.plan_id,
+            authorization_id=self.plan.authorization.authorization_id,
+            claimed_at="2026-07-28T01:00:00Z",
+        )
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                side_effect=AssertionError("live inventory must not be read"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+                side_effect=AssertionError("execution drift must not be checked"),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "interrupted state was terminalized",
+            ),
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                repository_identity_resolver=self._drifted_repository_identity,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-28T01:01:00Z",
+            )
+
+        attempt = load_av1_validation_derivation_attempts(attempts_dir)[0]
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(attempt.status, "stopped")
+        self.assertEqual(attempt.reason_code, "interrupted_claim")
+        self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_interrupted_nonreview_attempt_recovery_ignores_checkout_drift(self) -> None:
+        attempt = self._failed_attempt(self.plan.assignments[0].assignment_id)
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+
+        def fail_on_live_repository_check() -> None:
+            raise AV1ValidationDerivationError("repository snapshot drifted")
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-07-28T01:06:00Z",
+            before_observed_publish=fail_on_live_repository_check,
+        ))
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "runtime_failure")
+        self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
+    def test_interrupted_verdict_claim_recovery_ignores_checkout_drift(self) -> None:
+        attempt = self._review_pending_attempt()
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+
+        def fail_on_live_repository_check() -> None:
+            raise AV1ValidationDerivationError("repository snapshot drifted")
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-07-28T01:07:00Z",
+            before_observed_publish=fail_on_live_repository_check,
+        ))
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
     def test_source_integrity_probe_fails_before_assignment_claim(self) -> None:
         assignment = self.plan.assignments[0]
         attempts_dir = self.runtime_artifact_root / "attempts"
@@ -5611,6 +5711,85 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             (terminal,),
         )
 
+    def test_favorable_terminal_intent_recovery_keeps_repository_and_expiry_guards(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        observation = _observation(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=[],
+            evidence_ids=[],
+            moment_indexes=[],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+            observation=observation,
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            self.runtime_artifact_root / "terminal-intents",
+            terminal,
+        )
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "repository snapshot drifted",
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                repository_identity_resolver=self._drifted_repository_identity,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-28T01:07:00Z",
+            )
+        self.assertFalse(records_dir.exists())
+
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                return_value=10**30,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "published after authorization expired",
+            ),
+        ):
+            _recover_interrupted_derivation_state(
+                plan=self.plan,
+                partition=self.partition,
+                artifact_root=self.runtime_artifact_root,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                completed_at="2026-07-28T01:07:00Z",
+                before_observed_publish=lambda: None,
+            )
+        self.assertFalse(records_dir.exists())
+
     def test_recovered_observed_terminal_allows_frozen_verdict_retry(self) -> None:
         assignment = self.plan.assignments[0]
         attempt = self._review_pending_attempt()
@@ -5657,6 +5836,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             attempts_directory=attempts_dir,
             terminal_records_directory=records_dir,
             completed_at="2026-07-28T01:07:00Z",
+            before_observed_publish=lambda: None,
         ))
         with (
             patch(

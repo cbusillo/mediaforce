@@ -1390,7 +1390,6 @@ def _run_av1_validation_derivation_assignment_locked(
             attempts_directory=attempts_directory,
             terminal_records_directory=terminal_records_directory,
             completed_at=recovery_completed_at,
-            before_publish=assert_live_repository_identity,
             before_observed_publish=(
                 assert_recovered_observed_terminal_publication
             ),
@@ -2934,7 +2933,6 @@ def _recover_interrupted_derivation_state(
         attempts_directory: Path,
         terminal_records_directory: Path,
         completed_at: str,
-        before_publish: Callable[[], None] | None = None,
         before_observed_publish: Callable[[], None] | None = None,
 ) -> bool:
     attempts = (
@@ -3004,11 +3002,25 @@ def _recover_interrupted_derivation_state(
             if terminal.status == "observed"
             else None
         )
-        terminal_before_publish = (
-            before_observed_publish
-            if terminal.status == "observed"
-            else before_publish
-        )
+        terminal_before_publish = None
+        if terminal.status == "observed":
+            if before_observed_publish is None:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation observed terminal intent recovery requires live repository authority"
+                )
+
+            def assert_observed_terminal_recovery_publishable() -> None:
+                _assert_observed_terminal_intent_recovery_supported(
+                    plan=plan,
+                    artifact_root=artifact_root,
+                    attempt=attempts_by_assignment[terminal.assignment_id],
+                    terminal_intent=terminal,
+                    attempts=attempts,
+                )
+                before_observed_publish()
+
+            assert_observed_terminal_recovery_publishable()
+            terminal_before_publish = assert_observed_terminal_recovery_publishable
         ensure_av1_validation_derivation_terminal_intent(
             terminal_intents_directory,
             terminal,
@@ -3042,7 +3054,6 @@ def _recover_interrupted_derivation_state(
         write_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
-            before_publish=before_publish,
         )
         return True
     interrupted_verdicts: list[AV1ValidationDerivationAttempt] = []
@@ -3079,12 +3090,10 @@ def _recover_interrupted_derivation_state(
         ensure_av1_validation_derivation_terminal_intent(
             artifact_root / "terminal-intents",
             terminal,
-            before_publish=before_publish,
         )
         ensure_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
-            before_publish=before_publish,
         )
         return True
     attempted_ids = {attempt.assignment_id for attempt in attempts}
@@ -3126,7 +3135,6 @@ def _recover_interrupted_derivation_state(
     write_av1_validation_derivation_attempt(
         attempts_directory,
         attempt,
-        before_publish=before_publish,
     )
     terminal = build_av1_validation_derivation_terminal_record(
         plan=plan,
@@ -3136,9 +3144,56 @@ def _recover_interrupted_derivation_state(
     write_av1_validation_derivation_terminal_record(
         terminal_records_directory,
         terminal,
-        before_publish=before_publish,
     )
     return True
+
+
+def _assert_observed_terminal_intent_recovery_supported(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        artifact_root: Path,
+        attempt: AV1ValidationDerivationAttempt,
+        terminal_intent: AV1ValidationDerivationTerminalRecord,
+        attempts: tuple[AV1ValidationDerivationAttempt, ...],
+) -> None:
+    projection = terminal_intent.observation
+    if terminal_intent.status != "observed" or projection is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation observed terminal intent is incomplete"
+        )
+    verdict_claims = load_av1_validation_derivation_verdict_claims(
+        artifact_root / "verdict-claims",
+        plan=plan,
+        attempts=attempts,
+    )
+    if not any(
+        str(claim["assignment_id"]) == terminal_intent.assignment_id
+        for claim in verdict_claims
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation observed terminal intent requires an immutable verdict claim"
+        )
+    verdict_intent = load_av1_validation_derivation_verdict_intent(
+        artifact_root / "verdict-intents",
+        plan=plan,
+        attempt=attempt,
+    )
+    if verdict_intent is None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation observed terminal intent requires an immutable verdict intent"
+        )
+    expected_verdict = {
+        "acceptable": "approved",
+        "unacceptable": "rejected",
+    }.get(projection.verdict)
+    if (
+        expected_verdict is None
+        or verdict_intent["verdict"] != expected_verdict
+        or verdict_intent["recorded_at"] != projection.recorded_at
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation observed terminal intent conflicts with its verdict intent"
+        )
 
 
 def _current_derivation_review_artifact_fingerprint(
