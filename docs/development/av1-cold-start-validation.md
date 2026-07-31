@@ -230,6 +230,20 @@ execution keeps Git access at the repo-local verifier boundary and injects a
 live identity resolver into the runtime. Each resolution uses an independent
 bounded Git probe, so cancellation or deadline state on the media controller
 cannot suppress publication of an immutable stopped or expired outcome. The
+Git environment is explicit and non-inherited: global and system config are
+disabled, replacement refs are disabled, and optional index locks are disabled
+so every read probe is non-writing. The verifier anchors `GIT_WORK_TREE` to its
+canonical repository root, disables system and configured attribute files, and
+disables repository-configured fsmonitor hooks for these probes. It does not
+blanket-disable repository-local configuration, because ordinary linked-worktree
+and core/remote/branch behavior must remain intact. Instead, the only local
+configuration vectors that could reinterpret authority are neutralized at the
+probe boundary: tracked-state checks use raw `diff-index` and `diff-files` with
+external diff, text conversion, and submodule ignoring disabled; the clean-state
+check explicitly includes all untracked files and submodules. Git aliases,
+remotes, hooks, and ordinary branch settings are not invoked by these direct
+built-in read commands, and remaining local configuration cannot alter the raw
+commit, tree, or blob object IDs they consume.
 runtime rechecks the plan's exact
 commit/tree pair before claim publication, immediately before and after media
 execution, and inside every attempt or terminal publication callback. A checkout
@@ -723,10 +737,15 @@ deadline. Before claim publication, the verifier checks that the live Git commit
 and tree equal the immutable plan snapshot, rejects uncommitted tracked changes,
 and repeats that identity check after the request. It never launches Code in a
 live source worktree. It builds a deterministic lane-specific bundle directly
-from the claimed Git commit instead. Every entry must be an exact allowlisted
-regular tracked blob with its Git blob ID, path, byte size, SHA-256 digest, and
-UTF-8 text. Per-blob and total-bundle bounds apply. Code receives no repository
-directory, so an untracked live-worktree file cannot affect the review. The
+from the claimed Git commit instead: raw `cat-file` commit data supplies the
+tree, `ls-tree -z` resolves each allowlisted entry from that exact tree, and raw
+`cat-file` size/blob reads supply its bytes. Replacement refs remain disabled
+for all of those probes, and no diff, textconv, attribute, or worktree-filter
+path participates in bundle construction. Every entry must be an exact
+allowlisted regular tracked blob with its Git blob ID, path, byte size, SHA-256
+digest, and UTF-8 text. Per-blob and total-bundle bounds apply. Code receives no
+repository directory, so an untracked live-worktree file cannot affect the
+review. The
 lane allowlists include the relevant implementation, runtime, verifier, and
 protocol files while remaining bounded to 384 KiB per blob and 512 KiB per
 request bundle. The

@@ -2791,6 +2791,252 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 process_controller=ManagedProcessController(),
             )
 
+    def test_review_git_environment_disables_replacements_locks_and_unsafe_config(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            environment = verify_av1_cold_start_preregistration._review_git_environment(
+                repository_root=repository,
+            )
+        self.assertEqual(environment["GIT_ATTR_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_CONFIG_GLOBAL"], "/dev/null")
+        self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
+        self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(environment["GIT_WORK_TREE"], str(repository.resolve()))
+        self.assertEqual(
+            verify_av1_cold_start_preregistration._review_git_command("cat-file", "blob", "a" * 40),
+            [
+                "/usr/bin/git",
+                "-c",
+                "core.attributesFile=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "cat-file",
+                "blob",
+                "a" * 40,
+            ],
+        )
+
+    def test_review_git_probes_ignore_replace_refs_for_identity_and_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            (repository / "allowed.txt").write_text(
+                "authoritative review text\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", "allowed.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "authoritative")
+            authoritative_commit = _run_test_git(repository, "rev-parse", "HEAD")
+            authoritative_tree = _run_test_git(repository, "rev-parse", "HEAD^{tree}")
+            authoritative_blob = _run_test_git(
+                repository,
+                "rev-parse",
+                "HEAD:allowed.txt",
+            )
+            (repository / "allowed.txt").write_text(
+                "replacement review text\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", "allowed.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "replacement")
+            replacement_commit = _run_test_git(repository, "rev-parse", "HEAD")
+            replacement_blob = _run_test_git(
+                repository,
+                "rev-parse",
+                "HEAD:allowed.txt",
+            )
+            _run_test_git(repository, "checkout", "--quiet", "--detach", authoritative_commit)
+            claim = SimpleNamespace(
+                lane="architecture",
+                repository_commit=authoritative_commit,
+                repository_tree=authoritative_tree,
+            )
+            with patch.object(
+                verify_av1_cold_start_preregistration,
+                "AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST",
+                {"architecture": ("allowed.txt",)},
+            ):
+                expected_identity = (
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    )
+                )
+                expected_bundle = (
+                    verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                        claim=claim,
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    )
+                )
+                _run_test_git(
+                    repository,
+                    "replace",
+                    authoritative_commit,
+                    replacement_commit,
+                )
+                _run_test_git(
+                    repository,
+                    "replace",
+                    authoritative_blob,
+                    replacement_blob,
+                )
+                self.assertEqual(
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    ),
+                    expected_identity,
+                )
+                self.assertEqual(
+                    verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                        claim=claim,
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    ),
+                    expected_bundle,
+                )
+            self.assertEqual(expected_identity, (authoritative_commit, authoritative_tree))
+            self.assertEqual(expected_bundle["files"][0]["blob_id"], authoritative_blob)
+            self.assertEqual(expected_bundle["files"][0]["text"], "authoritative review text\n")
+
+    def test_review_git_probes_reject_dirty_state_despite_local_diff_drivers(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            alternate_worktree = Path(directory) / "alternate-worktree"
+            repository.mkdir()
+            alternate_worktree.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            (repository / ".gitattributes").write_text(
+                "tracked.txt diff=review-mask\n",
+                encoding="utf-8",
+            )
+            (repository / "tracked.txt").write_text(
+                "authoritative tracked text\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", ".gitattributes", "tracked.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "authoritative")
+            commit = _run_test_git(repository, "rev-parse", "HEAD")
+            tree = _run_test_git(repository, "rev-parse", "HEAD^{tree}")
+            claim = SimpleNamespace(
+                lane="architecture",
+                repository_commit=commit,
+                repository_tree=tree,
+            )
+            external_diff = Path(directory) / "external-diff.sh"
+            external_diff.write_text(
+                "#!/bin/sh\n: > \"${0}.called\"\nexit 0\n",
+                encoding="utf-8",
+            )
+            external_diff.chmod(0o700)
+            textconv = Path(directory) / "textconv.sh"
+            textconv.write_text(
+                "#!/bin/sh\n: > \"${0}.called\"\nprintf 'normalized\\n'\n",
+                encoding="utf-8",
+            )
+            textconv.chmod(0o700)
+            configured_attributes = Path(directory) / "configured-attributes"
+            configured_attributes.write_text(
+                "tracked.txt diff=review-mask\n",
+                encoding="utf-8",
+            )
+            (alternate_worktree / "tracked.txt").write_text(
+                "alternate worktree text\n",
+                encoding="utf-8",
+            )
+            _run_test_git(
+                repository,
+                "config",
+                "--local",
+                "core.attributesFile",
+                str(configured_attributes),
+            )
+            _run_test_git(
+                repository,
+                "config",
+                "--local",
+                "core.worktree",
+                str(alternate_worktree),
+            )
+            _run_test_git(
+                repository,
+                "config",
+                "--local",
+                "diff.external",
+                str(external_diff),
+            )
+            _run_test_git(
+                repository,
+                "config",
+                "--local",
+                "diff.review-mask.textconv",
+                str(textconv),
+            )
+            with patch.object(
+                verify_av1_cold_start_preregistration,
+                "AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST",
+                {"architecture": ("tracked.txt",)},
+            ):
+                self.assertEqual(
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                        require_clean=True,
+                    ),
+                    (commit, tree),
+                )
+                baseline_bundle = (
+                    verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                        claim=claim,
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    )
+                )
+                (repository / "untracked.txt").write_text(
+                    "untracked worktree text\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "isolated review repository is not clean",
+                ):
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                        require_clean=True,
+                    )
+                self.assertEqual(
+                    verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                        claim=claim,
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    ),
+                    baseline_bundle,
+                )
+                (repository / "untracked.txt").unlink()
+                (repository / "tracked.txt").write_text(
+                    "dirty tracked text\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "uncommitted tracked changes",
+                ):
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    )
+            self.assertFalse(external_diff.with_name(f"{external_diff.name}.called").exists())
+            self.assertFalse(textconv.with_name(f"{textconv.name}.called").exists())
+
     def test_review_bundle_uses_tracked_utf8_allowlist_and_rejects_unsafe_blobs(
             self,
     ) -> None:

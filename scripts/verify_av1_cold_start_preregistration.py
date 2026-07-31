@@ -145,6 +145,19 @@ _CANONICAL_PREREGISTRATION_RUNNER = (
 _AGENT_REVIEW_MAX_SECONDS = 1800
 _AGENT_REVIEW_SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _AGENT_REVIEW_GENERIC_IDENTITY = "mediaforce-review"
+_REVIEW_GIT_COMMAND_PREFIX = (
+    "/usr/bin/git",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+)
+_REVIEW_GIT_DIFF_OPTIONS = (
+    "--quiet",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--ignore-submodules=none",
+)
 _LLM_REVIEW_MAXIMUM_RESPONSE_BYTES = 64 * 1024
 _MACH_O_MAGICS = frozenset({
     b"\xce\xfa\xed\xfe",
@@ -1360,20 +1373,39 @@ def _authorized_review_runner_identity(
     return identity
 
 
+def _is_raw_git_object_id(value: str) -> bool:
+    return (
+        len(value) in {40, 64}
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _review_git_command(*arguments: str) -> list[str]:
+    return [*_REVIEW_GIT_COMMAND_PREFIX, *arguments]
+
+
+def _review_git_diff_command(command: str, *arguments: str) -> list[str]:
+    return _review_git_command(
+        command,
+        *_REVIEW_GIT_DIFF_OPTIONS,
+        *arguments,
+    )
+
+
 def _repository_review_identity(
         *,
         process_controller: ManagedProcessController,
         repository_root: Path | None = None,
         require_clean: bool = False,
 ) -> tuple[str, str]:
-    root = REPOSITORY_ROOT if repository_root is None else repository_root
+    root = (REPOSITORY_ROOT if repository_root is None else repository_root).resolve()
 
     def resolve_identity() -> tuple[str, str]:
         identity = run_command(
-            ["/usr/bin/git", "rev-parse", "HEAD", "HEAD^{tree}"],
+            _review_git_command("rev-parse", "HEAD", "HEAD^{tree}"),
             process_controller=process_controller,
             cwd=root,
-            env=_review_git_environment(),
+            env=_review_git_environment(repository_root=root),
             timeout=15,
             check=False,
         )
@@ -1381,11 +1413,7 @@ def _repository_review_identity(
         if (
             identity.returncode != 0
             or len(object_ids) != 2
-            or any(
-                len(object_id) not in {40, 64}
-                or any(character not in "0123456789abcdef" for character in object_id)
-                for object_id in object_ids
-            )
+            or any(not _is_raw_git_object_id(object_id) for object_id in object_ids)
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation review repository identity is unavailable"
@@ -1393,33 +1421,42 @@ def _repository_review_identity(
         return object_ids[0], object_ids[1]
 
     object_ids = resolve_identity()
-    tracked_state = run_command(
-        ["/usr/bin/git", "diff", "--quiet", object_ids[0], "--"],
-        process_controller=process_controller,
-        cwd=root,
-        env=_review_git_environment(),
-        timeout=15,
-        check=False,
-    )
-    if tracked_state.returncode == 1:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository has uncommitted tracked changes"
+    for tracked_state_command in (
+        _review_git_diff_command(
+            "diff-index",
+            "--cached",
+            object_ids[0],
+            "--",
+        ),
+        _review_git_diff_command("diff-files", "--"),
+    ):
+        tracked_state = run_command(
+            tracked_state_command,
+            process_controller=process_controller,
+            cwd=root,
+            env=_review_git_environment(repository_root=root),
+            timeout=15,
+            check=False,
         )
-    if tracked_state.returncode != 0:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository state is unavailable"
-        )
+        if tracked_state.returncode == 1:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository has uncommitted tracked changes"
+            )
+        if tracked_state.returncode != 0:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository state is unavailable"
+            )
     if require_clean:
         repository_state = run_command(
-            [
-                "/usr/bin/git",
+            _review_git_command(
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
-            ],
+                "--ignore-submodules=none",
+            ),
             process_controller=process_controller,
             cwd=root,
-            env=_review_git_environment(),
+            env=_review_git_environment(repository_root=root),
             timeout=15,
             check=False,
         )
@@ -1445,11 +1482,15 @@ def _live_repository_identity() -> tuple[str, str]:
     )
 
 
-def _review_git_environment() -> dict[str, str]:
+def _review_git_environment(*, repository_root: Path) -> dict[str, str]:
     return {
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
+        "GIT_WORK_TREE": str(repository_root.resolve()),
         "LANG": "C",
         "LC_ALL": "C",
         "PAGER": "cat",
@@ -1475,7 +1516,7 @@ def _review_runner_environment(*, working_directory: Path) -> dict[str, str]:
 
 
 def _run_review_git(
-        command: list[str],
+        arguments: list[str],
         *,
         repository_root: Path,
         process_controller: ManagedProcessController,
@@ -1483,10 +1524,10 @@ def _run_review_git(
 ) -> str | bytes:
     try:
         completed = run_command(
-            command,
+            _review_git_command(*arguments),
             process_controller=process_controller,
             cwd=repository_root,
-            env=_review_git_environment(),
+            env=_review_git_environment(repository_root=repository_root),
             text=not binary,
             timeout=15,
             check=False,
@@ -1513,22 +1554,56 @@ def _run_review_git(
     return output
 
 
+def _review_git_commit_tree(
+        commit: str,
+        *,
+        repository_root: Path,
+        process_controller: ManagedProcessController,
+) -> str:
+    payload = _run_review_git(
+        ["cat-file", "commit", commit],
+        repository_root=repository_root,
+        process_controller=process_controller,
+        binary=True,
+    )
+    if not isinstance(payload, bytes):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git commit data is invalid"
+        )
+    headers, separator, _message = payload.partition(b"\n\n")
+    tree_entries = [
+        header.removeprefix(b"tree ")
+        for header in headers.splitlines()
+        if header.startswith(b"tree ")
+    ]
+    if not separator or len(tree_entries) != 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git commit data is invalid"
+        )
+    try:
+        tree = tree_entries[0].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git commit data is invalid"
+        ) from exc
+    if not _is_raw_git_object_id(tree):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git commit data is invalid"
+        )
+    return tree
+
+
 def _build_av1_validation_derivation_review_bundle(
         *,
         claim: AV1ValidationDerivationReviewClaim,
         process_controller: ManagedProcessController,
         repository_root: Path = REPOSITORY_ROOT,
 ) -> dict[str, object]:
-    resolved_tree = _run_review_git(
-        [
-            "/usr/bin/git",
-            "rev-parse",
-            "--verify",
-            f"{claim.repository_commit}^{{tree}}",
-        ],
+    resolved_tree = _review_git_commit_tree(
+        claim.repository_commit,
         repository_root=repository_root,
         process_controller=process_controller,
-    ).strip()
+    )
     if resolved_tree != claim.repository_tree:
         raise AV1ValidationDerivationError(
             "AV1 derivation review bundle repository identity drifted"
@@ -1541,11 +1616,10 @@ def _build_av1_validation_derivation_review_bundle(
     for path in allowed_paths:
         listing = _run_review_git(
             [
-                "/usr/bin/git",
                 "ls-tree",
                 "-z",
                 "--full-tree",
-                claim.repository_commit,
+                resolved_tree,
                 "--",
                 path,
             ],
@@ -1571,14 +1645,13 @@ def _build_av1_validation_derivation_review_bundle(
             listed_path != path
             or mode not in {b"100644", b"100755"}
             or object_type != b"blob"
-            or len(blob_id) not in {40, 64}
-            or any(character not in "0123456789abcdef" for character in blob_id)
+            or not _is_raw_git_object_id(blob_id)
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation review bundle tree entry is not an allowlisted blob"
             )
         raw_size = _run_review_git(
-            ["/usr/bin/git", "cat-file", "-s", blob_id],
+            ["cat-file", "-s", blob_id],
             repository_root=repository_root,
             process_controller=process_controller,
         )
@@ -1596,7 +1669,7 @@ def _build_av1_validation_derivation_review_bundle(
         ):
             raise AV1ValidationDerivationError("AV1 derivation review bundle is oversized")
         blob = _run_review_git(
-            ["/usr/bin/git", "cat-file", "blob", blob_id],
+            ["cat-file", "blob", blob_id],
             repository_root=repository_root,
             process_controller=process_controller,
             binary=True,
