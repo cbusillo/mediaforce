@@ -1080,6 +1080,14 @@ def _run_av1_validation_derivation_assignment_locked(
             )
         clock = now_iso or _now_iso
         recovery_completed_at = clock()
+
+        def assert_recovered_observed_terminal_publication() -> None:
+            assert_live_repository_identity()
+            assert_av1_validation_derivation_authorization_active(
+                plan,
+                at=clock(),
+            )
+
         interrupted_state_recovered = _recover_interrupted_derivation_state(
             plan=plan,
             partition=partition,
@@ -1088,6 +1096,9 @@ def _run_av1_validation_derivation_assignment_locked(
             terminal_records_directory=terminal_records_directory,
             completed_at=recovery_completed_at,
             before_publish=assert_live_repository_identity,
+            before_observed_publish=(
+                assert_recovered_observed_terminal_publication
+            ),
         )
         if interrupted_state_recovered:
             raise AV1ValidationDerivationError(
@@ -2169,6 +2180,7 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 "AV1 derivation verdict arrived outside its authorization window"
             ) from exc
     terminal_publication_started = False
+    observation_inserted = False
     try:
         publication_guards: list[Callable[[], None]] = []
         source_sha256_resolver: (
@@ -2183,6 +2195,11 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             _assert_publication_directories()
             assert_live_repository_identity()
             _assert_publication_directories()
+            if observation_inserted:
+                assert_av1_validation_derivation_authorization_active(
+                    plan,
+                    at=clock(),
+                )
 
         def _assert_authoritative_publication() -> None:
             _assert_publication_directories()
@@ -2193,6 +2210,10 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             source_sha256_resolver.assert_quiet()
             assert_live_repository_identity()
             _assert_publication_directories()
+
+        def _assert_observed_terminal_publication() -> None:
+            _assert_authoritative_publication()
+            _assert_fresh_authorization()
 
         with (
             ExitStack() as publication_stack,
@@ -2323,7 +2344,7 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 )
             if result.observation is not None:
                 try:
-                    append_content_intent_boundary_observation(
+                    observation_inserted = append_content_intent_boundary_observation(
                         connection,
                         result.observation,
                     )
@@ -2353,15 +2374,27 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 ))
             )
             publication_guards.append(terminal_publication_guard)
+            terminal_published_before = (
+                plan.authorization.valid_until
+                if terminal.status == "observed"
+                else None
+            )
+            terminal_before_publish = (
+                _assert_observed_terminal_publication
+                if terminal.status == "observed"
+                else _assert_authoritative_publication
+            )
             ensure_av1_validation_derivation_terminal_intent(
                 artifact_root / "terminal-intents",
                 terminal,
-                before_publish=_assert_authoritative_publication,
+                before_publish=terminal_before_publish,
+                published_before=terminal_published_before,
             )
             ensure_av1_validation_derivation_terminal_record(
                 terminal_records_directory,
                 terminal,
-                before_publish=_assert_authoritative_publication,
+                before_publish=terminal_before_publish,
+                published_before=terminal_published_before,
             )
     except _AV1ValidationDerivationVerdictSafetyStop:
         raise
@@ -2607,6 +2640,7 @@ def _recover_interrupted_derivation_state(
         terminal_records_directory: Path,
         completed_at: str,
         before_publish: Callable[[], None] | None = None,
+        before_observed_publish: Callable[[], None] | None = None,
 ) -> bool:
     attempts = (
         load_av1_validation_derivation_attempts(attempts_directory)
@@ -2669,10 +2703,28 @@ def _recover_interrupted_derivation_state(
             "AV1 derivation has multiple interrupted terminal publications"
         )
     if interrupted_terminal_publications:
+        terminal = interrupted_terminal_publications[0]
+        terminal_published_before = (
+            plan.authorization.valid_until
+            if terminal.status == "observed"
+            else None
+        )
+        terminal_before_publish = (
+            before_observed_publish
+            if terminal.status == "observed"
+            else before_publish
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            terminal_intents_directory,
+            terminal,
+            before_publish=terminal_before_publish,
+            published_before=terminal_published_before,
+        )
         ensure_av1_validation_derivation_terminal_record(
             terminal_records_directory,
-            interrupted_terminal_publications[0],
-            before_publish=before_publish,
+            terminal,
+            before_publish=terminal_before_publish,
+            published_before=terminal_published_before,
         )
         return True
     terminal_attempt_ids = {record.attempt_id for record in records}

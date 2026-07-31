@@ -92,6 +92,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelope,
     load_av1_validation_derivation_review_envelopes,
+    load_av1_validation_derivation_terminal_intents,
     load_av1_validation_derivation_terminal_records,
     resolve_av1_validation_derivation_verdict_intent,
     retain_av1_validation_derivation_publication_directories,
@@ -478,6 +479,81 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 compatibility=_compatibility(assignment),
             ),
         )
+
+    def _record_approved_derivation_verdict(
+            self,
+            *,
+            database: Callable[..., object],
+            clock: Callable[[], str],
+    ) -> AV1ValidationDerivationTerminalRecord:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        observation = _observation(
+            assignment=assignment,
+            source_identity=_source_identity(self.partition, assignment),
+            crf=28.0,
+            bitrate=1_000_000,
+            verdict="acceptable",
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_config",
+                return_value=self.runtime_config,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.exclusive_mediaforce_runtime_lock",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                side_effect=database,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=attempt.calibration_payload()["review_artifact_fingerprint"],
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_visual_content_intent_observation",
+                return_value=ContentIntentObservationBuildResult(observation, None),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.append_content_intent_boundary_observation",
+                return_value=True,
+            ),
+        ):
+            return record_av1_validation_derivation_visual_verdict(
+                config_path=Path("unused.toml"),
+                manifest=self.manifest,
+                plan=self.plan,
+                partition=self.partition,
+                token_key=self.token_key,
+                attempt=attempt,
+                terminal_records_directory=(
+                    self.runtime_artifact_root / "terminal-records"
+                ),
+                verdict="approved",
+                concern_tags=[],
+                evidence_ids=[],
+                moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
+                recorded_at="2026-07-28T01:06:00Z",
+                now_iso=clock,
+            )
 
     def _matching_repository_identity(self) -> tuple[str, str]:
         return self.plan.repository_commit, self.plan.repository_tree
@@ -2137,6 +2213,61 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
         self.assertEqual(len(claims), 1)
         self.assertTrue(claims[0]["published_after_deadline"])
+
+    def test_observed_terminal_retry_rejects_post_deadline_inode(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+            observation=_observation(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                bitrate=1_000_000,
+                verdict="acceptable",
+            ),
+        )
+        terminal_intents_directory = self.runtime_artifact_root / "terminal-intents"
+        terminal_records_directory = self.runtime_artifact_root / "terminal-records"
+        ensure_av1_validation_derivation_terminal_intent(
+            terminal_intents_directory,
+            terminal,
+            published_before=VALID_UNTIL,
+        )
+        ensure_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+            published_before=VALID_UNTIL,
+        )
+
+        for directory, ensure_terminal in (
+            (
+                terminal_intents_directory,
+                ensure_av1_validation_derivation_terminal_intent,
+            ),
+            (
+                terminal_records_directory,
+                ensure_av1_validation_derivation_terminal_record,
+            ),
+        ):
+            with self.subTest(directory=directory.name):
+                before_publish = unittest.mock.Mock()
+                with (
+                    patch(
+                        "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                        return_value=10 ** 30,
+                    ),
+                    self.assertRaises(AV1ValidationDerivationPublicationDeadlineError),
+                ):
+                    ensure_terminal(
+                        directory,
+                        terminal,
+                        before_publish=before_publish,
+                        published_before=VALID_UNTIL,
+                    )
+                before_publish.assert_not_called()
 
     def test_exclusive_rename_advances_kernel_change_time(self) -> None:
         self.publication_time_patcher.stop()
@@ -6190,6 +6321,142 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ).exists()
         )
         self.assertFalse((self.runtime_artifact_root / "verdict-intents").exists())
+
+    def test_derivation_verdict_rejects_expired_favorable_commit_after_intent(
+            self,
+    ) -> None:
+        committed = False
+        rolled_back = False
+
+        @contextmanager
+        def database(
+                _path: Path,
+                *,
+                before_commit: Callable[[], None] | None = None,
+        ) -> Iterator[SimpleNamespace]:
+            nonlocal committed, rolled_back
+            connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
+            try:
+                yield connection
+                assert before_commit is not None
+                before_commit()
+                committed = True
+            except BaseException:
+                rolled_back = True
+                raise
+
+        clock_values = iter((
+            "2026-07-31T23:59:55Z",
+            "2026-07-31T23:59:56Z",
+            "2026-07-31T23:59:57Z",
+            "2026-07-31T23:59:58Z",
+            VALID_UNTIL,
+        ))
+        clock_calls: list[str] = []
+
+        def clock() -> str:
+            value = next(clock_values)
+            clock_calls.append(value)
+            return value
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "outside its authorization window",
+        ):
+            self._record_approved_derivation_verdict(
+                database=database,
+                clock=clock,
+            )
+
+        self.assertFalse(committed)
+        self.assertTrue(rolled_back)
+        self.assertEqual(clock_calls, [
+            "2026-07-31T23:59:55Z",
+            "2026-07-31T23:59:56Z",
+            "2026-07-31T23:59:57Z",
+            "2026-07-31T23:59:58Z",
+            VALID_UNTIL,
+        ])
+        terminal = load_av1_validation_derivation_terminal_records(
+            self.runtime_artifact_root / "terminal-records"
+        )[0]
+        self.assertEqual(terminal.status, "observed")
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_current_content_intent_boundary_observations",
+                return_value=[],
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "idempotent verdict retry",
+            ),
+        ):
+            _assert_derivation_terminal_observations_current(
+                connection=SimpleNamespace(),
+                records=(terminal,),
+            )
+
+    def test_derivation_verdict_stops_before_expired_favorable_terminal_publish(
+            self,
+    ) -> None:
+        committed = False
+        rolled_back = False
+
+        @contextmanager
+        def database(
+                _path: Path,
+                *,
+                before_commit: Callable[[], None] | None = None,
+        ) -> Iterator[SimpleNamespace]:
+            nonlocal committed, rolled_back
+            connection = SimpleNamespace(exec_driver_sql=lambda _sql: None)
+            try:
+                yield connection
+                assert before_commit is not None
+                before_commit()
+                committed = True
+            except BaseException:
+                rolled_back = True
+                raise
+
+        clock_values = iter((
+            "2026-07-31T23:59:58Z",
+            "2026-07-31T23:59:59Z",
+            VALID_UNTIL,
+        ))
+        clock_calls: list[str] = []
+
+        def clock() -> str:
+            value = next(clock_values)
+            clock_calls.append(value)
+            return value
+
+        terminal = self._record_approved_derivation_verdict(
+            database=database,
+            clock=clock,
+        )
+
+        self.assertEqual(terminal.status, "stopped")
+        self.assertEqual(terminal.reason_code, "safety_stop")
+        self.assertFalse(committed)
+        self.assertTrue(rolled_back)
+        self.assertEqual(clock_calls, [
+            "2026-07-31T23:59:58Z",
+            "2026-07-31T23:59:59Z",
+            VALID_UNTIL,
+        ])
+        self.assertEqual(
+            load_av1_validation_derivation_terminal_records(
+                self.runtime_artifact_root / "terminal-records"
+            ),
+            (terminal,),
+        )
+        self.assertEqual(
+            load_av1_validation_derivation_terminal_intents(
+                self.runtime_artifact_root / "terminal-intents"
+            ),
+            (terminal,),
+        )
 
     def test_derivation_verdict_terminalizes_transaction_begin_failure(self) -> None:
         attempt = self._review_pending_attempt()

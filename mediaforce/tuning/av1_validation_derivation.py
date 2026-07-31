@@ -3382,6 +3382,7 @@ def ensure_av1_validation_derivation_terminal_intent(
         record: AV1ValidationDerivationTerminalRecord,
         *,
         before_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> Path:
     return _ensure_av1_validation_derivation_terminal_artifact(
         directory,
@@ -3389,6 +3390,7 @@ def ensure_av1_validation_derivation_terminal_intent(
         label="terminal intent",
         record=record,
         before_publish=before_publish,
+        published_before=published_before,
     )
 
 
@@ -3777,6 +3779,7 @@ def ensure_av1_validation_derivation_terminal_record(
         record: AV1ValidationDerivationTerminalRecord,
         *,
         before_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> Path:
     return _ensure_av1_validation_derivation_terminal_artifact(
         directory,
@@ -3784,6 +3787,7 @@ def ensure_av1_validation_derivation_terminal_record(
         label="terminal record",
         record=record,
         before_publish=before_publish,
+        published_before=published_before,
     )
 
 
@@ -6303,6 +6307,7 @@ def _ensure_av1_validation_derivation_terminal_artifact(
         label: str,
         record: AV1ValidationDerivationTerminalRecord,
         before_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> Path:
     _bind_owner_only_directory(
         directory,
@@ -6312,7 +6317,11 @@ def _ensure_av1_validation_derivation_terminal_artifact(
     )
     path = directory / f"{record.assignment_id}.json"
     if path.exists() or path.is_symlink():
-        payload, raw = _load_owner_only_json(path, f"derivation {label}")
+        payload, raw = _load_owner_only_json(
+            path,
+            f"derivation {label}",
+            published_before=published_before,
+        )
         existing = av1_validation_derivation_terminal_record_from_payload(
             payload,
             raw=raw,
@@ -6328,10 +6337,15 @@ def _ensure_av1_validation_derivation_terminal_artifact(
             path,
             canonical_json_bytes(record.to_payload()),
             before_publish=before_publish,
+            published_before=published_before,
         )
         return path
     except _AV1ValidationDerivationArtifactAlreadyExists:
-        payload, raw = _load_owner_only_json(path, f"derivation {label}")
+        payload, raw = _load_owner_only_json(
+            path,
+            f"derivation {label}",
+            published_before=published_before,
+        )
         existing = av1_validation_derivation_terminal_record_from_payload(
             payload,
             raw=raw,

@@ -578,8 +578,12 @@ human verdict. A first verdict whose claim publication reaches authorization
 expiry publishes no claim and terminalizes the affected cell before database
 open. A claim published in-window without a matching verdict intent remains an
 interrupted safety stop, while an immutable in-window verdict intent remains
-eligible for idempotent completion after expiry. After those checks, an
-immutable verdict intent freezes the first human input and runtime timestamp.
+eligible for idempotent reuse without extending authorization. Every favorable
+observation commit and each newly published `observed` terminal artifact samples
+authorization again; an `observed` artifact's inode must predate `valid_until`,
+including when an existing artifact is reused on retry. Failed, stopped, and
+excluded terminal evidence remains publishable after expiry. After those checks,
+an immutable verdict intent freezes the first human input and runtime timestamp.
 The validated observation is appended inside
 the immediate database transaction, then the execution contract is checked one
 final time. The source cohort then completes full verification and a final quiet
