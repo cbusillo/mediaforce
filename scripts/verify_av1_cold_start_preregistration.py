@@ -99,6 +99,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     av1_validation_derivation_artifact_root,
     av1_validation_derivation_execution_environment_sha256,
     av1_validation_derivation_runtime_context_sha256,
+    assert_av1_validation_derivation_source_snapshot_capacity,
     assert_av1_validation_derivation_execution_environment,
     finalize_av1_validation_derivation_candidate_lock,
     load_current_av1_validation_derivation_observations,
@@ -1004,10 +1005,18 @@ def _run_derivation_plan_action(
                 "AV1 derivation plan does not match current locked inputs"
             )
         if args.action == "create-derivation-plan":
+            def _before_plan_publish() -> None:
+                source_sha256_session.assert_quiet()
+                assert_av1_validation_derivation_source_snapshot_capacity(
+                    artifact_root,
+                    plan=plan,
+                )
+                source_sha256_session.assert_quiet()
+
             write_av1_validation_derivation_plan(
                 artifact_root,
                 plan,
-                before_publish=source_sha256_session.assert_quiet,
+                before_publish=_before_plan_publish,
             )
         _print_partition_payload(
             av1_validation_derivation_plan_public_summary(plan),

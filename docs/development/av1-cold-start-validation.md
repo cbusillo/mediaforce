@@ -431,10 +431,21 @@ Interruption recovery terminalizes the owned assignment and preserves any full
 or partial snapshot residue for explicit out-of-band retirement while
 Mediaforce is stopped. Creating each snapshot requires free space for the
 complete source plus the existing five-gibibyte safety floor. Before execution
-authorization, the private operator storage gate must account for cumulative
-retained-snapshot capacity across the authorized derivation assignments; the
-runtime also rechecks free capacity through the pinned snapshot-directory
-descriptor before each assignment.
+authorization, plan publication creates and pins the canonical owner-only
+snapshot directory and requires free bytes equal to the sum of all twenty-four
+source-commitment sizes plus the existing five-gibibyte safety floor. The first
+publication requires that directory to be empty. A plan retry credits only
+complete assignment-named snapshots whose owner, mode, single-link identity,
+size, sampled content identity, and full SHA-256 still match the already-bound
+immutable plan. Its required free bytes are the unretained committed bytes plus
+the safety floor, so retained snapshots do not require impossible duplicate
+capacity. Unexpected entries, partial residue, retained snapshots before a root
+binding exists, a binding without its plan, a drifted plan/root binding, and
+directory or snapshot identity drift fail closed. A retry may recover the
+documented plan-without-binding interruption only while the pinned snapshot
+directory remains present and empty. The runtime also keeps the existing per-
+assignment free-capacity recheck through the pinned snapshot-directory
+descriptor immediately before each new snapshot.
 
 The repository keeps the full protocol suite active on Linux with test-only
 seams for macOS capability admission, the same-filesystem mutation probe, and

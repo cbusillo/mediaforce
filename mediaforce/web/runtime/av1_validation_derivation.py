@@ -77,6 +77,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationCandidateLockEnvelope,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
+    AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationVerdictRetryMismatchError,
     AV1ValidationDerivationTerminalRecord,
     assert_av1_validation_derivation_authorization_active,
@@ -180,6 +181,14 @@ class _PinnedDerivationSource:
     size_bytes: int
     device: int
     inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RetainedDerivationSourceSnapshot:
+    name: str
+    descriptor: int
+    source_size_bytes: int
+    stat_signature: tuple[int, int, int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +307,292 @@ def _retained_source_snapshot_name(assignment_id: str) -> str:
             "AV1 derivation assignment ID is invalid for retained snapshot storage"
         )
     return f"{assignment_id}.source-media"
+
+
+def _assert_owner_only_directory_descriptor_current(
+        path: Path,
+        descriptor: int,
+        *,
+        label: str,
+) -> None:
+    try:
+        descriptor_info = os.fstat(descriptor)
+        path_info = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation {label} directory binding drifted"
+        ) from exc
+    if (
+        not stat.S_ISDIR(descriptor_info.st_mode)
+        or not stat.S_ISDIR(path_info.st_mode)
+        or descriptor_info.st_uid != os.getuid()
+        or path_info.st_uid != os.getuid()
+        or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+        or stat.S_IMODE(path_info.st_mode) & 0o077
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (path_info.st_dev, path_info.st_ino)
+    ):
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation {label} directory binding drifted"
+        )
+
+
+def _source_snapshot_capacity_plan_state(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+) -> tuple[bool, bool]:
+    plan_path = artifact_root / "plan.json"
+    binding_path = artifact_root / ".binding"
+    plan_exists = plan_path.exists() or plan_path.is_symlink()
+    binding_exists = binding_path.exists() or binding_path.is_symlink()
+    if not plan_exists:
+        if binding_exists:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation root binding exists without its immutable plan"
+            )
+        return False, False
+    if load_av1_validation_derivation_plan(plan_path) != plan:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot capacity retry changed its immutable plan"
+        )
+    if not binding_exists:
+        return True, False
+    validate_av1_validation_derivation_artifact_root_binding(
+        artifact_root,
+        plan,
+    )
+    return True, True
+
+
+def _open_validated_retained_source_snapshot(
+        *,
+        snapshot_root_descriptor: int,
+        snapshot_name: str,
+        commitment: AV1ValidationDerivationSourceCommitment,
+) -> _RetainedDerivationSourceSnapshot:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            snapshot_name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=snapshot_root_descriptor,
+        )
+        descriptor_info = os.fstat(descriptor)
+        path_info = os.stat(
+            snapshot_name,
+            dir_fd=snapshot_root_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or path_info.st_uid != os.getuid()
+            or stat.S_IMODE(descriptor_info.st_mode) != 0o400
+            or stat.S_IMODE(path_info.st_mode) != 0o400
+            or descriptor_info.st_nlink != 1
+            or path_info.st_nlink != 1
+            or descriptor_info.st_size != commitment.source_size_bytes
+            or file_stat_signature(descriptor_info)
+            != file_stat_signature(path_info)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation retained source snapshot identity drifted"
+            )
+        initial_signature = file_stat_signature(descriptor_info)
+        if (
+            descriptor_content_version_fingerprint(
+                descriptor,
+                size_bytes=descriptor_info.st_size,
+            ) != commitment.source_identity
+            or descriptor_sha256(descriptor) != commitment.source_sha256
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation retained source snapshot identity drifted"
+            )
+        final_info = os.fstat(descriptor)
+        final_path_info = os.stat(
+            snapshot_name,
+            dir_fd=snapshot_root_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            initial_signature != file_stat_signature(final_info)
+            or initial_signature != file_stat_signature(final_path_info)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation retained source snapshot identity drifted"
+            )
+        retained = _RetainedDerivationSourceSnapshot(
+            name=snapshot_name,
+            descriptor=descriptor,
+            source_size_bytes=commitment.source_size_bytes,
+            stat_signature=initial_signature,
+        )
+        descriptor = -1
+        return retained
+    except AV1ValidationDerivationError:
+        raise
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation retained source snapshot identity drifted"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _assert_retained_source_snapshot_current(
+        retained: _RetainedDerivationSourceSnapshot,
+        *,
+        snapshot_root_descriptor: int,
+) -> None:
+    try:
+        descriptor_info = os.fstat(retained.descriptor)
+        path_info = os.stat(
+            retained.name,
+            dir_fd=snapshot_root_descriptor,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation retained source snapshot identity drifted"
+        ) from exc
+    if (
+        not stat.S_ISREG(descriptor_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or descriptor_info.st_uid != os.getuid()
+        or path_info.st_uid != os.getuid()
+        or stat.S_IMODE(descriptor_info.st_mode) != 0o400
+        or stat.S_IMODE(path_info.st_mode) != 0o400
+        or descriptor_info.st_nlink != 1
+        or path_info.st_nlink != 1
+        or descriptor_info.st_size != retained.source_size_bytes
+        or retained.stat_signature != file_stat_signature(descriptor_info)
+        or retained.stat_signature != file_stat_signature(path_info)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation retained source snapshot identity drifted"
+        )
+
+
+def assert_av1_validation_derivation_source_snapshot_capacity(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+) -> None:
+    canonical_artifact_root = stable_absolute_path(artifact_root)
+    if (
+        canonical_artifact_root.name != plan.partition_id
+        or canonical_artifact_root.parent.name
+        != AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot capacity requires the canonical artifact root"
+        )
+    (
+        plan_already_published,
+        retained_snapshots_are_authorized,
+    ) = _source_snapshot_capacity_plan_state(
+        canonical_artifact_root,
+        plan=plan,
+    )
+    commitments_by_name: dict[str, AV1ValidationDerivationSourceCommitment] = {}
+    total_source_size_bytes = 0
+    for commitment in plan.source_commitments:
+        snapshot_name = _retained_source_snapshot_name(commitment.assignment_id)
+        if snapshot_name in commitments_by_name:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source snapshot commitments are not unique"
+            )
+        commitments_by_name[snapshot_name] = commitment
+        total_source_size_bytes += commitment.source_size_bytes
+    if not commitments_by_name:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot capacity has no authorized commitments"
+        )
+
+    snapshot_root = (
+        canonical_artifact_root
+        / _AV1_VALIDATION_DERIVATION_SOURCE_SNAPSHOT_DIRECTORY
+    )
+    snapshot_root_descriptor = -1
+    retained_snapshots: list[_RetainedDerivationSourceSnapshot] = []
+    try:
+        if plan_already_published:
+            snapshot_root_descriptor = _bind_owner_only_directory_descriptor(
+                snapshot_root,
+                label="source-snapshot",
+            )
+        else:
+            snapshot_root_descriptor = _open_owner_only_directory_descriptor(
+                snapshot_root,
+                label="source-snapshot",
+            )
+        _assert_owner_only_directory_descriptor_current(
+            snapshot_root,
+            snapshot_root_descriptor,
+            label="source-snapshot",
+        )
+        snapshot_names = tuple(sorted(os.listdir(snapshot_root_descriptor)))
+        if snapshot_names and not retained_snapshots_are_authorized:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source snapshot directory contains unexpected pre-authorization artifacts"
+            )
+        if any(name not in commitments_by_name for name in snapshot_names):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source snapshot directory contains unexpected artifacts"
+            )
+        for snapshot_name in snapshot_names:
+            retained_snapshots.append(
+                _open_validated_retained_source_snapshot(
+                    snapshot_root_descriptor=snapshot_root_descriptor,
+                    snapshot_name=snapshot_name,
+                    commitment=commitments_by_name[snapshot_name],
+                )
+            )
+        retained_source_size_bytes = sum(
+            snapshot.source_size_bytes
+            for snapshot in retained_snapshots
+        )
+        required_free_bytes = (
+            total_source_size_bytes
+            - retained_source_size_bytes
+            + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
+        )
+        if (
+            _available_bytes_for_descriptor(snapshot_root_descriptor)
+            < required_free_bytes
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation cumulative source snapshot capacity is not available"
+            )
+        if tuple(sorted(os.listdir(snapshot_root_descriptor))) != snapshot_names:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation source snapshot directory identity drifted"
+            )
+        for retained_snapshot in retained_snapshots:
+            _assert_retained_source_snapshot_current(
+                retained_snapshot,
+                snapshot_root_descriptor=snapshot_root_descriptor,
+            )
+        _assert_owner_only_directory_descriptor_current(
+            snapshot_root,
+            snapshot_root_descriptor,
+            label="source-snapshot",
+        )
+    except AV1ValidationDerivationError:
+        raise
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation source snapshot capacity could not be measured safely"
+        ) from exc
+    finally:
+        for retained_snapshot in reversed(retained_snapshots):
+            os.close(retained_snapshot.descriptor)
+        if snapshot_root_descriptor >= 0:
+            os.close(snapshot_root_descriptor)
 
 
 def _assert_pinned_source_guard_quiet(

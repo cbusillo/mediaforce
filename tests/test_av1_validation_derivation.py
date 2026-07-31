@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from dataclasses import replace
 import errno
 import fcntl
@@ -109,6 +109,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     write_av1_validation_derivation_terminal_record,
 )
 from mediaforce.web.runtime.av1_validation_derivation import (
+    AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES,
     _AV1ValidationDerivationVerdictSafetyStop,
     _assert_next_assignment,
     _assert_derivation_terminal_observations_current,
@@ -125,6 +126,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     _write_all,
     assert_av1_validation_derivation_execution_contract,
     assert_av1_validation_derivation_execution_environment,
+    assert_av1_validation_derivation_source_snapshot_capacity,
     av1_validation_derivation_execution_environment_sha256,
     av1_validation_derivation_runtime_context_sha256,
     finalize_av1_validation_derivation_candidate_lock as finalize_runtime_av1_validation_derivation_candidate_lock,
@@ -965,6 +967,184 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
         )
         self.assertEqual(rebuilt, self.plan)
+
+    def test_plan_capacity_gate_requires_all_authorized_source_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = (
+                Path(directory)
+                / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+                / self.plan.partition_id
+            )
+            total_source_size_bytes = sum(
+                commitment.source_size_bytes
+                for commitment in self.plan.source_commitments
+            )
+            required_free_bytes = (
+                total_source_size_bytes
+                + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
+            )
+            with (
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation._available_bytes_for_descriptor",
+                    return_value=required_free_bytes - 1,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "cumulative source snapshot capacity",
+                ),
+            ):
+                assert_av1_validation_derivation_source_snapshot_capacity(
+                    artifact_root,
+                    plan=self.plan,
+                )
+            self.assertFalse((artifact_root / "plan.json").exists())
+            snapshot_root = artifact_root / "source-snapshots"
+            self.assertTrue(snapshot_root.is_dir())
+            self.assertEqual(stat.S_IMODE(snapshot_root.stat().st_mode), 0o700)
+
+            with patch(
+                "mediaforce.web.runtime.av1_validation_derivation._available_bytes_for_descriptor",
+                return_value=required_free_bytes,
+            ):
+                assert_av1_validation_derivation_source_snapshot_capacity(
+                    artifact_root,
+                    plan=self.plan,
+                )
+
+            commitment = self.plan.source_commitments[0]
+            unexpected_path = (
+                snapshot_root / f"{commitment.assignment_id}.source-media"
+            )
+            unexpected_path.write_bytes(b"pre-authorization-residue")
+            unexpected_path.chmod(0o400)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "unexpected pre-authorization artifacts",
+            ):
+                assert_av1_validation_derivation_source_snapshot_capacity(
+                    artifact_root,
+                    plan=self.plan,
+                )
+
+    def test_plan_capacity_retry_credits_matching_retained_snapshot(self) -> None:
+        snapshot_root = self.runtime_artifact_root / "source-snapshots"
+        snapshot_root.mkdir(mode=0o700)
+        commitment = self.plan.source_commitments[0]
+        snapshot_path = snapshot_root / f"{commitment.assignment_id}.source-media"
+        with snapshot_path.open("wb") as snapshot_file:
+            snapshot_file.truncate(commitment.source_size_bytes)
+        snapshot_path.chmod(0o400)
+        total_source_size_bytes = sum(
+            item.source_size_bytes
+            for item in self.plan.source_commitments
+        )
+        required_free_bytes = (
+            total_source_size_bytes
+            - commitment.source_size_bytes
+            + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
+        )
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.descriptor_content_version_fingerprint",
+                return_value=commitment.source_identity,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.descriptor_sha256",
+                return_value=commitment.source_sha256,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._available_bytes_for_descriptor",
+                side_effect=(required_free_bytes, required_free_bytes - 1),
+            ),
+        ):
+            assert_av1_validation_derivation_source_snapshot_capacity(
+                self.runtime_artifact_root,
+                plan=self.plan,
+            )
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "cumulative source snapshot capacity",
+            ):
+                assert_av1_validation_derivation_source_snapshot_capacity(
+                    self.runtime_artifact_root,
+                    plan=self.plan,
+                )
+
+    def test_plan_capacity_retry_rejects_unexpected_snapshot_entry(self) -> None:
+        snapshot_root = self.runtime_artifact_root / "source-snapshots"
+        snapshot_root.mkdir(mode=0o700)
+        unexpected_path = snapshot_root / "unexpected.source-media"
+        unexpected_path.write_bytes(b"unexpected-private-residue")
+        unexpected_path.chmod(0o400)
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "unexpected artifacts",
+        ):
+            assert_av1_validation_derivation_source_snapshot_capacity(
+                self.runtime_artifact_root,
+                plan=self.plan,
+            )
+
+    def test_plan_capacity_retry_rejects_snapshot_identity_drift(self) -> None:
+        snapshot_root = self.runtime_artifact_root / "source-snapshots"
+        snapshot_root.mkdir(mode=0o700)
+        commitment = self.plan.source_commitments[0]
+        snapshot_path = snapshot_root / f"{commitment.assignment_id}.source-media"
+        snapshot_path.write_bytes(b"partial-private-residue")
+        snapshot_path.chmod(0o400)
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "retained source snapshot identity drifted",
+        ):
+            assert_av1_validation_derivation_source_snapshot_capacity(
+                self.runtime_artifact_root,
+                plan=self.plan,
+            )
+
+    def test_plan_capacity_retry_rejects_missing_snapshot_directory(self) -> None:
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "source-snapshot directory could not be safely bound",
+        ):
+            assert_av1_validation_derivation_source_snapshot_capacity(
+                self.runtime_artifact_root,
+                plan=self.plan,
+            )
+
+    def test_plan_capacity_gate_detects_snapshot_directory_swap(self) -> None:
+        snapshot_root = self.runtime_artifact_root / "source-snapshots"
+        snapshot_root.mkdir(mode=0o700)
+        moved_snapshot_root = self.runtime_artifact_root / "moved-source-snapshots"
+        total_source_size_bytes = sum(
+            commitment.source_size_bytes
+            for commitment in self.plan.source_commitments
+        )
+
+        def swap_snapshot_directory(_descriptor: int) -> int:
+            snapshot_root.rename(moved_snapshot_root)
+            snapshot_root.mkdir(mode=0o700)
+            return (
+                total_source_size_bytes
+                + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
+            )
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._available_bytes_for_descriptor",
+                side_effect=swap_snapshot_directory,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "source-snapshot directory binding drifted",
+            ),
+        ):
+            assert_av1_validation_derivation_source_snapshot_capacity(
+                self.runtime_artifact_root,
+                plan=self.plan,
+            )
 
     def test_plan_binds_execution_environment_and_runner_digests(self) -> None:
         changed_environment = build_av1_validation_derivation_plan(
@@ -9175,6 +9355,98 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertNotIn("local_item_id", serialized)
             self.assertNotIn("source_token", serialized)
             self.assertNotIn(str(root), serialized)
+
+    def test_create_plan_cli_capacity_failure_does_not_publish_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "private"
+            root.mkdir(mode=0o700)
+            runtime_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    db_path=root / "db.sqlite3",
+                    review_dir=root / "review",
+                    web_state_dir=root / "state",
+                )
+            )
+            runtime_config.paths.db_path.touch(mode=0o600)
+            current_inputs = (
+                self.manifest,
+                self.partition,
+                self.token_key,
+                _SourceSHA256Session(),
+                self.source_commitments,
+            )
+            total_source_size_bytes = sum(
+                commitment.source_size_bytes
+                for commitment in self.source_commitments
+            )
+            argv = [
+                "create-derivation-plan",
+                str(V2_MANIFEST_PATH),
+                str(root / "eligibility.json"),
+                str(root / "partition.json"),
+                "--key",
+                str(root / "partition.key"),
+                "--valid-until",
+                VALID_UNTIL,
+                "--json",
+            ]
+            stderr = io.StringIO()
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_load_current_derivation_inputs",
+                    side_effect=lambda *_args, **_kwargs: _context_value(
+                        current_inputs
+                    ),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "load_config",
+                    return_value=runtime_config,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_now_iso",
+                    return_value=AUTHORIZED_AT,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_review_runner_identity",
+                    return_value=(
+                        root / "private-code-runner",
+                        self.plan.review_runner_canonical_path_sha256,
+                        self.plan.review_runner_binary_sha256,
+                    ),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_repository_review_identity",
+                    return_value=(
+                        self.plan.repository_commit,
+                        self.plan.repository_tree,
+                    ),
+                ),
+                patch(
+                    "mediaforce.web.runtime.av1_validation_derivation._available_bytes_for_descriptor",
+                    return_value=(
+                        total_source_size_bytes
+                        + AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES
+                        - 1
+                    ),
+                ),
+                redirect_stderr(stderr),
+            ):
+                exit_code = verify_av1_cold_start_preregistration.main(argv)
+            self.assertEqual(exit_code, 1)
+            self.assertIn("cumulative source snapshot capacity", stderr.getvalue())
+            artifact_root = (
+                runtime_config.paths.web_state_dir
+                / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+                / self.partition.partition_id
+            )
+            self.assertFalse((artifact_root / "plan.json").exists())
+            self.assertFalse((artifact_root / ".binding").exists())
+            self.assertTrue((artifact_root / "source-snapshots").is_dir())
 
     def _candidate_proposal(
             self,
