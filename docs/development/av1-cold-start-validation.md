@@ -227,7 +227,10 @@ finalization, and verified-lock loading must all resolve to the plan's exact
 commit/tree pair; advancing the checkout requires a new derivation plan and
 review set rather than reusing approvals from the earlier snapshot. Assignment
 execution keeps Git access at the repo-local verifier boundary and injects a
-live identity resolver into the runtime. The runtime rechecks the plan's exact
+live identity resolver into the runtime. Each resolution uses an independent
+bounded Git probe, so cancellation or deadline state on the media controller
+cannot suppress publication of an immutable stopped or expired outcome. The
+runtime rechecks the plan's exact
 commit/tree pair before claim publication, immediately before and after media
 execution, and inside every attempt or terminal publication callback. A checkout
 that drifts mid-run therefore stops closed and cannot publish favorable evidence
@@ -458,7 +461,9 @@ authorization, runtime context, execution environment, statistics contract,
 review runner, and source commitments as one immutable unit. Proposal and
 review publication require the executing verifier to be the canonical
 repository file and re-check the plan-bound execution environment immediately
-before each immutable write. A
+before each immutable write. Proposal publication also resolves the live Git
+commit and tree before evaluation, inside the final publication callback, and
+after write recovery; every result must equal the plan snapshot. A
 real same-filesystem kqueue mutation probe must pass before the immutable
 assignment claim is written. The probe creates a private owner-only file,
 sets its pathname mode to `0400` from creation, mutates only its original
@@ -577,15 +582,17 @@ eligible for idempotent completion after expiry. After those checks, an
 immutable verdict intent freezes the first human input and runtime timestamp.
 The validated observation is appended inside
 the immediate database transaction, then the execution contract is checked one
-final time. The source cohort then completes full verification and its final
-quiet/exit check while that transaction remains open. A final source-session
-quiet, close, or exit failure after verdict intent therefore rolls back the
-observation before publishing the separate immutable stopped `safety_stop`
-terminal for the affected cell. Only after the source-session boundary succeeds
-are the immutable observed or excluded terminal intent and terminal record
-written, still before the database transaction can commit. An append conflict
-or late contract drift uses the same rollback-and-stop path rather than
-producing a false observed terminal.
+final time. The source cohort then completes full verification and a final quiet
+preflight while that transaction remains open. Its guard stays live through
+both immutable terminal publication callbacks and closes before the database
+transaction can commit. A quiet or repository-authority failure before terminal
+publication starts therefore rolls back the observation before publishing the
+separate immutable stopped `safety_stop` terminal for the affected cell. Once
+terminal publication has started, a terminal-write, guard-close, or later
+authority failure is retryable: the frozen verdict intent and any already
+published exact terminal artifact are reused, and the database projection
+remains uncommitted. An append conflict or earlier contract drift uses the
+rollback-and-stop path rather than producing a false observed terminal.
 A database-open, transaction-begin, inventory-load, current-input, contract,
 review-media, or other pre-publication failure uses the same conversion; when a
 transaction exists, rollback completes before the stopped terminal is
@@ -610,7 +617,12 @@ complete verdict claim, media recheck, immutable verdict intent, immediate
 database transaction, observation append, and terminal-intent/terminal-record
 path holds the shared runtime lock.
 Inside that lock it reloads the canonical plan and attempt, revalidates the
-current partition inputs and execution contract, and fails closed on drift.
+current partition inputs and execution contract, and repeatedly resolves the
+live repository commit/tree before the verdict claim, verdict intent, terminal
+intent, terminal record, and database commit boundaries. It fails closed on
+drift. An existing immutable in-window verdict intent intentionally skips only
+fresh authorization sampling; repository, source, and publication-directory
+authority remain mandatory for idempotent completion.
 
 ```bash
 uv run python scripts/verify_av1_cold_start_preregistration.py \
@@ -720,17 +732,25 @@ the copy is unlinked and its empty owner-only directory is removed without a
 recursive delete; an integrity failure leaves any suspicious replacement
 untouched. The review process uses
 a fixed system `PATH` and a strict allowlisted process environment containing no
-caller secrets; agent shell commands use the same explicit minimal environment
-with no caller-environment inheritance. On the macOS execution host,
+caller secrets. The parent Code process retains only the account home and
+path needed to load its existing local authentication and configuration; its
+environment identity is generic too. Agent shell commands do not inherit that
+home: each run receives a fresh
+owner-only home and temp/XDG tree, the generic `mediaforce-review` identity, and
+the same explicit minimal environment with no caller-environment inheritance.
+On the macOS execution host,
 a held no-follow descriptor and the canonical path-chain kqueue guard reject any
 write, delete, rename, link, revoke, or parent-path substitution event on that
 copy before its output can become evidence; unavailable secure monitoring fails
-closed. Each attestation binds the claim plus
-the SHA-256 digest of the canonical immutable owner-only completion transcript,
-and the loader recomputes that digest before trusting it. The attestation and
-transcript are written together as one immutable atomic lane envelope. Duplicate
-run IDs or transcript digests are rejected. The completed process must emit a
-matching quiescent agent message whose final non-empty line is the exact
+closed. Each attestation binds the claim plus the SHA-256 digest of canonical
+immutable owner-only completion evidence. That evidence contains only the exact
+parsed completion marker and SHA-256 commitments to the prompt, final message,
+raw JSONL transcript, and stderr; it never retains raw stdout, stderr, model
+prose, workdir paths, or other untrusted transcript fields. The loader
+recomputes the canonical evidence digest before trusting it. The attestation and
+completion evidence are written together as one immutable atomic lane envelope.
+Duplicate run IDs or raw-transcript digests are rejected. The completed process
+must emit a matching quiescent agent message whose final non-empty line is the exact
 proposal-, lane-, claim-, and run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker;
 the JSONL parser requires one ordered config record and one ordered prompt,
 rejects duplicate JSON keys, reserved-field mixing, malformed or repeated
@@ -759,10 +779,12 @@ misreported as ordinary expiry.
 Finalization requires exactly five resolved claims and five matching approvals
 over the plan's unanimous repository commit/tree identity; any unresolved,
 divergent, or rejected claim blocks it permanently. The repo-local command
-reads the current verified `HEAD` and tree again immediately before entering
-the runtime-owned finalization API. A checkout advanced from snapshot A to
-snapshot B therefore cannot finalize snapshot A's reviews, even if every stored
-claim and envelope is internally self-consistent.
+injects the same live Git resolver used by assignment execution. The
+runtime-owned finalization API resolves and enforces the plan-pinned `HEAD` and
+tree before locked evaluation, after source verification, inside the final
+candidate-lock publication callback, and after write recovery. A checkout
+advanced from snapshot A to snapshot B therefore cannot finalize snapshot A's
+reviews, even if every stored claim and envelope is internally self-consistent.
 Finalization loads configuration once, opens an immediate database write
 transaction, revalidates the frozen partition against inventory in that same
 transaction, resolves every frozen source commitment, rereads current

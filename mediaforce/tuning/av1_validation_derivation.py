@@ -2352,6 +2352,10 @@ def _av1_validation_derivation_review_set_sha256(
         envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
 ) -> str:
     reviews = tuple(envelope.review for envelope in envelopes)
+    transcript_digests = tuple(
+        _av1_validation_derivation_review_transcript_sha256(envelope)
+        for envelope in envelopes
+    )
     claims_by_lane = {claim.lane: claim for claim in claims}
     if (
         len(claims) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
@@ -2362,6 +2366,7 @@ def _av1_validation_derivation_review_set_sha256(
         != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
         or len({review.reviewer_token for review in reviews}) != len(reviews)
         or len({review.review_evidence_sha256 for review in reviews}) != len(reviews)
+        or len(set(transcript_digests)) != len(transcript_digests)
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation review set is incomplete or not independent"
@@ -2403,6 +2408,23 @@ def _av1_validation_derivation_review_set_sha256(
             for envelope in sorted(envelopes, key=lambda item: item.review.lane)
         ],
     })
+
+
+def _av1_validation_derivation_review_transcript_sha256(
+        envelope: AV1ValidationDerivationReviewEnvelope,
+) -> str:
+    try:
+        evidence = object_dict(json.loads(envelope.review_run_payload_json))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review run evidence is invalid"
+        ) from exc
+    transcript_sha256 = _required_text(
+        evidence.get("transcript_sha256"),
+        "review transcript digest",
+    )
+    _require_sha256(transcript_sha256, "review transcript digest")
+    return transcript_sha256
 
 
 def _av1_validation_derivation_review_repository_identity(
@@ -3959,7 +3981,8 @@ def validate_av1_validation_derivation_review_run_evidence(
         "review_claim_payload_sha256", "lane", "decision",
         "repository_commit", "repository_tree",
         "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
-        "proposal", "review_claim", "prompt_sha256", "stdout", "stderr",
+        "proposal", "review_claim", "prompt_sha256", "completion_marker",
+        "completion_message_sha256", "transcript_sha256", "stderr_sha256",
         "returncode",
     }, "derivation review run evidence")
     try:
@@ -3988,12 +4011,16 @@ def validate_av1_validation_derivation_review_run_evidence(
     )
     _require_git_object_id(repository_commit, "review repository commit")
     _require_git_object_id(repository_tree, "review repository tree")
-    stdout = payload.get("stdout")
-    stderr = payload.get("stderr")
+    try:
+        completion_marker = object_dict(payload.get("completion_marker"))
+    except TypeError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review completion marker is invalid"
+        ) from exc
     returncode = payload.get("returncode")
     if (
         payload.get("schema") != "mediaforce.av1_derivation_agent_review_run"
-        or int_value(payload.get("schema_version")) != 1
+        or int_value(payload.get("schema_version")) != 2
         or payload.get("reviewer_token") != review.reviewer_token
         or review.reviewer_token != f"agent:{review_run_id}"
         or payload.get("proposal_id") != review.proposal_id
@@ -4016,8 +4043,6 @@ def validate_av1_validation_derivation_review_run_evidence(
         or not _av1_validation_derivation_review_matches_claim(review, claim)
         or type(returncode) is not int
         or returncode != 0
-        or not isinstance(stdout, str)
-        or not isinstance(stderr, str)
         or evidence != canonical_json_bytes(payload)
     ):
         raise AV1ValidationDerivationError(
@@ -4037,6 +4062,15 @@ def validate_av1_validation_derivation_review_run_evidence(
         ),
         "review-runner binary digest",
     )
+    for key, label in (
+        ("completion_message_sha256", "review completion-message digest"),
+        ("transcript_sha256", "review transcript digest"),
+        ("stderr_sha256", "review standard-error digest"),
+    ):
+        _require_sha256(
+            _required_text(payload.get(key), label),
+            label,
+        )
     canonical_evidence = canonical_json_bytes(payload)
     if review.review_evidence_sha256 != (
         f"sha256:{hashlib.sha256(canonical_evidence).hexdigest()}"
@@ -4046,21 +4080,20 @@ def validate_av1_validation_derivation_review_run_evidence(
         )
     prompt_sha256 = _required_text(payload.get("prompt_sha256"), "review prompt digest")
     _require_sha256(prompt_sha256, "review prompt digest")
-    final_message, prompt = _completed_code_review_message(stdout)
     expected_prompt = build_av1_validation_derivation_review_prompt(
         proposal=proposal,
         claim=claim,
     )
-    if prompt != expected_prompt:
+    if prompt_sha256 != f"sha256:{hashlib.sha256(expected_prompt.encode('utf-8')).hexdigest()}":
         raise AV1ValidationDerivationError(
             "AV1 derivation review prompt does not match its frozen inputs"
         )
-    if prompt_sha256 != f"sha256:{hashlib.sha256(expected_prompt.encode('utf-8')).hexdigest()}":
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review prompt digest does not match its completed run"
-        )
-    marker = _code_review_marker(final_message)
-    if marker != {
+    _require_exact_keys(completion_marker, {
+        "decision", "lane", "proposal_id", "proposal_payload_sha256",
+        "repository_commit", "repository_tree",
+        "review_claim_id", "review_claim_payload_sha256", "review_run_id",
+    }, "derivation review completion marker")
+    if completion_marker != {
         "decision": review.decision,
         "lane": review.lane,
         "proposal_id": review.proposal_id,

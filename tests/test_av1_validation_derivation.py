@@ -1325,15 +1325,27 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         "runtime-lock domain drifted",
                     ),
                 ):
+                    operation_kwargs: dict[str, object] = {
+                        "config_path": Path("unused.toml"),
+                        "manifest": self.manifest,
+                        "partition": self.partition,
+                        "token_key": self.token_key,
+                        "plan_path": aliased_artifact_root / "plan.json",
+                        "cell_plan_id": self.plan.assignments[0].cell_plan_id,
+                    }
+                    if operation is finalize_runtime_av1_validation_derivation_candidate_lock:
+                        operation_kwargs["repository_identity_resolver"] = (
+                            self._matching_repository_identity
+                        )
+                    else:
+                        operation_kwargs["repository_commit"] = (
+                            self.plan.repository_commit
+                        )
+                        operation_kwargs["repository_tree"] = (
+                            self.plan.repository_tree
+                        )
                     operation(
-                        config_path=Path("unused.toml"),
-                        manifest=self.manifest,
-                        partition=self.partition,
-                        token_key=self.token_key,
-                        plan_path=aliased_artifact_root / "plan.json",
-                        cell_plan_id=self.plan.assignments[0].cell_plan_id,
-                        repository_commit=self.plan.repository_commit,
-                        repository_tree=self.plan.repository_tree,
+                        **operation_kwargs,
                     )
                 load_proposal.assert_not_called()
         self.assertFalse((self.runtime_artifact_root / "candidate-locks").exists())
@@ -1373,6 +1385,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         for directory_name in (
@@ -1424,6 +1437,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertFalse((self.runtime_artifact_root / "terminal-intents").exists())
@@ -2338,8 +2352,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             isolated_repository = root / "isolated-repository"
             code_binary.write_bytes(REVIEW_RUNNER_BYTES)
             code_binary.chmod(0o700)
+            caller_secret = f"caller-secret:{root}/private-token"
             final_message = (
-                "Résumé\u2028review\u2029complete.\n"
+                f"Résumé\u2028review\u2029complete. {caller_secret}\n"
                 "MEDIAFORCE_AV1_REVIEW_V2 "
                 f"{json.dumps(marker, sort_keys=True, separators=(',', ':'))}"
             )
@@ -2373,7 +2388,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             completed = SimpleNamespace(
                 returncode=0,
                 stdout=stdout,
-                stderr="",
+                stderr=f"stderr:{caller_secret}",
             )
             with (
                 patch.object(
@@ -2431,6 +2446,25 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertFalse(launched_runner.parent.exists())
             review_command = run_review.call_args.args[0]
             self.assertIn('shell_environment_policy.inherit="none"', review_command)
+            shell_home_override = next(
+                value
+                for value in review_command
+                if value.startswith("shell_environment_policy.set.HOME=")
+            )
+            shell_home = Path(json.loads(shell_home_override.split("=", 1)[1]))
+            self.assertFalse(shell_home.exists())
+            self.assertNotEqual(
+                shell_home,
+                Path(verify_av1_cold_start_preregistration._review_user_home()),
+            )
+            self.assertIn(
+                "shell_environment_policy.set.USER=\"mediaforce-review\"",
+                review_command,
+            )
+            self.assertIn(
+                "shell_environment_policy.set.LOGNAME=\"mediaforce-review\"",
+                review_command,
+            )
             self.assertEqual(
                 run_review.call_args.kwargs["cwd"],
                 isolated_repository,
@@ -2448,6 +2482,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(evidence, canonical_json_bytes(evidence_payload))
             self.assertEqual(evidence_payload["review_run_id"], agent_id)
             self.assertEqual(evidence_payload["returncode"], 0)
+            self.assertEqual(evidence_payload["schema_version"], 2)
+            self.assertNotIn("stdout", evidence_payload)
+            self.assertNotIn("stderr", evidence_payload)
             self.assertEqual(
                 evidence_payload["repository_commit"],
                 REVIEW_REPOSITORY_COMMIT,
@@ -2458,6 +2495,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             self.assertEqual(repository_identity.call_count, 2)
             self.assertNotIn(str(code_binary), evidence.decode("utf-8"))
+            self.assertNotIn(str(root), evidence.decode("utf-8"))
+            self.assertNotIn(
+                verify_av1_cold_start_preregistration._review_user_home(),
+                evidence.decode("utf-8"),
+            )
+            self.assertNotIn(caller_secret, evidence.decode("utf-8"))
             review = build_av1_validation_derivation_review_attestation(
                 proposal=proposal,
                 claim=claim,
@@ -2775,6 +2818,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             environment["HOME"],
             verify_av1_cold_start_preregistration._review_user_home(),
         )
+        self.assertEqual(environment["USER"], "mediaforce-review")
+        self.assertEqual(environment["LOGNAME"], "mediaforce-review")
         self.assertEqual(environment["SHELL"], "/bin/zsh")
         for key in (
             "AWS_SECRET_ACCESS_KEY",
@@ -2786,6 +2831,23 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "OPENAI_BASE_URL",
         ):
             self.assertNotIn(key, environment)
+
+    def test_review_shell_environment_uses_ephemeral_generic_identity(self) -> None:
+        with verify_av1_cold_start_preregistration._isolated_review_shell_home() as home:
+            environment = (
+                verify_av1_cold_start_preregistration._review_shell_environment(home)
+            )
+            self.assertTrue(home.is_dir())
+            self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
+            self.assertEqual(environment["HOME"], str(home))
+            self.assertEqual(environment["USER"], "mediaforce-review")
+            self.assertEqual(environment["LOGNAME"], "mediaforce-review")
+            self.assertEqual(environment["TMPDIR"], str(home / "tmp"))
+            self.assertNotEqual(
+                environment["HOME"],
+                verify_av1_cold_start_preregistration._review_user_home(),
+            )
+        self.assertFalse(home.exists())
 
     def test_review_runner_rejects_non_ancestor_native_binary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2981,6 +3043,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
             process_controller = run_assignment.call_args.kwargs["process_controller"]
             resolver = run_assignment.call_args.kwargs["repository_identity_resolver"]
+            process_controller.cancel()
             first_identity = resolver()
             second_identity = resolver()
 
@@ -2989,10 +3052,19 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(first_identity, self._matching_repository_identity())
         self.assertEqual(second_identity, self._matching_repository_identity())
         self.assertEqual(repository_identity.call_count, 2)
-        repository_identity.assert_has_calls([
-            call(process_controller=process_controller),
-            call(process_controller=process_controller),
-        ])
+        resolver_controllers = [
+            item.kwargs["process_controller"]
+            for item in repository_identity.call_args_list
+        ]
+        self.assertTrue(all(
+            isinstance(controller, ManagedProcessController)
+            for controller in resolver_controllers
+        ))
+        self.assertTrue(all(
+            controller is not process_controller
+            for controller in resolver_controllers
+        ))
+        self.assertIsNot(resolver_controllers[0], resolver_controllers[1])
 
     def test_isolated_review_repository_excludes_live_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -3678,16 +3750,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         evidence_payload = json.loads(
             _review_run_evidence(proposal=proposal, claim=claim)
         )
-        events = [
-            json.loads(line)
-            for line in str(evidence_payload["stdout"]).split("\n")
-        ]
         drifted_prompt = f"proposal_id={proposal.proposal_id}"
-        events[1] = {"prompt": drifted_prompt}
-        evidence_payload["stdout"] = "\n".join(
-            canonical_json_bytes(event).decode("utf-8")
-            for event in events
-        )
         evidence_payload["prompt_sha256"] = (
             f"sha256:{hashlib.sha256(drifted_prompt.encode('utf-8')).hexdigest()}"
         )
@@ -3708,6 +3771,63 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             validate_av1_validation_derivation_review_run_evidence(
                 evidence,
                 review=review,
+            )
+
+    def test_review_set_rejects_duplicate_transcript_digests(self) -> None:
+        proposal = self._candidate_proposal()
+        claims: list[AV1ValidationDerivationReviewClaim] = []
+        envelopes = []
+        duplicate_transcript_sha256 = f"sha256:{'a' * 64}"
+        for index, lane in enumerate(
+            AV1_VALIDATION_DERIVATION_REVIEW_LANES,
+            start=1,
+        ):
+            claim = build_av1_validation_derivation_review_claim(
+                plan=self.plan,
+                proposal=proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
+                lane=lane,
+                review_run_id=f"51000000-0000-0000-0000-{index:012x}",
+                review_runner_canonical_path_sha256=(
+                    self.plan.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.plan.review_runner_binary_sha256
+                ),
+                claimed_at=f"2026-07-28T03:00:{index:02d}Z",
+            )
+            evidence_payload = json.loads(
+                _review_run_evidence(proposal=proposal, claim=claim)
+            )
+            if index <= 2:
+                evidence_payload["transcript_sha256"] = (
+                    duplicate_transcript_sha256
+                )
+            evidence = canonical_json_bytes(evidence_payload)
+            review = build_av1_validation_derivation_review_attestation(
+                proposal=proposal,
+                claim=claim,
+                review_evidence_sha256=(
+                    f"sha256:{hashlib.sha256(evidence).hexdigest()}"
+                ),
+                decision="approved",
+                reviewed_at=f"2026-07-28T03:{index:02d}:00Z",
+            )
+            claims.append(claim)
+            envelopes.append(build_av1_validation_derivation_review_envelope(
+                review=review,
+                evidence=evidence,
+            ))
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "not independent",
+        ):
+            _av1_validation_derivation_review_set_sha256(
+                self.plan,
+                claims,
+                envelopes,
             )
 
     def test_verdict_retry_reuses_first_immutable_timestamp(self) -> None:
@@ -4765,6 +4885,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         records_dir = self.runtime_artifact_root / "terminal-records"
         events: list[str] = []
 
+        def record_publication(
+                label: str,
+                kwargs: dict[str, object],
+        ) -> None:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
+            events.append(label)
+
         @contextmanager
         def source_sha256_resolver_context(
                 *_args: object,
@@ -4809,11 +4939,17 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.write_av1_validation_derivation_attempt",
-                side_effect=lambda *_args, **_kwargs: events.append("attempt"),
+                side_effect=lambda *_args, **kwargs: record_publication(
+                    "attempt",
+                    kwargs,
+                ),
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.write_av1_validation_derivation_terminal_record",
-                side_effect=lambda *_args, **_kwargs: events.append("terminal-record"),
+                side_effect=lambda *_args, **kwargs: record_publication(
+                    "terminal-record",
+                    kwargs,
+                ),
             ),
         ):
             attempt = _run_av1_validation_derivation_assignment_locked(
@@ -6093,6 +6229,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(retried_terminal, terminal)
@@ -6179,6 +6316,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
 
@@ -6302,16 +6440,28 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                             "config-derived canonical root",
                         ),
                     ):
-                        operation(
-                            config_path=Path("unused.toml"),
-                            manifest=self.manifest,
-                            partition=self.partition,
-                            token_key=self.token_key,
-                            plan_path=plan_path,
-                            cell_plan_id=self.plan.assignments[0].cell_plan_id,
-                            repository_commit=self.plan.repository_commit,
-                            repository_tree=self.plan.repository_tree,
-                        )
+                        operation_kwargs: dict[str, object] = {
+                            "config_path": Path("unused.toml"),
+                            "manifest": self.manifest,
+                            "partition": self.partition,
+                            "token_key": self.token_key,
+                            "plan_path": plan_path,
+                            "cell_plan_id": (
+                                self.plan.assignments[0].cell_plan_id
+                            ),
+                        }
+                        if operation is finalize_runtime_av1_validation_derivation_candidate_lock:
+                            operation_kwargs["repository_identity_resolver"] = (
+                                self._matching_repository_identity
+                            )
+                        else:
+                            operation_kwargs["repository_commit"] = (
+                                self.plan.repository_commit
+                            )
+                            operation_kwargs["repository_tree"] = (
+                                self.plan.repository_tree
+                            )
+                        operation(**operation_kwargs)
 
     def test_derivation_review_media_is_owner_only_and_no_follow(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -6687,6 +6837,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:07:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -6733,6 +6884,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -6774,6 +6926,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at=VALID_UNTIL,
             )
         self.assertEqual(terminal.status, "stopped")
@@ -6831,6 +6984,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 now_iso=clock,
             )
         self.assertEqual(terminal.status, "stopped")
@@ -6891,6 +7045,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -6939,6 +7094,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -7046,6 +7202,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -7214,6 +7371,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -7224,6 +7382,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "verdict-intent",
             "append",
             "source-verify",
+            "source-final-quiet",
             "source-final-quiet",
             "rollback",
             "db-exit",
@@ -7270,7 +7429,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             finally:
                 events.append("db-exit")
 
-        def fail_terminal_intent(*_args: object, **_kwargs: object) -> None:
+        def fail_terminal_intent(*_args: object, **kwargs: object) -> None:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
             events.append("observed-terminal-intent")
             raise AV1ValidationDerivationError("terminal write failed")
 
@@ -7354,6 +7517,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(write_terminal_intent.call_count, 1)
@@ -7365,7 +7529,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "append",
             "source-verify",
             "source-final-quiet",
+            "source-final-quiet",
             "observed-terminal-intent",
+            "source-final-quiet",
             "rollback",
             "db-exit",
         ])
@@ -7385,6 +7551,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             attempt,
         )
         database_calls = 0
+        expired_retry_clock_calls = 0
+
+        def expired_retry_clock() -> str:
+            nonlocal expired_retry_clock_calls
+            expired_retry_clock_calls += 1
+            return VALID_UNTIL
 
         @contextmanager
         def database(
@@ -7448,7 +7620,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     concern_tags=[],
                     evidence_ids=[],
                     moment_indexes=[],
+                    repository_identity_resolver=self._matching_repository_identity,
                     recorded_at="2026-07-28T01:06:00Z",
+                    now_iso=lambda: "2026-07-28T01:06:00Z",
                 )
             terminal = record_av1_validation_derivation_visual_verdict(
                 config_path=Path("unused.toml"),
@@ -7464,9 +7638,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
+                now_iso=expired_retry_clock,
             )
         self.assertEqual(database_calls, 2)
+        self.assertEqual(expired_retry_clock_calls, 0)
         self.assertEqual(append_observation.call_count, 2)
         self.assertEqual(terminal.status, "observed")
         self.assertEqual(
@@ -7567,6 +7744,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     concern_tags=[],
                     evidence_ids=[],
                     moment_indexes=[],
+                    repository_identity_resolver=self._matching_repository_identity,
                     recorded_at="2026-07-28T01:06:00Z",
                 )
         append_observation.assert_not_called()
@@ -7655,6 +7833,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -7725,6 +7904,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -7761,6 +7941,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         events: list[str] = []
         lock_held = False
+        repository_checks = 0
+
+        def resolve_repository_identity() -> tuple[str, str]:
+            nonlocal repository_checks
+            repository_checks += 1
+            return self._matching_repository_identity()
 
         @contextmanager
         def runtime_lock(
@@ -7814,6 +8000,23 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             assert callable(before_publish)
             before_publish()
             record_event(label)
+
+        def freeze_verdict_intent(
+                *_args: object,
+                **kwargs: object,
+        ) -> dict[str, object]:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
+            record_event("verdict-intent")
+            return {
+                "verdict": "approved",
+                "concern_tags": [],
+                "evidence_ids": [],
+                "moment_indexes": [],
+                "recorded_at": "2026-07-28T01:06:00Z",
+            }
 
         @contextmanager
         def source_sha256_resolver_context(
@@ -7874,16 +8077,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.resolve_av1_validation_derivation_verdict_intent",
-                side_effect=lambda *_args, **_kwargs: (
-                    record_event("verdict-intent")
-                    or {
-                        "verdict": "approved",
-                        "concern_tags": [],
-                        "evidence_ids": [],
-                        "moment_indexes": [],
-                        "recorded_at": "2026-07-28T01:06:00Z",
-                    }
-                ),
+                side_effect=freeze_verdict_intent,
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
@@ -7926,9 +8120,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=resolve_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
+                now_iso=lambda: "2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "observed")
+        self.assertGreaterEqual(repository_checks, 9)
         self.assertEqual(events, [
             "lock-enter",
             "db-enter",
@@ -7942,8 +8139,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "execution-contract",
             "source-verify",
             "source-quiet",
+            "source-quiet",
             "terminal-intent",
+            "source-quiet",
             "terminal-record",
+            "source-quiet",
             "db-exit",
             "lock-exit",
         ])
@@ -8020,6 +8220,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 concern_tags=[],
                 evidence_ids=[],
                 moment_indexes=[],
+                repository_identity_resolver=self._matching_repository_identity,
                 recorded_at="2026-07-28T01:06:00Z",
             )
         self.assertEqual(terminal.status, "stopped")
@@ -8286,6 +8487,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration._run_derivation_proposal_action(
                     args,
                     config=self.runtime_config,
+                    repository_identity_resolver=self._matching_repository_identity,
                 )
             self.assertTrue(proposal_path.exists())
             with patch(
@@ -8296,6 +8498,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     verify_av1_cold_start_preregistration._run_derivation_proposal_action(
                         args,
                         config=self.runtime_config,
+                        repository_identity_resolver=self._matching_repository_identity,
                     )
                 )
         self.assertEqual(exit_code, 0)
@@ -8410,9 +8613,121 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             verify_av1_cold_start_preregistration._run_derivation_proposal_action(
                 args,
                 config=self.runtime_config,
+                repository_identity_resolver=self._matching_repository_identity,
             )
         self.assertEqual(now_iso.call_args_list, [call(), call()])
         write_proposal.assert_called_once()
+        self.assertFalse(
+            (
+                self.runtime_artifact_root
+                / "proposals"
+                / f"{cell_plan_id}.json"
+            ).exists()
+        )
+
+    def test_proposal_rechecks_live_repository_inside_publication_callback(
+            self,
+    ) -> None:
+        cell_plan_id = self.plan.assignments[0].cell_plan_id
+        proposal = self._candidate_proposal(
+            proposed_at="2026-07-28T03:00:00Z",
+        )
+        evaluation = SimpleNamespace(proposal=proposal)
+        args = SimpleNamespace(
+            action="build-derivation-proposal",
+            manifest=V2_MANIFEST_PATH,
+            partition=self.runtime_artifact_root / "partition.json",
+            plan=self.runtime_artifact_root / "plan.json",
+            key=self.runtime_artifact_root / "partition.key",
+            config=Path("unused.toml"),
+            cell_plan_id=cell_plan_id,
+            json_output=True,
+        )
+        live_identity = [self.plan.repository_commit, self.plan.repository_tree]
+        repository_checks = 0
+
+        def resolve_repository_identity() -> tuple[str, str]:
+            nonlocal repository_checks
+            repository_checks += 1
+            return live_identity[0], live_identity[1]
+
+        def publish_proposal(*_args: object, **kwargs: object) -> None:
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            live_identity[:] = ["b" * 40, "c" * 40]
+            before_publish()
+            self.fail("repository-drifted proposal reached publication")
+
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_derivation_partition_for_evaluation",
+                side_effect=lambda **_kwargs: _context_value((
+                    self.partition,
+                    _SourceSHA256Session(),
+                )),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_derivation_attempts",
+                return_value=(),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_derivation_terminal_records",
+                return_value=(),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_current_av1_validation_derivation_observations",
+                return_value={},
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "evaluate_av1_validation_derivation_candidate",
+                return_value=evaluation,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "av1_validation_derivation_candidate_evaluation_public_summary",
+                return_value={},
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_av1_validation_derivation_execution_environment",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_now_iso",
+                return_value="2026-07-28T03:00:00Z",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "write_av1_validation_derivation_candidate_proposal",
+                side_effect=publish_proposal,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "repository snapshot drifted",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._run_derivation_proposal_action(
+                args,
+                config=self.runtime_config,
+                repository_identity_resolver=resolve_repository_identity,
+            )
+
+        self.assertEqual(repository_checks, 2)
         self.assertFalse(
             (
                 self.runtime_artifact_root
@@ -8543,7 +8858,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             proposed_at=locked_at,
         )
         events: list[str] = []
+        repository_checks = 0
         expected_envelope = SimpleNamespace(payload_sha256="sha256:test")
+
+        def resolve_repository_identity() -> tuple[str, str]:
+            nonlocal repository_checks
+            repository_checks += 1
+            return self._matching_repository_identity()
 
         @contextmanager
         def database(
@@ -8674,11 +8995,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 token_key=self.token_key,
                 plan_path=self.runtime_artifact_root / "plan.json",
                 cell_plan_id=cell_plan_id,
-                repository_commit=self.plan.repository_commit,
-                repository_tree=self.plan.repository_tree,
+                repository_identity_resolver=resolve_repository_identity,
                 now_iso=sample_clock,
             )
         self.assertIs(envelope, expected_envelope)
+        self.assertGreaterEqual(repository_checks, 5)
         self.assertEqual(events, [
             "current-inputs",
             "source-commitments",
@@ -8836,8 +9157,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 token_key=self.token_key,
                 plan_path=self.runtime_artifact_root / "plan.json",
                 cell_plan_id=cell_plan_id,
-                repository_commit=self.plan.repository_commit,
-                repository_tree=self.plan.repository_tree,
+                repository_identity_resolver=self._matching_repository_identity,
                 now_iso=sample_expired_clock,
             )
         publish_candidate_lock_mock.assert_called_once()
@@ -9869,7 +10189,7 @@ def _review_run_evidence(
     ))
     return canonical_json_bytes({
         "schema": "mediaforce.av1_derivation_agent_review_run",
-        "schema_version": 1,
+        "schema_version": 2,
         "review_run_id": review_run_id,
         "reviewer_token": f"agent:{review_run_id}",
         "proposal_id": proposal_id,
@@ -9889,8 +10209,14 @@ def _review_run_evidence(
         "proposal": proposal.to_payload(),
         "review_claim": claim.to_payload(),
         "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
-        "stdout": stdout,
-        "stderr": "",
+        "completion_marker": marker,
+        "completion_message_sha256": (
+            f"sha256:{hashlib.sha256(final_message.encode('utf-8')).hexdigest()}"
+        ),
+        "transcript_sha256": (
+            f"sha256:{hashlib.sha256(stdout.encode('utf-8')).hexdigest()}"
+        ),
+        "stderr_sha256": f"sha256:{hashlib.sha256(b'').hexdigest()}",
         "returncode": 0,
     })
 

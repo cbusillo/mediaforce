@@ -138,6 +138,7 @@ _CANONICAL_PREREGISTRATION_RUNNER = (
 )
 _AGENT_REVIEW_MAX_SECONDS = 1800
 _AGENT_REVIEW_SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+_AGENT_REVIEW_GENERIC_IDENTITY = "mediaforce-review"
 _MACH_O_MAGICS = frozenset({
     b"\xce\xfa\xed\xfe",
     b"\xfe\xed\xfa\xce",
@@ -611,11 +612,6 @@ def _run_derivation_action_body(
         token_key = load_av1_validation_partition_key(args.key)
         process_controller = ManagedProcessController()
 
-        def repository_identity_resolver() -> tuple[str, str]:
-            return _repository_review_identity(
-                process_controller=process_controller,
-            )
-
         attempt = run_av1_validation_derivation_assignment(
             config_path=args.config,
             manifest=manifest,
@@ -625,7 +621,7 @@ def _run_derivation_action_body(
             assignment_id=args.assignment_id,
             attempts_directory=artifact_root / "attempts",
             terminal_records_directory=artifact_root / "terminal-records",
-            repository_identity_resolver=repository_identity_resolver,
+            repository_identity_resolver=_live_repository_identity,
             process_controller=process_controller,
         )
         _print_partition_payload(
@@ -715,6 +711,7 @@ def _run_derivation_action_body(
             concern_tags=args.concern_tag,
             evidence_ids=args.evidence_id,
             moment_indexes=args.moment_index,
+            repository_identity_resolver=_live_repository_identity,
         )
         _print_partition_payload(
             {
@@ -731,6 +728,7 @@ def _run_derivation_action_body(
         return _run_derivation_proposal_action(
             args,
             config=cast(MediaforceConfig, locked_config),
+            repository_identity_resolver=_live_repository_identity,
         )
 
     if args.action == "record-derivation-review":
@@ -837,9 +835,6 @@ def _run_derivation_action_body(
             manifest=manifest,
             token_key=token_key,
         )
-        repository_commit, repository_tree = _repository_review_identity(
-            process_controller=ManagedProcessController(),
-        )
         lock_envelope = finalize_av1_validation_derivation_candidate_lock(
             config_path=args.config,
             manifest=manifest,
@@ -847,8 +842,7 @@ def _run_derivation_action_body(
             token_key=token_key,
             plan_path=args.plan,
             cell_plan_id=args.cell_plan_id,
-            repository_commit=repository_commit,
-            repository_tree=repository_tree,
+            repository_identity_resolver=_live_repository_identity,
             now_iso=_now_iso,
         )
         candidate_lock = lock_envelope.candidate_lock
@@ -1021,6 +1015,7 @@ def _run_derivation_proposal_action(
         args: argparse.Namespace,
         *,
         config: MediaforceConfig,
+        repository_identity_resolver: Callable[[], tuple[str, str]],
 ) -> int:
     for path in (
         args.partition,
@@ -1035,6 +1030,16 @@ def _run_derivation_proposal_action(
         config_path=args.config,
         config=config,
     )
+
+    def assert_live_repository_identity() -> None:
+        repository_commit, repository_tree = repository_identity_resolver()
+        assert_av1_validation_derivation_repository_identity(
+            plan,
+            repository_commit=repository_commit,
+            repository_tree=repository_tree,
+        )
+
+    assert_live_repository_identity()
     with _load_derivation_partition_for_evaluation(
         manifest=manifest,
         partition_path=args.partition,
@@ -1091,6 +1096,7 @@ def _run_derivation_proposal_action(
                 plan,
                 at=_now_iso(),
             )
+            assert_live_repository_identity()
 
         write_av1_validation_derivation_candidate_proposal(
             artifact_root,
@@ -1098,6 +1104,7 @@ def _run_derivation_proposal_action(
             proposal=evaluation.proposal,
             before_publish=(None if proposal_exists else _before_proposal_publish),
         )
+        assert_live_repository_identity()
         return 0
 
 
@@ -1418,6 +1425,12 @@ def _repository_review_identity(
     return verified_object_ids
 
 
+def _live_repository_identity() -> tuple[str, str]:
+    return _repository_review_identity(
+        process_controller=ManagedProcessController(),
+    )
+
+
 def _run_isolated_review_git(
         command: list[str],
         *,
@@ -1616,12 +1629,12 @@ def _review_runner_environment() -> dict[str, str]:
         "HOME": _review_user_home(),
         "LANG": "C",
         "LC_ALL": "C",
-        "LOGNAME": _review_user_name(),
+        "LOGNAME": _AGENT_REVIEW_GENERIC_IDENTITY,
         "PAGER": "cat",
         "PATH": _AGENT_REVIEW_SAFE_PATH,
         "SHELL": "/bin/zsh",
         "TMPDIR": "/tmp",
-        "USER": _review_user_name(),
+        "USER": _AGENT_REVIEW_GENERIC_IDENTITY,
         "ZDOTDIR": "/var/empty",
     }
 
@@ -1665,36 +1678,103 @@ def _review_user_home() -> str:
     return pwd.getpwuid(os.getuid()).pw_dir
 
 
-def _review_user_name() -> str:
-    return pwd.getpwuid(os.getuid()).pw_name
-
-
-def _review_shell_environment() -> dict[str, str]:
+def _review_shell_environment(home: Path) -> dict[str, str]:
+    home_path = str(home)
     return {
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_PAGER": "cat",
-        "HOME": _review_user_home(),
+        "HOME": home_path,
         "LANG": "C",
         "LC_ALL": "C",
+        "LOGNAME": _AGENT_REVIEW_GENERIC_IDENTITY,
         "PAGER": "cat",
         "PATH": _AGENT_REVIEW_SAFE_PATH,
         "SHELL": "/bin/zsh",
-        "TMPDIR": "/tmp",
-        "USER": _review_user_name(),
-        "ZDOTDIR": "/var/empty",
+        "TMPDIR": str(home / "tmp"),
+        "USER": _AGENT_REVIEW_GENERIC_IDENTITY,
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_STATE_HOME": str(home / ".local" / "state"),
+        "ZDOTDIR": home_path,
     }
 
 
-def _review_shell_environment_overrides() -> tuple[str, ...]:
+def _review_shell_environment_overrides(home: Path) -> tuple[str, ...]:
     return (
         'shell_environment_policy.inherit="none"',
         "shell_environment_policy.ignore_default_excludes=false",
         *(
             f"shell_environment_policy.set.{key}={json.dumps(value)}"
-            for key, value in sorted(_review_shell_environment().items())
+            for key, value in sorted(_review_shell_environment(home).items())
         ),
     )
+
+
+def _cleanup_isolated_review_shell_home(
+        directory: Path,
+        expected_identity: tuple[int, int],
+) -> None:
+    if not shutil.rmtree.avoids_symlink_attacks:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review shell-home cleanup is unavailable"
+        )
+    try:
+        info = directory.lstat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review shell-home cleanup identity is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+        or (info.st_dev, info.st_ino) != expected_identity
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review shell-home cleanup identity changed"
+        )
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review shell-home cleanup failed"
+        ) from exc
+
+
+@contextmanager
+def _isolated_review_shell_home() -> Iterator[Path]:
+    directory = Path(tempfile.mkdtemp(
+        prefix="mediaforce-av1-review-home-",
+        dir="/tmp",
+    ))
+    os.chmod(directory, 0o700)
+    info = directory.lstat()
+    identity = (info.st_dev, info.st_ino)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation isolated review shell home is not owner-only"
+        )
+    try:
+        for relative_path in (
+            Path("tmp"),
+            Path(".cache"),
+            Path(".config"),
+            Path(".local"),
+            Path(".local/share"),
+            Path(".local/state"),
+        ):
+            path = directory / relative_path
+            path.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(path, 0o700)
+        yield directory
+    finally:
+        _cleanup_isolated_review_shell_home(directory, identity)
 
 
 def _review_runner_descriptor_sha256(descriptor: int) -> str:
@@ -1959,7 +2039,7 @@ def _run_code_agent_review_before_deadline(
             repository_commit=claim.repository_commit,
             repository_tree=claim.repository_tree,
             process_controller=process_controller,
-        ) as review_repository:
+        ) as review_repository, _isolated_review_shell_home() as review_home:
             command = [
                 str(review_runner),
                 "-a",
@@ -1968,7 +2048,7 @@ def _run_code_agent_review_before_deadline(
                 "-s",
                 "read-only",
             ]
-            for override in _review_shell_environment_overrides():
+            for override in _review_shell_environment_overrides(review_home):
                 command.extend(("-c", override))
             command.extend((
                 "--json",
@@ -2034,9 +2114,10 @@ def _run_code_agent_review_before_deadline(
         proposal=proposal,
         claim=claim,
     )
+    completion_marker = _code_review_marker(final_message)
     evidence = canonical_json_bytes({
             "schema": "mediaforce.av1_derivation_agent_review_run",
-            "schema_version": 1,
+            "schema_version": 2,
             "review_run_id": review_run_id,
             "reviewer_token": f"agent:{review_run_id}",
             "proposal_id": proposal.proposal_id,
@@ -2052,8 +2133,16 @@ def _run_code_agent_review_before_deadline(
             "proposal": proposal.to_payload(),
             "review_claim": claim.to_payload(),
             "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
+            "completion_marker": completion_marker,
+            "completion_message_sha256": (
+                f"sha256:{hashlib.sha256(final_message.encode('utf-8')).hexdigest()}"
+            ),
+            "transcript_sha256": (
+                f"sha256:{hashlib.sha256(completed.stdout.encode('utf-8')).hexdigest()}"
+            ),
+            "stderr_sha256": (
+                f"sha256:{hashlib.sha256(completed.stderr.encode('utf-8')).hexdigest()}"
+            ),
             "returncode": completed.returncode,
     })
     return claim, evidence, decision
