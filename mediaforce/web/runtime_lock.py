@@ -17,9 +17,16 @@ import struct
 import sys
 import threading
 
-from mediaforce.core.config import MediaforceConfig
+from mediaforce.core.config import (
+    MediaforceConfig,
+    legacy_sqlite_migration_quarantine_name,
+)
 from mediaforce.core.db import register_database_identity_provider
-from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    MacOSFileIntegrityGuard,
+    rename_exclusive,
+)
 from mediaforce.core.utils import filesystem_collision_key
 
 
@@ -451,6 +458,30 @@ class LegacySQLiteMigrationSource:
     _directory_identity: tuple[int, int]
     _mutation_guard: _LegacySQLiteMutationGuard
 
+    def assert_parent_stable(self) -> None:
+        try:
+            directory_descriptor_info = os.fstat(self._directory_descriptor)
+            parent_info = self.path.parent.lstat()
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source parent changed during migration"
+            ) from exc
+        if (
+            not stat.S_ISDIR(directory_descriptor_info.st_mode)
+            or not stat.S_ISDIR(parent_info.st_mode)
+            or stat.S_ISLNK(parent_info.st_mode)
+            or (
+                directory_descriptor_info.st_dev,
+                directory_descriptor_info.st_ino,
+            )
+            != self._directory_identity
+            or (parent_info.st_dev, parent_info.st_ino)
+            != self._directory_identity
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source parent changed during migration"
+            )
+
     def assert_stable(self) -> None:
         try:
             self._mutation_guard.assert_quiet()
@@ -538,17 +569,6 @@ class LegacySQLiteMigrationSource:
 
     def assert_connection_bound(self, connection: object) -> None:
         self.assert_stable()
-
-    def cleanup_snapshot(self) -> dict[str, dict[str, object]]:
-        self.assert_stable()
-        try:
-            snapshot = self._mutation_guard.cleanup_snapshot()
-        except FileIntegrityError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Legacy SQLite sidecar identity changed before cleanup"
-            ) from exc
-        self.assert_stable()
-        return snapshot
         try:
             rows = connection.execute("PRAGMA database_list").fetchall()
             main_paths = [
@@ -569,6 +589,17 @@ class LegacySQLiteMigrationSource:
             )
         self.assert_stable()
 
+    def cleanup_snapshot(self) -> dict[str, dict[str, object]]:
+        self.assert_stable()
+        try:
+            snapshot = self._mutation_guard.cleanup_snapshot()
+        except FileIntegrityError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite sidecar identity changed before cleanup"
+            ) from exc
+        self.assert_stable()
+        return snapshot
+
     def discard_after_publish(
             self,
             *,
@@ -576,32 +607,28 @@ class LegacySQLiteMigrationSource:
     ) -> None:
         self.assert_stable()
         before_remove()
+        self.assert_stable()
         try:
-            os.unlink(self.path.name, dir_fd=self._directory_descriptor)
-            os.fsync(self._directory_descriptor)
-        except OSError as exc:
+            _retire_bound_legacy_sqlite_entry(
+                directory_descriptor=self._directory_descriptor,
+                name=self.path.name,
+                expected_snapshot=self._file_snapshot,
+                descriptor=self._file_descriptor,
+            )
+        except (FileIntegrityError, OSError) as exc:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite source cleanup failed after publication"
             ) from exc
         for suffix in ("-wal", "-shm", "-journal"):
             before_remove()
+            self.assert_parent_stable()
             try:
-                os.unlink(
-                    f"{self.path.name}{suffix}",
-                    dir_fd=self._directory_descriptor,
-                )
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
+                self._mutation_guard.retire_sidecar(suffix)
+            except (FileIntegrityError, OSError) as exc:
                 raise MediaforceRuntimeBusyError(
                     "Legacy SQLite source cleanup failed after publication"
                 ) from exc
-        try:
-            os.fsync(self._directory_descriptor)
-        except OSError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Legacy SQLite source cleanup could not be synchronized"
-            ) from exc
+        self.assert_parent_stable()
 
 
 @dataclass(frozen=True, slots=True)
@@ -867,6 +894,42 @@ class _LegacySQLiteMutationGuard:
             }
         self.assert_quiet()
         return snapshot
+
+    def assert_sidecar_bound(self, suffix: str) -> None:
+        if suffix not in {"-wal", "-shm", "-journal"}:
+            raise FileIntegrityError("legacy SQLite sidecar suffix is invalid")
+        name = f"{self._path.name}{suffix}"
+        binding = self._sidecar_bindings.get(name)
+        if binding is None or not self._sidecar_binding_matches(name, binding):
+            raise FileIntegrityError(
+                "legacy SQLite sidecar identity changed during cleanup"
+            )
+
+    def retire_sidecar(self, suffix: str) -> None:
+        self.assert_sidecar_bound(suffix)
+        name = f"{self._path.name}{suffix}"
+        binding = self._sidecar_bindings.get(name)
+        if binding is None:
+            raise FileIntegrityError(
+                "legacy SQLite sidecar binding is unavailable"
+            )
+        info = os.fstat(binding.descriptor)
+        expected_snapshot = (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_nlink,
+            info.st_uid,
+            stat.S_IMODE(info.st_mode),
+        )
+        _retire_bound_legacy_sqlite_entry(
+            directory_descriptor=self._directory_descriptor,
+            name=name,
+            expected_snapshot=expected_snapshot,
+            descriptor=binding.descriptor,
+        )
 
     def _drain_mutation_events(self) -> tuple[bool, bool, set[str]]:
         file_changed = False
@@ -1165,7 +1228,6 @@ class _LegacySQLiteMutationGuard:
         )
 
     def _discard_created_sidecar_reservations(self) -> None:
-        removed = False
         for name, binding in self._sidecar_bindings.items():
             if binding is None or binding.created_snapshot is None:
                 continue
@@ -1190,20 +1252,24 @@ class _LegacySQLiteMutationGuard:
             ):
                 continue
             try:
-                os.unlink(name, dir_fd=self._directory_descriptor)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
+                _retire_bound_legacy_sqlite_entry(
+                    directory_descriptor=self._directory_descriptor,
+                    name=name,
+                    expected_snapshot=(
+                        descriptor_info.st_dev,
+                        descriptor_info.st_ino,
+                        descriptor_info.st_size,
+                        descriptor_info.st_mtime_ns,
+                        descriptor_info.st_ctime_ns,
+                        descriptor_info.st_nlink,
+                        descriptor_info.st_uid,
+                        stat.S_IMODE(descriptor_info.st_mode),
+                    ),
+                    descriptor=binding.descriptor,
+                )
+            except (FileIntegrityError, OSError) as exc:
                 raise FileIntegrityError(
                     "legacy SQLite sidecar reservation cleanup failed"
-                ) from exc
-            removed = True
-        if removed:
-            try:
-                os.fsync(self._directory_descriptor)
-            except OSError as exc:
-                raise FileIntegrityError(
-                    "legacy SQLite sidecar reservation cleanup could not be synchronized"
                 ) from exc
 
     def close(self) -> None:
@@ -1705,6 +1771,119 @@ def _legacy_sqlite_source_snapshot(
         source_info.st_mtime_ns,
         source_info.st_ctime_ns,
         source_info.st_nlink,
+    )
+
+
+def _retire_bound_legacy_sqlite_entry(
+        *,
+        directory_descriptor: int,
+        name: str,
+        expected_snapshot: tuple[int, ...],
+        descriptor: int,
+) -> None:
+    if len(expected_snapshot) not in {6, 8}:
+        raise FileIntegrityError("legacy SQLite cleanup snapshot is invalid")
+    quarantine_name = legacy_sqlite_migration_quarantine_name(
+        name,
+        device=expected_snapshot[0],
+        inode=expected_snapshot[1],
+        size=expected_snapshot[2],
+        mtime_ns=expected_snapshot[3],
+    )
+    try:
+        os.stat(
+            quarantine_name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileIntegrityError(
+            "legacy SQLite cleanup quarantine already exists"
+        )
+    rename_exclusive(
+        source_directory_descriptor=directory_descriptor,
+        source_name=name,
+        destination_directory_descriptor=directory_descriptor,
+        destination_name=quarantine_name,
+    )
+    descriptor_info = os.fstat(descriptor)
+    quarantine_info = os.stat(
+        quarantine_name,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+        not _legacy_sqlite_retired_snapshot_matches(
+            descriptor_info,
+            expected_snapshot,
+        )
+        or not _legacy_sqlite_retired_snapshot_matches(
+            quarantine_info,
+            expected_snapshot,
+        )
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (quarantine_info.st_dev, quarantine_info.st_ino)
+    ):
+        raise FileIntegrityError(
+            "legacy SQLite cleanup claimed an unexpected entry"
+        )
+    os.fsync(directory_descriptor)
+    quarantine_info = os.stat(
+        quarantine_name,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    if not _legacy_sqlite_retired_snapshot_matches(
+            quarantine_info,
+            expected_snapshot,
+    ):
+        raise FileIntegrityError(
+            "legacy SQLite cleanup quarantine identity changed"
+        )
+    os.unlink(quarantine_name, dir_fd=directory_descriptor)
+    os.fsync(directory_descriptor)
+    for candidate in (name, quarantine_name):
+        try:
+            os.stat(
+                candidate,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            continue
+        raise FileIntegrityError(
+            "legacy SQLite cleanup entry reappeared"
+        )
+
+
+def _legacy_sqlite_retired_snapshot_matches(
+        info: os.stat_result,
+        expected_snapshot: tuple[int, ...],
+) -> bool:
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_nlink,
+    ) != (
+        expected_snapshot[0],
+        expected_snapshot[1],
+        expected_snapshot[2],
+        expected_snapshot[3],
+        expected_snapshot[5],
+    ):
+        return False
+    return len(expected_snapshot) == 6 or (
+        info.st_uid,
+        stat.S_IMODE(info.st_mode),
+    ) == (
+        expected_snapshot[6],
+        expected_snapshot[7],
     )
 
 

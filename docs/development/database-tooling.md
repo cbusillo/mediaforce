@@ -94,13 +94,22 @@ Mediaforce's SQLite schema.
   exact bytes through the platform-pinned directory path, and atomically advances
   the intent to `cleaning` with the exact identity, size, timestamps, ownership,
   mode, and guard-origin flag for every bound source sidecar. The configured
-  parent is rechecked before every source removal. A destination-parent swap
+  parent is rechecked before every source retirement. A destination-parent swap
   therefore rolls back publication or stops cleanup before the legacy main is
-  retired. Cleanup removes and syncs the legacy main first, then removes and
-  syncs WAL, SHM, and rollback-journal paths. A missing main file therefore
-  proves cleanup started. Recovery preflights every remaining sidecar against
-  the `cleaning` manifest before deleting any of them, so a replacement is
-  preserved and fails closed rather than being mistaken for an orphan. Recovery
+  retired. Cleanup claims the exact legacy main first with an exclusive rename
+  to an identity-derived quarantine name, syncs that namespace transition,
+  validates the claimed inode, removes it, and syncs again; WAL, SHM, and the
+  rollback journal follow in the same order. A crash-surviving quarantine entry
+  is durable cleanup progress, not an orphan, and recovery validates it against
+  the intent before removal. If another inode appears between the final live-name
+  check and the claim, cleanup stops with the claimed inode retained in its
+  deterministic quarantine and the replacement is preserved. A missing main
+  file therefore proves cleanup started. Recovery
+  preflights every live or quarantined sidecar against the `cleaning` manifest,
+  so a replacement is preserved and fails closed rather than being mistaken for
+  an orphan. While the main still exists, an existing `cleaning` manifest keeps
+  its sidecar lineage; only an exact prior inode or a missing path reserved anew
+  by the current guard can be adopted. Recovery
   discards only an intent-bound partial stage; after publication it requires a
   fresh gated backup while the main still exists, or the exact descriptor-bound
   destination plus sidecar manifest once the main has been retired, before

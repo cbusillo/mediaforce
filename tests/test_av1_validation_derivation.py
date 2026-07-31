@@ -1882,6 +1882,22 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     repository
                 )
 
+    def test_preregistration_bootstrap_rejects_nonisolated_startup(self) -> None:
+        runner = Path(verify_av1_cold_start_preregistration.__file__).resolve()
+
+        completed = subprocess.run(
+            [sys.executable, runner, "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "must start with Python -I -S",
+            completed.stderr,
+        )
+
     def test_preregistration_bootstrap_rejects_shadow_module_before_import(self) -> None:
         source_runner = Path(
             verify_av1_cold_start_preregistration.__file__
@@ -1949,7 +1965,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
 
                 completed = subprocess.run(
-                    [sys.executable, runner, "--help"],
+                    [sys.executable, "-I", "-S", runner, "--help"],
                     cwd=repository,
                     text=True,
                     capture_output=True,
@@ -2022,7 +2038,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             shadow_module.write_text("VALUE = 'modified'\n", encoding="utf-8")
 
             completed = subprocess.run(
-                [sys.executable, runner, "--help"],
+                [sys.executable, "-I", "-S", runner, "--help"],
                 cwd=repository,
                 text=True,
                 capture_output=True,
@@ -2032,6 +2048,236 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn(
                 "refuses modified import state",
+                completed.stderr,
+            )
+
+    def test_preregistration_bootstrap_rejects_foreign_git_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            foreign_repository = root / "foreign-repository"
+            for checkout in (repository, foreign_repository):
+                (checkout / "scripts").mkdir(parents=True)
+                (checkout / "mediaforce").mkdir()
+                (checkout / "scripts" / "runner.py").write_text(
+                    "VALUE = 'tracked'\n",
+                    encoding="utf-8",
+                )
+                (checkout / "mediaforce" / "__init__.py").write_text(
+                    '"""fixture"""\n',
+                    encoding="utf-8",
+                )
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            for arguments in (
+                ("init", "-q"),
+                ("config", "user.name", "Mediaforce Test"),
+                (
+                    "config",
+                    "user.email",
+                    "mediaforce-test@example.invalid",
+                ),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "foreign fixture"),
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", *arguments],
+                    cwd=foreign_repository,
+                    env=git_environment,
+                    check=True,
+                )
+            (repository / ".git").write_text(
+                f"gitdir: {foreign_repository / '.git'}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "could not inspect Git worktree backlink",
+            ):
+                verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                )
+
+    def test_preregistration_bootstrap_rejects_foreign_git_directory_symlink(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            foreign_repository = root / "foreign-repository"
+            for checkout in (repository, foreign_repository):
+                (checkout / "scripts").mkdir(parents=True)
+                (checkout / "mediaforce").mkdir()
+                (checkout / "scripts" / "runner.py").write_text(
+                    "VALUE = 'tracked'\n",
+                    encoding="utf-8",
+                )
+                (checkout / "mediaforce" / "__init__.py").write_text(
+                    '"""fixture"""\n',
+                    encoding="utf-8",
+                )
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            for arguments in (
+                ("init", "-q"),
+                ("config", "user.name", "Mediaforce Test"),
+                (
+                    "config",
+                    "user.email",
+                    "mediaforce-test@example.invalid",
+                ),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "foreign fixture"),
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", *arguments],
+                    cwd=foreign_repository,
+                    env=git_environment,
+                    check=True,
+                )
+            (repository / ".git").symlink_to(
+                foreign_repository / ".git",
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "refuses unsafe Git metadata",
+            ):
+                verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                )
+
+    def test_preregistration_bootstrap_accepts_linked_worktree_git_directory(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            linked_worktree = root / "linked-worktree"
+            (repository / "scripts").mkdir(parents=True)
+            (repository / "mediaforce").mkdir()
+            (repository / "scripts" / "runner.py").write_text(
+                "VALUE = 'tracked'\n",
+                encoding="utf-8",
+            )
+            (repository / "mediaforce" / "__init__.py").write_text(
+                '"""fixture"""\n',
+                encoding="utf-8",
+            )
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            for arguments in (
+                ("init", "-q"),
+                ("config", "user.name", "Mediaforce Test"),
+                (
+                    "config",
+                    "user.email",
+                    "mediaforce-test@example.invalid",
+                ),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "linked fixture"),
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", *arguments],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "worktree",
+                    "add",
+                    "--detach",
+                    "-q",
+                    str(linked_worktree),
+                    "HEAD",
+                ],
+                cwd=repository,
+                env=git_environment,
+                check=True,
+            )
+
+            verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                linked_worktree
+            )
+
+    def test_preregistration_bootstrap_rejects_unapproved_venv_launcher(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            scripts_directory = repository / "scripts"
+            mediaforce_directory = repository / "mediaforce"
+            scripts_directory.mkdir()
+            mediaforce_directory.mkdir()
+            runner = scripts_directory / Path(
+                verify_av1_cold_start_preregistration.__file__
+            ).name
+            shutil.copyfile(
+                Path(verify_av1_cold_start_preregistration.__file__),
+                runner,
+            )
+            (mediaforce_directory / "__init__.py").write_text(
+                '"""fixture"""\n',
+                encoding="utf-8",
+            )
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            for arguments in (
+                ("init", "-q"),
+                ("config", "user.name", "Mediaforce Test"),
+                (
+                    "config",
+                    "user.email",
+                    "mediaforce-test@example.invalid",
+                ),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "launcher fixture"),
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", *arguments],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+            virtual_environment = repository / ".venv"
+            launcher = virtual_environment / "bin" / "python-unapproved"
+            launcher.parent.mkdir(parents=True)
+            launcher.symlink_to(sys._base_executable)
+            (virtual_environment / "bin" / "python").symlink_to(
+                sys._base_executable
+            )
+            (virtual_environment / "pyvenv.cfg").write_text(
+                f"home = {Path(sys._base_executable).parent}\n"
+                "include-system-site-packages = false\n"
+                f"version = {sys.version_info.major}.{sys.version_info.minor}\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [launcher, "-I", "-S", runner, "--help"],
+                cwd=repository,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "requires the canonical repository virtual environment",
                 completed.stderr,
             )
 
@@ -2097,7 +2343,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             child_environment["VIRTUAL_ENV"] = str(hostile_environment)
 
             completed = subprocess.run(
-                [canonical_python, runner, "--help"],
+                [canonical_python, "-I", "-S", runner, "--help"],
                 cwd=repository,
                 env=child_environment,
                 text=True,
@@ -2565,7 +2811,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             nonlocal directory_fsyncs
             if stat.S_ISDIR(os.fstat(descriptor).st_mode):
                 directory_fsyncs += 1
-                if directory_fsyncs == 3:
+                if directory_fsyncs == 2:
                     raise OSError(errno.EIO, "directory fsync failed")
             real_fsync(descriptor)
 
@@ -2773,6 +3019,73 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ).disposition,
             "unsealed",
         )
+
+    def test_existing_accepted_attempt_rechecks_post_publish_identity(self) -> None:
+        attempts_directory = (
+            self.runtime_config.paths.web_state_dir / "existing-accepted-attempt"
+        )
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            attempts_directory,
+            attempt,
+            published_before=self.plan.authorization.valid_until,
+        )
+        after_publish = unittest.mock.Mock(
+            side_effect=AV1ValidationDerivationError("repository drift")
+        )
+        before_publish = unittest.mock.Mock(
+            side_effect=AssertionError("existing attempt must not republish")
+        )
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "repository drift",
+        ):
+            write_av1_validation_derivation_attempt(
+                attempts_directory,
+                attempt,
+                before_publish=before_publish,
+                after_publish=after_publish,
+                published_before=self.plan.authorization.valid_until,
+            )
+
+        before_publish.assert_not_called()
+        after_publish.assert_called_once_with()
+
+    def test_existing_non_review_attempt_rechecks_post_publish_identity(self) -> None:
+        attempts_directory = (
+            self.runtime_config.paths.web_state_dir / "existing-failed-attempt"
+        )
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=self.plan.assignments[0].assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="failed",
+            reason_code="runtime_failure",
+        )
+        write_av1_validation_derivation_attempt(attempts_directory, attempt)
+        after_publish = unittest.mock.Mock(
+            side_effect=AV1ValidationDerivationError("repository drift")
+        )
+        before_publish = unittest.mock.Mock(
+            side_effect=AssertionError("existing attempt must not republish")
+        )
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "repository drift",
+        ):
+            write_av1_validation_derivation_attempt(
+                attempts_directory,
+                attempt,
+                before_publish=before_publish,
+                after_publish=after_publish,
+            )
+
+        before_publish.assert_not_called()
+        after_publish.assert_called_once_with()
 
     def test_authoritative_attempt_load_requires_parent_durability(self) -> None:
         attempts_directory = self.runtime_config.paths.web_state_dir / "durable-attempts"
@@ -3122,6 +3435,100 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
             after_publish.assert_called_once_with()
             self.assertFalse((artifact_root / ".binding").exists())
+
+    def test_existing_directory_binding_rechecks_post_publish_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "bound-root"
+            _bind_owner_only_directory(
+                artifact_root,
+                kind="artifact_root",
+                binding_id="plan-id",
+                binding_digest="sha256:" + "1" * 64,
+            )
+            after_publish = unittest.mock.Mock(
+                side_effect=AV1ValidationDerivationError("repository drift")
+            )
+            before_publish = unittest.mock.Mock(
+                side_effect=AssertionError("existing binding must not republish")
+            )
+
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "repository drift",
+            ):
+                _bind_owner_only_directory(
+                    artifact_root,
+                    kind="artifact_root",
+                    binding_id="plan-id",
+                    binding_digest="sha256:" + "1" * 64,
+                    before_publish=before_publish,
+                    after_publish=after_publish,
+                )
+
+            before_publish.assert_not_called()
+            after_publish.assert_called_once_with()
+
+    def test_existing_plan_conflicting_binding_skips_post_publish_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            root.mkdir(mode=0o700)
+            artifact_root = root / self.plan.partition_id
+            artifact_root.mkdir(mode=0o700)
+            _write_owner_only(
+                artifact_root / "plan.json",
+                canonical_json_bytes(self.plan.to_payload()),
+            )
+            _bind_owner_only_directory(
+                artifact_root,
+                kind="artifact_root",
+                binding_id=self.plan.plan_id,
+                binding_digest="sha256:" + "f" * 64,
+            )
+            after_publish = unittest.mock.Mock()
+            before_bind = unittest.mock.Mock(
+                side_effect=AssertionError("existing binding must not republish")
+            )
+
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "bound to another artifact set",
+            ):
+                write_av1_validation_derivation_plan(
+                    artifact_root,
+                    self.plan,
+                    after_publish=after_publish,
+                    before_bind=before_bind,
+                )
+
+            before_bind.assert_not_called()
+            after_publish.assert_not_called()
+
+    def test_existing_directory_binding_preserves_deadline_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "bound-root"
+            _bind_owner_only_directory(
+                artifact_root,
+                kind="artifact_root",
+                binding_id="plan-id",
+                binding_digest="sha256:" + "2" * 64,
+            )
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                    return_value=10**30,
+                ),
+                self.assertRaises(
+                    AV1ValidationDerivationPublicationDeadlineError
+                ),
+            ):
+                _bind_owner_only_directory(
+                    artifact_root,
+                    kind="artifact_root",
+                    binding_id="plan-id",
+                    binding_digest="sha256:" + "2" * 64,
+                    published_before="2026-07-31T23:59:59Z",
+                )
 
     def test_assignment_claim_loader_marks_post_deadline_publication(self) -> None:
         claims_directory = self.runtime_artifact_root / "attempts"
@@ -3545,6 +3952,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory) / "repository"
             repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
             environment = verify_av1_cold_start_preregistration._review_git_environment(
                 repository_root=repository,
             )
@@ -3553,6 +3961,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(
+            environment["GIT_DIR"],
+            str((repository / ".git").resolve()),
+        )
+        self.assertEqual(
+            environment["GIT_COMMON_DIR"],
+            str((repository / ".git").resolve()),
+        )
         self.assertEqual(environment["GIT_WORK_TREE"], str(repository.resolve()))
         self.assertEqual(
             verify_av1_cold_start_preregistration._review_git_command("cat-file", "blob", "a" * 40),
@@ -3567,6 +3983,49 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "a" * 40,
             ],
         )
+
+    def test_review_git_identity_rejects_git_directory_replacement_during_probe(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            original_git_directory = repository / ".git-original"
+            replaced = False
+
+            def replace_git_directory(
+                    *_args: object,
+                    **_kwargs: object,
+            ) -> SimpleNamespace:
+                nonlocal replaced
+                if not replaced:
+                    (repository / ".git").rename(original_git_directory)
+                    (repository / ".git").mkdir()
+                    replaced = True
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"{'a' * 40}\n{'b' * 40}\n",
+                    stderr="",
+                )
+
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "run_command",
+                    side_effect=replace_git_directory,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "Git authority changed",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
+            self.assertTrue(replaced)
 
     def test_review_git_probes_ignore_replace_refs_for_identity_and_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -10810,7 +11269,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     retry_exit_code = verify_av1_cold_start_preregistration.main(argv)
             self.assertEqual(exit_code, 0)
             self.assertEqual(retry_exit_code, 0)
-            self.assertEqual(now_iso.call_count, 9)
+            self.assertEqual(now_iso.call_count, 5)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(json.loads(retry_stdout.getvalue()), payload)
             self.assertEqual(payload["derivation_assignment_count"], 24)

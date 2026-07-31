@@ -26,7 +26,7 @@ case IDs are protocol slots, not hashes of media.
 Validate it without loading Mediaforce config or state:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   validate docs/validation/av1-cold-start-preregistration-v1.json --json
 ```
 
@@ -60,7 +60,7 @@ values, media identities, paths, titles, fingerprints, or mappings.
 Validate the successor without loading runtime state:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   validate docs/validation/av1-cold-start-preregistration-v2.json --json
 ```
 
@@ -92,7 +92,7 @@ Create a dedicated owner-only directory outside the repository, then create its
 HMAC key once:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   create-partition-key /private/owner-only/av1-v2/partition.key \
   --config config/defaults.toml --json
 ```
@@ -111,7 +111,7 @@ machine-local eligibility attestation, current measured fingerprint inventory,
 and an explicit canonical UTC timestamp:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   build-partition docs/validation/av1-cold-start-preregistration-v2.json \
   /private/owner-only/eligibility-attestation-v1.json \
   --key /private/owner-only/av1-v2/partition.key \
@@ -130,7 +130,7 @@ change, taxonomy change, policy change, or compatibility change fails the
 current-input gate:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   validate-partition docs/validation/av1-cold-start-preregistration-v2.json \
   /private/owner-only/eligibility-attestation-v1.json \
   /private/owner-only/av1-v2/source-partition-v1.json \
@@ -172,7 +172,7 @@ Validate the pinned machine-local aggregate attestation without printing its
 counts:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   validate-eligibility /path/to/eligibility-attestation-v1.json --json
 ```
 
@@ -191,7 +191,7 @@ binds the assignment ID, local item ID, content-version identity, full source
 SHA-256, source size, and frozen evidence-summary SHA-256:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   create-derivation-plan \
   docs/validation/av1-cold-start-preregistration-v2.json \
   /private/owner-only/eligibility-attestation-v1.json \
@@ -216,7 +216,12 @@ fsynced and immediately before its exclusive rename. The renamed binding's
 kernel change time must also remain strictly before the plan authorization
 deadline, and the live source/repository identity is rechecked after the rename;
 a boundary-crossing or drifted binding is rolled back. An existing exact binding
-is validated for the same deadline and re-fsynced without creating a new authorization. Retrying plan
+is validated for the same deadline, re-fsynced, and passed through the same
+idempotent live source/repository identity verifier without rerunning the
+pre-publication authorization callback or creating a new authorization. Exact
+attempt and accepted-marker recovery follows the same rule: the full durable
+composite is validated first, then the read-only post-publication identity check
+is replayed once. Retrying plan
 creation therefore requires
 the selected media to remain present and byte-identical. The runtime clock is
 sampled only for the first successful plan payload. A binding
@@ -239,9 +244,13 @@ bounded Git probe, so cancellation or deadline state on the media controller
 cannot suppress publication of an immutable stopped or expired outcome. The
 Git environment is explicit and non-inherited: global and system config are
 disabled, replacement refs are disabled, and optional index locks are disabled
-so every read probe is non-writing. The verifier anchors `GIT_WORK_TREE` to its
-canonical repository root, disables system and configured attribute files, and
-disables repository-configured fsmonitor hooks for these probes. It does not
+so every read probe is non-writing. The verifier validates the checkout's main
+or linked-worktree metadata, pins `GIT_DIR`, `GIT_COMMON_DIR`, and
+`GIT_WORK_TREE` to that one authority tuple, disables system and configured
+attribute files, and disables repository-configured fsmonitor hooks for these
+probes. The same frozen tuple is reused across each multi-command identity or
+review-bundle proof and revalidated immediately before and after every Git
+child. It does not
 blanket-disable repository-local configuration, because ordinary linked-worktree
 and core/remote/branch behavior must remain intact. Instead, the only local
 configuration vectors that could reinterpret authority are neutralized at the
@@ -255,18 +264,22 @@ commit, tree, or blob object IDs they consume. Before any clean-tree decision,
 the verifier also requires every tracked index entry to have Git's ordinary
 `H` state; `assume-unchanged`, `skip-worktree`, unmerged, and other exceptional
 index states fail closed instead of allowing live implementation bytes to
-diverge from the reviewed commit. The canonical runner re-executes itself with
+diverge from the reviewed commit. The canonical runner must be launched with
 CPython isolated/no-site startup before importing `argparse`, dependencies, or
-`mediaforce`. A stdlib-only bootstrap invokes fixed `/usr/bin/git` through a
-sanitized environment with `GIT_WORK_TREE` pinned to the canonical checkout, so
-repo-local `core.worktree` cannot redirect the proof. It refuses modified,
+`mediaforce`; non-`-I -S` startup fails closed. A stdlib-only bootstrap invokes
+fixed `/usr/bin/git` through a
+sanitized environment with validated `GIT_DIR`, `GIT_COMMON_DIR`, and
+`GIT_WORK_TREE` values pinned to the canonical checkout, so repo-local
+`core.worktree` or a foreign `.git` pointer cannot redirect the proof. It refuses modified,
 exceptional-index, untracked, or ignored state anywhere under `mediaforce/` or
 `scripts/`; it also rejects
 repository bytecode caches and disables bytecode writes. The bootstrap removes
 the repository and script directories from normal module search, adds only
 trusted interpreter paths plus the canonical checkout's `.venv` site-packages,
-requires both the running interpreter path and any `VIRTUAL_ENV` declaration to
-match that environment, and explicitly binds the canonical `mediaforce` package
+requires the running interpreter to use an approved `.venv/bin/python*` launcher
+whose opened binary is the same inode as canonical `.venv/bin/python` and the
+interpreter's base executable, requires any `VIRTUAL_ENV` declaration to match
+that environment, and explicitly binds the canonical `mediaforce` package
 directory. An ignored `scripts/argparse.py`,
 Python source, bytecode, native extension, or package substitution therefore
 cannot execute before the exact-object authority proof. Operators must remove
@@ -643,7 +656,7 @@ claim.
 stopping the backend.
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   run-derivation-assignment \
   docs/validation/av1-cold-start-preregistration-v2.json \
   /private/owner-only/av1-v2/source-partition-v1.json \
@@ -726,7 +739,7 @@ fresh authorization sampling; repository, source, and publication-directory
 authority remain mandatory for idempotent completion.
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   record-derivation-verdict \
   docs/validation/av1-cold-start-preregistration-v2.json \
   /private/owner-only/av1-v2/source-partition-v1.json \
@@ -872,7 +885,10 @@ path and rely on the stronger final-inode publication receipt. After every
 deadline-bound rename, the writer verifies the inode's kernel change time
 against the same expiration; every loader repeats that check. Recovery of an
 already-published authoritative artifact skips live-clock sampling but still
-rejects a kernel-observable post-expiration publication. Assignment claims are
+rejects a kernel-observable post-expiration publication. Exact plan, binding,
+attempt, and accepted-marker recovery also reruns its idempotent read-only
+source/repository post-publication verifier after canonical-byte and durability
+checks; it never reissues the pre-publication callback. Assignment claims are
 the narrow recovery exception: a claim whose rename landed after expiration is
 loaded only as terminal evidence, marked late in memory, and recovered as
 `failed/authorization_expired`. It can never authorize work or permanently
@@ -1110,7 +1126,7 @@ or decides #256/#262 automatically. Those remain explicit governance steps.
 When redacted evidence exists:
 
 ```bash
-uv run python scripts/verify_av1_cold_start_preregistration.py \
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   report docs/validation/av1-cold-start-preregistration-v1.json \
   /path/to/private/redacted-evidence.json \
   --as-of YYYY-MM-DDTHH:MM:SSZ --runtime-state paused --json

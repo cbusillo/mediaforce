@@ -51,6 +51,7 @@ from mediaforce.web.runtime_lock import (
     exclusive_mediaforce_runtime_lock,
     reserve_mediaforce_database_identity,
 )
+from mediaforce.web import runtime_lock as runtime_lock_module
 
 CURRENT_DB_REVISION = "20260731_0020"
 
@@ -684,6 +685,40 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         ):
                             locked_source.sqlite_uri()
 
+    def test_legacy_migration_source_rejects_connection_to_other_database(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            other_path = root / "other.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            sqlite3.connect(source_path).close()
+            sqlite3.connect(other_path).close()
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-connection-identity"},
+                ),
+                exclusive_legacy_sqlite_migration_source(
+                    config,
+                    source_path,
+                ) as locked_source,
+                sqlite3.connect(other_path) as other_connection,
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "unexpected database",
+                ),
+            ):
+                locked_source.assert_connection_bound(other_connection)
+
     def test_migrate_config_state_rejects_wal_replacement_before_write_gate_open(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -859,6 +894,76 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     [("resumable-row",)],
                 )
 
+    def test_migrate_config_state_resumes_completed_v2_source_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('v2-cleanup-row')"
+                )
+            real_discard = LegacySQLiteMigrationSource.discard_after_publish
+
+            def discard_then_interrupt(
+                    locked_source: LegacySQLiteMigrationSource,
+                    **kwargs: object,
+            ) -> None:
+                real_discard(locked_source, **kwargs)
+                raise OSError("simulated interruption after source cleanup")
+
+            with (
+                patch.object(
+                    LegacySQLiteMigrationSource,
+                    "discard_after_publish",
+                    new=discard_then_interrupt,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-v2-cleanup-setup"},
+                ),
+                self.assertRaisesRegex(
+                    OSError,
+                    "simulated interruption after source cleanup",
+                ),
+            ):
+                migrate_config_state(config)
+
+            v3_payload = json.loads(intent_path.read_text(encoding="utf-8"))
+            v2_payload = dict(v3_payload)
+            v2_payload["schema_version"] = 2
+            v2_payload["phase"] = "ready"
+            v2_payload.pop("source_sidecar_snapshots")
+            config_module._replace_legacy_sqlite_migration_intent(
+                intent_path,
+                expected=v3_payload,
+                payload=v2_payload,
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-v2-cleanup-resume"},
+            ):
+                migrate_config_state(config)
+
+            self.assertFalse(source_path.exists())
+            self.assertFalse(intent_path.exists())
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM migration_rows").fetchall(),
+                    [("v2-cleanup-row",)],
+                )
+
     def test_migrate_config_state_rejects_destination_parent_swap_before_cleanup(
             self,
     ) -> None:
@@ -926,6 +1031,89 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 self.assertEqual(
                     connection.execute("SELECT value FROM migration_rows").fetchall(),
                     [("parent-bound-row",)],
+                )
+
+    def test_migrate_config_state_rechecks_source_parent_before_intent_removal(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            displaced_parent = root / "state.displaced"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('source-parent-row')"
+                )
+            destination_type = config_module._LegacySQLiteMigrationDestination
+            real_discard_staging = destination_type.discard_staging
+            replacement_marker = source_path.parent / "replacement-marker"
+            parent_swapped = False
+
+            def swap_source_parent_then_discard_staging(
+                    binding: object,
+                    staging_name: str,
+                    expected: dict[str, object],
+            ) -> None:
+                nonlocal parent_swapped
+                source_path.parent.rename(displaced_parent)
+                source_path.parent.mkdir()
+                replacement_marker.write_bytes(b"replacement-parent")
+                parent_swapped = True
+                real_discard_staging(binding, staging_name, expected)
+
+            with (
+                patch.object(
+                    destination_type,
+                    "discard_staging",
+                    new=swap_source_parent_then_discard_staging,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-source-parent-finalization-swap"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "source parent changed during migration",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(parent_swapped)
+            self.assertEqual(replacement_marker.read_bytes(), b"replacement-parent")
+            self.assertTrue(destination_path.is_file())
+            self.assertTrue(intent_path.is_file())
+            self.assertEqual(
+                list(destination_path.parent.glob(
+                    ".library.sqlite3.migration-*.sqlite3"
+                )),
+                [],
+            )
+
+            replacement_marker.unlink()
+            source_path.parent.rmdir()
+            displaced_parent.rename(source_path.parent)
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-source-parent-finalization-resume"},
+            ):
+                migrate_config_state(config)
+
+            self.assertFalse(intent_path.exists())
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM migration_rows").fetchall(),
+                    [("source-parent-row",)],
                 )
 
     def test_migrate_config_state_publish_rollback_preserves_replacement(self) -> None:
@@ -1021,7 +1209,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     dir_fd: int | None = None,
             ) -> None:
                 nonlocal interrupted
-                if path == f"{source_path.name}-wal" and not interrupted:
+                if (
+                    str(path).startswith(
+                        f".{source_path.name}-wal.mediaforce-retired-"
+                    )
+                    and not interrupted
+                ):
                     interrupted = True
                     raise OSError("simulated interruption before sidecar cleanup")
                 if dir_fd is None:
@@ -1061,7 +1254,13 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
                 self.assertTrue(interrupted)
                 self.assertFalse(source_path.exists())
-                self.assertTrue(Path(f"{source_path}-wal").is_file())
+                self.assertFalse(Path(f"{source_path}-wal").exists())
+                self.assertEqual(
+                    len(list(source_path.parent.glob(
+                        f".{source_path.name}-wal.mediaforce-retired-*"
+                    ))),
+                    1,
+                )
                 self.assertTrue(destination_path.is_file())
                 self.assertTrue(intent_path.is_file())
 
@@ -1101,22 +1300,20 @@ class DatabaseRuntimeTests(unittest.TestCase):
             )
             source_path.parent.mkdir()
             source_connection = sqlite3.connect(source_path)
-            real_unlink = os.unlink
+            real_rename_exclusive = runtime_lock_module.rename_exclusive
             interrupted = False
 
             def interrupt_before_sidecar_cleanup(
-                    path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-                    *,
-                    dir_fd: int | None = None,
+                    **kwargs: object,
             ) -> None:
                 nonlocal interrupted
-                if path == f"{source_path.name}-wal" and not interrupted:
+                if (
+                    kwargs.get("source_name") == f"{source_path.name}-wal"
+                    and not interrupted
+                ):
                     interrupted = True
                     raise OSError("simulated interruption before sidecar cleanup")
-                if dir_fd is None:
-                    real_unlink(path)
-                else:
-                    real_unlink(path, dir_fd=dir_fd)
+                real_rename_exclusive(**kwargs)
 
             try:
                 self.assertEqual(
@@ -1133,8 +1330,8 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
                 with (
                     patch(
-                        "mediaforce.web.runtime_lock.os.unlink",
-                        side_effect=interrupt_before_sidecar_cleanup,
+                        "mediaforce.web.runtime_lock.rename_exclusive",
+                        new=interrupt_before_sidecar_cleanup,
                     ),
                     exclusive_mediaforce_runtime_lock(
                         config,
@@ -1172,6 +1369,488 @@ class DatabaseRuntimeTests(unittest.TestCase):
             finally:
                 source_connection.close()
 
+    def test_migrate_config_state_rejects_replaced_sidecar_before_main_retirement(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            source_connection = sqlite3.connect(source_path)
+
+            def interrupt_before_source_retirement(
+                    _locked_source: LegacySQLiteMigrationSource,
+                    **_kwargs: object,
+            ) -> None:
+                raise OSError("simulated interruption before source retirement")
+
+            try:
+                self.assertEqual(
+                    source_connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                    ("wal",),
+                )
+                source_connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                source_connection.execute(
+                    "INSERT INTO migration_rows VALUES ('cleaning-lineage-row')"
+                )
+                source_connection.commit()
+
+                with (
+                    patch.object(
+                        LegacySQLiteMigrationSource,
+                        "discard_after_publish",
+                        new=interrupt_before_source_retirement,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-cleaning-lineage-setup"},
+                    ),
+                    self.assertRaisesRegex(
+                        OSError,
+                        "simulated interruption before source retirement",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                payload = json.loads(intent_path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["phase"], "cleaning")
+                wal_path = Path(f"{source_path}-wal")
+                original_wal_path = Path(f"{source_path}-wal.original")
+                wal_bytes = wal_path.read_bytes()
+                wal_path.rename(original_wal_path)
+                wal_path.write_bytes(wal_bytes)
+
+                with (
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-cleaning-lineage-resume"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "could not be resumed safely",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(source_path.is_file())
+                self.assertTrue(destination_path.is_file())
+                self.assertTrue(intent_path.is_file())
+                self.assertEqual(wal_path.read_bytes(), wal_bytes)
+                self.assertTrue(original_wal_path.is_file())
+            finally:
+                source_connection.close()
+
+    def test_migrate_config_state_rejects_sidecar_swap_during_initial_cleanup(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            source_connection = sqlite3.connect(source_path)
+            wal_path = Path(f"{source_path}-wal")
+            original_wal_path = Path(f"{source_path}-wal.original")
+            real_assert_sidecar_bound = (
+                runtime_lock_module._LegacySQLiteMutationGuard.assert_sidecar_bound
+            )
+            replaced = False
+
+            def replace_wal_then_assert(
+                    guard: object,
+                    suffix: str,
+            ) -> None:
+                nonlocal replaced
+                if suffix == "-wal" and not replaced:
+                    wal_path.rename(original_wal_path)
+                    wal_path.write_bytes(b"initial-cleanup-replacement")
+                    replaced = True
+                real_assert_sidecar_bound(guard, suffix)
+
+            try:
+                self.assertEqual(
+                    source_connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                    ("wal",),
+                )
+                source_connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                source_connection.execute(
+                    "INSERT INTO migration_rows VALUES ('initial-cleanup-row')"
+                )
+                source_connection.commit()
+
+                with (
+                    patch.object(
+                        runtime_lock_module._LegacySQLiteMutationGuard,
+                        "assert_sidecar_bound",
+                        new=replace_wal_then_assert,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-initial-sidecar-swap"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "source cleanup failed after publication",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(replaced)
+                self.assertFalse(source_path.exists())
+                self.assertTrue(destination_path.is_file())
+                self.assertEqual(
+                    wal_path.read_bytes(),
+                    b"initial-cleanup-replacement",
+                )
+                self.assertTrue(original_wal_path.is_file())
+            finally:
+                source_connection.close()
+
+    def test_migrate_config_state_preserves_sidecar_swapped_during_quarantine_claim(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            source_connection = sqlite3.connect(source_path)
+            wal_path = Path(f"{source_path}-wal")
+            original_wal_path = Path(f"{source_path}-wal.original")
+            real_rename_exclusive = runtime_lock_module.rename_exclusive
+            replaced = False
+
+            def replace_wal_during_claim(**kwargs: object) -> None:
+                nonlocal replaced
+                if (
+                    kwargs.get("source_name") == f"{source_path.name}-wal"
+                    and not replaced
+                ):
+                    wal_path.rename(original_wal_path)
+                    wal_path.write_bytes(b"quarantine-claim-replacement")
+                    replaced = True
+                real_rename_exclusive(**kwargs)
+
+            try:
+                self.assertEqual(
+                    source_connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                    ("wal",),
+                )
+                source_connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                source_connection.execute(
+                    "INSERT INTO migration_rows VALUES ('quarantine-claim-row')"
+                )
+                source_connection.commit()
+
+                with (
+                    patch(
+                        "mediaforce.web.runtime_lock.rename_exclusive",
+                        new=replace_wal_during_claim,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-quarantine-claim-swap"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "source cleanup failed after publication",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(replaced)
+                self.assertFalse(source_path.exists())
+                self.assertTrue(destination_path.is_file())
+                self.assertFalse(wal_path.exists())
+                quarantined_wal_paths = list(source_path.parent.glob(
+                    f".{wal_path.name}.mediaforce-retired-*"
+                ))
+                self.assertEqual(len(quarantined_wal_paths), 1)
+                self.assertEqual(
+                    quarantined_wal_paths[0].read_bytes(),
+                    b"quarantine-claim-replacement",
+                )
+                self.assertTrue(original_wal_path.is_file())
+            finally:
+                source_connection.close()
+
+    def test_migrate_config_state_preserves_resumed_sidecar_swap_during_claim(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            source_connection = sqlite3.connect(source_path)
+            wal_path = Path(f"{source_path}-wal")
+            original_wal_path = Path(f"{source_path}-wal.original")
+            runtime_rename_exclusive = runtime_lock_module.rename_exclusive
+            config_rename_exclusive = config_module.rename_exclusive
+            interrupted = False
+            replaced = False
+
+            def interrupt_before_wal_claim(**kwargs: object) -> None:
+                nonlocal interrupted
+                if (
+                    kwargs.get("source_name") == f"{source_path.name}-wal"
+                    and not interrupted
+                ):
+                    interrupted = True
+                    raise OSError("simulated interruption before WAL claim")
+                runtime_rename_exclusive(**kwargs)
+
+            def replace_wal_during_resumed_claim(**kwargs: object) -> None:
+                nonlocal replaced
+                if (
+                    kwargs.get("source_name") == f"{source_path.name}-wal"
+                    and not replaced
+                ):
+                    wal_path.rename(original_wal_path)
+                    wal_path.write_bytes(b"resumed-claim-replacement")
+                    replaced = True
+                config_rename_exclusive(**kwargs)
+
+            try:
+                self.assertEqual(
+                    source_connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                    ("wal",),
+                )
+                source_connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                source_connection.execute(
+                    "INSERT INTO migration_rows VALUES ('resumed-claim-row')"
+                )
+                source_connection.commit()
+
+                with (
+                    patch(
+                        "mediaforce.web.runtime_lock.rename_exclusive",
+                        new=interrupt_before_wal_claim,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-resumed-claim-setup"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "source cleanup failed after publication",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(interrupted)
+                self.assertFalse(source_path.exists())
+                self.assertTrue(wal_path.is_file())
+
+                with (
+                    patch.object(
+                        config_module,
+                        "rename_exclusive",
+                        new=replace_wal_during_resumed_claim,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-resumed-claim-swap"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "could not be resumed safely",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(replaced)
+                self.assertFalse(wal_path.exists())
+                quarantined_wal_paths = list(source_path.parent.glob(
+                    f".{wal_path.name}.mediaforce-retired-*"
+                ))
+                self.assertEqual(len(quarantined_wal_paths), 1)
+                self.assertEqual(
+                    quarantined_wal_paths[0].read_bytes(),
+                    b"resumed-claim-replacement",
+                )
+                self.assertTrue(original_wal_path.is_file())
+            finally:
+                source_connection.close()
+
+    def test_migrate_config_state_resumes_after_main_quarantine_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('main-quarantine-row')"
+                )
+            real_unlink = os.unlink
+            interrupted = False
+
+            def interrupt_main_quarantine_cleanup(
+                    path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                    *,
+                    dir_fd: int | None = None,
+            ) -> None:
+                nonlocal interrupted
+                if (
+                    str(path).startswith(
+                        f".{source_path.name}.mediaforce-retired-"
+                    )
+                    and not interrupted
+                ):
+                    interrupted = True
+                    raise OSError("simulated interruption after main claim")
+                if dir_fd is None:
+                    real_unlink(path)
+                else:
+                    real_unlink(path, dir_fd=dir_fd)
+
+            with (
+                patch(
+                    "mediaforce.web.runtime_lock.os.unlink",
+                    side_effect=interrupt_main_quarantine_cleanup,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-main-quarantine-setup"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "source cleanup failed after publication",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(interrupted)
+            self.assertFalse(source_path.exists())
+            self.assertTrue(intent_path.is_file())
+            self.assertEqual(
+                len(list(source_path.parent.glob(
+                    f".{source_path.name}.mediaforce-retired-*"
+                ))),
+                1,
+            )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-main-quarantine-resume"},
+            ):
+                migrate_config_state(config)
+
+            self.assertFalse(intent_path.exists())
+            self.assertEqual(
+                list(source_path.parent.glob("*.mediaforce-retired-*")),
+                [],
+            )
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM migration_rows").fetchall(),
+                    [("main-quarantine-row",)],
+                )
+
+    def test_migrate_config_state_rejects_unowned_cleanup_quarantine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('quarantine-owner-row')"
+                )
+            destination_type = config_module._LegacySQLiteMigrationDestination
+
+            with (
+                patch.object(
+                    destination_type,
+                    "discard_staging",
+                    side_effect=OSError("simulated interruption after source cleanup"),
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-unowned-quarantine-setup"},
+                ),
+                self.assertRaisesRegex(
+                    OSError,
+                    "simulated interruption after source cleanup",
+                ),
+            ):
+                migrate_config_state(config)
+
+            unowned_quarantine = source_path.parent / (
+                f".{source_path.name}-journal.mediaforce-retired-unowned"
+            )
+            unowned_quarantine.write_bytes(b"unowned-quarantine")
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-unowned-quarantine-resume"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "could not be resumed safely",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertEqual(
+                unowned_quarantine.read_bytes(),
+                b"unowned-quarantine",
+            )
+            self.assertTrue(destination_path.is_file())
+            self.assertTrue(intent_path.is_file())
+
     def test_migrate_config_state_resumes_after_each_sidecar_cleanup_boundary(
             self,
     ) -> None:
@@ -1202,7 +1881,9 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 ) -> None:
                     nonlocal interrupted
                     if (
-                        path == f"{source_path.name}{interrupted_suffix}"
+                        str(path).startswith(
+                            f".{source_path.name}{interrupted_suffix}.mediaforce-retired-"
+                        )
                         and not interrupted
                     ):
                         interrupted = True

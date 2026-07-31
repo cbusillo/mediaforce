@@ -3,24 +3,12 @@ def _assert_preregistration_import_tree_clean(
 ) -> None:
     bootstrap_sys = __import__("sys")
     bootstrap_os = __import__("os")
+    bootstrap_stat = __import__("stat")
     if repository_root is None:
         bootstrap_sys.dont_write_bytecode = True
         if not bootstrap_sys.flags.isolated or not bootstrap_sys.flags.no_site:
-            environment = {
-                key: value
-                for key, value in bootstrap_os.environ.items()
-                if not key.startswith("PYTHON")
-            }
-            bootstrap_os.execve(
-                bootstrap_sys.executable,
-                (
-                    bootstrap_sys.executable,
-                    "-I",
-                    "-S",
-                    bootstrap_os.path.realpath(__file__),
-                    *bootstrap_sys.argv[1:],
-                ),
-                environment,
+            raise RuntimeError(
+                "AV1 preregistration runner must start with Python -I -S"
             )
         root = bootstrap_os.path.realpath(
             bootstrap_os.path.join(
@@ -45,6 +33,148 @@ def _assert_preregistration_import_tree_clean(
             "AV1 preregistration runner could not inspect repository imports"
         ) from exc
 
+    def read_git_metadata_file(path: str, label: str) -> str:
+        flags = bootstrap_os.O_RDONLY | getattr(bootstrap_os, "O_CLOEXEC", 0)
+        if hasattr(bootstrap_os, "O_NOFOLLOW"):
+            flags |= bootstrap_os.O_NOFOLLOW
+        descriptor = -1
+        try:
+            descriptor = bootstrap_os.open(path, flags)
+            descriptor_info = bootstrap_os.fstat(descriptor)
+            path_info = bootstrap_os.stat(path, follow_symlinks=False)
+            if (
+                not bootstrap_os.path.isfile(path)
+                or descriptor_info.st_uid != bootstrap_os.getuid()
+                or descriptor_info.st_nlink != 1
+                or descriptor_info.st_size > 4096
+                or descriptor_info.st_mode & 0o022
+                or (descriptor_info.st_dev, descriptor_info.st_ino)
+                != (path_info.st_dev, path_info.st_ino)
+            ):
+                raise RuntimeError(
+                    f"AV1 preregistration runner refuses unsafe {label}"
+                )
+            raw = bytearray()
+            while len(raw) <= 4096:
+                chunk = bootstrap_os.read(descriptor, 4096)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            if len(raw) > 4096:
+                raise RuntimeError(
+                    f"AV1 preregistration runner refuses oversized {label}"
+                )
+            return bytes(raw).decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise RuntimeError(
+                f"AV1 preregistration runner refuses invalid {label}"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                f"AV1 preregistration runner could not inspect {label}"
+            ) from exc
+        finally:
+            if descriptor >= 0:
+                bootstrap_os.close(descriptor)
+
+    def resolved_git_metadata() -> tuple[str, tuple[int, int], str, tuple[int, int]]:
+        metadata_path = bootstrap_os.path.join(root, ".git")
+        try:
+            metadata_info = bootstrap_os.stat(
+                metadata_path,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            fail_closed(exc)
+        if bootstrap_stat.S_ISDIR(metadata_info.st_mode):
+            git_directory = bootstrap_os.path.realpath(metadata_path)
+        elif bootstrap_stat.S_ISREG(metadata_info.st_mode):
+            pointer = read_git_metadata_file(metadata_path, "Git metadata pointer")
+            prefix = "gitdir:"
+            if not pointer.startswith(prefix):
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses invalid Git metadata pointer"
+                )
+            candidate = pointer[len(prefix):].strip()
+            if not candidate:
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses invalid Git metadata pointer"
+                )
+            if not bootstrap_os.path.isabs(candidate):
+                candidate = bootstrap_os.path.join(root, candidate)
+            git_directory = bootstrap_os.path.realpath(candidate)
+            backlink = read_git_metadata_file(
+                bootstrap_os.path.join(git_directory, "gitdir"),
+                "Git worktree backlink",
+            )
+            if not bootstrap_os.path.isabs(backlink):
+                backlink = bootstrap_os.path.join(git_directory, backlink)
+            if bootstrap_os.path.realpath(backlink) != bootstrap_os.path.realpath(
+                    metadata_path
+            ):
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses foreign Git metadata"
+                )
+        else:
+            raise RuntimeError(
+                "AV1 preregistration runner refuses unsafe Git metadata"
+            )
+        commondir_path = bootstrap_os.path.join(git_directory, "commondir")
+        if bootstrap_os.path.exists(commondir_path):
+            common_value = read_git_metadata_file(
+                commondir_path,
+                "Git common-directory pointer",
+            )
+            if not common_value:
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses invalid Git common directory"
+                )
+            if not bootstrap_os.path.isabs(common_value):
+                common_value = bootstrap_os.path.join(
+                    git_directory,
+                    common_value,
+                )
+            common_directory = bootstrap_os.path.realpath(common_value)
+            expected_worktrees_parent = bootstrap_os.path.join(
+                common_directory,
+                "worktrees",
+            )
+            if bootstrap_os.path.dirname(git_directory) != expected_worktrees_parent:
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses foreign Git worktree metadata"
+                )
+        else:
+            common_directory = git_directory
+
+        def directory_identity(path: str, label: str) -> tuple[int, int]:
+            flags = bootstrap_os.O_RDONLY | getattr(bootstrap_os, "O_DIRECTORY", 0)
+            if hasattr(bootstrap_os, "O_NOFOLLOW"):
+                flags |= bootstrap_os.O_NOFOLLOW
+            descriptor = bootstrap_os.open(path, flags)
+            try:
+                descriptor_info = bootstrap_os.fstat(descriptor)
+                path_info = bootstrap_os.stat(path, follow_symlinks=False)
+                if (
+                    not bootstrap_os.path.isdir(path)
+                    or descriptor_info.st_uid != bootstrap_os.getuid()
+                    or descriptor_info.st_mode & 0o022
+                    or (descriptor_info.st_dev, descriptor_info.st_ino)
+                    != (path_info.st_dev, path_info.st_ino)
+                ):
+                    raise RuntimeError(
+                        f"AV1 preregistration runner refuses unsafe {label}"
+                    )
+                return descriptor_info.st_dev, descriptor_info.st_ino
+            finally:
+                bootstrap_os.close(descriptor)
+
+        return (
+            git_directory,
+            directory_identity(git_directory, "Git directory"),
+            common_directory,
+            directory_identity(common_directory, "Git common directory"),
+        )
+
     for relative_root in ("mediaforce", "scripts"):
         import_root = bootstrap_os.path.join(root, relative_root)
         if not bootstrap_os.path.isdir(import_root):
@@ -66,8 +196,48 @@ def _assert_preregistration_import_tree_clean(
                     "AV1 preregistration runner refuses repository bytecode artifacts"
                 )
 
+    (
+        git_directory,
+        git_directory_identity,
+        git_common_directory,
+        git_common_directory_identity,
+    ) = resolved_git_metadata()
+
     def git_output(*arguments: str) -> tuple[int, bytes]:
         bootstrap_time = __import__("time")
+        git_descriptors: list[int] = []
+
+        def pinned_git_directory(
+                path: str,
+                expected_identity: tuple[int, int],
+        ) -> str:
+            flags = bootstrap_os.O_RDONLY | getattr(bootstrap_os, "O_DIRECTORY", 0)
+            if hasattr(bootstrap_os, "O_NOFOLLOW"):
+                flags |= bootstrap_os.O_NOFOLLOW
+            descriptor = bootstrap_os.open(path, flags)
+            descriptor_info = bootstrap_os.fstat(descriptor)
+            if (
+                (descriptor_info.st_dev, descriptor_info.st_ino)
+                != expected_identity
+                or descriptor_info.st_uid != bootstrap_os.getuid()
+                or descriptor_info.st_mode & 0o022
+            ):
+                bootstrap_os.close(descriptor)
+                raise RuntimeError(
+                    "AV1 preregistration runner detected changed Git metadata"
+                )
+            bootstrap_os.set_inheritable(descriptor, True)
+            git_descriptors.append(descriptor)
+            return path
+
+        pinned_git_dir = pinned_git_directory(
+            git_directory,
+            git_directory_identity,
+        )
+        pinned_git_common_dir = pinned_git_directory(
+            git_common_directory,
+            git_common_directory_identity,
+        )
         read_descriptor, write_descriptor = bootstrap_os.pipe()
         process_id = bootstrap_os.fork()
         if process_id == 0:
@@ -100,6 +270,8 @@ def _assert_preregistration_import_tree_clean(
                         "GIT_ATTR_NOSYSTEM": "1",
                         "GIT_CONFIG_GLOBAL": "/dev/null",
                         "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_DIR": pinned_git_dir,
+                        "GIT_COMMON_DIR": pinned_git_common_dir,
                         "GIT_NO_REPLACE_OBJECTS": "1",
                         "GIT_OPTIONAL_LOCKS": "0",
                         "GIT_WORK_TREE": root,
@@ -172,6 +344,32 @@ def _assert_preregistration_import_tree_clean(
             raise
         finally:
             bootstrap_os.close(read_descriptor)
+            metadata_changed = False
+            for descriptor, path, expected_identity in zip(
+                    git_descriptors,
+                    (git_directory, git_common_directory),
+                    (git_directory_identity, git_common_directory_identity),
+                    strict=True,
+            ):
+                try:
+                    descriptor_info = bootstrap_os.fstat(descriptor)
+                    path_info = bootstrap_os.stat(path, follow_symlinks=False)
+                    if (
+                        descriptor_info.st_dev,
+                        descriptor_info.st_ino,
+                    ) != expected_identity or (
+                        path_info.st_dev,
+                        path_info.st_ino,
+                    ) != expected_identity:
+                        metadata_changed = True
+                except OSError:
+                    metadata_changed = True
+                finally:
+                    bootstrap_os.close(descriptor)
+            if metadata_changed:
+                raise RuntimeError(
+                    "AV1 preregistration runner detected changed Git metadata"
+                )
         if process_status is None:
             raise RuntimeError(
                 "AV1 preregistration repository inspection did not finish"
@@ -267,16 +465,80 @@ def _assert_preregistration_import_tree_clean(
             expected_virtual_environment,
             "bin",
         )
+        allowed_executable_names = {
+            "python",
+            "python3",
+            f"python{bootstrap_sys.version_info.major}",
+            (
+                f"python{bootstrap_sys.version_info.major}."
+                f"{bootstrap_sys.version_info.minor}"
+            ),
+        }
+        executable_realpath = bootstrap_os.path.realpath(executable_path)
+        canonical_executable_path = bootstrap_os.path.join(
+            expected_executable_directory,
+            "python",
+        )
+        canonical_executable_realpath = bootstrap_os.path.realpath(
+            canonical_executable_path
+        )
+        base_executable = getattr(bootstrap_sys, "_base_executable", None)
+        base_executable_realpath = (
+            bootstrap_os.path.realpath(base_executable)
+            if isinstance(base_executable, str) and base_executable
+            else None
+        )
+        executable_descriptor = -1
+        executable_is_canonical = False
         try:
-            executable_is_canonical = (
-                bootstrap_os.path.commonpath((
-                    executable_path,
-                    expected_executable_directory,
-                ))
+            if (
+                bootstrap_os.path.dirname(executable_path)
                 == expected_executable_directory
-            )
-        except ValueError:
+                and bootstrap_os.path.basename(executable_path)
+                in allowed_executable_names
+                and base_executable_realpath == executable_realpath
+            ):
+                flags = bootstrap_os.O_RDONLY | getattr(
+                    bootstrap_os,
+                    "O_CLOEXEC",
+                    0,
+                )
+                if hasattr(bootstrap_os, "O_NOFOLLOW"):
+                    flags |= bootstrap_os.O_NOFOLLOW
+                executable_descriptor = bootstrap_os.open(
+                    executable_realpath,
+                    flags,
+                )
+                descriptor_info = bootstrap_os.fstat(executable_descriptor)
+                path_info = bootstrap_os.stat(
+                    executable_realpath,
+                    follow_symlinks=False,
+                )
+                base_info = bootstrap_os.stat(
+                    base_executable_realpath,
+                    follow_symlinks=False,
+                )
+                canonical_info = bootstrap_os.stat(
+                    canonical_executable_realpath,
+                    follow_symlinks=False,
+                )
+                executable_is_canonical = (
+                    bootstrap_os.path.isfile(executable_realpath)
+                    and descriptor_info.st_uid == bootstrap_os.getuid()
+                    and not descriptor_info.st_mode & 0o022
+                    and (
+                        descriptor_info.st_dev,
+                        descriptor_info.st_ino,
+                    )
+                    == (path_info.st_dev, path_info.st_ino)
+                    == (base_info.st_dev, base_info.st_ino)
+                    == (canonical_info.st_dev, canonical_info.st_ino)
+                )
+        except OSError:
             executable_is_canonical = False
+        finally:
+            if executable_descriptor >= 0:
+                bootstrap_os.close(executable_descriptor)
         if (
             not executable_is_canonical
             or (
@@ -1904,15 +2166,15 @@ def _repository_review_identity(
         repository_root: Path | None = None,
 ) -> tuple[str, str]:
     root = (REPOSITORY_ROOT if repository_root is None else repository_root).resolve()
+    git_environment, git_authority = _review_git_context(repository_root=root)
 
     def resolve_identity() -> tuple[str, str]:
-        identity = run_command(
+        identity = _run_review_git_process(
             _review_git_command("rev-parse", "HEAD", "HEAD^{tree}"),
             process_controller=process_controller,
-            cwd=root,
-            env=_review_git_environment(repository_root=root),
-            timeout=15,
-            check=False,
+            repository_root=root,
+            git_environment=git_environment,
+            git_authority=git_authority,
         )
         object_ids = tuple(identity.stdout.splitlines())
         if (
@@ -1926,13 +2188,12 @@ def _repository_review_identity(
         return object_ids[0], object_ids[1]
 
     def assert_clean_state(object_ids: tuple[str, str]) -> None:
-        index_state = run_command(
+        index_state = _run_review_git_process(
             _review_git_command("ls-files", "-v", "-z"),
             process_controller=process_controller,
-            cwd=root,
-            env=_review_git_environment(repository_root=root),
-            timeout=15,
-            check=False,
+            repository_root=root,
+            git_environment=git_environment,
+            git_authority=git_authority,
         )
         if index_state.returncode != 0:
             raise AV1ValidationDerivationError(
@@ -1955,13 +2216,12 @@ def _repository_review_identity(
             ),
             _review_git_diff_command("diff-files", "--"),
         ):
-            tracked_state = run_command(
+            tracked_state = _run_review_git_process(
                 tracked_state_command,
                 process_controller=process_controller,
-                cwd=root,
-                env=_review_git_environment(repository_root=root),
-                timeout=15,
-                check=False,
+                repository_root=root,
+                git_environment=git_environment,
+                git_authority=git_authority,
             )
             if tracked_state.returncode == 1:
                 raise AV1ValidationDerivationError(
@@ -1971,7 +2231,7 @@ def _repository_review_identity(
                 raise AV1ValidationDerivationError(
                     "AV1 derivation review repository state is unavailable"
                 )
-        repository_state = run_command(
+        repository_state = _run_review_git_process(
             _review_git_command(
                 "status",
                 "--porcelain=v1",
@@ -1979,10 +2239,9 @@ def _repository_review_identity(
                 "--ignore-submodules=none",
             ),
             process_controller=process_controller,
-            cwd=root,
-            env=_review_git_environment(repository_root=root),
-            timeout=15,
-            check=False,
+            repository_root=root,
+            git_environment=git_environment,
+            git_authority=git_authority,
         )
         if repository_state.returncode != 0:
             raise AV1ValidationDerivationError(
@@ -1992,7 +2251,7 @@ def _repository_review_identity(
             raise AV1ValidationDerivationError(
                 "AV1 derivation review repository is not clean"
             )
-        ignored_implementation_state = run_command(
+        ignored_implementation_state = _run_review_git_process(
             _review_git_command(
                 "ls-files",
                 "-z",
@@ -2004,10 +2263,9 @@ def _repository_review_identity(
                 "scripts/verify_av1_cold_start_preregistration.py",
             ),
             process_controller=process_controller,
-            cwd=root,
-            env=_review_git_environment(repository_root=root),
-            timeout=15,
-            check=False,
+            repository_root=root,
+            git_environment=git_environment,
+            git_authority=git_authority,
         )
         if ignored_implementation_state.returncode != 0:
             raise AV1ValidationDerivationError(
@@ -2035,20 +2293,224 @@ def _live_repository_identity() -> tuple[str, str]:
     )
 
 
-def _review_git_environment(*, repository_root: Path) -> dict[str, str]:
+def _read_review_git_metadata_file(path: Path, label: str) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        descriptor_info = os.fstat(descriptor)
+        path_info = path.lstat()
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or descriptor_info.st_nlink != 1
+            or descriptor_info.st_size > 4096
+            or stat.S_IMODE(descriptor_info.st_mode) & 0o022
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                f"AV1 derivation review refuses unsafe {label}"
+            )
+        raw = bytearray()
+        while len(raw) <= 4096:
+            chunk = os.read(descriptor, 4096)
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if len(raw) > 4096:
+            raise AV1ValidationDerivationError(
+                f"AV1 derivation review refuses oversized {label}"
+            )
+        return bytes(raw).decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation review refuses invalid {label}"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 derivation review could not inspect {label}"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _review_git_authority(repository_root: Path) -> tuple[Path, Path]:
+    root = repository_root.expanduser().resolve()
+    metadata_path = root / ".git"
+    try:
+        metadata_info = metadata_path.lstat()
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git metadata is unavailable"
+        ) from exc
+    if stat.S_ISDIR(metadata_info.st_mode):
+        git_directory = metadata_path.resolve(strict=True)
+    elif stat.S_ISREG(metadata_info.st_mode):
+        pointer = _read_review_git_metadata_file(
+            metadata_path,
+            "Git metadata pointer",
+        )
+        prefix = "gitdir:"
+        if not pointer.startswith(prefix) or not pointer[len(prefix):].strip():
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git metadata pointer is invalid"
+            )
+        candidate = Path(pointer[len(prefix):].strip())
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        git_directory = candidate.resolve(strict=True)
+        backlink = Path(_read_review_git_metadata_file(
+            git_directory / "gitdir",
+            "Git worktree backlink",
+        ))
+        if not backlink.is_absolute():
+            backlink = git_directory / backlink
+        if backlink.resolve(strict=True) != metadata_path.resolve(strict=True):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git metadata is foreign"
+            )
+    else:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git metadata is unsafe"
+        )
+    commondir_path = git_directory / "commondir"
+    if commondir_path.exists():
+        common_value = _read_review_git_metadata_file(
+            commondir_path,
+            "Git common-directory pointer",
+        )
+        if not common_value:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git common directory is invalid"
+            )
+        common_directory = Path(common_value)
+        if not common_directory.is_absolute():
+            common_directory = git_directory / common_directory
+        common_directory = common_directory.resolve(strict=True)
+        if git_directory.parent != common_directory / "worktrees":
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git worktree metadata is foreign"
+            )
+    else:
+        common_directory = git_directory
+    for path, label in (
+        (git_directory, "Git directory"),
+        (common_directory, "Git common directory"),
+    ):
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise AV1ValidationDerivationError(
+                f"AV1 derivation review refuses unsafe {label}"
+            )
+    return git_directory, common_directory
+
+
+_ReviewGitAuthoritySnapshot: TypeAlias = tuple[
+    tuple[Path, tuple[int, int]],
+    tuple[Path, tuple[int, int]],
+    tuple[Path, tuple[int, int]],
+]
+
+
+def _review_git_authority_snapshot(
+        repository_root: Path,
+) -> _ReviewGitAuthoritySnapshot:
+    root = repository_root.expanduser().resolve()
+    git_directory, common_directory = _review_git_authority(root)
+    entries: list[tuple[Path, tuple[int, int]]] = []
+    for path in (root, git_directory, common_directory):
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority is unavailable"
+            ) from exc
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority is unsafe"
+            )
+        entries.append((path, (info.st_dev, info.st_ino)))
+    return cast(_ReviewGitAuthoritySnapshot, tuple(entries))
+
+
+def _assert_review_git_authority(
+        repository_root: Path,
+        authority: _ReviewGitAuthoritySnapshot,
+) -> None:
+    root_entry, git_entry, common_entry = authority
+    current_root = repository_root.expanduser().resolve()
+    current_git_directory, current_common_directory = _review_git_authority(
+        repository_root
+    )
+    if (
+        current_root != root_entry[0]
+        or current_git_directory != git_entry[0]
+        or current_common_directory != common_entry[0]
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git authority changed"
+        )
+    for path, expected_identity in authority:
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority changed"
+            ) from exc
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or (info.st_dev, info.st_ino) != expected_identity
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority changed"
+            )
+
+
+def _review_git_environment_for_authority(
+        authority: _ReviewGitAuthoritySnapshot,
+) -> dict[str, str]:
+    root_entry, git_entry, common_entry = authority
     return {
         "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_DIR": str(git_entry[0]),
+        "GIT_COMMON_DIR": str(common_entry[0]),
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
-        "GIT_WORK_TREE": str(repository_root.resolve()),
+        "GIT_WORK_TREE": str(root_entry[0]),
         "LANG": "C",
         "LC_ALL": "C",
         "PAGER": "cat",
         "PATH": _AGENT_REVIEW_SAFE_PATH,
     }
+
+
+def _review_git_context(
+        *,
+        repository_root: Path,
+) -> tuple[dict[str, str], _ReviewGitAuthoritySnapshot]:
+    authority = _review_git_authority_snapshot(repository_root)
+    environment = _review_git_environment_for_authority(authority)
+    _assert_review_git_authority(repository_root, authority)
+    return environment, authority
+
+
+def _review_git_environment(*, repository_root: Path) -> dict[str, str]:
+    environment, _authority = _review_git_context(
+        repository_root=repository_root
+    )
+    return environment
 
 
 def _review_runner_environment(*, working_directory: Path) -> dict[str, str]:
@@ -2073,17 +2535,31 @@ def _run_review_git(
         *,
         repository_root: Path,
         process_controller: ManagedProcessController,
+        git_environment: dict[str, str] | None = None,
+        git_authority: _ReviewGitAuthoritySnapshot | None = None,
         binary: bool = False,
 ) -> str | bytes:
+    current_environment, current_authority = _review_git_context(
+        repository_root=repository_root
+    )
+    if git_environment is None:
+        git_environment = current_environment
+    elif git_environment != current_environment:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git environment drifted"
+        )
+    if git_authority is None:
+        git_authority = current_authority
+    else:
+        _assert_review_git_authority(repository_root, git_authority)
     try:
-        completed = run_command(
+        completed = _run_review_git_process(
             _review_git_command(*arguments),
             process_controller=process_controller,
-            cwd=repository_root,
-            env=_review_git_environment(repository_root=repository_root),
+            repository_root=repository_root,
+            git_environment=git_environment,
+            git_authority=git_authority,
             text=not binary,
-            timeout=15,
-            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AV1ValidationDerivationError(
@@ -2107,16 +2583,53 @@ def _run_review_git(
     return output
 
 
+def _run_review_git_process(
+        command: list[str],
+        *,
+        repository_root: Path,
+        process_controller: ManagedProcessController,
+        git_environment: dict[str, str],
+        git_authority: _ReviewGitAuthoritySnapshot,
+        text: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    _assert_review_git_authority(repository_root, git_authority)
+    try:
+        completed = run_command(
+            command,
+            process_controller=process_controller,
+            cwd=repository_root,
+            env=git_environment,
+            text=text,
+            timeout=15,
+            check=False,
+        )
+    except BaseException as exc:
+        try:
+            _assert_review_git_authority(repository_root, git_authority)
+        except AV1ValidationDerivationError as authority_error:
+            exc.add_note(
+                "AV1 derivation review Git authority also changed: "
+                f"{authority_error}"
+            )
+        raise
+    _assert_review_git_authority(repository_root, git_authority)
+    return completed
+
+
 def _review_git_commit_tree(
         commit: str,
         *,
         repository_root: Path,
         process_controller: ManagedProcessController,
+        git_environment: dict[str, str],
+        git_authority: _ReviewGitAuthoritySnapshot,
 ) -> str:
     payload = _run_review_git(
         ["cat-file", "commit", commit],
         repository_root=repository_root,
         process_controller=process_controller,
+        git_environment=git_environment,
+        git_authority=git_authority,
         binary=True,
     )
     if not isinstance(payload, bytes):
@@ -2152,10 +2665,15 @@ def _build_av1_validation_derivation_review_bundle(
         process_controller: ManagedProcessController,
         repository_root: Path = REPOSITORY_ROOT,
 ) -> dict[str, object]:
+    git_environment, git_authority = _review_git_context(
+        repository_root=repository_root
+    )
     resolved_tree = _review_git_commit_tree(
         claim.repository_commit,
         repository_root=repository_root,
         process_controller=process_controller,
+        git_environment=git_environment,
+        git_authority=git_authority,
     )
     if resolved_tree != claim.repository_tree:
         raise AV1ValidationDerivationError(
@@ -2178,6 +2696,8 @@ def _build_av1_validation_derivation_review_bundle(
             ],
             repository_root=repository_root,
             process_controller=process_controller,
+            git_environment=git_environment,
+            git_authority=git_authority,
             binary=True,
         )
         records = [record for record in listing.split(b"\0") if record]
@@ -2207,6 +2727,8 @@ def _build_av1_validation_derivation_review_bundle(
             ["cat-file", "-s", blob_id],
             repository_root=repository_root,
             process_controller=process_controller,
+            git_environment=git_environment,
+            git_authority=git_authority,
         )
         try:
             blob_size = int(raw_size.strip())
@@ -2225,6 +2747,8 @@ def _build_av1_validation_derivation_review_bundle(
             ["cat-file", "blob", blob_id],
             repository_root=repository_root,
             process_controller=process_controller,
+            git_environment=git_environment,
+            git_authority=git_authority,
             binary=True,
         )
         if len(blob) != blob_size:

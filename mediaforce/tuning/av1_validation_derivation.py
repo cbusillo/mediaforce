@@ -3297,21 +3297,28 @@ def write_av1_validation_derivation_plan(
 ) -> Path:
     root = _av1_validation_derivation_artifact_root_path(artifact_root, plan)
     path = root / "plan.json"
-    try:
-        _write_owner_only(
-            path,
-            canonical_json_bytes(plan.to_payload()),
-            before_publish=before_publish,
-            after_publish=after_publish,
-            published_before=plan.authorization.valid_until,
-        )
-    except _AV1ValidationDerivationArtifactAlreadyExists:
+
+    def recover_existing_plan() -> None:
         existing = load_av1_validation_derivation_plan(path)
         if existing != plan:
             raise AV1ValidationDerivationError(
                 "AV1 derivation plan conflicts with an immutable existing plan"
             )
         _fsync_owner_only_parent(path, "derivation plan")
+
+    if path.exists() or path.is_symlink():
+        recover_existing_plan()
+    else:
+        try:
+            _write_owner_only(
+                path,
+                canonical_json_bytes(plan.to_payload()),
+                before_publish=before_publish,
+                after_publish=None,
+                published_before=plan.authorization.valid_until,
+            )
+        except _AV1ValidationDerivationArtifactAlreadyExists:
+            recover_existing_plan()
     bound_root = _bind_av1_validation_derivation_artifact_root(
         root,
         plan,
@@ -3351,17 +3358,8 @@ def write_av1_validation_derivation_attempt(
         binding_digest=attempt.authorization_id,
     )
     path = directory / f"{attempt.assignment_id}.json"
-    existing_attempt = False
-    try:
-        _write_owner_only(
-            path,
-            canonical_json_bytes(attempt.to_payload()),
-            before_publish=before_publish,
-            after_publish=after_publish,
-            published_before=published_before,
-        )
-    except _AV1ValidationDerivationArtifactAlreadyExists:
-        existing_attempt = True
+
+    def recover_existing_attempt() -> None:
         payload, raw = _load_owner_only_json(
             path,
             "derivation attempt",
@@ -3376,6 +3374,22 @@ def write_av1_validation_derivation_attempt(
                 "AV1 derivation attempt conflicts with an immutable existing attempt"
             )
         _fsync_owner_only_parent(path, "derivation attempt")
+
+    existing_attempt = path.exists() or path.is_symlink()
+    if existing_attempt:
+        recover_existing_attempt()
+    else:
+        try:
+            _write_owner_only(
+                path,
+                canonical_json_bytes(attempt.to_payload()),
+                before_publish=before_publish,
+                after_publish=after_publish,
+                published_before=published_before,
+            )
+        except _AV1ValidationDerivationArtifactAlreadyExists:
+            existing_attempt = True
+            recover_existing_attempt()
     if attempt.status == "review_pending":
         if existing_attempt:
             publication_state = (
@@ -3390,6 +3404,8 @@ def write_av1_validation_derivation_attempt(
                 raise AV1ValidationDerivationError(
                     "AV1 derivation existing review-pending attempt was not durably accepted"
                 )
+            if after_publish is not None:
+                after_publish()
             return path
         _write_av1_validation_derivation_attempt_publication_marker(
             directory,
@@ -3400,6 +3416,8 @@ def write_av1_validation_derivation_attempt(
             after_publish=after_publish,
             published_before=published_before,
         )
+    elif existing_attempt and after_publish is not None:
+        after_publish()
     return path
 
 
@@ -3758,15 +3776,8 @@ def _write_av1_validation_derivation_attempt_publication_marker(
         disposition=disposition,
         reason_code=reason_code,
     )
-    try:
-        _write_owner_only(
-            path,
-            canonical_json_bytes(marker_payload),
-            before_publish=before_publish,
-            after_publish=after_publish,
-            published_before=published_before,
-        )
-    except _AV1ValidationDerivationArtifactAlreadyExists:
+
+    def recover_existing_marker() -> None:
         _load_av1_validation_derivation_attempt_publication_marker(
             path,
             attempt=attempt,
@@ -3774,6 +3785,22 @@ def _write_av1_validation_derivation_attempt_publication_marker(
             reason_code=reason_code,
         )
         _fsync_owner_only_parent(path, "derivation attempt publication")
+        if after_publish is not None:
+            after_publish()
+
+    if path.exists() or path.is_symlink():
+        recover_existing_marker()
+    else:
+        try:
+            _write_owner_only(
+                path,
+                canonical_json_bytes(marker_payload),
+                before_publish=before_publish,
+                after_publish=after_publish,
+                published_before=published_before,
+            )
+        except _AV1ValidationDerivationArtifactAlreadyExists:
+            recover_existing_marker()
     return path
 
 
@@ -6900,6 +6927,25 @@ def _bind_owner_only_directory(
         "binding_digest": binding_digest,
     }
     binding_path = path / ".binding"
+
+    def recover_existing_binding() -> None:
+        current, raw = _load_owner_only_json(
+            binding_path,
+            "derivation directory binding",
+            published_before=published_before,
+        )
+        if current != payload or raw != canonical_json_bytes(payload):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation directory is bound to another artifact set"
+            )
+        _fsync_owner_only_parent(binding_path, "derivation directory binding")
+        _discard_stale_owner_only_binding_temporaries(path)
+        if after_publish is not None:
+            after_publish()
+
+    if binding_path.exists() or binding_path.is_symlink():
+        recover_existing_binding()
+        return
     try:
         _write_owner_only(
             binding_path,
@@ -6909,20 +6955,8 @@ def _bind_owner_only_directory(
             published_before=published_before,
         )
         _discard_stale_owner_only_binding_temporaries(path)
-        return
-    except _AV1ValidationDerivationArtifactAlreadyExists as write_error:
-        try:
-            current, raw = _load_owner_only_json(
-                binding_path,
-                "derivation directory binding",
-                published_before=published_before,
-            )
-        except AV1ValidationDerivationError:
-            raise write_error
-    if current != payload or raw != canonical_json_bytes(payload):
-        raise AV1ValidationDerivationError("AV1 derivation directory is bound to another artifact set")
-    _fsync_owner_only_parent(binding_path, "derivation directory binding")
-    _discard_stale_owner_only_binding_temporaries(path)
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        recover_existing_binding()
 
 
 def _discard_stale_owner_only_binding_temporaries(path: Path) -> None:
