@@ -125,6 +125,97 @@ class DatabaseRuntimeTests(unittest.TestCase):
             finally:
                 source_connection.close()
 
+    def test_migrate_config_state_gates_wal_writes_before_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            real_connect = sqlite3.connect
+            writer_connection = real_connect(source_path)
+            writer_committed = False
+
+            class CommitBeforeWriteGate:
+                def __init__(self, connection: sqlite3.Connection) -> None:
+                    self.connection = connection
+
+                @property
+                def in_transaction(self) -> bool:
+                    return self.connection.in_transaction
+
+                def execute(self, statement: str) -> sqlite3.Cursor:
+                    nonlocal writer_committed
+                    if statement == "BEGIN IMMEDIATE" and not writer_committed:
+                        writer_connection.execute(
+                            "INSERT INTO migration_rows VALUES ('gate-boundary-row')"
+                        )
+                        writer_connection.commit()
+                        writer_committed = True
+                    return self.connection.execute(statement)
+
+                def backup(self, target: sqlite3.Connection) -> None:
+                    self.connection.backup(target)
+
+                def rollback(self) -> None:
+                    self.connection.rollback()
+
+                def close(self) -> None:
+                    self.connection.close()
+
+            try:
+                self.assertEqual(
+                    writer_connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                    ("wal",),
+                )
+                writer_connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                writer_connection.execute(
+                    "INSERT INTO migration_rows VALUES ('initial-row')"
+                )
+                writer_connection.commit()
+                source_uri = f"{source_path.as_uri()}?mode=rw"
+
+                def connect_with_gate_commit(
+                        database: str | Path,
+                        *args: object,
+                        **kwargs: object,
+                ) -> sqlite3.Connection | CommitBeforeWriteGate:
+                    connection = real_connect(database, *args, **kwargs)
+                    if str(database) == source_uri:
+                        return CommitBeforeWriteGate(connection)
+                    return connection
+
+                with (
+                    patch.object(
+                        config_module.sqlite3,
+                        "connect",
+                        side_effect=connect_with_gate_commit,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-wal-gate-order"},
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(writer_committed)
+                with real_connect(destination_path) as destination_connection:
+                    self.assertEqual(
+                        destination_connection.execute(
+                            "SELECT value FROM migration_rows ORDER BY rowid"
+                        ).fetchall(),
+                        [("initial-row",), ("gate-boundary-row",)],
+                    )
+                self.assertFalse(source_path.exists())
+            finally:
+                writer_connection.close()
+
     def test_migrate_config_state_rejects_active_legacy_runtime_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

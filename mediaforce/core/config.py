@@ -539,6 +539,14 @@ def _copied_legacy_sqlite_database(
     staging_connection: sqlite3.Connection | None = None
     source_uri = f"{locked_source.path.as_uri()}?mode=rw"
     try:
+        write_gate_connection = sqlite3.connect(
+            source_uri,
+            uri=True,
+            timeout=0,
+            isolation_level=None,
+        )
+        write_gate_connection.execute("BEGIN IMMEDIATE")
+        locked_source.assert_stable()
         source_connection = sqlite3.connect(
             source_uri,
             uri=True,
@@ -547,14 +555,6 @@ def _copied_legacy_sqlite_database(
         )
         source_connection.execute("BEGIN")
         source_connection.execute("PRAGMA schema_version").fetchone()
-        locked_source.assert_stable()
-        write_gate_connection = sqlite3.connect(
-            source_uri,
-            uri=True,
-            timeout=0,
-            isolation_level=None,
-        )
-        write_gate_connection.execute("BEGIN IMMEDIATE")
         locked_source.assert_stable()
         staging_connection = sqlite3.connect(
             staging_path,
