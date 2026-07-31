@@ -14,6 +14,7 @@ import secrets
 import stat
 from statistics import median
 from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
+from urllib.parse import urlsplit
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
@@ -135,6 +136,22 @@ AV1ValidationDerivationReviewLane = Literal[
     "adversarial",
 ]
 AV1ValidationDerivationReviewDecision = Literal["approved", "rejected"]
+AV1ValidationDerivationAttemptPublicationDisposition = Literal[
+    "accepted",
+    "rejected",
+    "unsealed",
+]
+AV1ValidationDerivationAttemptRecoveryAction = Literal[
+    "none",
+    "reject_and_terminalize",
+    "terminalize",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AV1ValidationDerivationAttemptPublicationState:
+    disposition: AV1ValidationDerivationAttemptPublicationDisposition
+    reason_code: str | None = None
 
 AV1_VALIDATION_DERIVATION_REVIEW_LANES: tuple[AV1ValidationDerivationReviewLane, ...] = (
     "architecture",
@@ -1768,9 +1785,14 @@ def build_av1_validation_derivation_terminal_record(
         elif (
                 observation is None
                 and observation_exclusion_reason is None
-                and review_failure_reason_code == "safety_stop"
+                and review_failure_reason_code
+                in {"authorization_expired", "safety_stop"}
         ):
-            status = "stopped"
+            status = (
+                "failed"
+                if review_failure_reason_code == "authorization_expired"
+                else "stopped"
+            )
             reason_code = review_failure_reason_code
         else:
             raise AV1ValidationDerivationError(
@@ -3195,6 +3217,8 @@ def _av1_validation_derivation_artifact_root_path(
 def _bind_av1_validation_derivation_artifact_root(
         artifact_root: Path,
         plan: AV1ValidationDerivationPlan,
+        *,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     root = _av1_validation_derivation_artifact_root_path(artifact_root, plan)
     _bind_owner_only_directory(
@@ -3205,6 +3229,7 @@ def _bind_av1_validation_derivation_artifact_root(
             root,
             plan,
         ),
+        before_publish=before_publish,
     )
     return stable_absolute_path(root)
 
@@ -3264,6 +3289,7 @@ def write_av1_validation_derivation_plan(
         *,
         before_publish: Callable[[], None] | None = None,
         after_publish: Callable[[], None] | None = None,
+        before_bind: Callable[[], None] | None = None,
 ) -> Path:
     root = _av1_validation_derivation_artifact_root_path(artifact_root, plan)
     path = root / "plan.json"
@@ -3282,7 +3308,11 @@ def write_av1_validation_derivation_plan(
                 "AV1 derivation plan conflicts with an immutable existing plan"
             )
         _fsync_owner_only_parent(path, "derivation plan")
-    bound_root = _bind_av1_validation_derivation_artifact_root(root, plan)
+    bound_root = _bind_av1_validation_derivation_artifact_root(
+        root,
+        plan,
+        before_publish=before_bind,
+    )
     return bound_root / "plan.json"
 
 
@@ -3316,6 +3346,7 @@ def write_av1_validation_derivation_attempt(
         binding_digest=attempt.authorization_id,
     )
     path = directory / f"{attempt.assignment_id}.json"
+    existing_attempt = False
     try:
         _write_owner_only(
             path,
@@ -3325,6 +3356,7 @@ def write_av1_validation_derivation_attempt(
             published_before=published_before,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
+        existing_attempt = True
         payload, raw = _load_owner_only_json(
             path,
             "derivation attempt",
@@ -3339,7 +3371,447 @@ def write_av1_validation_derivation_attempt(
                 "AV1 derivation attempt conflicts with an immutable existing attempt"
             )
         _fsync_owner_only_parent(path, "derivation attempt")
+    if attempt.status == "review_pending":
+        if existing_attempt:
+            publication_state = (
+                load_av1_validation_derivation_attempt_publication_state(
+                    directory,
+                    attempt,
+                    published_before=published_before,
+                    require_durable=True,
+                )
+            )
+            if publication_state.disposition != "accepted":
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation existing review-pending attempt was not durably accepted"
+                )
+            return path
+        _write_av1_validation_derivation_attempt_publication_marker(
+            directory,
+            attempt,
+            disposition="accepted",
+            reason_code=None,
+            before_publish=before_publish,
+            published_before=published_before,
+        )
     return path
+
+
+def load_av1_validation_derivation_attempt_publication_state(
+        directory: Path,
+        attempt: AV1ValidationDerivationAttempt,
+        *,
+        published_before: str | None = None,
+        require_durable: bool = False,
+) -> AV1ValidationDerivationAttemptPublicationState:
+    if attempt.status != "review_pending":
+        return AV1ValidationDerivationAttemptPublicationState(
+            disposition="accepted"
+        )
+    attempt_path = directory / f"{attempt.assignment_id}.json"
+    payload, raw, attempt_info = _load_owner_only_json_with_info(
+        attempt_path,
+        "derivation attempt",
+    )
+    persisted_attempt = av1_validation_derivation_attempt_from_payload(
+        payload,
+        raw=raw,
+    )
+    if persisted_attempt != attempt:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt publication state is bound to another attempt"
+        )
+    publication_reason = "safety_stop"
+    if published_before is not None:
+        try:
+            _assert_owner_only_publication_before(
+                attempt_path,
+                "derivation attempt",
+                info=attempt_info,
+                published_before=published_before,
+            )
+        except AV1ValidationDerivationPublicationDeadlineError:
+            publication_reason = "authorization_expired"
+    publication_directory = directory / ".publication"
+    if not publication_directory.exists() and not publication_directory.is_symlink():
+        return AV1ValidationDerivationAttemptPublicationState(
+            disposition="unsealed",
+            reason_code=publication_reason,
+        )
+    binding = _load_attempt_publication_directory_binding(
+        publication_directory,
+    )
+    if binding is None:
+        return AV1ValidationDerivationAttemptPublicationState(
+            disposition="unsealed",
+            reason_code=publication_reason,
+        )
+    if (
+        binding["binding_id"] != attempt.plan_id
+        or binding["binding_digest"] != attempt.authorization_id
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt-publication directory binding drifted"
+        )
+    accepted_path = publication_directory / f"{attempt.assignment_id}.accepted"
+    rejected_path = publication_directory / f"{attempt.assignment_id}.rejected"
+    accepted_info = _load_av1_validation_derivation_attempt_publication_marker(
+        accepted_path,
+        attempt=attempt,
+        disposition="accepted",
+        reason_code=None,
+    )
+    rejection_reason = None
+    rejected_info = None
+    if rejected_path.exists() or rejected_path.is_symlink():
+        rejected_payload, rejected_raw, rejected_info = (
+            _load_owner_only_json_with_info(
+                rejected_path,
+                "derivation attempt rejected publication",
+            )
+        )
+        rejection_reason = str(rejected_payload.get("reason_code") or "")
+        if rejection_reason not in {"authorization_expired", "safety_stop"}:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation attempt rejection reason is invalid"
+            )
+        expected_rejection = (
+            _av1_validation_derivation_attempt_publication_payload(
+                attempt,
+                disposition="rejected",
+                reason_code=rejection_reason,
+            )
+        )
+        if (
+            rejected_payload != expected_rejection
+            or rejected_raw != canonical_json_bytes(expected_rejection)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation attempt publication marker is invalid"
+            )
+    attempt_publication_time = _owner_only_publication_time_ns(attempt_info)
+    if (
+        accepted_info is not None
+        and _owner_only_publication_time_ns(accepted_info)
+        < attempt_publication_time
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt acceptance predates its attempt"
+        )
+    if (
+        rejected_info is not None
+        and _owner_only_publication_time_ns(rejected_info)
+        < attempt_publication_time
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt rejection predates its attempt"
+        )
+    accepted_is_timely = accepted_info is not None
+    if accepted_info is not None and published_before is not None:
+        try:
+            _assert_owner_only_publication_before(
+                accepted_path,
+                "derivation attempt acceptance",
+                info=accepted_info,
+                published_before=published_before,
+            )
+        except AV1ValidationDerivationPublicationDeadlineError:
+            accepted_is_timely = False
+            publication_reason = "authorization_expired"
+    if accepted_is_timely and publication_reason == "authorization_expired":
+        accepted_is_timely = False
+    if accepted_is_timely and rejected_info is not None:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt publication is both accepted and rejected"
+        )
+    if (
+        rejected_info is not None
+        and publication_reason == "authorization_expired"
+        and rejection_reason != "authorization_expired"
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt rejection understates authorization expiry"
+        )
+    if require_durable:
+        _fsync_owner_only_parent(attempt_path, "derivation attempt")
+        if accepted_info is not None:
+            _fsync_owner_only_parent(
+                accepted_path,
+                "derivation attempt acceptance",
+            )
+        if rejected_info is not None:
+            _fsync_owner_only_parent(
+                rejected_path,
+                "derivation attempt rejection",
+            )
+    if rejected_info is not None:
+        return AV1ValidationDerivationAttemptPublicationState(
+            disposition="rejected",
+            reason_code=rejection_reason,
+        )
+    if accepted_is_timely:
+        return AV1ValidationDerivationAttemptPublicationState(
+            disposition="accepted"
+        )
+    return AV1ValidationDerivationAttemptPublicationState(
+        disposition="unsealed",
+        reason_code=publication_reason,
+    )
+
+
+def av1_validation_derivation_attempt_recovery_action(
+        attempt: AV1ValidationDerivationAttempt,
+        publication_state: AV1ValidationDerivationAttemptPublicationState,
+        *,
+        terminal_intents: Sequence[AV1ValidationDerivationTerminalRecord],
+        terminal_records: Sequence[AV1ValidationDerivationTerminalRecord],
+) -> AV1ValidationDerivationAttemptRecoveryAction:
+    if (
+        attempt.status != "review_pending"
+        or publication_state.disposition == "accepted"
+    ):
+        return "none"
+    reason_code = publication_state.reason_code
+    if reason_code not in {"authorization_expired", "safety_stop"}:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt recovery reason is invalid"
+        )
+    expected_status = (
+        "failed" if reason_code == "authorization_expired" else "stopped"
+    )
+
+    def matching_terminal(
+            terminal: AV1ValidationDerivationTerminalRecord,
+    ) -> bool:
+        return (
+            terminal.plan_id == attempt.plan_id
+            and terminal.authorization_id == attempt.authorization_id
+            and terminal.attempt_id == attempt.attempt_id
+            and terminal.attempt_payload_sha256 == attempt.payload_sha256
+            and terminal.assignment_id == attempt.assignment_id
+            and terminal.cell_plan_id == attempt.cell_plan_id
+            and terminal.ordinal == attempt.ordinal
+            and terminal.started_at == attempt.started_at
+            and terminal.completed_at == attempt.completed_at
+            and terminal.status == expected_status
+            and terminal.reason_code == reason_code
+            and terminal.observation is None
+        )
+
+    assignment_intents = tuple(
+        terminal
+        for terminal in terminal_intents
+        if terminal.assignment_id == attempt.assignment_id
+    )
+    assignment_records = tuple(
+        terminal
+        for terminal in terminal_records
+        if terminal.assignment_id == attempt.assignment_id
+    )
+    if (
+        len(assignment_intents) > 1
+        or len(assignment_records) > 1
+        or any(not matching_terminal(terminal) for terminal in assignment_intents)
+        or any(not matching_terminal(terminal) for terminal in assignment_records)
+        or (
+            assignment_intents
+            and assignment_records
+            and assignment_intents[0] != assignment_records[0]
+        )
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation rejected-attempt recovery conflicts with terminal state"
+        )
+    if publication_state.disposition == "unsealed":
+        return "reject_and_terminalize"
+    if publication_state.disposition != "rejected":
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt recovery disposition is invalid"
+        )
+    if assignment_intents and assignment_records:
+        return "none"
+    return "terminalize"
+
+
+def reject_av1_validation_derivation_attempt_publication(
+        directory: Path,
+        attempt: AV1ValidationDerivationAttempt,
+        *,
+        reason_code: str,
+        published_before: str | None = None,
+) -> Path:
+    if reason_code not in {"authorization_expired", "safety_stop"}:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt rejection reason is invalid"
+        )
+    state = load_av1_validation_derivation_attempt_publication_state(
+        directory,
+        attempt,
+        published_before=published_before,
+        require_durable=True,
+    )
+    if state.disposition == "accepted":
+        raise AV1ValidationDerivationError(
+            "AV1 derivation accepted attempt cannot be rejected"
+        )
+    if state.disposition == "rejected" and state.reason_code != reason_code:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt rejection reason conflicts with existing state"
+        )
+    return _write_av1_validation_derivation_attempt_publication_marker(
+        directory,
+        attempt,
+        disposition="rejected",
+        reason_code=reason_code,
+        acceptance_published_before=published_before,
+    )
+
+
+def assert_av1_validation_derivation_attempt_accepted(
+        directory: Path,
+        attempt: AV1ValidationDerivationAttempt,
+        *,
+        published_before: str | None = None,
+) -> None:
+    state = load_av1_validation_derivation_attempt_publication_state(
+        directory,
+        attempt,
+        published_before=published_before,
+        require_durable=True,
+    )
+    if state.disposition != "accepted":
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt was not durably accepted for review"
+        )
+
+
+def assert_av1_validation_derivation_observed_attempts_accepted(
+        artifact_root: Path,
+        plan: AV1ValidationDerivationPlan,
+        attempts: Sequence[AV1ValidationDerivationAttempt],
+        records: Sequence[AV1ValidationDerivationTerminalRecord],
+) -> None:
+    attempts_directory = artifact_root / "attempts"
+    attempts_by_assignment = {
+        attempt.assignment_id: attempt
+        for attempt in attempts
+    }
+    for record in records:
+        if record.status != "observed":
+            continue
+        attempt = attempts_by_assignment.get(record.assignment_id)
+        if attempt is None:
+            raise AV1ValidationDerivationError(
+                "AV1 observed terminal record has no matching attempt"
+            )
+        assert_av1_validation_derivation_attempt_accepted(
+            attempts_directory,
+            attempt,
+            published_before=plan.authorization.valid_until,
+        )
+
+
+def _write_av1_validation_derivation_attempt_publication_marker(
+        directory: Path,
+        attempt: AV1ValidationDerivationAttempt,
+        *,
+        disposition: Literal["accepted", "rejected"],
+        reason_code: str | None,
+        before_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
+        acceptance_published_before: str | None = None,
+) -> Path:
+    publication_directory = directory / ".publication"
+    _bind_owner_only_directory(
+        publication_directory,
+        kind="attempt_publications",
+        binding_id=attempt.plan_id,
+        binding_digest=attempt.authorization_id,
+    )
+    opposite = "rejected" if disposition == "accepted" else "accepted"
+    opposite_path = publication_directory / f"{attempt.assignment_id}.{opposite}"
+    if opposite_path.exists() or opposite_path.is_symlink():
+        opposite_state = load_av1_validation_derivation_attempt_publication_state(
+            directory,
+            attempt,
+            published_before=(
+                acceptance_published_before or published_before
+            ),
+        )
+        if (
+            disposition == "accepted"
+            or opposite_state.disposition == "accepted"
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation attempt publication disposition conflicts"
+            )
+    path = publication_directory / f"{attempt.assignment_id}.{disposition}"
+    marker_payload = _av1_validation_derivation_attempt_publication_payload(
+        attempt,
+        disposition=disposition,
+        reason_code=reason_code,
+    )
+    try:
+        _write_owner_only(
+            path,
+            canonical_json_bytes(marker_payload),
+            before_publish=before_publish,
+            published_before=published_before,
+        )
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        _load_av1_validation_derivation_attempt_publication_marker(
+            path,
+            attempt=attempt,
+            disposition=disposition,
+            reason_code=reason_code,
+        )
+        _fsync_owner_only_parent(path, "derivation attempt publication")
+    return path
+
+
+def _load_av1_validation_derivation_attempt_publication_marker(
+        path: Path,
+        *,
+        attempt: AV1ValidationDerivationAttempt,
+        disposition: Literal["accepted", "rejected"],
+        reason_code: str | None,
+) -> os.stat_result | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    payload, raw, info = _load_owner_only_json_with_info(
+        path,
+        f"derivation attempt {disposition} publication",
+    )
+    expected = _av1_validation_derivation_attempt_publication_payload(
+        attempt,
+        disposition=disposition,
+        reason_code=reason_code,
+    )
+    if payload != expected or raw != canonical_json_bytes(expected):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt publication marker is invalid"
+        )
+    return info
+
+
+def _av1_validation_derivation_attempt_publication_payload(
+        attempt: AV1ValidationDerivationAttempt,
+        *,
+        disposition: Literal["accepted", "rejected"],
+        reason_code: str | None,
+) -> dict[str, object]:
+    return {
+        "schema": "mediaforce.av1_cold_start_derivation_attempt_publication",
+        "schema_version": AV1_VALIDATION_DERIVATION_SCHEMA_VERSION,
+        "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+        "plan_id": attempt.plan_id,
+        "authorization_id": attempt.authorization_id,
+        "assignment_id": attempt.assignment_id,
+        "attempt_id": attempt.attempt_id,
+        "attempt_payload_sha256": attempt.payload_sha256,
+        "disposition": disposition,
+        "reason_code": reason_code,
+    }
 
 
 def load_av1_validation_derivation_attempts(
@@ -3347,11 +3819,12 @@ def load_av1_validation_derivation_attempts(
         *,
         review_pending_published_before: str | None = None,
         require_durable: bool = False,
+        allow_unaccepted_review_pending: bool = False,
 ) -> tuple[AV1ValidationDerivationAttempt, ...]:
     binding = _load_owner_only_directory_binding(directory, expected_kind="attempts")
     attempts_list: list[AV1ValidationDerivationAttempt] = []
     for path in sorted(directory.glob("*.json")):
-        payload, raw, info = _load_owner_only_json_with_info(
+        payload, raw, _info = _load_owner_only_json_with_info(
             path,
             "derivation attempt",
         )
@@ -3359,16 +3832,27 @@ def load_av1_validation_derivation_attempts(
             payload,
             raw=raw,
         )
-        if (
-            review_pending_published_before is not None
-            and attempt.status == "review_pending"
-        ):
-            _assert_owner_only_publication_before(
-                path,
-                "derivation attempt",
-                info=info,
-                published_before=review_pending_published_before,
+        if attempt.status == "review_pending":
+            publication_state = (
+                load_av1_validation_derivation_attempt_publication_state(
+                    directory,
+                    attempt,
+                    published_before=review_pending_published_before,
+                    require_durable=require_durable,
+                )
             )
+            if (
+                publication_state.disposition == "unsealed"
+                and not allow_unaccepted_review_pending
+            ):
+                if publication_state.reason_code == "authorization_expired":
+                    raise AV1ValidationDerivationPublicationDeadlineError(
+                        path,
+                        "derivation attempt",
+                    )
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review-pending attempt has no durable publication disposition"
+                )
         if require_durable:
             _fsync_owner_only_parent(path, "derivation attempt")
         attempts_list.append(attempt)
@@ -3382,7 +3866,50 @@ def load_av1_validation_derivation_attempts(
         for attempt in attempts
     ):
         raise AV1ValidationDerivationError("AV1 derivation attempt directory binding drifted")
+    _assert_av1_validation_derivation_attempt_publication_directory_complete(
+        directory,
+        attempts,
+    )
     return attempts
+
+
+def _assert_av1_validation_derivation_attempt_publication_directory_complete(
+        attempts_directory: Path,
+        attempts: Sequence[AV1ValidationDerivationAttempt],
+) -> None:
+    publication_directory = attempts_directory / ".publication"
+    if not publication_directory.exists() and not publication_directory.is_symlink():
+        return
+    if _load_attempt_publication_directory_binding(publication_directory) is None:
+        return
+    expected_assignment_ids = {
+        attempt.assignment_id
+        for attempt in attempts
+        if attempt.status == "review_pending"
+    }
+    if not expected_assignment_ids:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation attempt-publication directory contains an orphan artifact"
+        )
+    for path in publication_directory.iterdir():
+        if path.name == ".binding":
+            continue
+        if re.fullmatch(r"\..+\.[0-9a-f]{24}\.tmp", path.name) is not None:
+            info = path.stat(follow_symlinks=False)
+            if (
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and stat.S_IMODE(info.st_mode) == 0o400
+                and info.st_nlink == 1
+            ):
+                continue
+        if (
+            path.suffix not in {".accepted", ".rejected"}
+            or path.stem not in expected_assignment_ids
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation attempt-publication directory contains an orphan artifact"
+            )
 
 
 def write_av1_validation_derivation_terminal_record(
@@ -3984,6 +4511,7 @@ def load_av1_validation_derivation_terminal_intents(
         directory: Path,
         *,
         observed_published_before: str | None = None,
+        allow_late_observed: bool = False,
 ) -> tuple[AV1ValidationDerivationTerminalRecord, ...]:
     binding = _load_owner_only_directory_binding(
         directory,
@@ -3995,6 +4523,7 @@ def load_av1_validation_derivation_terminal_intents(
         if (
             observed_published_before is not None
             and payload.get("status") == "observed"
+            and not allow_late_observed
         ):
             payload, raw = _load_owner_only_json(
                 path,
@@ -4019,6 +4548,106 @@ def load_av1_validation_derivation_terminal_intents(
             "AV1 derivation terminal-intent directory binding drifted"
         )
     return intents
+
+
+def av1_validation_derivation_terminal_intent_published_after(
+        directory: Path,
+        intent: AV1ValidationDerivationTerminalRecord,
+        *,
+        published_before: str,
+) -> bool:
+    if intent.status != "observed":
+        return False
+    path = directory / f"{intent.assignment_id}.json"
+    payload, raw, info = _load_owner_only_json_with_info(
+        path,
+        "derivation terminal intent",
+    )
+    persisted = av1_validation_derivation_terminal_record_from_payload(
+        payload,
+        raw=raw,
+    )
+    if persisted != intent:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation terminal intent changed during chronology validation"
+        )
+    try:
+        _assert_owner_only_publication_before(
+            path,
+            "derivation terminal intent",
+            info=info,
+            published_before=published_before,
+        )
+    except AV1ValidationDerivationPublicationDeadlineError:
+        return True
+    return False
+
+
+def rollback_late_av1_validation_derivation_terminal_intent(
+        directory: Path,
+        intent: AV1ValidationDerivationTerminalRecord,
+        *,
+        published_before: str,
+) -> None:
+    assert_mediaforce_runtime_lock_held()
+    if not av1_validation_derivation_terminal_intent_published_after(
+            directory,
+            intent,
+            published_before=published_before,
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation terminal intent is not eligible for deadline rollback"
+        )
+    path = directory / f"{intent.assignment_id}.json"
+    _payload, _raw, info = _load_owner_only_json_with_info(
+        path,
+        "derivation terminal intent",
+    )
+    descriptor = -1
+    try:
+        canonical_directory, descriptor = open_stable_directory(
+            directory,
+            require_owner_only=True,
+        )
+        binding = _load_owner_only_directory_binding(
+            canonical_directory,
+            expected_kind="terminal_intents",
+        )
+        if (
+            binding["binding_id"] != intent.plan_id
+            or binding["binding_digest"] != intent.authorization_id
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation terminal-intent directory binding drifted"
+            )
+        current = os.stat(
+            path.name,
+            dir_fd=descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_uid != os.getuid()
+            or stat.S_IMODE(current.st_mode) != 0o400
+            or current.st_nlink != 1
+            or (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation late terminal intent changed before rollback"
+            )
+        os.unlink(path.name, dir_fd=descriptor)
+        os.fsync(descriptor)
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation late terminal intent directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation late terminal intent could not be rolled back"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def write_av1_validation_derivation_candidate_proposal(
@@ -5688,11 +6317,62 @@ def _validate_calibration_execution(calibration: Mapping[str, Any]) -> None:
         or calibration.get("current_review_artifact_fingerprint") != review_fingerprint
         or calibration.get("review_media_ready") is not True
         or calibration.get("boundary_review_media_ready") is not True
+        or not _persisted_review_clip_roles_valid(calibration)
         or not str(calibration.get("job_id") or "").strip()
     ):
         raise AV1ValidationDerivationError(
             "AV1 derivation calibration does not prove unchanged measured full search"
         )
+
+
+def _persisted_review_clip_roles_valid(
+        calibration: Mapping[str, Any],
+) -> bool:
+    role_timestamps: list[set[int]] = []
+    for role in ("preview_clips", "source_clips", "compare_clips"):
+        clips = object_list(calibration.get(role))
+        if not clips:
+            return False
+        timestamps: set[int] = set()
+        for value in clips:
+            clip = object_dict(value)
+            path = clip.get("path")
+            timestamp = clip.get("timestamp_seconds")
+            duration = clip.get("duration_seconds")
+            if (
+                not isinstance(path, str)
+                or not path.strip()
+                or isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+            ):
+                return False
+            timestamp_value = float(timestamp)
+            duration_value = float(duration)
+            if (
+                not math.isfinite(timestamp_value)
+                or timestamp_value < 0
+                or not math.isfinite(duration_value)
+                or duration_value <= 0
+            ):
+                return False
+            try:
+                parsed_path = urlsplit(path)
+            except ValueError:
+                return False
+            if (
+                parsed_path.scheme != "file"
+                or parsed_path.netloc not in {"", "localhost"}
+                or not parsed_path.path.startswith("/")
+            ):
+                return False
+            timestamp_milliseconds = round(timestamp_value * 1_000)
+            if timestamp_milliseconds in timestamps:
+                return False
+            timestamps.add(timestamp_milliseconds)
+        role_timestamps.append(timestamps)
+    return role_timestamps[0] == role_timestamps[1] == role_timestamps[2]
 
 
 def _validate_plan_partition(
@@ -6017,14 +6697,14 @@ def _write_owner_only(
             raise AV1ValidationDerivationError(
                 "AV1 private derivation artifact changed during publication"
             )
-        if published_before is not None:
-            _assert_owner_only_publication_before(
-                path,
-                "private derivation artifact",
-                info=final_info,
-                published_before=published_before,
-            )
         try:
+            if published_before is not None:
+                _assert_owner_only_publication_before(
+                    path,
+                    "private derivation artifact",
+                    info=final_info,
+                    published_before=published_before,
+                )
             if after_publish is not None:
                 after_publish()
             _assert_owner_only_directory_descriptor_binding(
@@ -6197,6 +6877,7 @@ def _bind_owner_only_directory(
         kind: str,
         binding_id: str,
         binding_digest: str,
+        before_publish: Callable[[], None] | None = None,
 ) -> None:
     assert_mediaforce_runtime_lock_held()
     _ensure_owner_only_directory(path)
@@ -6210,7 +6891,12 @@ def _bind_owner_only_directory(
     }
     binding_path = path / ".binding"
     try:
-        _write_owner_only(binding_path, canonical_json_bytes(payload))
+        _write_owner_only(
+            binding_path,
+            canonical_json_bytes(payload),
+            before_publish=before_publish,
+        )
+        _discard_stale_owner_only_binding_temporaries(path)
         return
     except _AV1ValidationDerivationArtifactAlreadyExists as write_error:
         try:
@@ -6223,6 +6909,49 @@ def _bind_owner_only_directory(
     if current != payload or raw != canonical_json_bytes(payload):
         raise AV1ValidationDerivationError("AV1 derivation directory is bound to another artifact set")
     _fsync_owner_only_parent(binding_path, "derivation directory binding")
+    _discard_stale_owner_only_binding_temporaries(path)
+
+
+def _discard_stale_owner_only_binding_temporaries(path: Path) -> None:
+    descriptor = -1
+    removed = False
+    try:
+        _, descriptor = open_stable_directory(
+            path,
+            require_owner_only=True,
+        )
+        for name in os.listdir(descriptor):
+            if re.fullmatch(r"\.\.binding\.[0-9a-f]{24}\.tmp", name) is None:
+                continue
+            info = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o400
+                or info.st_nlink != 1
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation binding temporary is unsafe"
+                )
+            os.unlink(name, dir_fd=descriptor)
+            removed = True
+        if removed:
+            os.fsync(descriptor)
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation binding temporary directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation binding temporary cleanup failed"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _load_owner_only_directory_binding(
@@ -6252,6 +6981,73 @@ def _load_owner_only_directory_binding(
     ):
         raise AV1ValidationDerivationError("AV1 derivation directory binding is invalid")
     return payload
+
+
+def _load_attempt_publication_directory_binding(
+        path: Path,
+) -> dict[str, Any] | None:
+    binding_path = path / ".binding"
+    if binding_path.exists() or binding_path.is_symlink():
+        return _load_owner_only_directory_binding(
+            path,
+            expected_kind="attempt_publications",
+        )
+    descriptor = -1
+    binding_appeared = False
+    try:
+        _, descriptor = open_stable_directory(
+            path,
+            require_owner_only=True,
+        )
+        for name in os.listdir(descriptor):
+            if name == ".binding":
+                binding_appeared = True
+                continue
+            if re.fullmatch(r"\.\.binding\.[0-9a-f]{24}\.tmp", name) is None:
+                raise AV1ValidationDerivationError(
+                    "AV1 unbound attempt-publication directory contains an artifact"
+                )
+            info = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o400
+                or info.st_nlink != 1
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 unbound attempt-publication directory is unsafe"
+                )
+        try:
+            binding_info = os.stat(
+                ".binding",
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            binding_info = None
+        if binding_info is not None:
+            binding_appeared = True
+    except FileIntegrityError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 unbound attempt-publication directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 unbound attempt-publication directory could not be inspected"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if binding_appeared:
+        return _load_owner_only_directory_binding(
+            path,
+            expected_kind="attempt_publications",
+        )
+    return None
 
 
 def _assert_owner_only_directory(path: Path) -> None:

@@ -438,6 +438,56 @@ class OperatorWorkTests(unittest.TestCase):
         self.assertEqual(row["error"], "interrupted")
         self.assertIsNotNone(row["completed_at"])
 
+    def test_active_scan_terminalizes_dead_row_when_sidecar_write_fails(self) -> None:
+        now = "2026-07-19T12:00:00+00:00"
+        running_job = {
+            "job_id": "dead-sidecar-scan",
+            "scan_id": "dead-sidecar-scan",
+            "status": "running",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": 999999,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: running_job,
+            save_scan_job_state=Mock(side_effect=OSError("sidecar write failed")),
+        )
+        deps.scan_process_is_alive = lambda _pid: False
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="dead-sidecar-scan",
+                    started_at=now,
+                    completed_at=None,
+                    status="running",
+                    error=None,
+                    owner_pid=999999,
+                    last_progress_at=now,
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=0,
+                    reprobed_count=0,
+                    unchanged_count=0,
+                )
+            )
+            with self.assertRaisesRegex(OSError, "sidecar write failed"):
+                active_scan_from_db(connection, self.config, None, deps)
+            row = connection.execute(
+                select(scan_runs).where(
+                    scan_runs.c.scan_id == "dead-sidecar-scan"
+                )
+            ).mappings().one()
+
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["error"], "interrupted")
+        self.assertIsNotNone(row["completed_at"])
+
     def test_failed_scan_run_does_not_refresh_catalog(self) -> None:
         deps = self._job_runtime_deps(load_scan_job_state=lambda _config, _prefix: None)
         now = "2026-07-19T12:00:00+00:00"
@@ -562,6 +612,55 @@ class OperatorWorkTests(unittest.TestCase):
         saved_job = save_scan_job_state.call_args.args[2]
         self.assertEqual(saved_job["status"], "failed")
         self.assertEqual(saved_job["error"], "interrupted")
+
+    def test_startup_repair_terminalizes_database_when_sidecar_write_fails(self) -> None:
+        now = "2026-07-19T12:00:00+00:00"
+        running_job = {
+            "job_id": "stale-sidecar-row",
+            "scan_id": "stale-sidecar-row",
+            "status": "running",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": 999999,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: running_job,
+            save_scan_job_state=Mock(side_effect=OSError("sidecar write failed")),
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="stale-sidecar-row",
+                    started_at=now,
+                    completed_at=None,
+                    status="running",
+                    error=None,
+                    owner_pid=999999,
+                    last_progress_at=now,
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=0,
+                    reprobed_count=0,
+                    unchanged_count=0,
+                )
+            )
+            with self.assertRaisesRegex(OSError, "sidecar write failed"):
+                repair_stale_scan_runs(connection, self.config, deps)
+            row = connection.execute(
+                select(scan_runs).where(
+                    scan_runs.c.scan_id == "stale-sidecar-row"
+                )
+            ).mappings().one()
+
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["error"], "interrupted")
+        self.assertIsNotNone(row["completed_at"])
 
     def test_startup_repair_does_not_trust_live_pid_for_preexisting_scan_run(self) -> None:
         now = "2026-07-19T12:00:00+00:00"

@@ -1,3 +1,329 @@
+def _assert_preregistration_import_tree_clean(
+        repository_root: object = None,
+) -> None:
+    bootstrap_sys = __import__("sys")
+    bootstrap_os = __import__("os")
+    if repository_root is None:
+        bootstrap_sys.dont_write_bytecode = True
+        if not bootstrap_sys.flags.isolated or not bootstrap_sys.flags.no_site:
+            environment = {
+                key: value
+                for key, value in bootstrap_os.environ.items()
+                if not key.startswith("PYTHON")
+            }
+            bootstrap_os.execve(
+                bootstrap_sys.executable,
+                (
+                    bootstrap_sys.executable,
+                    "-I",
+                    "-S",
+                    bootstrap_os.path.realpath(__file__),
+                    *bootstrap_sys.argv[1:],
+                ),
+                environment,
+            )
+        root = bootstrap_os.path.realpath(
+            bootstrap_os.path.join(
+                bootstrap_os.path.dirname(__file__),
+                bootstrap_os.pardir,
+            )
+        )
+        expected_script = bootstrap_os.path.join(
+            root,
+            "scripts",
+            "verify_av1_cold_start_preregistration.py",
+        )
+        if bootstrap_os.path.realpath(__file__) != expected_script:
+            raise RuntimeError(
+                "AV1 preregistration runner must execute from its canonical repository path"
+            )
+    else:
+        root = bootstrap_os.path.realpath(bootstrap_os.fspath(repository_root))
+
+    def fail_closed(exc: BaseException) -> None:
+        raise RuntimeError(
+            "AV1 preregistration runner could not inspect repository imports"
+        ) from exc
+
+    for relative_root in ("mediaforce", "scripts"):
+        import_root = bootstrap_os.path.join(root, relative_root)
+        if not bootstrap_os.path.isdir(import_root):
+            continue
+        for _current_root, directory_names, filenames in bootstrap_os.walk(
+                import_root,
+                followlinks=False,
+                onerror=fail_closed,
+        ):
+            if "__pycache__" in directory_names:
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses repository bytecode caches"
+                )
+            if any(
+                filename.endswith((".pyc", ".pyo"))
+                for filename in filenames
+            ):
+                raise RuntimeError(
+                    "AV1 preregistration runner refuses repository bytecode artifacts"
+                )
+
+    def git_output(*arguments: str) -> tuple[int, bytes]:
+        bootstrap_time = __import__("time")
+        read_descriptor, write_descriptor = bootstrap_os.pipe()
+        process_id = bootstrap_os.fork()
+        if process_id == 0:
+            try:
+                bootstrap_os.close(read_descriptor)
+                bootstrap_os.dup2(write_descriptor, 1)
+                null_descriptor = bootstrap_os.open(
+                    bootstrap_os.devnull,
+                    bootstrap_os.O_RDWR,
+                )
+                bootstrap_os.dup2(null_descriptor, 0)
+                bootstrap_os.dup2(null_descriptor, 2)
+                bootstrap_os.close(write_descriptor)
+                if null_descriptor > 2:
+                    bootstrap_os.close(null_descriptor)
+                bootstrap_os.chdir(root)
+                bootstrap_os.execve(
+                    "/usr/bin/git",
+                    (
+                        "/usr/bin/git",
+                        "-c",
+                        "core.attributesFile=/dev/null",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        *arguments,
+                    ),
+                    {
+                        "GIT_ATTR_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": "/dev/null",
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_NO_REPLACE_OBJECTS": "1",
+                        "GIT_OPTIONAL_LOCKS": "0",
+                        "HOME": root,
+                        "LANG": "C",
+                        "LC_ALL": "C",
+                        "PATH": "/usr/bin:/bin",
+                    },
+                )
+            except BaseException:
+                bootstrap_os._exit(127)
+        bootstrap_os.close(write_descriptor)
+        output = bytearray()
+        deadline = bootstrap_time.monotonic() + 15.0
+        process_status = None
+        try:
+            bootstrap_os.set_blocking(read_descriptor, False)
+            while True:
+                try:
+                    chunk = bootstrap_os.read(read_descriptor, 64 * 1024)
+                except BlockingIOError:
+                    chunk = None
+                if chunk:
+                    output.extend(chunk)
+                    if len(output) > 1024 * 1024:
+                        bootstrap_os.kill(process_id, 9)
+                        _waited_process_id, process_status = (
+                            bootstrap_os.waitpid(process_id, 0)
+                        )
+                        raise RuntimeError(
+                            "AV1 preregistration repository inspection is oversized"
+                        )
+                waited_process_id, status = bootstrap_os.waitpid(
+                    process_id,
+                    bootstrap_os.WNOHANG,
+                )
+                if waited_process_id == process_id:
+                    process_status = status
+                    bootstrap_os.set_blocking(read_descriptor, True)
+                    while True:
+                        chunk = bootstrap_os.read(read_descriptor, 64 * 1024)
+                        if not chunk:
+                            break
+                        output.extend(chunk)
+                        if len(output) > 1024 * 1024:
+                            raise RuntimeError(
+                                "AV1 preregistration repository inspection is oversized"
+                            )
+                    break
+                if bootstrap_time.monotonic() >= deadline:
+                    bootstrap_os.kill(process_id, 9)
+                    _waited_process_id, process_status = bootstrap_os.waitpid(
+                        process_id,
+                        0,
+                    )
+                    raise RuntimeError(
+                        "AV1 preregistration repository inspection timed out"
+                    )
+                bootstrap_time.sleep(0.01)
+        except BaseException:
+            if process_status is None:
+                try:
+                    bootstrap_os.kill(process_id, 9)
+                except ProcessLookupError:
+                    pass
+                try:
+                    bootstrap_os.waitpid(process_id, 0)
+                except ChildProcessError:
+                    pass
+            raise
+        finally:
+            bootstrap_os.close(read_descriptor)
+        if process_status is None:
+            raise RuntimeError(
+                "AV1 preregistration repository inspection did not finish"
+            )
+        return bootstrap_os.waitstatus_to_exitcode(process_status), bytes(output)
+
+    pathspec = ("--", "mediaforce", "scripts")
+    for ignored in (False, True):
+        arguments = ["ls-files", "-z", "--others"]
+        if ignored:
+            arguments.append("--ignored")
+        arguments.extend(("--exclude-standard", *pathspec))
+        return_code, output = git_output(*arguments)
+        if return_code != 0:
+            raise RuntimeError(
+                "AV1 preregistration runner could not inspect repository imports"
+            )
+        if output:
+            raise RuntimeError(
+                "AV1 preregistration runner refuses untracked or ignored import state"
+            )
+    for arguments in (
+        (
+            "diff",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            *pathspec,
+        ),
+        (
+            "diff",
+            "--cached",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            "HEAD",
+            *pathspec,
+        ),
+    ):
+        return_code, _output = git_output(*arguments)
+        if return_code == 1:
+            raise RuntimeError(
+                "AV1 preregistration runner refuses modified import state"
+            )
+        if return_code != 0:
+            raise RuntimeError(
+                "AV1 preregistration runner could not inspect repository imports"
+            )
+    return_code, index_output = git_output(
+        "ls-files",
+        "-v",
+        "-z",
+        *pathspec,
+    )
+    if return_code != 0 or any(
+        not record.startswith(b"H ")
+        for record in index_output.split(b"\0")
+        if record
+    ):
+        raise RuntimeError(
+            "AV1 preregistration runner refuses exceptional repository index state"
+        )
+
+    if repository_root is None:
+        version_directory = (
+            f"python{bootstrap_sys.version_info.major}."
+            f"{bootstrap_sys.version_info.minor}"
+        )
+        stdlib_setting = getattr(bootstrap_sys, "_stdlib_dir", None)
+        if not isinstance(stdlib_setting, str) or not stdlib_setting:
+            raise RuntimeError(
+                "AV1 preregistration runner cannot identify the standard library"
+            )
+        stdlib_directory = bootstrap_os.path.realpath(stdlib_setting)
+        trusted_paths = [
+            bootstrap_os.path.join(
+                bootstrap_sys.base_prefix,
+                "lib",
+                f"python{bootstrap_sys.version_info.major}"
+                f"{bootstrap_sys.version_info.minor}.zip",
+            ),
+            stdlib_directory,
+            bootstrap_os.path.join(stdlib_directory, "lib-dynload"),
+        ]
+        virtual_environment = bootstrap_os.environ.get("VIRTUAL_ENV")
+        for prefix in (
+            virtual_environment,
+            bootstrap_sys.prefix,
+            bootstrap_sys.base_prefix,
+        ):
+            if not prefix:
+                continue
+            trusted_paths.append(
+                bootstrap_os.path.join(
+                    bootstrap_os.path.realpath(prefix),
+                    "lib",
+                    version_directory,
+                    "site-packages",
+                )
+            )
+        normalized_paths = []
+        for candidate in trusted_paths:
+            normalized = bootstrap_os.path.realpath(candidate)
+            if normalized not in normalized_paths and (
+                bootstrap_os.path.exists(normalized)
+                or normalized.endswith(".zip")
+            ):
+                normalized_paths.append(normalized)
+        bootstrap_sys.path[:] = normalized_paths
+        bootstrap_sys.path_importer_cache.clear()
+        if any(
+            name == "mediaforce" or name.startswith("mediaforce.")
+            for name in bootstrap_sys.modules
+        ):
+            raise RuntimeError(
+                "AV1 preregistration runner refuses preloaded mediaforce modules"
+            )
+
+
+if __name__ == "__main__":
+    _assert_preregistration_import_tree_clean()
+    import importlib.util as _bootstrap_importlib_util
+
+    _bootstrap_package_path = (
+        __import__("os").path.realpath(
+            __import__("os").path.join(
+                __import__("os").path.dirname(__file__),
+                __import__("os").pardir,
+                "mediaforce",
+            )
+        )
+    )
+    _bootstrap_package_spec = _bootstrap_importlib_util.spec_from_file_location(
+        "mediaforce",
+        __import__("os").path.join(_bootstrap_package_path, "__init__.py"),
+        submodule_search_locations=[_bootstrap_package_path],
+    )
+    if (
+        _bootstrap_package_spec is None
+        or _bootstrap_package_spec.loader is None
+    ):
+        raise RuntimeError(
+            "AV1 preregistration runner could not bind the canonical mediaforce package"
+        )
+    _bootstrap_package = _bootstrap_importlib_util.module_from_spec(
+        _bootstrap_package_spec
+    )
+    __import__("sys").modules["mediaforce"] = _bootstrap_package
+    _bootstrap_package_spec.loader.exec_module(_bootstrap_package)
+
+
 import argparse
 from contextlib import contextmanager
 import ctypes
@@ -65,8 +391,11 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationReviewDecision,
     AV1ValidationDerivationReviewEnvelope,
     assert_av1_validation_derivation_authorization_active,
+    assert_av1_validation_derivation_observed_attempts_accepted,
     assert_av1_validation_derivation_repository_identity,
     AV1ValidationDerivationReviewLane,
+    av1_validation_derivation_attempt_recovery_action,
+    av1_validation_derivation_terminal_intent_published_after,
     av1_validation_derivation_review_analysis_sha256,
     av1_validation_derivation_review_developer_text,
     av1_validation_derivation_candidate_evaluation_public_summary,
@@ -81,12 +410,17 @@ from mediaforce.tuning.av1_validation_derivation import (
     build_av1_validation_derivation_review_request,
     build_av1_validation_derivation_review_response_schema,
     evaluate_av1_validation_derivation_candidate,
+    load_av1_validation_derivation_assignment_claims,
+    load_av1_validation_derivation_attempt_publication_state,
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_plan,
     load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelope,
+    load_av1_validation_derivation_terminal_intents,
     load_av1_validation_derivation_terminal_records,
+    load_av1_validation_derivation_verdict_claims,
+    load_av1_validation_derivation_verdict_intent,
     retain_av1_validation_derivation_publication_directories,
     validate_av1_validation_derivation_review_response,
     validate_av1_validation_derivation_artifact_root_binding,
@@ -668,6 +1002,7 @@ def _run_derivation_action_body(
             load_av1_validation_derivation_attempts(
                 attempts_directory,
                 review_pending_published_before=plan.authorization.valid_until,
+                allow_unaccepted_review_pending=True,
             )
             if attempts_directory.exists()
             else ()
@@ -680,6 +1015,92 @@ def _run_derivation_action_body(
             if records_directory.exists()
             else ()
         )
+        assignment_claims = load_av1_validation_derivation_assignment_claims(
+            attempts_directory,
+            plan=plan,
+        )
+        terminal_intents_directory = artifact_root / "terminal-intents"
+        terminal_intents = (
+            load_av1_validation_derivation_terminal_intents(
+                terminal_intents_directory,
+                observed_published_before=plan.authorization.valid_until,
+                allow_late_observed=True,
+            )
+            if terminal_intents_directory.exists()
+            else ()
+        )
+        verdict_claims = load_av1_validation_derivation_verdict_claims(
+            artifact_root / "verdict-claims",
+            plan=plan,
+            attempts=attempts,
+        )
+        attempts_by_assignment = {
+            attempt.assignment_id: attempt
+            for attempt in attempts
+        }
+        attempt_assignment_ids = set(attempts_by_assignment)
+        terminal_assignment_ids = {
+            record.assignment_id
+            for record in records
+        }
+        unaccepted_attempt_count = sum(
+            av1_validation_derivation_attempt_recovery_action(
+                attempt,
+                publication_state,
+                terminal_intents=terminal_intents,
+                terminal_records=records,
+            )
+            != "none"
+            for attempt in attempts
+            if attempt.status == "review_pending"
+            for publication_state in (
+                load_av1_validation_derivation_attempt_publication_state(
+                    attempts_directory,
+                    attempt,
+                    published_before=plan.authorization.valid_until,
+                ),
+            )
+        )
+        unresolved_assignment_claim_count = sum(
+            str(claim["assignment_id"]) not in attempt_assignment_ids
+            for claim in assignment_claims
+        )
+        unresolved_terminal_intent_count = sum(
+            intent.assignment_id not in terminal_assignment_ids
+            for intent in terminal_intents
+        )
+        late_observed_terminal_intent_count = sum(
+            av1_validation_derivation_terminal_intent_published_after(
+                terminal_intents_directory,
+                intent,
+                published_before=plan.authorization.valid_until,
+            )
+            for intent in terminal_intents
+        )
+        unresolved_verdict_claim_count = 0
+        unresolved_verdict_intent_count = 0
+        for claim in verdict_claims:
+            assignment_id = str(claim["assignment_id"])
+            if assignment_id in terminal_assignment_ids:
+                continue
+            attempt = attempts_by_assignment[assignment_id]
+            verdict_intent = load_av1_validation_derivation_verdict_intent(
+                artifact_root / "verdict-intents",
+                plan=plan,
+                attempt=attempt,
+            )
+            if verdict_intent is None:
+                unresolved_verdict_claim_count += 1
+            else:
+                unresolved_verdict_intent_count += 1
+        recovery_required = any((
+            unaccepted_attempt_count,
+            unresolved_assignment_claim_count,
+            unresolved_terminal_intent_count,
+            late_observed_terminal_intent_count,
+            unresolved_verdict_claim_count,
+            unresolved_verdict_intent_count,
+        ))
         attempt_counts = {
             status: sum(attempt.status == status for attempt in attempts)
             for status in ("review_pending", "failed", "excluded", "stopped")
@@ -694,6 +1115,26 @@ def _run_derivation_action_body(
                 "registered_assignment_count": len(plan.assignments),
                 "attempt_count": len(attempts),
                 "terminal_record_count": len(records),
+                "assignment_claim_count": len(assignment_claims),
+                "terminal_intent_count": len(terminal_intents),
+                "verdict_claim_count": len(verdict_claims),
+                "unaccepted_attempt_count": unaccepted_attempt_count,
+                "unresolved_assignment_claim_count": (
+                    unresolved_assignment_claim_count
+                ),
+                "unresolved_terminal_intent_count": (
+                    unresolved_terminal_intent_count
+                ),
+                "late_observed_terminal_intent_count": (
+                    late_observed_terminal_intent_count
+                ),
+                "unresolved_verdict_claim_count": (
+                    unresolved_verdict_claim_count
+                ),
+                "unresolved_verdict_intent_count": (
+                    unresolved_verdict_intent_count
+                ),
+                "recovery_required": recovery_required,
                 **{f"attempt_{key}_count": value for key, value in attempt_counts.items()},
                 **{f"terminal_{key}_count": value for key, value in record_counts.items()},
                 "holdout_execution_authorized": False,
@@ -701,7 +1142,7 @@ def _run_derivation_action_body(
             },
             json_output=args.json_output,
         )
-        return 0
+        return 2 if recovery_required else 0
 
     if args.action == "record-derivation-verdict":
         for path in (args.partition, args.plan, args.key):
@@ -1062,6 +1503,7 @@ def _run_derivation_plan_action(
                 plan,
                 before_publish=_before_plan_publish,
                 after_publish=_after_plan_publish,
+                before_bind=_before_plan_publish,
             )
         _print_partition_payload(
             av1_validation_derivation_plan_public_summary(plan),
@@ -1116,6 +1558,12 @@ def _run_derivation_proposal_action(
         records = load_av1_validation_derivation_terminal_records(
             artifact_root / "terminal-records",
             observed_published_before=plan.authorization.valid_until,
+        )
+        assert_av1_validation_derivation_observed_attempts_accepted(
+            artifact_root,
+            plan,
+            attempts,
+            records,
         )
         current_observations = load_current_av1_validation_derivation_observations(
             config_path=args.config,
@@ -1520,6 +1968,31 @@ def _repository_review_identity(
         if repository_state.stdout:
             raise AV1ValidationDerivationError(
                 "AV1 derivation review repository is not clean"
+            )
+        ignored_implementation_state = run_command(
+            _review_git_command(
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--",
+                "mediaforce",
+                "scripts/verify_av1_cold_start_preregistration.py",
+            ),
+            process_controller=process_controller,
+            cwd=root,
+            env=_review_git_environment(repository_root=root),
+            timeout=15,
+            check=False,
+        )
+        if ignored_implementation_state.returncode != 0:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation ignored implementation state is unavailable"
+            )
+        if ignored_implementation_state.stdout:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation repository has ignored implementation artifacts"
             )
 
     object_ids = resolve_identity()

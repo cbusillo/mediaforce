@@ -75,17 +75,27 @@ Mediaforce's SQLite schema.
   retained source before and after backup. A retained vnode/inotify guard makes
   any transient rename, relink, replacement, or write to that source identity a
   permanent migration failure even if the original pathname is restored before
-  the next stat check. After the no-wait source write gate is held, the same
-  guard binds the existing WAL/SHM inode identities or their verified absence;
-  any later sidecar creation, removal, rename, relink, or WAL write fails the
-  transfer. The source is copied through that verified SQLite snapshot while
-  the write gate excludes new commits, preserving committed WAL state without
-  moving WAL or SHM files.
-  The staged database is fsynced, atomically linked into an absent configured
-  destination, and its directory is fsynced before the legacy main, WAL, and
-  SHM files are removed. A failed transfer leaves the legacy source in place and
-  removes the staging file; startup reserves the published destination only
-  after the migration returns.
+  the next stat check. Before the first SQLite open, missing WAL, SHM, and
+  rollback-journal paths are created as owner-only empty files and all three
+  inode identities are bound. SQLite may initialize those bound inodes while
+  acquiring the no-wait source write gate, but any sidecar removal, replacement,
+  relink, or later WAL write fails the transfer. The source is copied through
+  that verified SQLite snapshot while the write gate excludes new commits,
+  preserving committed WAL state without moving sidecar files.
+  Before a staging file becomes visible, an owner-only durable `copying` intent
+  binds its reserved name, the source inode and parent, and the configured
+  destination and parent. After backup, quick-check, and fsync, that intent is
+  atomically finalized to `ready` with the staged inode and exact backup bytes.
+  The staged database is then atomically linked into an absent configured
+  destination and its directory is fsynced. Cleanup removes and syncs the bound
+  WAL, SHM, and rollback journal before removing and syncing the legacy main
+  database, so a missing main file proves sidecar cleanup completed. Recovery
+  discards only an intent-bound partial stage, or—after publication—requires a
+  fresh gated SQLite backup to match the exact staged bytes before completing
+  source/staging cleanup and intent removal. Parent replacement, incomplete
+  cleanup, metadata-only divergence, or any other ambiguous state fails closed.
+  Startup reserves the published destination only after migration or recovery
+  returns.
 - SQLite URLs use URI modes explicitly: `rwc` for first-use creation, `rw` for
   guarded existing databases, and `ro` for read-only opens. Path components are
   percent-quoted so spaces, `#`, `?`, `%`, and legal colons remain part of the

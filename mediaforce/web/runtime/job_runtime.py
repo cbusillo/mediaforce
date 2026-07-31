@@ -1081,6 +1081,11 @@ def repair_stale_scan_runs(
         job_prefixes = [None]
         if scope == "prefix":
             job_prefixes = _prefixes_for_scan_run(row)
+        _expire_scan_run(
+            connection,
+            str(row["scan_id"]),
+            deps.scan_interrupted_error,
+        )
         for job_prefix in job_prefixes:
             job = deps.load_scan_job_state(config, job_prefix)
             if (
@@ -1103,7 +1108,6 @@ def repair_stale_scan_runs(
                         ),
                     ),
                 )
-        _expire_scan_run(connection, str(row["scan_id"]), deps.scan_interrupted_error)
         repaired += 1
     if deps.list_scan_job_files is None:
         return repaired
@@ -1296,9 +1300,9 @@ def _expire_scan_job(
         scan_id: str | None = None,
 ) -> dict[str, Any]:
     expired = _interrupted_scan_job(job, deps, finished_at=deps.now_iso())
-    deps.save_scan_job_state(config, prefix, expired)
     if connection is not None and scan_id:
         _expire_scan_run(connection, scan_id, str(expired.get("error") or deps.scan_interrupted_error))
+    deps.save_scan_job_state(config, prefix, expired)
     return expired
 
 

@@ -209,8 +209,12 @@ same reservations under another plan ID.
 The canonical `plan.json` is published before its root binding. A retry loads
 and validates that exact plan, requires the same authorization window, reuses
 its original `authorized_at`, re-hashes all twenty-four derivation sources, and
-requires the rebuilt commitments to reproduce the frozen plan exactly before
-it creates or verifies the binding. Retrying plan creation therefore requires
+requires the rebuilt commitments to reproduce the frozen plan exactly. When a
+binding is absent, the full authorization, repository, source-quiet, and
+cumulative-capacity gate runs after the binding temporary is fully written and
+fsynced and immediately before its exclusive rename. An existing exact binding
+is validated and re-fsynced without creating a new authorization. Retrying plan
+creation therefore requires
 the selected media to remain present and byte-identical. The runtime clock is
 sampled only for the first successful plan payload. A binding
 without its plan is an explicit interrupted-state failure, not permission to
@@ -248,7 +252,18 @@ commit, tree, or blob object IDs they consume. Before any clean-tree decision,
 the verifier also requires every tracked index entry to have Git's ordinary
 `H` state; `assume-unchanged`, `skip-worktree`, unmerged, and other exceptional
 index states fail closed instead of allowing live implementation bytes to
-diverge from the reviewed commit.
+diverge from the reviewed commit. The canonical runner re-executes itself with
+CPython isolated/no-site startup before importing `argparse`, dependencies, or
+`mediaforce`. A stdlib-only bootstrap invokes fixed `/usr/bin/git` through a
+sanitized environment and refuses modified, exceptional-index, untracked, or
+ignored state anywhere under `mediaforce/` or `scripts/`; it also rejects
+repository bytecode caches and disables bytecode writes. The bootstrap removes
+the repository and script directories from normal module search, adds only
+trusted interpreter and active-environment paths, and explicitly binds the
+canonical `mediaforce` package directory. An ignored `scripts/argparse.py`,
+Python source, bytecode, native extension, or package substitution therefore
+cannot execute before the exact-object authority proof. Operators must remove
+those artifacts before invoking this security-sensitive runner.
 The runtime rechecks the plan's exact
 commit/tree pair before claim publication, immediately before and after media
 execution, and inside every attempt or terminal publication callback. A checkout
@@ -305,7 +320,25 @@ artifact re-fsyncs its parent directory before accepting it, so a prior
 directory-sync error cannot be downgraded to an unsynced idempotent success.
 Authoritative attempt loaders also re-fsync the retained attempt parent before a
 visible attempt can authorize verdict, proposal, or finalization work; status
-reporting remains read-only. A
+reporting remains read-only. A favorable attempt is not authoritative merely
+because its JSON name is visible: after the attempt's post-rename source and
+repository checks and parent sync complete, a separate immutable accepted
+publication marker binds the plan, authorization, assignment, attempt ID, and
+attempt digest. Verdict publication explicitly requires that timely marker.
+An interruption before acceptance cannot be blessed on retry; recovery writes
+an immutable rejected marker and terminalizes the unchanged one-shot attempt as
+`safety_stop`, or as `authorization_expired` when the attempt or acceptance
+marker crossed the authorization deadline. A rejected marker plus its terminal
+record remains loadable for deterministic progress accounting, while a timely
+accepted marker plus any rejection is corruption. An owner-only empty or
+binding-temporary-only attempt-publication directory left by a crash is treated
+as unsealed and rebound during rejection recovery; any marker or unrelated file
+without a binding is corruption. A second recovery recognizes the exact
+rejected terminal-intent/record pair as complete and makes no writes. If an
+observed terminal intent was renamed after authorization expiry but its record
+was never published, recovery rolls back that incomplete intent and replaces it
+with an `authorization_expired` terminal pair. A late observed record or a
+conflicting pair still fails closed. A
 fresh plan, favorable `review_pending` attempt, or candidate proposal rechecks
 the live authorization immediately before its exclusive rename, then verifies
 that the renamed inode's kernel change time is strictly earlier than the
@@ -374,7 +407,11 @@ check. The `cira3` review fingerprint binds all three clip roles, content, a
 one-way canonical-path digest, device, inode, modification/change times, mode,
 and link count. Existing non-derivation `cira1` and `cira2` records retain their
 original preview/source-only recomputation contracts; new compare-aware records
-and every derivation attempt use `cira3`. Verdict-time identity checks use the same
+and every derivation attempt use `cira3`. Persisted calibration requires
+nonempty preview, source, and compare arrays with valid absolute `file:` URIs,
+finite positive durations, unique nonnegative millisecond-normalized moments,
+and the same moment set in all three roles before review media can be marked
+ready or a `cira3` fingerprint can be accepted. Verdict-time identity checks use the same
 all-clips-held procedure, closing the earlier-clip mutation window.
 Descriptor/resource or integrity failure is an affected-cell `safety_stop`, not
 `media_unavailable` or measured evidence.
@@ -603,6 +640,14 @@ uv run python scripts/verify_av1_cold_start_preregistration.py \
   --key /private/owner-only/av1-v2/partition.key \
   --config /private/owner-only/mediaforce.toml --json
 ```
+
+`derivation-status` is a read-only recovery diagnostic. It reports privacy-safe
+counts for assignment claims, attempts, terminal intents and records, verdict
+claims and intents, plus unresolved counts and `recovery_required`. An orphan
+claim, unaccepted attempt, terminal intent without its record, or verdict
+claim/intent without a terminal sets `recovery_required=true` and returns exit
+status `2`. Late observed terminal intents are counted separately and also
+require recovery; the status command never performs recovery writes.
 
 Successful technical attempts remain `review_pending` until a human records an
 explicit visual verdict. The verdict path appends the existing current-contract

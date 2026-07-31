@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -57,6 +58,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     _payload_sha256,
     _read_owner_only_bytes,
     _rename_owner_only_exclusive,
+    _fsync_owner_only_artifact,
     _av1_validation_derivation_review_set_sha256,
     _terminal_semantic_payload,
     _write_owner_only,
@@ -86,6 +88,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     finalize_av1_validation_derivation_candidate_lock,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_assignment_claims,
+    load_av1_validation_derivation_attempt_publication_state,
     _load_verified_av1_validation_derivation_candidate_lock as load_verified_av1_validation_derivation_candidate_lock,
     load_av1_validation_derivation_plan,
     load_av1_validation_derivation_attempts,
@@ -1865,6 +1868,101 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 verify_av1_cold_start_preregistration._assert_canonical_preregistration_runner()
 
+    def test_preregistration_import_guard_rejects_repository_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            (repository / "mediaforce" / "__pycache__").mkdir(parents=True)
+            (repository / "scripts").mkdir()
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "refuses repository bytecode caches",
+            ):
+                verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                )
+
+    def test_preregistration_bootstrap_rejects_shadow_module_before_import(self) -> None:
+        source_runner = Path(
+            verify_av1_cold_start_preregistration.__file__
+        ).resolve()
+        for ignored in (False, True):
+            with self.subTest(ignored=ignored), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory)
+                git_environment = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith("GIT_")
+                }
+                scripts_directory = repository / "scripts"
+                scripts_directory.mkdir()
+                runner = scripts_directory / source_runner.name
+                shutil.copyfile(source_runner, runner)
+                if ignored:
+                    (repository / ".gitignore").write_text(
+                        "scripts/argparse.py\n",
+                        encoding="utf-8",
+                    )
+                subprocess.run(
+                    ["/usr/bin/git", "init", "-q"],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+                subprocess.run(
+                    ["/usr/bin/git", "config", "user.name", "Mediaforce Test"],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+                subprocess.run(
+                    [
+                        "/usr/bin/git",
+                        "config",
+                        "user.email",
+                        "mediaforce-test@example.invalid",
+                    ],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+                paths_to_add = ["scripts"]
+                if ignored:
+                    paths_to_add.append(".gitignore")
+                subprocess.run(
+                    ["/usr/bin/git", "add", *paths_to_add],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+                subprocess.run(
+                    ["/usr/bin/git", "commit", "-qm", "bootstrap fixture"],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+                sentinel = repository / "shadow-imported"
+                (scripts_directory / "argparse.py").write_text(
+                    "from pathlib import Path\n"
+                    f"Path({str(sentinel)!r}).write_text('imported')\n",
+                    encoding="utf-8",
+                )
+
+                completed = subprocess.run(
+                    [sys.executable, runner, "--help"],
+                    cwd=repository,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "refuses untracked or ignored import state",
+                    completed.stderr,
+                )
+                self.assertFalse(sentinel.exists())
+
     def test_derivation_review_checks_environment_before_claim(self) -> None:
         args = SimpleNamespace(
             action="record-derivation-review",
@@ -1905,6 +2003,49 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
         load_proposal.assert_not_called()
         run_review.assert_not_called()
+
+    def test_derivation_status_reports_recovery_required_for_orphan_claim(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        write_av1_validation_derivation_assignment_claim(
+            attempts_directory,
+            assignment_id=assignment.assignment_id,
+            plan_id=self.plan.plan_id,
+            authorization_id=self.plan.authorization.authorization_id,
+            claimed_at="2026-07-28T01:00:00Z",
+            published_before=self.plan.authorization.valid_until,
+        )
+        args = SimpleNamespace(
+            action="derivation-status",
+            config=Path("unused.toml"),
+            plan=self.runtime_artifact_root / "plan.json",
+            json_output=True,
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ) as print_payload,
+        ):
+            exit_code = (
+                verify_av1_cold_start_preregistration._run_derivation_action_body(
+                    args,
+                    locked_config=None,
+                )
+            )
+
+        self.assertEqual(exit_code, 2)
+        payload = print_payload.call_args.args[0]
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["assignment_claim_count"], 1)
+        self.assertEqual(payload["unresolved_assignment_claim_count"], 1)
+        self.assertEqual(payload["attempt_count"], 0)
+        self.assertEqual(payload["terminal_record_count"], 0)
 
     def test_review_retry_reuses_complete_envelope_after_parent_fsync_failure(
             self,
@@ -2367,13 +2508,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
 
             before_publish.assert_called_once_with()
-            self.assertTrue(artifact_path.exists())
-            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
-                _read_owner_only_bytes(
-                    artifact_path,
-                    "test artifact",
-                    published_before=AUTHORIZED_AT,
-                )
+            self.assertFalse(artifact_path.exists())
 
     def test_derivation_plan_rejects_post_authorization_publication(self) -> None:
         artifact_root = (
@@ -2389,9 +2524,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         ):
             with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
                 write_av1_validation_derivation_plan(artifact_root, self.plan)
-            self.assertTrue(plan_path.is_file())
-            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
-                load_av1_validation_derivation_plan(plan_path)
+            self.assertFalse(plan_path.exists())
 
     def test_review_pending_attempt_rejects_post_authorization_publication(self) -> None:
         attempts_directory = self.runtime_config.paths.web_state_dir / "late-attempts"
@@ -2407,7 +2540,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     attempt,
                     published_before=self.plan.authorization.valid_until,
                 )
-            self.assertTrue(attempt_path.is_file())
+            self.assertFalse(attempt_path.exists())
             before_publish = unittest.mock.Mock()
             with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
                 write_av1_validation_derivation_attempt(
@@ -2417,13 +2550,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     published_before=self.plan.authorization.valid_until,
                 )
             before_publish.assert_called_once_with()
-            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+            self.assertFalse(attempt_path.exists())
+            self.assertEqual(
                 load_av1_validation_derivation_attempts(
                     attempts_directory,
                     review_pending_published_before=(
                         self.plan.authorization.valid_until
                     ),
-                )
+                ),
+                (),
+            )
 
     def test_attempt_post_publish_identity_failure_removes_artifact(self) -> None:
         attempts_directory = self.runtime_config.paths.web_state_dir / "drifted-attempts"
@@ -2476,6 +2612,261 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             attempts_directory / f"{attempt.assignment_id}.json",
             "derivation attempt",
         )
+
+    def test_existing_unsealed_attempt_cannot_be_retroactively_accepted(self) -> None:
+        attempts_directory = self.runtime_config.paths.web_state_dir / "unsealed-attempts"
+        attempt = self._review_pending_attempt()
+        _bind_owner_only_directory(
+            attempts_directory,
+            kind="attempts",
+            binding_id=attempt.plan_id,
+            binding_digest=attempt.authorization_id,
+        )
+        attempt_path = attempts_directory / f"{attempt.assignment_id}.json"
+        _write_owner_only(
+            attempt_path,
+            canonical_json_bytes(attempt.to_payload()),
+        )
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "existing review-pending attempt was not durably accepted",
+        ):
+            write_av1_validation_derivation_attempt(
+                attempts_directory,
+                attempt,
+                published_before=self.plan.authorization.valid_until,
+            )
+
+        self.assertFalse(
+            (
+                attempts_directory
+                / ".publication"
+                / f"{attempt.assignment_id}.accepted"
+            ).exists()
+        )
+        self.assertEqual(attempt_path.read_bytes(), canonical_json_bytes(attempt.to_payload()))
+
+    def test_attempt_publication_directory_rejects_orphan_marker(self) -> None:
+        attempts_directory = self.runtime_config.paths.web_state_dir / "orphan-marker-attempts"
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            attempts_directory,
+            attempt,
+            published_before=self.plan.authorization.valid_until,
+        )
+        _write_owner_only(
+            attempts_directory / ".publication" / "orphan.accepted",
+            b"{}",
+        )
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "contains an orphan artifact",
+        ):
+            load_av1_validation_derivation_attempts(
+                attempts_directory,
+                review_pending_published_before=self.plan.authorization.valid_until,
+            )
+
+    def test_unsealed_review_pending_attempt_is_rejected_and_terminalized(self) -> None:
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        records_directory = self.runtime_artifact_root / "terminal-records"
+        attempt = self._review_pending_attempt()
+        _bind_owner_only_directory(
+            attempts_directory,
+            kind="attempts",
+            binding_id=attempt.plan_id,
+            binding_digest=attempt.authorization_id,
+        )
+        _write_owner_only(
+            attempts_directory / f"{attempt.assignment_id}.json",
+            canonical_json_bytes(attempt.to_payload()),
+        )
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_directory,
+            terminal_records_directory=records_directory,
+            completed_at="2026-07-28T01:06:00Z",
+        ))
+
+        publication_state = load_av1_validation_derivation_attempt_publication_state(
+            attempts_directory,
+            attempt,
+            published_before=self.plan.authorization.valid_until,
+        )
+        self.assertEqual(publication_state.disposition, "rejected")
+        self.assertEqual(publication_state.reason_code, "safety_stop")
+        records = load_av1_validation_derivation_terminal_records(records_directory)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "stopped")
+        self.assertEqual(records[0].reason_code, "safety_stop")
+        self.assertFalse(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_directory,
+            terminal_records_directory=records_directory,
+            completed_at="2026-07-28T01:06:00Z",
+        ))
+
+    def test_unbound_attempt_publication_directory_recovers_as_unsealed(self) -> None:
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        records_directory = self.runtime_artifact_root / "terminal-records"
+        attempt = self._review_pending_attempt()
+        _bind_owner_only_directory(
+            attempts_directory,
+            kind="attempts",
+            binding_id=attempt.plan_id,
+            binding_digest=attempt.authorization_id,
+        )
+        _write_owner_only(
+            attempts_directory / f"{attempt.assignment_id}.json",
+            canonical_json_bytes(attempt.to_payload()),
+        )
+        publication_directory = attempts_directory / ".publication"
+        publication_directory.mkdir(mode=0o700)
+        stale_binding_temporary = (
+            publication_directory / f"..binding.{'a' * 24}.tmp"
+        )
+        stale_binding_temporary.write_bytes(b"partial")
+        stale_binding_temporary.chmod(0o400)
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_directory,
+            terminal_records_directory=records_directory,
+            completed_at="2026-07-28T01:06:00Z",
+        ))
+
+        self.assertTrue((publication_directory / ".binding").is_file())
+        state = load_av1_validation_derivation_attempt_publication_state(
+            attempts_directory,
+            attempt,
+            published_before=self.plan.authorization.valid_until,
+        )
+        self.assertEqual(state.disposition, "rejected")
+
+    def test_unbound_attempt_publication_directory_rejects_marker(self) -> None:
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        attempt = self._review_pending_attempt()
+        _bind_owner_only_directory(
+            attempts_directory,
+            kind="attempts",
+            binding_id=attempt.plan_id,
+            binding_digest=attempt.authorization_id,
+        )
+        _write_owner_only(
+            attempts_directory / f"{attempt.assignment_id}.json",
+            canonical_json_bytes(attempt.to_payload()),
+        )
+        publication_directory = attempts_directory / ".publication"
+        publication_directory.mkdir(mode=0o700)
+        marker = publication_directory / f"{attempt.assignment_id}.accepted"
+        marker.write_bytes(b"{}")
+        marker.chmod(0o400)
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "unbound attempt-publication directory contains an artifact",
+        ):
+            load_av1_validation_derivation_attempt_publication_state(
+                attempts_directory,
+                attempt,
+                published_before=self.plan.authorization.valid_until,
+            )
+
+    def test_late_unsealed_attempt_terminalizes_as_authorization_expired(self) -> None:
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        records_directory = self.runtime_artifact_root / "terminal-records"
+        attempt = self._review_pending_attempt()
+        _bind_owner_only_directory(
+            attempts_directory,
+            kind="attempts",
+            binding_id=attempt.plan_id,
+            binding_digest=attempt.authorization_id,
+        )
+        _write_owner_only(
+            attempts_directory / f"{attempt.assignment_id}.json",
+            canonical_json_bytes(attempt.to_payload()),
+        )
+
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+            return_value=10 ** 30,
+        ):
+            self.assertTrue(_recover_interrupted_derivation_state(
+                plan=self.plan,
+                partition=self.partition,
+                artifact_root=self.runtime_artifact_root,
+                attempts_directory=attempts_directory,
+                terminal_records_directory=records_directory,
+                completed_at="2026-07-28T01:06:00Z",
+            ))
+
+        publication_state = load_av1_validation_derivation_attempt_publication_state(
+            attempts_directory,
+            attempt,
+            published_before=self.plan.authorization.valid_until,
+        )
+        self.assertEqual(publication_state.disposition, "rejected")
+        self.assertEqual(publication_state.reason_code, "authorization_expired")
+        records = load_av1_validation_derivation_terminal_records(records_directory)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].status, "failed")
+        self.assertEqual(records[0].reason_code, "authorization_expired")
+
+    def test_interrupted_plan_retry_runs_gate_inside_binding_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            root.mkdir(mode=0o700)
+            artifact_root = root / self.plan.partition_id
+            artifact_root.mkdir(mode=0o700)
+            _write_owner_only(
+                artifact_root / "plan.json",
+                canonical_json_bytes(self.plan.to_payload()),
+            )
+            events: list[str] = []
+            real_sync = _fsync_owner_only_artifact
+            real_rename = _rename_owner_only_exclusive
+
+            def track_sync(descriptor: int) -> None:
+                events.append("binding_fsync")
+                real_sync(descriptor)
+
+            def before_bind() -> None:
+                events.append("gate")
+                self.assertFalse((artifact_root / ".binding").exists())
+
+            def track_rename(**kwargs: object) -> None:
+                events.append(f"rename:{kwargs['destination_name']}")
+                real_rename(**kwargs)
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._fsync_owner_only_artifact",
+                    side_effect=track_sync,
+                ),
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._rename_owner_only_exclusive",
+                    side_effect=track_rename,
+                ),
+            ):
+                write_av1_validation_derivation_plan(
+                    artifact_root,
+                    self.plan,
+                    before_bind=before_bind,
+                )
+
+            self.assertEqual(
+                events[-3:],
+                ["binding_fsync", "gate", "rename:.binding"],
+            )
 
     def test_assignment_claim_loader_marks_post_deadline_publication(self) -> None:
         claims_directory = self.runtime_artifact_root / "attempts"
@@ -3043,6 +3434,32 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     )
                     _run_test_git(repository, "checkout", "--", "tracked.txt")
 
+    def test_review_git_identity_rejects_ignored_implementation_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            (repository / "mediaforce").mkdir(parents=True)
+            _run_test_git(repository, "init", "--quiet")
+            (repository / ".gitignore").write_text(
+                "*.pyc\n__pycache__/\n",
+                encoding="utf-8",
+            )
+            (repository / "mediaforce" / "module.py").write_text(
+                "VALUE = 1\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", ".gitignore", "mediaforce/module.py")
+            _run_test_git(repository, "commit", "--quiet", "-m", "authoritative")
+            (repository / "mediaforce" / "module.pyc").write_bytes(b"ignored bytecode")
+
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "ignored implementation artifacts",
+            ):
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
     def test_review_git_probes_reject_dirty_state_despite_local_diff_drivers(
             self,
     ) -> None:
@@ -3324,6 +3741,30 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 status="review_pending",
                 calibration_payload=calibration,
             )
+
+    def test_attempt_requires_all_persisted_review_clip_roles(self) -> None:
+        assignment = self.plan.assignments[0]
+        for role in ("preview_clips", "source_clips", "compare_clips"):
+            calibration = _calibration_payload(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            )
+            calibration[role] = []
+            with self.subTest(role=role), self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "unchanged measured full search",
+            ):
+                build_av1_validation_derivation_attempt(
+                    plan=self.plan,
+                    partition=self.partition,
+                    assignment_id=assignment.assignment_id,
+                    started_at="2026-07-28T01:00:00Z",
+                    completed_at="2026-07-28T01:05:00Z",
+                    status="review_pending",
+                    calibration_payload=calibration,
+                )
 
     def test_attempt_requires_pinned_source_evidence(self) -> None:
         assignment = self.plan.assignments[0]
@@ -6132,6 +6573,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.runtime_artifact_root / "terminal-intents",
             terminal,
         )
+        terminal_intent_path = (
+            self.runtime_artifact_root
+            / "terminal-intents"
+            / f"{terminal.assignment_id}.json"
+        )
+        terminal_intent_inode = terminal_intent_path.stat().st_ino
 
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
@@ -6151,17 +6598,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
         self.assertFalse(records_dir.exists())
 
-        with (
-            patch(
-                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
-                return_value=10**30,
-            ),
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "published after authorization expired",
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+            side_effect=lambda info: (
+                10**30
+                if info.st_ino == terminal_intent_inode
+                else info.st_ctime_ns
             ),
         ):
-            _recover_interrupted_derivation_state(
+            self.assertTrue(_recover_interrupted_derivation_state(
                 plan=self.plan,
                 partition=self.partition,
                 artifact_root=self.runtime_artifact_root,
@@ -6169,8 +6614,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 terminal_records_directory=records_dir,
                 completed_at="2026-07-28T01:07:00Z",
                 before_observed_publish=lambda: None,
-            )
-        self.assertFalse(records_dir.exists())
+            ))
+        recovered = load_av1_validation_derivation_terminal_records(records_dir)
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0].status, "failed")
+        self.assertEqual(recovered[0].reason_code, "authorization_expired")
 
     def test_recovery_rejects_existing_observed_terminal_pair_published_after_expiry(
             self,
@@ -6591,13 +7039,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(review_root.stat().st_mode & 0o777, 0o700)
             self.assertEqual(clip_directory.stat().st_mode & 0o777, 0o700)
             self.assertEqual(clip_path.stat().st_mode & 0o777, 0o400)
+            clip_payload = {
+                "path": clip_path.as_uri(),
+                "timestamp_seconds": 1.0,
+                "duration_seconds": 8.0,
+            }
             calibration = {
-                "preview_clips": [{
-                    "path": clip_path.as_uri(),
-                    "timestamp_seconds": 1.0,
-                    "duration_seconds": 8.0,
-                }],
-                "source_clips": [],
+                "preview_clips": [dict(clip_payload)],
+                "source_clips": [dict(clip_payload)],
+                "compare_clips": [dict(clip_payload)],
             }
             fingerprint = _current_derivation_review_artifact_fingerprint(
                 review_root=review_root,
@@ -6691,13 +7141,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             clip_path.write_bytes(clip_bytes)
             clip_path.chmod(0o600)
             moved_clip_path = run_directory / "original-encoded-01.mp4"
+            clip_payload = {
+                "path": clip_path.as_uri(),
+                "timestamp_seconds": 1.0,
+                "duration_seconds": 8.0,
+            }
             calibration = {
-                "preview_clips": [{
-                    "path": clip_path.as_uri(),
-                    "timestamp_seconds": 1.0,
-                    "duration_seconds": 8.0,
-                }],
-                "source_clips": [],
+                "preview_clips": [dict(clip_payload)],
+                "source_clips": [dict(clip_payload)],
+                "compare_clips": [dict(clip_payload)],
             }
 
             original_fingerprint = _current_derivation_review_artifact_fingerprint(
@@ -6736,15 +7188,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 clip_path.chmod(0o400)
                 clip_paths.append(clip_path)
             calibration = {
-                "preview_clips": [
-                    {
-                        "path": clip_path.as_uri(),
-                        "timestamp_seconds": float(index),
-                        "duration_seconds": 8.0,
-                    }
-                    for index, clip_path in enumerate(clip_paths)
-                ],
-                "source_clips": [],
+                role: [{
+                    "path": clip_paths[index].as_uri(),
+                    "timestamp_seconds": float(index),
+                    "duration_seconds": 8.0,
+                }]
+                for index, role in enumerate(
+                    ("preview_clips", "source_clips", "compare_clips")
+                )
             }
             active_guards = 0
             maximum_active_guards = 0
@@ -6800,13 +7251,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             clip_path = review_root / "encoded-01.mp4"
             clip_path.write_bytes(b"review")
             clip_path.chmod(0o400)
+            clip_payload = {
+                "path": clip_path.as_uri(),
+                "timestamp_seconds": 0.0,
+                "duration_seconds": 8.0,
+            }
             calibration = {
-                "preview_clips": [{
-                    "path": clip_path.as_uri(),
-                    "timestamp_seconds": 0.0,
-                    "duration_seconds": 8.0,
-                }],
-                "source_clips": [],
+                "preview_clips": [dict(clip_payload)],
+                "source_clips": [dict(clip_payload)],
+                "compare_clips": [dict(clip_payload)],
             }
             with (
                 patch(
@@ -6823,6 +7276,29 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     calibration=calibration,
                 )
 
+    def test_review_fingerprint_requires_preview_source_and_compare_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            artifact_root = Path(directory) / "artifact-root"
+            artifact_root.mkdir(mode=0o700)
+            review_root = _prepare_derivation_review_root(artifact_root)
+            clip_path = review_root / "encoded-01.mp4"
+            clip_path.write_bytes(b"review")
+            clip_path.chmod(0o400)
+            clip_payload = {
+                "path": clip_path.as_uri(),
+                "timestamp_seconds": 0.0,
+                "duration_seconds": 8.0,
+            }
+
+            self.assertIsNone(_current_derivation_review_artifact_fingerprint(
+                review_root=review_root,
+                calibration={
+                    "preview_clips": [dict(clip_payload)],
+                    "source_clips": [dict(clip_payload)],
+                    "compare_clips": [],
+                },
+            ))
+
     def test_review_fingerprint_reports_cleanup_failure_inside_outer_handler(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             artifact_root = Path(directory) / "artifact-root"
@@ -6831,14 +7307,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             clip_path = review_root / "encoded-01.mp4"
             clip_path.write_bytes(b"review")
             clip_path.chmod(0o400)
+            clip_payload = {
+                "path": clip_path.as_uri(),
+                "timestamp_seconds": 0.0,
+                "duration_seconds": 8.0,
+            }
             calibration = {
-                "preview_clips": [{
-                    "path": clip_path.as_uri(),
-                    "timestamp_seconds": 0.0,
-                    "duration_seconds": 8.0,
-                }],
-                "source_clips": [],
-                "compare_clips": [],
+                "preview_clips": [dict(clip_payload)],
+                "source_clips": [dict(clip_payload)],
+                "compare_clips": [dict(clip_payload)],
             }
 
             class CloseFailGuard:
@@ -6879,13 +7356,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             clip_path.chmod(0o400)
             symlinked_review_root = root / "review-media"
             symlinked_review_root.symlink_to(real_review_root, target_is_directory=True)
+            clip_payload = {
+                "path": clip_path.as_uri(),
+                "timestamp_seconds": 0.0,
+                "duration_seconds": 8.0,
+            }
             calibration = {
-                "preview_clips": [{
-                    "path": clip_path.as_uri(),
-                    "timestamp_seconds": 0.0,
-                    "duration_seconds": 8.0,
-                }],
-                "source_clips": [],
+                "preview_clips": [dict(clip_payload)],
+                "source_clips": [dict(clip_payload)],
+                "compare_clips": [dict(clip_payload)],
             }
             with self.assertRaisesRegex(
                 AV1ValidationDerivationError,
@@ -9187,6 +9666,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 return_value=records,
             ),
             patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_observed_attempts_accepted",
+            ),
+            patch(
                 "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_review_claims",
                 return_value=(),
             ),
@@ -9347,6 +9829,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_terminal_records",
                 return_value=records,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_observed_attempts_accepted",
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_review_claims",
@@ -9947,7 +10432,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     retry_exit_code = verify_av1_cold_start_preregistration.main(argv)
             self.assertEqual(exit_code, 0)
             self.assertEqual(retry_exit_code, 0)
-            self.assertEqual(now_iso.call_count, 5)
+            self.assertEqual(now_iso.call_count, 9)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(json.loads(retry_stdout.getvalue()), payload)
             self.assertEqual(payload["derivation_assignment_count"], 24)
@@ -10401,6 +10886,11 @@ def _calibration_payload(
         "within_sample_band": True,
         "violates_source_cap": False,
     }
+    clip = {
+        "path": f"file:///private/{assignment.assignment_id}.mp4",
+        "timestamp_seconds": 0.0,
+        "duration_seconds": 8.0,
+    }
     return {
         "mode": "sample",
         "action": "av1_derivation",
@@ -10413,6 +10903,9 @@ def _calibration_payload(
         "boundary_review_media_ready": True,
         "review_artifact_fingerprint": artifact,
         "current_review_artifact_fingerprint": artifact,
+        "preview_clips": [dict(clip)],
+        "source_clips": [dict(clip)],
+        "compare_clips": [dict(clip)],
         "sample_item": {
             "library_item_id": assignment.local_item_id,
             "content_version_fingerprint": source_identity,

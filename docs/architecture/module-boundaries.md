@@ -114,8 +114,9 @@ Guidance:
       scope/time only to inherit a conservative non-success result,
     - workers revalidate sidecar ownership under the process-wide state lock
       before startup and every terminal save, so an older worker cannot overwrite
-      a newer scan's sidecar; dead database rows are terminalized independently
-      of mismatched sidecar state,
+      a newer scan's sidecar; dead database rows are committed terminal before
+      sidecar repair, so they remain terminalized even when sidecar persistence
+      fails or the sidecar belongs to another scan,
       restores a completed database result over a stale active sidecar, and lets
       a matching or later database failure override contradictory legacy
       sidecar state

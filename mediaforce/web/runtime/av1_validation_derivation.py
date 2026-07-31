@@ -80,9 +80,13 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationVerdictRetryMismatchError,
     AV1ValidationDerivationTerminalRecord,
+    assert_av1_validation_derivation_attempt_accepted,
+    assert_av1_validation_derivation_observed_attempts_accepted,
     assert_av1_validation_derivation_authorization_active,
     assert_av1_validation_derivation_repository_identity,
     assert_av1_validation_derivation_source_commitments,
+    av1_validation_derivation_attempt_recovery_action,
+    av1_validation_derivation_terminal_intent_published_after,
     av1_validation_derivation_plan_source_commitment,
     av1_validation_derivation_statistics_contract_sha256,
     build_av1_validation_derivation_attempt,
@@ -92,6 +96,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     ensure_av1_validation_derivation_terminal_record,
     ensure_av1_validation_derivation_verdict_claim,
     load_av1_validation_derivation_assignment_claims,
+    load_av1_validation_derivation_attempt_publication_state,
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
     load_av1_validation_derivation_plan,
@@ -105,7 +110,9 @@ from mediaforce.tuning.av1_validation_derivation import (
     _load_av1_validation_derivation_candidate_lock_envelope,
     _load_verified_av1_validation_derivation_candidate_lock,
     resolve_av1_validation_derivation_verdict_intent,
+    reject_av1_validation_derivation_attempt_publication,
     retain_av1_validation_derivation_publication_directories,
+    rollback_late_av1_validation_derivation_terminal_intent,
     validate_av1_validation_derivation_artifact_root_binding,
     validate_av1_validation_derivation_attempt_binding,
     validate_av1_validation_derivation_plan_binding,
@@ -1678,7 +1685,10 @@ def _run_av1_validation_derivation_assignment_locked(
                 "AV1 derivation review media could not be secured without identity drift"
             )
         payload["job_id"] = f"av1vdjob1_{calibration_run_id}"
-        payload["review_media_ready"] = bool(payload.get("preview_clips") and payload.get("source_clips"))
+        payload["review_media_ready"] = all(
+            payload.get(key)
+            for key in ("preview_clips", "source_clips", "compare_clips")
+        )
         payload["boundary_review_media_ready"] = payload["review_media_ready"]
         payload["current_review_artifact_fingerprint"] = payload.get("review_artifact_fingerprint")
         completed_at = clock()
@@ -1969,6 +1979,12 @@ def finalize_av1_validation_derivation_candidate_lock(
                 artifact_root / "terminal-records",
                 observed_published_before=plan.authorization.valid_until,
             )
+            assert_av1_validation_derivation_observed_attempts_accepted(
+                artifact_root,
+                plan,
+                attempts,
+                records,
+            )
             review_claims = load_av1_validation_derivation_review_claims(
                 artifact_root,
                 plan=plan,
@@ -2166,6 +2182,12 @@ def load_verified_av1_validation_derivation_candidate_lock(
             records = load_av1_validation_derivation_terminal_records(
                 artifact_root / "terminal-records",
                 observed_published_before=plan.authorization.valid_until,
+            )
+            assert_av1_validation_derivation_observed_attempts_accepted(
+                artifact_root,
+                plan,
+                attempts,
+                records,
             )
             review_claims = load_av1_validation_derivation_review_claims(
                 artifact_root,
@@ -2426,6 +2448,11 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         raise AV1ValidationDerivationError(
             "AV1 derivation verdict attempt is not the immutable current attempt"
         )
+    assert_av1_validation_derivation_attempt_accepted(
+        artifact_root / "attempts",
+        persisted_attempt,
+        published_before=plan.authorization.valid_until,
+    )
     if terminal_records_directory.resolve() != (
         artifact_root / "terminal-records"
     ).resolve():
@@ -2970,6 +2997,7 @@ def _recover_interrupted_derivation_state(
             attempts_directory,
             review_pending_published_before=plan.authorization.valid_until,
             require_durable=True,
+            allow_unaccepted_review_pending=True,
         )
         if attempts_directory.exists()
         else ()
@@ -2982,6 +3010,16 @@ def _recover_interrupted_derivation_state(
         if terminal_records_directory.exists()
         else ()
     )
+    terminal_intents_directory = artifact_root / "terminal-intents"
+    terminal_intents = (
+        load_av1_validation_derivation_terminal_intents(
+            terminal_intents_directory,
+            observed_published_before=plan.authorization.valid_until,
+            allow_late_observed=True,
+        )
+        if terminal_intents_directory.exists()
+        else ()
+    )
     attempts_by_assignment = {
         attempt.assignment_id: attempt
         for attempt in attempts
@@ -2990,15 +3028,105 @@ def _recover_interrupted_derivation_state(
         record.assignment_id: record
         for record in records
     }
-    terminal_intents_directory = artifact_root / "terminal-intents"
-    terminal_intents = (
-        load_av1_validation_derivation_terminal_intents(
+    late_terminal_intents = [
+        intent
+        for intent in terminal_intents
+        if av1_validation_derivation_terminal_intent_published_after(
             terminal_intents_directory,
-            observed_published_before=plan.authorization.valid_until,
+            intent,
+            published_before=plan.authorization.valid_until,
         )
-        if terminal_intents_directory.exists()
-        else ()
-    )
+    ]
+    if len(late_terminal_intents) > 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation has multiple late observed terminal intents"
+        )
+    if late_terminal_intents:
+        late_intent = late_terminal_intents[0]
+        attempt = attempts_by_assignment.get(late_intent.assignment_id)
+        if (
+            attempt is None
+            or records_by_assignment.get(late_intent.assignment_id) is not None
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation late observed terminal intent conflicts with durable state"
+            )
+        assert_av1_validation_derivation_attempt_accepted(
+            attempts_directory,
+            attempt,
+            published_before=plan.authorization.valid_until,
+        )
+        rollback_late_av1_validation_derivation_terminal_intent(
+            terminal_intents_directory,
+            late_intent,
+            published_before=plan.authorization.valid_until,
+        )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=plan,
+            partition=partition,
+            attempt=attempt,
+            review_failure_reason_code="authorization_expired",
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            terminal_intents_directory,
+            terminal,
+        )
+        ensure_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+        )
+        return True
+    recovery_attempts = [
+        (attempt, publication_state, recovery_action)
+        for attempt in attempts
+        if attempt.status == "review_pending"
+        for publication_state in (
+            load_av1_validation_derivation_attempt_publication_state(
+                attempts_directory,
+                attempt,
+                published_before=plan.authorization.valid_until,
+                require_durable=True,
+            ),
+        )
+        for recovery_action in (
+            av1_validation_derivation_attempt_recovery_action(
+                attempt,
+                publication_state,
+                terminal_intents=terminal_intents,
+                terminal_records=records,
+            ),
+        )
+        if recovery_action != "none"
+    ]
+    if len(recovery_attempts) > 1:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation has multiple unaccepted review-pending attempts"
+        )
+    if recovery_attempts:
+        attempt, publication_state, recovery_action = recovery_attempts[0]
+        reason_code = publication_state.reason_code or "safety_stop"
+        if recovery_action == "reject_and_terminalize":
+            reject_av1_validation_derivation_attempt_publication(
+                attempts_directory,
+                attempt,
+                reason_code=reason_code,
+                published_before=plan.authorization.valid_until,
+            )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=plan,
+            partition=partition,
+            attempt=attempt,
+            review_failure_reason_code=reason_code,
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            artifact_root / "terminal-intents",
+            terminal,
+        )
+        ensure_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+        )
+        return True
     interrupted_terminal_publications: list[
         AV1ValidationDerivationTerminalRecord
     ] = []
@@ -3197,6 +3325,11 @@ def _assert_observed_terminal_intent_recovery_supported(
         raise AV1ValidationDerivationError(
             "AV1 derivation observed terminal intent is incomplete"
         )
+    assert_av1_validation_derivation_attempt_accepted(
+        artifact_root / "attempts",
+        attempt,
+        published_before=plan.authorization.valid_until,
+    )
     verdict_claims = load_av1_validation_derivation_verdict_claims(
         artifact_root / "verdict-claims",
         plan=plan,
@@ -3290,6 +3423,8 @@ def _secure_and_fingerprint_derivation_review_clips(
         review_root: Path,
         clips: tuple[_DerivationReviewClip, ...],
 ) -> str | None:
+    if {clip.role for clip in clips} != {"preview", "source", "compare"}:
+        return None
     root_descriptor = -1
     held_clips: list[_HeldDerivationReviewClip] = []
     clip_payloads: list[dict[str, object]] = []

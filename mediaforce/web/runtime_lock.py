@@ -514,12 +514,25 @@ class LegacySQLiteMigrationSource:
         self.assert_stable()
         return f"{pinned_path.as_uri()}?mode=rw"
 
+    def source_snapshot(self) -> tuple[int, int, int, int, int, int]:
+        self.assert_stable()
+        return self._file_snapshot
+
     def bind_sqlite_sidecars(self) -> None:
         try:
             self._mutation_guard.bind_sqlite_sidecars()
         except FileIntegrityError as exc:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite sidecar identity changed during migration"
+            ) from exc
+        self.assert_stable()
+
+    def prepare_sqlite_sidecars_for_write_gate(self) -> None:
+        try:
+            self._mutation_guard.prepare_sqlite_sidecars_for_write_gate()
+        except FileIntegrityError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite sidecar identity changed before migration"
             ) from exc
         self.assert_stable()
 
@@ -547,13 +560,7 @@ class LegacySQLiteMigrationSource:
 
     def discard_after_publish(self) -> None:
         self.assert_stable()
-        try:
-            os.unlink(self.path.name, dir_fd=self._directory_descriptor)
-        except OSError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Legacy SQLite source cleanup failed after publication"
-            ) from exc
-        for suffix in ("-wal", "-shm"):
+        for suffix in ("-wal", "-shm", "-journal"):
             try:
                 os.unlink(
                     f"{self.path.name}{suffix}",
@@ -570,6 +577,13 @@ class LegacySQLiteMigrationSource:
         except OSError as exc:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite source cleanup could not be synchronized"
+            ) from exc
+        try:
+            os.unlink(self.path.name, dir_fd=self._directory_descriptor)
+            os.fsync(self._directory_descriptor)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source cleanup failed after publication"
             ) from exc
 
 
@@ -601,16 +615,32 @@ class _LegacySQLiteMutationGuard:
         self._file_watch = -1
         self._directory_watch = -1
         self._sidecar_watches: set[int] = set()
-        self._watched_directory_names = {path.name}
+        self._sidecar_names = tuple(
+            f"{path.name}{suffix}"
+            for suffix in ("-wal", "-shm", "-journal")
+        )
+        self._watched_directory_names = {
+            path.name,
+            *self._sidecar_names,
+        }
         self._sidecar_bindings: dict[
             str,
             tuple[int, tuple[int, int, int]] | None,
         ] = {}
+        self._sidecars_prepared = False
         self._sidecars_bound = False
         self._violated = False
+        try:
+            self._prepare_sidecar_bindings_before_monitoring()
+            self._initialize_monitoring(file_descriptor)
+        except BaseException:
+            self.close()
+            raise
+
+    def _initialize_monitoring(self, file_descriptor: int) -> None:
         if sys.platform == "darwin":
             self._darwin_guard = MacOSFileIntegrityGuard(
-                path=path,
+                path=self._path,
                 descriptor=file_descriptor,
                 require_single_link=True,
             )
@@ -626,7 +656,7 @@ class _LegacySQLiteMutationGuard:
             self._darwin_directory_watcher.control(
                 [
                     select_module.kevent(
-                        directory_descriptor,
+                        self._directory_descriptor,
                         filter=select_module.KQ_FILTER_VNODE,
                         flags=(
                             select_module.KQ_EV_ADD
@@ -638,6 +668,16 @@ class _LegacySQLiteMutationGuard:
                 0,
                 0,
             )
+            for name, binding in self._sidecar_bindings.items():
+                if binding is None:
+                    raise FileIntegrityError(
+                        "legacy SQLite sidecar binding is unavailable"
+                    )
+                self._register_sidecar_watch(
+                    name,
+                    descriptor=binding[0],
+                    watch_writes=False,
+                )
             self.assert_quiet()
             return
         if not sys.platform.startswith("linux") or not Path("/proc/self/fd").is_dir():
@@ -688,7 +728,7 @@ class _LegacySQLiteMutationGuard:
         )
         self._directory_watch = inotify_add_watch(
             descriptor,
-            os.fsencode(f"/proc/self/fd/{directory_descriptor}"),
+            os.fsencode(f"/proc/self/fd/{self._directory_descriptor}"),
             directory_mask,
         )
         if self._file_watch < 0 or self._directory_watch < 0:
@@ -697,80 +737,124 @@ class _LegacySQLiteMutationGuard:
             raise FileIntegrityError(
                 "legacy SQLite source mutation monitoring is unavailable"
             ) from OSError(error_number, os.strerror(error_number))
+        for name, binding in self._sidecar_bindings.items():
+            if binding is None:
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar binding is unavailable"
+                )
+            self._register_sidecar_watch(
+                name,
+                descriptor=binding[0],
+                watch_writes=False,
+            )
+        self.assert_quiet()
+
+    def prepare_sqlite_sidecars_for_write_gate(self) -> None:
+        if not self._sidecars_prepared:
+            raise FileIntegrityError(
+                "legacy SQLite sidecars were not bound before monitoring"
+            )
         self.assert_quiet()
 
     def bind_sqlite_sidecars(self) -> None:
+        if not self._sidecars_prepared:
+            raise FileIntegrityError(
+                "legacy SQLite sidecars were not prepared before write-gate open"
+            )
         if self._sidecars_bound:
             self.assert_quiet()
             return
-        self.assert_quiet()
-        for suffix in ("-wal", "-shm"):
-            name = f"{self._path.name}{suffix}"
-            binding = self._open_sidecar_binding(name)
-            self._sidecar_bindings[name] = binding
-            self._watched_directory_names.add(name)
-            if binding is not None:
-                self._register_sidecar_watch(
-                    name,
-                    descriptor=binding[0],
-                )
+        file_changed, directory_changed, directory_names = (
+            self._drain_mutation_events()
+        )
+        if file_changed:
+            self._violated = True
+        for name, binding in self._sidecar_bindings.items():
+            if binding is None or not self._sidecar_binding_matches(name, binding):
+                self._violated = True
+                continue
+            self._register_sidecar_watch(
+                name,
+                descriptor=binding[0],
+                watch_writes=True,
+            )
+        later_file_changed, later_directory_changed, later_directory_names = (
+            self._drain_mutation_events()
+        )
+        if later_file_changed:
+            self._violated = True
+        directory_changed = directory_changed or later_directory_changed
+        directory_names.update(later_directory_names)
+        if directory_changed or directory_names:
+            self._violated = True
         self._sidecars_bound = True
-        self.assert_quiet()
-
-    def assert_quiet(self) -> None:
-        if self._darwin_guard is not None:
-            self._darwin_guard.assert_quiet()
-            watcher = self._darwin_directory_watcher
-            if watcher is None:
-                self._violated = True
-            else:
-                try:
-                    if watcher.control(None, 32, 0) and self._sidecars_bound:
-                        self._violated = True
-                except OSError:
-                    self._violated = True
-        else:
-            descriptor = self._inotify_descriptor
-            if descriptor < 0:
-                self._violated = True
-            else:
-                while True:
-                    try:
-                        data = os.read(descriptor, 64 * 1024)
-                    except BlockingIOError:
-                        break
-                    except OSError:
-                        self._violated = True
-                        break
-                    if not data:
-                        self._violated = True
-                        break
-                    offset = 0
-                    while offset + self._INOTIFY_EVENT.size <= len(data):
-                        watch, mask, _cookie, name_length = (
-                            self._INOTIFY_EVENT.unpack_from(data, offset)
-                        )
-                        offset += self._INOTIFY_EVENT.size
-                        name_bytes = data[offset:offset + name_length]
-                        offset += name_length
-                        name = os.fsdecode(name_bytes.split(b"\0", 1)[0])
-                        if (
-                            mask & self._IN_Q_OVERFLOW
-                            or watch == self._file_watch
-                            or watch in self._sidecar_watches
-                            or (
-                                watch == self._directory_watch
-                                and (
-                                    not name
-                                    or name in self._watched_directory_names
-                                )
-                            )
-                        ):
-                            self._violated = True
         if not self._sidecar_bindings_match():
             self._violated = True
         if self._violated:
             raise FileIntegrityError("legacy SQLite source changed")
+
+    def assert_quiet(self) -> None:
+        if self._darwin_guard is not None:
+            self._darwin_guard.assert_quiet()
+        file_changed, directory_changed, directory_names = (
+            self._drain_mutation_events()
+        )
+        if file_changed or directory_changed or directory_names:
+            self._violated = True
+        if not self._sidecar_bindings_match():
+            self._violated = True
+        if self._violated:
+            raise FileIntegrityError("legacy SQLite source changed")
+
+    def _drain_mutation_events(self) -> tuple[bool, bool, set[str]]:
+        file_changed = False
+        directory_changed = False
+        directory_names: set[str] = set()
+        if self._darwin_guard is not None:
+            watcher = self._darwin_directory_watcher
+            if watcher is None:
+                return True, True, directory_names
+            try:
+                for event in watcher.control(None, 32, 0):
+                    if int(event.ident) == self._directory_descriptor:
+                        directory_changed = True
+                    else:
+                        file_changed = True
+            except OSError:
+                return True, True, directory_names
+            return file_changed, directory_changed, directory_names
+        descriptor = self._inotify_descriptor
+        if descriptor < 0:
+            return True, True, directory_names
+        while True:
+            try:
+                data = os.read(descriptor, 64 * 1024)
+            except BlockingIOError:
+                break
+            except OSError:
+                return True, True, directory_names
+            if not data:
+                return True, True, directory_names
+            offset = 0
+            while offset + self._INOTIFY_EVENT.size <= len(data):
+                watch, mask, _cookie, name_length = (
+                    self._INOTIFY_EVENT.unpack_from(data, offset)
+                )
+                offset += self._INOTIFY_EVENT.size
+                name_bytes = data[offset:offset + name_length]
+                offset += name_length
+                name = os.fsdecode(name_bytes.split(b"\0", 1)[0])
+                if mask & self._IN_Q_OVERFLOW:
+                    file_changed = True
+                elif watch == self._file_watch or watch in self._sidecar_watches:
+                    file_changed = True
+                elif watch == self._directory_watch and (
+                    not name or name in self._watched_directory_names
+                ):
+                    directory_changed = True
+                    if name:
+                        directory_names.add(name)
+        return file_changed, directory_changed, directory_names
 
     def _open_sidecar_binding(
             self,
@@ -831,20 +915,78 @@ class _LegacySQLiteMutationGuard:
             os.close(descriptor)
             raise
 
-    def _register_sidecar_watch(self, name: str, *, descriptor: int) -> None:
+    def _prepare_sidecar_bindings_before_monitoring(self) -> None:
+        created = False
+        for name in self._sidecar_names:
+            binding = self._open_sidecar_binding(name)
+            if binding is None:
+                flags = (
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_CLOEXEC", 0)
+                )
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                try:
+                    descriptor = os.open(
+                        name,
+                        flags,
+                        0o600,
+                        dir_fd=self._directory_descriptor,
+                    )
+                except FileExistsError:
+                    binding = self._open_sidecar_binding(name)
+                    if binding is None:
+                        raise FileIntegrityError(
+                            "legacy SQLite sidecar identity changed"
+                        )
+                except OSError as exc:
+                    raise FileIntegrityError(
+                        "legacy SQLite sidecar could not be reserved"
+                    ) from exc
+                else:
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    binding = self._open_sidecar_binding(name)
+                    if binding is None:
+                        raise FileIntegrityError(
+                            "legacy SQLite sidecar reservation disappeared"
+                        )
+                    created = True
+            self._sidecar_bindings[name] = binding
+        if created:
+            try:
+                os.fsync(self._directory_descriptor)
+            except OSError as exc:
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar reservation could not be synchronized"
+                ) from exc
+        self._sidecars_prepared = True
+
+    def _register_sidecar_watch(
+            self,
+            name: str,
+            *,
+            descriptor: int,
+            watch_writes: bool,
+    ) -> None:
         if self._darwin_directory_watcher is not None:
             flags = (
                 select_module.KQ_NOTE_DELETE
                 | select_module.KQ_NOTE_RENAME
                 | select_module.KQ_NOTE_LINK
                 | select_module.KQ_NOTE_REVOKE
-                | select_module.KQ_NOTE_ATTRIB
             )
-            if name.endswith("-wal"):
-                flags |= (
-                    select_module.KQ_NOTE_WRITE
-                    | select_module.KQ_NOTE_EXTEND
-                )
+            if watch_writes:
+                flags |= select_module.KQ_NOTE_ATTRIB
+                if name.endswith("-wal"):
+                    flags |= (
+                        select_module.KQ_NOTE_WRITE
+                        | select_module.KQ_NOTE_EXTEND
+                    )
             self._darwin_directory_watcher.control(
                 [
                     select_module.kevent(
@@ -867,7 +1009,7 @@ class _LegacySQLiteMutationGuard:
                 "legacy SQLite sidecar mutation monitoring is unavailable"
             )
         mask = self._IN_ATTRIB | self._IN_DELETE_SELF | self._IN_MOVE_SELF
-        if name.endswith("-wal"):
+        if name.endswith("-wal") and watch_writes:
             mask |= self._IN_MODIFY
         watch = inotify_add_watch(
             self._inotify_descriptor,
@@ -882,10 +1024,12 @@ class _LegacySQLiteMutationGuard:
         self._sidecar_watches.add(watch)
 
     def _sidecar_bindings_match(self) -> bool:
-        if not self._sidecars_bound:
+        if not self._sidecars_prepared:
             return True
         for name, binding in self._sidecar_bindings.items():
             if binding is None:
+                if not self._sidecars_bound:
+                    continue
                 try:
                     os.stat(
                         name,
@@ -897,34 +1041,41 @@ class _LegacySQLiteMutationGuard:
                 except OSError:
                     return False
                 return False
-            descriptor, snapshot = binding
-            try:
-                descriptor_info = os.fstat(descriptor)
-                path_info = os.stat(
-                    name,
-                    dir_fd=self._directory_descriptor,
-                    follow_symlinks=False,
-                )
-            except OSError:
-                return False
-            if (
-                not stat.S_ISREG(descriptor_info.st_mode)
-                or not stat.S_ISREG(path_info.st_mode)
-                or (
-                    descriptor_info.st_dev,
-                    descriptor_info.st_ino,
-                    descriptor_info.st_nlink,
-                )
-                != snapshot
-                or (
-                    path_info.st_dev,
-                    path_info.st_ino,
-                    path_info.st_nlink,
-                )
-                != snapshot
-            ):
+            if not self._sidecar_binding_matches(name, binding):
                 return False
         return True
+
+    def _sidecar_binding_matches(
+            self,
+            name: str,
+            binding: tuple[int, tuple[int, int, int]],
+    ) -> bool:
+        descriptor, snapshot = binding
+        try:
+            descriptor_info = os.fstat(descriptor)
+            path_info = os.stat(
+                name,
+                dir_fd=self._directory_descriptor,
+                follow_symlinks=False,
+            )
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(descriptor_info.st_mode)
+            and stat.S_ISREG(path_info.st_mode)
+            and (
+                descriptor_info.st_dev,
+                descriptor_info.st_ino,
+                descriptor_info.st_nlink,
+            )
+            == snapshot
+            and (
+                path_info.st_dev,
+                path_info.st_ino,
+                path_info.st_nlink,
+            )
+            == snapshot
+        )
 
     def close(self) -> None:
         if self._darwin_directory_watcher is not None:
