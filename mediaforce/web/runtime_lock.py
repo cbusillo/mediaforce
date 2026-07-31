@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 import ctypes
@@ -538,6 +538,17 @@ class LegacySQLiteMigrationSource:
 
     def assert_connection_bound(self, connection: object) -> None:
         self.assert_stable()
+
+    def cleanup_snapshot(self) -> dict[str, dict[str, object]]:
+        self.assert_stable()
+        try:
+            snapshot = self._mutation_guard.cleanup_snapshot()
+        except FileIntegrityError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite sidecar identity changed before cleanup"
+            ) from exc
+        self.assert_stable()
+        return snapshot
         try:
             rows = connection.execute("PRAGMA database_list").fetchall()
             main_paths = [
@@ -558,9 +569,22 @@ class LegacySQLiteMigrationSource:
             )
         self.assert_stable()
 
-    def discard_after_publish(self) -> None:
+    def discard_after_publish(
+            self,
+            *,
+            before_remove: Callable[[], None],
+    ) -> None:
         self.assert_stable()
+        before_remove()
+        try:
+            os.unlink(self.path.name, dir_fd=self._directory_descriptor)
+            os.fsync(self._directory_descriptor)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source cleanup failed after publication"
+            ) from exc
         for suffix in ("-wal", "-shm", "-journal"):
+            before_remove()
             try:
                 os.unlink(
                     f"{self.path.name}{suffix}",
@@ -578,13 +602,13 @@ class LegacySQLiteMigrationSource:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite source cleanup could not be synchronized"
             ) from exc
-        try:
-            os.unlink(self.path.name, dir_fd=self._directory_descriptor)
-            os.fsync(self._directory_descriptor)
-        except OSError as exc:
-            raise MediaforceRuntimeBusyError(
-                "Legacy SQLite source cleanup failed after publication"
-            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacySQLiteSidecarBinding:
+    descriptor: int
+    identity: tuple[int, int, int]
+    created_snapshot: tuple[int, int, int, int, int, int, int, int] | None
 
 
 class _LegacySQLiteMutationGuard:
@@ -625,7 +649,7 @@ class _LegacySQLiteMutationGuard:
         }
         self._sidecar_bindings: dict[
             str,
-            tuple[int, tuple[int, int, int]] | None,
+            _LegacySQLiteSidecarBinding | None,
         ] = {}
         self._sidecars_prepared = False
         self._sidecars_bound = False
@@ -633,8 +657,14 @@ class _LegacySQLiteMutationGuard:
         try:
             self._prepare_sidecar_bindings_before_monitoring()
             self._initialize_monitoring(file_descriptor)
-        except BaseException:
-            self.close()
+        except BaseException as exc:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                exc.add_note(
+                    "Legacy SQLite sidecar reservation rollback also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
             raise
 
     def _initialize_monitoring(self, file_descriptor: int) -> None:
@@ -675,7 +705,7 @@ class _LegacySQLiteMutationGuard:
                     )
                 self._register_sidecar_watch(
                     name,
-                    descriptor=binding[0],
+                    descriptor=binding.descriptor,
                     watch_writes=False,
                 )
             self.assert_quiet()
@@ -744,7 +774,7 @@ class _LegacySQLiteMutationGuard:
                 )
             self._register_sidecar_watch(
                 name,
-                descriptor=binding[0],
+                descriptor=binding.descriptor,
                 watch_writes=False,
             )
         self.assert_quiet()
@@ -775,7 +805,7 @@ class _LegacySQLiteMutationGuard:
                 continue
             self._register_sidecar_watch(
                 name,
-                descriptor=binding[0],
+                descriptor=binding.descriptor,
                 watch_writes=True,
             )
         later_file_changed, later_directory_changed, later_directory_names = (
@@ -805,6 +835,38 @@ class _LegacySQLiteMutationGuard:
             self._violated = True
         if self._violated:
             raise FileIntegrityError("legacy SQLite source changed")
+
+    def cleanup_snapshot(self) -> dict[str, dict[str, object]]:
+        if not self._sidecars_bound:
+            raise FileIntegrityError(
+                "legacy SQLite sidecars were not bound for cleanup"
+            )
+        self.assert_quiet()
+        snapshot: dict[str, dict[str, object]] = {}
+        for suffix, name in zip(
+                ("-wal", "-shm", "-journal"),
+                self._sidecar_names,
+                strict=True,
+        ):
+            binding = self._sidecar_bindings.get(name)
+            if binding is None or not self._sidecar_binding_matches(name, binding):
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar identity changed before cleanup"
+                )
+            info = os.fstat(binding.descriptor)
+            snapshot[suffix] = {
+                "device": info.st_dev,
+                "inode": info.st_ino,
+                "size": info.st_size,
+                "link_count": info.st_nlink,
+                "mtime_ns": info.st_mtime_ns,
+                "ctime_ns": info.st_ctime_ns,
+                "uid": info.st_uid,
+                "mode": stat.S_IMODE(info.st_mode),
+                "guard_created": binding.created_snapshot is not None,
+            }
+        self.assert_quiet()
+        return snapshot
 
     def _drain_mutation_events(self) -> tuple[bool, bool, set[str]]:
         file_changed = False
@@ -859,7 +921,9 @@ class _LegacySQLiteMutationGuard:
     def _open_sidecar_binding(
             self,
             name: str,
-    ) -> tuple[int, tuple[int, int, int]] | None:
+            *,
+            created: bool = False,
+    ) -> _LegacySQLiteSidecarBinding | None:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -888,32 +952,55 @@ class _LegacySQLiteMutationGuard:
                 "legacy SQLite sidecar identity is unavailable"
             ) from exc
         try:
-            descriptor_info = os.fstat(descriptor)
-            path_info = os.stat(
+            return self._sidecar_binding_from_descriptor(
                 name,
-                dir_fd=self._directory_descriptor,
-                follow_symlinks=False,
+                descriptor=descriptor,
+                created=created,
             )
-            snapshot = (
-                descriptor_info.st_dev,
-                descriptor_info.st_ino,
-                descriptor_info.st_nlink,
-            )
-            if (
-                not stat.S_ISREG(descriptor_info.st_mode)
-                or not stat.S_ISREG(path_info.st_mode)
-                or descriptor_info.st_nlink != 1
-                or path_info.st_nlink != 1
-                or (path_info.st_dev, path_info.st_ino, path_info.st_nlink)
-                != snapshot
-            ):
-                raise FileIntegrityError(
-                    "legacy SQLite sidecar identity is unsafe"
-                )
-            return descriptor, snapshot
         except BaseException:
             os.close(descriptor)
             raise
+
+    def _sidecar_binding_from_descriptor(
+            self,
+            name: str,
+            *,
+            descriptor: int,
+            created: bool,
+    ) -> _LegacySQLiteSidecarBinding:
+        descriptor_info = os.fstat(descriptor)
+        path_info = os.stat(
+            name,
+            dir_fd=self._directory_descriptor,
+            follow_symlinks=False,
+        )
+        snapshot = (
+            descriptor_info.st_dev,
+            descriptor_info.st_ino,
+            descriptor_info.st_nlink,
+        )
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or descriptor_info.st_uid != os.getuid()
+            or path_info.st_uid != os.getuid()
+            or descriptor_info.st_nlink != 1
+            or path_info.st_nlink != 1
+            or (path_info.st_dev, path_info.st_ino, path_info.st_nlink)
+            != snapshot
+        ):
+            raise FileIntegrityError(
+                "legacy SQLite sidecar identity is unsafe"
+            )
+        return _LegacySQLiteSidecarBinding(
+            descriptor=descriptor,
+            identity=snapshot,
+            created_snapshot=(
+                _legacy_sqlite_sidecar_reservation_snapshot(descriptor_info)
+                if created
+                else None
+            ),
+        )
 
     def _prepare_sidecar_bindings_before_monitoring(self) -> None:
         created = False
@@ -948,13 +1035,14 @@ class _LegacySQLiteMutationGuard:
                 else:
                     try:
                         os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
-                    binding = self._open_sidecar_binding(name)
-                    if binding is None:
-                        raise FileIntegrityError(
-                            "legacy SQLite sidecar reservation disappeared"
+                        binding = self._sidecar_binding_from_descriptor(
+                            name,
+                            descriptor=descriptor,
+                            created=True,
                         )
+                    except BaseException:
+                        os.close(descriptor)
+                        raise
                     created = True
             self._sidecar_bindings[name] = binding
         if created:
@@ -1048,11 +1136,10 @@ class _LegacySQLiteMutationGuard:
     def _sidecar_binding_matches(
             self,
             name: str,
-            binding: tuple[int, tuple[int, int, int]],
+            binding: _LegacySQLiteSidecarBinding,
     ) -> bool:
-        descriptor, snapshot = binding
         try:
-            descriptor_info = os.fstat(descriptor)
+            descriptor_info = os.fstat(binding.descriptor)
             path_info = os.stat(
                 name,
                 dir_fd=self._directory_descriptor,
@@ -1068,14 +1155,56 @@ class _LegacySQLiteMutationGuard:
                 descriptor_info.st_ino,
                 descriptor_info.st_nlink,
             )
-            == snapshot
+            == binding.identity
             and (
                 path_info.st_dev,
                 path_info.st_ino,
                 path_info.st_nlink,
             )
-            == snapshot
+            == binding.identity
         )
+
+    def _discard_created_sidecar_reservations(self) -> None:
+        removed = False
+        for name, binding in self._sidecar_bindings.items():
+            if binding is None or binding.created_snapshot is None:
+                continue
+            try:
+                descriptor_info = os.fstat(binding.descriptor)
+                path_info = os.stat(
+                    name,
+                    dir_fd=self._directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar reservation cleanup is unavailable"
+                ) from exc
+            if (
+                _legacy_sqlite_sidecar_reservation_snapshot(descriptor_info)
+                != binding.created_snapshot
+                or _legacy_sqlite_sidecar_reservation_snapshot(path_info)
+                != binding.created_snapshot
+            ):
+                continue
+            try:
+                os.unlink(name, dir_fd=self._directory_descriptor)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar reservation cleanup failed"
+                ) from exc
+            removed = True
+        if removed:
+            try:
+                os.fsync(self._directory_descriptor)
+            except OSError as exc:
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar reservation cleanup could not be synchronized"
+                ) from exc
 
     def close(self) -> None:
         if self._darwin_directory_watcher is not None:
@@ -1087,10 +1216,18 @@ class _LegacySQLiteMutationGuard:
         if self._inotify_descriptor >= 0:
             os.close(self._inotify_descriptor)
             self._inotify_descriptor = -1
-        for binding in self._sidecar_bindings.values():
-            if binding is not None:
-                os.close(binding[0])
-        self._sidecar_bindings.clear()
+        cleanup_error: BaseException | None = None
+        try:
+            self._discard_created_sidecar_reservations()
+        except BaseException as exc:
+            cleanup_error = exc
+        finally:
+            for binding in self._sidecar_bindings.values():
+                if binding is not None:
+                    os.close(binding.descriptor)
+            self._sidecar_bindings.clear()
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -1571,6 +1708,21 @@ def _legacy_sqlite_source_snapshot(
     )
 
 
+def _legacy_sqlite_sidecar_reservation_snapshot(
+        sidecar_info: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        sidecar_info.st_dev,
+        sidecar_info.st_ino,
+        sidecar_info.st_nlink,
+        sidecar_info.st_size,
+        sidecar_info.st_mtime_ns,
+        sidecar_info.st_ctime_ns,
+        sidecar_info.st_uid,
+        stat.S_IMODE(sidecar_info.st_mode),
+    )
+
+
 def _legacy_sqlite_connection_path_for_directory_descriptor(
         directory_descriptor: int,
         *,
@@ -1665,12 +1817,27 @@ def exclusive_legacy_sqlite_migration_source(
         locked_source.assert_stable()
         yield locked_source
     finally:
+        active_error = sys.exception()
+        cleanup_error: BaseException | None = None
         if mutation_guard is not None:
-            mutation_guard.close()
+            try:
+                mutation_guard.close()
+            except BaseException as exc:
+                cleanup_error = exc
         if descriptor >= 0:
             os.close(descriptor)
         if directory_descriptor >= 0:
             os.close(directory_descriptor)
+        if cleanup_error is not None:
+            if active_error is not None:
+                active_error.add_note(
+                    "Legacy SQLite sidecar reservation rollback also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            else:
+                raise MediaforceRuntimeBusyError(
+                    "Legacy SQLite sidecar reservation rollback failed"
+                ) from cleanup_error
 
 
 def _acquire_runtime_namespace_locks(

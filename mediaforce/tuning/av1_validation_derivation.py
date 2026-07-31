@@ -3219,6 +3219,7 @@ def _bind_av1_validation_derivation_artifact_root(
         plan: AV1ValidationDerivationPlan,
         *,
         before_publish: Callable[[], None] | None = None,
+        after_publish: Callable[[], None] | None = None,
 ) -> Path:
     root = _av1_validation_derivation_artifact_root_path(artifact_root, plan)
     _bind_owner_only_directory(
@@ -3230,6 +3231,8 @@ def _bind_av1_validation_derivation_artifact_root(
             plan,
         ),
         before_publish=before_publish,
+        after_publish=after_publish,
+        published_before=plan.authorization.valid_until,
     )
     return stable_absolute_path(root)
 
@@ -3242,6 +3245,7 @@ def _assert_av1_validation_derivation_artifact_root_binding(
     binding = _load_owner_only_directory_binding(
         root,
         expected_kind="artifact_root",
+        published_before=plan.authorization.valid_until,
     )
     if (
         binding["binding_id"] != plan.plan_id
@@ -3312,6 +3316,7 @@ def write_av1_validation_derivation_plan(
         root,
         plan,
         before_publish=before_bind,
+        after_publish=after_publish,
     )
     return bound_root / "plan.json"
 
@@ -3392,6 +3397,7 @@ def write_av1_validation_derivation_attempt(
             disposition="accepted",
             reason_code=None,
             before_publish=before_publish,
+            after_publish=after_publish,
             published_before=published_before,
         )
     return path
@@ -3718,6 +3724,7 @@ def _write_av1_validation_derivation_attempt_publication_marker(
         disposition: Literal["accepted", "rejected"],
         reason_code: str | None,
         before_publish: Callable[[], None] | None = None,
+        after_publish: Callable[[], None] | None = None,
         published_before: str | None = None,
         acceptance_published_before: str | None = None,
 ) -> Path:
@@ -3756,6 +3763,7 @@ def _write_av1_validation_derivation_attempt_publication_marker(
             path,
             canonical_json_bytes(marker_payload),
             before_publish=before_publish,
+            after_publish=after_publish,
             published_before=published_before,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
@@ -6878,6 +6886,8 @@ def _bind_owner_only_directory(
         binding_id: str,
         binding_digest: str,
         before_publish: Callable[[], None] | None = None,
+        after_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> None:
     assert_mediaforce_runtime_lock_held()
     _ensure_owner_only_directory(path)
@@ -6895,6 +6905,8 @@ def _bind_owner_only_directory(
             binding_path,
             canonical_json_bytes(payload),
             before_publish=before_publish,
+            after_publish=after_publish,
+            published_before=published_before,
         )
         _discard_stale_owner_only_binding_temporaries(path)
         return
@@ -6903,6 +6915,7 @@ def _bind_owner_only_directory(
             current, raw = _load_owner_only_json(
                 binding_path,
                 "derivation directory binding",
+                published_before=published_before,
             )
         except AV1ValidationDerivationError:
             raise write_error
@@ -6958,10 +6971,15 @@ def _load_owner_only_directory_binding(
         path: Path,
         *,
         expected_kind: str,
+        published_before: str | None = None,
 ) -> dict[str, Any]:
     _assert_owner_only_directory(path)
     binding_path = path / ".binding"
-    payload, raw = _load_owner_only_json(binding_path, "derivation directory binding")
+    payload, raw = _load_owner_only_json(
+        binding_path,
+        "derivation directory binding",
+        published_before=published_before,
+    )
     _require_exact_keys(payload, {
         "schema",
         "schema_version",

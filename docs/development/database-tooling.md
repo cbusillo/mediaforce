@@ -79,21 +79,34 @@ Mediaforce's SQLite schema.
   rollback-journal paths are created as owner-only empty files and all three
   inode identities are bound. SQLite may initialize those bound inodes while
   acquiring the no-wait source write gate, but any sidecar removal, replacement,
-  relink, or later WAL write fails the transfer. The source is copied through
-  that verified SQLite snapshot while the write gate excludes new commits,
-  preserving committed WAL state without moving sidecar files.
+  relink, or later WAL write fails the transfer. A pre-publication failure
+  removes only reservation inodes that remain byte-empty and metadata-identical
+  to the files the guard created; changed or pre-existing sidecars are never
+  removed. The source is copied through that verified SQLite snapshot while the
+  write gate excludes new commits, preserving committed WAL state without
+  moving sidecar files.
   Before a staging file becomes visible, an owner-only durable `copying` intent
   binds its reserved name, the source inode and parent, and the configured
   destination and parent. After backup, quick-check, and fsync, that intent is
   atomically finalized to `ready` with the staged inode and exact backup bytes.
-  The staged database is then atomically linked into an absent configured
-  destination and its directory is fsynced. Cleanup removes and syncs the bound
-  WAL, SHM, and rollback journal before removing and syncing the legacy main
-  database, so a missing main file proves sidecar cleanup completed. Recovery
-  discards only an intent-bound partial stage, or—after publication—requires a
-  fresh gated SQLite backup to match the exact staged bytes before completing
-  source/staging cleanup and intent removal. Parent replacement, incomplete
-  cleanup, metadata-only divergence, or any other ambiguous state fails closed.
+  The configured destination parent is then retained by descriptor. Publication
+  links the staging inode through that descriptor, fsyncs it, validates the
+  exact bytes through the platform-pinned directory path, and atomically advances
+  the intent to `cleaning` with the exact identity, size, timestamps, ownership,
+  mode, and guard-origin flag for every bound source sidecar. The configured
+  parent is rechecked before every source removal. A destination-parent swap
+  therefore rolls back publication or stops cleanup before the legacy main is
+  retired. Cleanup removes and syncs the legacy main first, then removes and
+  syncs WAL, SHM, and rollback-journal paths. A missing main file therefore
+  proves cleanup started. Recovery preflights every remaining sidecar against
+  the `cleaning` manifest before deleting any of them, so a replacement is
+  preserved and fails closed rather than being mistaken for an orphan. Recovery
+  discards only an intent-bound partial stage; after publication it requires a
+  fresh gated backup while the main still exists, or the exact descriptor-bound
+  destination plus sidecar manifest once the main has been retired, before
+  completing source/staging cleanup and intent removal. Parent replacement,
+  incomplete cleanup, metadata-only divergence, or any other ambiguous state
+  fails closed.
   Startup reserves the published destination only after migration or recovery
   returns.
 - SQLite URLs use URI modes explicitly: `rwc` for first-use creation, `rw` for

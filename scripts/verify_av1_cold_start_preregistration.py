@@ -102,6 +102,7 @@ def _assert_preregistration_import_tree_clean(
                         "GIT_CONFIG_NOSYSTEM": "1",
                         "GIT_NO_REPLACE_OBJECTS": "1",
                         "GIT_OPTIONAL_LOCKS": "0",
+                        "GIT_WORK_TREE": root,
                         "HOME": root,
                         "LANG": "C",
                         "LC_ALL": "C",
@@ -257,22 +258,44 @@ def _assert_preregistration_import_tree_clean(
             stdlib_directory,
             bootstrap_os.path.join(stdlib_directory, "lib-dynload"),
         ]
-        virtual_environment = bootstrap_os.environ.get("VIRTUAL_ENV")
-        for prefix in (
-            virtual_environment,
-            bootstrap_sys.prefix,
-            bootstrap_sys.base_prefix,
-        ):
-            if not prefix:
-                continue
-            trusted_paths.append(
-                bootstrap_os.path.join(
-                    bootstrap_os.path.realpath(prefix),
-                    "lib",
-                    version_directory,
-                    "site-packages",
-                )
+        expected_virtual_environment = bootstrap_os.path.realpath(
+            bootstrap_os.path.join(root, ".venv")
+        )
+        declared_virtual_environment = bootstrap_os.environ.get("VIRTUAL_ENV")
+        executable_path = bootstrap_os.path.abspath(bootstrap_sys.executable)
+        expected_executable_directory = bootstrap_os.path.join(
+            expected_virtual_environment,
+            "bin",
+        )
+        try:
+            executable_is_canonical = (
+                bootstrap_os.path.commonpath((
+                    executable_path,
+                    expected_executable_directory,
+                ))
+                == expected_executable_directory
             )
+        except ValueError:
+            executable_is_canonical = False
+        if (
+            not executable_is_canonical
+            or (
+                declared_virtual_environment is not None
+                and bootstrap_os.path.realpath(declared_virtual_environment)
+                != expected_virtual_environment
+            )
+        ):
+            raise RuntimeError(
+                "AV1 preregistration runner requires the canonical repository virtual environment"
+            )
+        trusted_paths.append(
+            bootstrap_os.path.join(
+                expected_virtual_environment,
+                "lib",
+                version_directory,
+                "site-packages",
+            )
+        )
         normalized_paths = []
         for candidate in trusted_paths:
             normalized = bootstrap_os.path.realpath(candidate)

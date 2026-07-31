@@ -3028,6 +3028,27 @@ def _recover_interrupted_derivation_state(
         record.assignment_id: record
         for record in records
     }
+
+    def assert_terminal_intent_matches_attempt(
+            terminal_intent: AV1ValidationDerivationTerminalRecord,
+            attempt: AV1ValidationDerivationAttempt,
+    ) -> None:
+        if (
+            terminal_intent.plan_id != plan.plan_id
+            or terminal_intent.authorization_id
+            != plan.authorization.authorization_id
+            or terminal_intent.attempt_id != attempt.attempt_id
+            or terminal_intent.attempt_payload_sha256 != attempt.payload_sha256
+            or terminal_intent.assignment_id != attempt.assignment_id
+            or terminal_intent.cell_plan_id != attempt.cell_plan_id
+            or terminal_intent.ordinal != attempt.ordinal
+            or terminal_intent.started_at != attempt.started_at
+            or terminal_intent.completed_at != attempt.completed_at
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation terminal intent does not match its attempt"
+            )
+
     late_terminal_intents = [
         intent
         for intent in terminal_intents
@@ -3056,16 +3077,24 @@ def _recover_interrupted_derivation_state(
             attempt,
             published_before=plan.authorization.valid_until,
         )
-        rollback_late_av1_validation_derivation_terminal_intent(
-            terminal_intents_directory,
-            late_intent,
-            published_before=plan.authorization.valid_until,
+        assert_terminal_intent_matches_attempt(late_intent, attempt)
+        _assert_observed_terminal_intent_recovery_supported(
+            plan=plan,
+            artifact_root=artifact_root,
+            attempt=attempt,
+            terminal_intent=late_intent,
+            attempts=attempts,
         )
         terminal = build_av1_validation_derivation_terminal_record(
             plan=plan,
             partition=partition,
             attempt=attempt,
             review_failure_reason_code="authorization_expired",
+        )
+        rollback_late_av1_validation_derivation_terminal_intent(
+            terminal_intents_directory,
+            late_intent,
+            published_before=plan.authorization.valid_until,
         )
         ensure_av1_validation_derivation_terminal_intent(
             terminal_intents_directory,
@@ -3132,19 +3161,11 @@ def _recover_interrupted_derivation_state(
     ] = []
     for terminal_intent in terminal_intents:
         attempt = attempts_by_assignment.get(terminal_intent.assignment_id)
-        if (
-            attempt is None
-            or terminal_intent.plan_id != plan.plan_id
-            or terminal_intent.authorization_id
-            != plan.authorization.authorization_id
-            or terminal_intent.attempt_id != attempt.attempt_id
-            or terminal_intent.attempt_payload_sha256 != attempt.payload_sha256
-            or terminal_intent.cell_plan_id != attempt.cell_plan_id
-            or terminal_intent.ordinal != attempt.ordinal
-        ):
+        if attempt is None:
             raise AV1ValidationDerivationError(
                 "AV1 derivation terminal intent does not match its attempt"
             )
+        assert_terminal_intent_matches_attempt(terminal_intent, attempt)
         terminal_record = records_by_assignment.get(
             terminal_intent.assignment_id
         )
@@ -3221,6 +3242,7 @@ def _recover_interrupted_derivation_state(
         )
         return True
     interrupted_verdicts: list[AV1ValidationDerivationAttempt] = []
+    expired_frozen_verdicts: list[AV1ValidationDerivationAttempt] = []
     for claim in load_av1_validation_derivation_verdict_claims(
         artifact_root / "verdict-claims",
         plan=plan,
@@ -3240,10 +3262,28 @@ def _recover_interrupted_derivation_state(
         )
         if verdict_intent is None:
             interrupted_verdicts.append(attempt)
-    if len(interrupted_verdicts) > 1:
+        elif _authorization_expired(plan, completed_at):
+            expired_frozen_verdicts.append(attempt)
+    if len(interrupted_verdicts) + len(expired_frozen_verdicts) > 1:
         raise AV1ValidationDerivationError(
             "AV1 derivation has multiple interrupted verdict claims"
         )
+    if expired_frozen_verdicts:
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=plan,
+            partition=partition,
+            attempt=expired_frozen_verdicts[0],
+            review_failure_reason_code="authorization_expired",
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            artifact_root / "terminal-intents",
+            terminal,
+        )
+        ensure_av1_validation_derivation_terminal_record(
+            terminal_records_directory,
+            terminal,
+        )
+        return True
     if interrupted_verdicts:
         terminal = build_av1_validation_derivation_terminal_record(
             plan=plan,

@@ -212,8 +212,11 @@ its original `authorized_at`, re-hashes all twenty-four derivation sources, and
 requires the rebuilt commitments to reproduce the frozen plan exactly. When a
 binding is absent, the full authorization, repository, source-quiet, and
 cumulative-capacity gate runs after the binding temporary is fully written and
-fsynced and immediately before its exclusive rename. An existing exact binding
-is validated and re-fsynced without creating a new authorization. Retrying plan
+fsynced and immediately before its exclusive rename. The renamed binding's
+kernel change time must also remain strictly before the plan authorization
+deadline, and the live source/repository identity is rechecked after the rename;
+a boundary-crossing or drifted binding is rolled back. An existing exact binding
+is validated for the same deadline and re-fsynced without creating a new authorization. Retrying plan
 creation therefore requires
 the selected media to remain present and byte-identical. The runtime clock is
 sampled only for the first successful plan payload. A binding
@@ -255,12 +258,16 @@ index states fail closed instead of allowing live implementation bytes to
 diverge from the reviewed commit. The canonical runner re-executes itself with
 CPython isolated/no-site startup before importing `argparse`, dependencies, or
 `mediaforce`. A stdlib-only bootstrap invokes fixed `/usr/bin/git` through a
-sanitized environment and refuses modified, exceptional-index, untracked, or
-ignored state anywhere under `mediaforce/` or `scripts/`; it also rejects
+sanitized environment with `GIT_WORK_TREE` pinned to the canonical checkout, so
+repo-local `core.worktree` cannot redirect the proof. It refuses modified,
+exceptional-index, untracked, or ignored state anywhere under `mediaforce/` or
+`scripts/`; it also rejects
 repository bytecode caches and disables bytecode writes. The bootstrap removes
 the repository and script directories from normal module search, adds only
-trusted interpreter and active-environment paths, and explicitly binds the
-canonical `mediaforce` package directory. An ignored `scripts/argparse.py`,
+trusted interpreter paths plus the canonical checkout's `.venv` site-packages,
+requires both the running interpreter path and any `VIRTUAL_ENV` declaration to
+match that environment, and explicitly binds the canonical `mediaforce` package
+directory. An ignored `scripts/argparse.py`,
 Python source, bytecode, native extension, or package substitution therefore
 cannot execute before the exact-object authority proof. Operators must remove
 those artifacts before invoking this security-sensitive runner.
@@ -337,7 +344,12 @@ without a binding is corruption. A second recovery recognizes the exact
 rejected terminal-intent/record pair as complete and makes no writes. If an
 observed terminal intent was renamed after authorization expiry but its record
 was never published, recovery rolls back that incomplete intent and replaces it
-with an `authorization_expired` terminal pair. A late observed record or a
+with an `authorization_expired` terminal pair. If interruption occurs after the
+rollback unlink, the still-frozen verdict intent is terminalized as
+`authorization_expired` on the next recovery once the window is expired. Before
+rollback, the late intent must match the exact plan, authorization, attempt,
+payload digest, cell, ordinal, and attempt chronology and must remain backed by
+its immutable verdict claim and intent. A late observed record or a
 conflicting pair still fails closed. A
 fresh plan, favorable `review_pending` attempt, or candidate proposal rechecks
 the live authorization immediately before its exclusive rename, then verifies

@@ -1963,6 +1963,155 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
                 self.assertFalse(sentinel.exists())
 
+    def test_preregistration_bootstrap_pins_canonical_git_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            scripts_directory = repository / "scripts"
+            mediaforce_directory = repository / "mediaforce"
+            scripts_directory.mkdir()
+            mediaforce_directory.mkdir()
+            runner = scripts_directory / Path(
+                verify_av1_cold_start_preregistration.__file__
+            ).name
+            shutil.copyfile(
+                Path(verify_av1_cold_start_preregistration.__file__),
+                runner,
+            )
+            shadow_module = scripts_directory / "argparse.py"
+            shadow_module.write_text("VALUE = 'clean'\n", encoding="utf-8")
+            (mediaforce_directory / "__init__.py").write_text(
+                '"""fixture"""\n',
+                encoding="utf-8",
+            )
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            for arguments in (
+                ("init", "-q"),
+                ("config", "user.name", "Mediaforce Test"),
+                (
+                    "config",
+                    "user.email",
+                    "mediaforce-test@example.invalid",
+                ),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "bootstrap fixture"),
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", *arguments],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+            alternate_worktree = repository / "alternate-worktree"
+            shutil.copytree(scripts_directory, alternate_worktree / "scripts")
+            shutil.copytree(mediaforce_directory, alternate_worktree / "mediaforce")
+            subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "config",
+                    "core.worktree",
+                    str(alternate_worktree),
+                ],
+                cwd=repository,
+                env=git_environment,
+                check=True,
+            )
+            shadow_module.write_text("VALUE = 'modified'\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                [sys.executable, runner, "--help"],
+                cwd=repository,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "refuses modified import state",
+                completed.stderr,
+            )
+
+    def test_preregistration_bootstrap_rejects_hostile_virtual_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            scripts_directory = repository / "scripts"
+            mediaforce_directory = repository / "mediaforce"
+            scripts_directory.mkdir()
+            mediaforce_directory.mkdir()
+            runner = scripts_directory / Path(
+                verify_av1_cold_start_preregistration.__file__
+            ).name
+            shutil.copyfile(
+                Path(verify_av1_cold_start_preregistration.__file__),
+                runner,
+            )
+            (mediaforce_directory / "__init__.py").write_text(
+                "import sqlalchemy\n",
+                encoding="utf-8",
+            )
+            git_environment = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            }
+            for arguments in (
+                ("init", "-q"),
+                ("config", "user.name", "Mediaforce Test"),
+                (
+                    "config",
+                    "user.email",
+                    "mediaforce-test@example.invalid",
+                ),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "bootstrap fixture"),
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", *arguments],
+                    cwd=repository,
+                    env=git_environment,
+                    check=True,
+                )
+            canonical_python = repository / ".venv" / "bin" / "python3"
+            canonical_python.parent.mkdir(parents=True)
+            canonical_python.symlink_to(sys.executable)
+            hostile_environment = repository / "hostile-venv"
+            hostile_package = (
+                hostile_environment
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+                / "sqlalchemy"
+            )
+            hostile_package.mkdir(parents=True)
+            sentinel = repository / "hostile-dependency-imported"
+            (hostile_package / "__init__.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('imported')\n",
+                encoding="utf-8",
+            )
+            child_environment = dict(os.environ)
+            child_environment["VIRTUAL_ENV"] = str(hostile_environment)
+
+            completed = subprocess.run(
+                [canonical_python, runner, "--help"],
+                cwd=repository,
+                env=child_environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn(
+                "requires the canonical repository virtual environment",
+                completed.stderr,
+            )
+            self.assertFalse(sentinel.exists())
+
     def test_derivation_review_checks_environment_before_claim(self) -> None:
         args = SimpleNamespace(
             action="record-derivation-review",
@@ -2581,6 +2730,50 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
         self.assertFalse(attempt_path.exists())
 
+    def test_attempt_acceptance_marker_post_publish_identity_failure_removes_marker(
+            self,
+    ) -> None:
+        attempts_directory = (
+            self.runtime_config.paths.web_state_dir / "drifted-attempt-marker"
+        )
+        attempt = self._review_pending_attempt()
+        after_publish = unittest.mock.Mock(side_effect=(
+            None,
+            AV1ValidationDerivationError("repository drift"),
+        ))
+
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "repository drift",
+        ):
+            write_av1_validation_derivation_attempt(
+                attempts_directory,
+                attempt,
+                after_publish=after_publish,
+                published_before=self.plan.authorization.valid_until,
+            )
+
+        self.assertEqual(after_publish.call_count, 2)
+        self.assertTrue(
+            (attempts_directory / f"{attempt.assignment_id}.json").is_file()
+        )
+        self.assertFalse(
+            (
+                attempts_directory
+                / ".publication"
+                / f"{attempt.assignment_id}.accepted"
+            ).exists()
+        )
+        self.assertEqual(
+            load_av1_validation_derivation_attempt_publication_state(
+                attempts_directory,
+                attempt,
+                published_before=self.plan.authorization.valid_until,
+                require_durable=True,
+            ).disposition,
+            "unsealed",
+        )
+
     def test_authoritative_attempt_load_requires_parent_durability(self) -> None:
         attempts_directory = self.runtime_config.paths.web_state_dir / "durable-attempts"
         attempt = self._review_pending_attempt()
@@ -2867,6 +3060,68 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 events[-3:],
                 ["binding_fsync", "gate", "rename:.binding"],
             )
+
+    def test_interrupted_plan_retry_rolls_back_late_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            root.mkdir(mode=0o700)
+            artifact_root = root / self.plan.partition_id
+            artifact_root.mkdir(mode=0o700)
+            plan_path = artifact_root / "plan.json"
+            _write_owner_only(
+                plan_path,
+                canonical_json_bytes(self.plan.to_payload()),
+            )
+            plan_inode = plan_path.stat().st_ino
+
+            with (
+                patch(
+                    "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                    side_effect=lambda info: (
+                        info.st_ctime_ns
+                        if info.st_ino == plan_inode
+                        else 10**30
+                    ),
+                ),
+                self.assertRaises(AV1ValidationDerivationPublicationDeadlineError),
+            ):
+                write_av1_validation_derivation_plan(
+                    artifact_root,
+                    self.plan,
+                    before_bind=lambda: None,
+                )
+
+            self.assertFalse((artifact_root / ".binding").exists())
+
+    def test_interrupted_plan_retry_rolls_back_drifted_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            root.mkdir(mode=0o700)
+            artifact_root = root / self.plan.partition_id
+            artifact_root.mkdir(mode=0o700)
+            _write_owner_only(
+                artifact_root / "plan.json",
+                canonical_json_bytes(self.plan.to_payload()),
+            )
+            after_publish = unittest.mock.Mock(
+                side_effect=AV1ValidationDerivationError(
+                    "repository drift"
+                )
+            )
+
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "repository drift",
+            ):
+                write_av1_validation_derivation_plan(
+                    artifact_root,
+                    self.plan,
+                    after_publish=after_publish,
+                    before_bind=lambda: None,
+                )
+
+            after_publish.assert_called_once_with()
+            self.assertFalse((artifact_root / ".binding").exists())
 
     def test_assignment_claim_loader_marks_post_deadline_publication(self) -> None:
         claims_directory = self.runtime_artifact_root / "attempts"
@@ -6489,6 +6744,42 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         ))
         self.assertFalse(records_dir.exists())
 
+    def test_expired_frozen_verdict_intent_is_terminalized(self) -> None:
+        attempt = self._review_pending_attempt()
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=[],
+            evidence_ids=[],
+            moment_indexes=[],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+
+        self.assertTrue(_recover_interrupted_derivation_state(
+            plan=self.plan,
+            partition=self.partition,
+            artifact_root=self.runtime_artifact_root,
+            attempts_directory=attempts_dir,
+            terminal_records_directory=records_dir,
+            completed_at="2026-08-01T00:00:01Z",
+        ))
+
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "authorization_expired")
+        self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+
     def test_interrupted_terminal_publication_is_completed_from_intent(self) -> None:
         attempt = self._review_pending_attempt()
         attempts_dir = self.runtime_artifact_root / "attempts"
@@ -6619,6 +6910,93 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(len(recovered), 1)
         self.assertEqual(recovered[0].status, "failed")
         self.assertEqual(recovered[0].reason_code, "authorization_expired")
+
+    def test_late_terminal_intent_is_validated_before_rollback(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        stale_attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T00:59:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="review_pending",
+            calibration_payload=_calibration_payload(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                compatibility=_compatibility(assignment),
+            ),
+        )
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_verdict_claim(
+            self.runtime_artifact_root / "verdict-claims",
+            plan=self.plan,
+            attempt=attempt,
+            claimed_at="2026-07-28T01:06:00Z",
+        )
+        resolve_av1_validation_derivation_verdict_intent(
+            self.runtime_artifact_root / "verdict-intents",
+            plan=self.plan,
+            attempt=attempt,
+            verdict="approved",
+            concern_tags=[],
+            evidence_ids=[],
+            moment_indexes=[],
+            recorded_at="2026-07-28T01:06:00Z",
+        )
+        stale_terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=stale_attempt,
+            observation=_observation(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                bitrate=1_000_000,
+                verdict="acceptable",
+            ),
+        )
+        terminal_intents_directory = (
+            self.runtime_artifact_root / "terminal-intents"
+        )
+        ensure_av1_validation_derivation_terminal_intent(
+            terminal_intents_directory,
+            stale_terminal,
+        )
+        terminal_intent_path = (
+            terminal_intents_directory
+            / f"{stale_terminal.assignment_id}.json"
+        )
+        terminal_intent_inode = terminal_intent_path.stat().st_ino
+
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                side_effect=lambda info: (
+                    10**30
+                    if info.st_ino == terminal_intent_inode
+                    else info.st_ctime_ns
+                ),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "terminal intent does not match its attempt",
+            ),
+        ):
+            _recover_interrupted_derivation_state(
+                plan=self.plan,
+                partition=self.partition,
+                artifact_root=self.runtime_artifact_root,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                completed_at="2026-08-01T00:00:01Z",
+            )
+
+        self.assertTrue(terminal_intent_path.is_file())
+        self.assertFalse(records_dir.exists())
 
     def test_recovery_rejects_existing_observed_terminal_pair_published_after_expiry(
             self,
