@@ -99,7 +99,11 @@ Mediaforce's SQLite schema.
   retired. Cleanup claims the exact legacy main first with an exclusive rename
   to an identity-derived quarantine name, syncs that namespace transition,
   validates the claimed inode, removes it, and syncs again; WAL, SHM, and the
-  rollback journal follow in the same order. A crash-surviving quarantine entry
+  rollback journal follow in the same order. Live cleanup consumes the durable
+  `cleaning` manifest rather than recapturing current sidecar metadata: every
+  sidecar must still match all recorded fields before its exclusive claim, and
+  only the expected rename-induced ctime change is relaxed afterward. A
+  crash-surviving quarantine entry
   is durable cleanup progress, not an orphan, and recovery validates it against
   the intent before removal. If another inode appears between the final live-name
   check and the claim, cleanup stops with the claimed inode retained in its
@@ -113,8 +117,14 @@ Mediaforce's SQLite schema.
   discards only an intent-bound partial stage; after publication it requires a
   fresh gated backup while the main still exists, or the exact descriptor-bound
   destination plus sidecar manifest once the main has been retired, before
-  completing source/staging cleanup and intent removal. Parent replacement,
-  incomplete cleanup, metadata-only divergence, or any other ambiguous state
+  completing source/staging cleanup and intent removal. The retained source
+  authority rechecks that the main, all three live sidecar names, and every
+  matching retirement quarantine remain absent through the final intent
+  deletion. Version-2 `ready` intents predate the sidecar manifest; if their
+  main file is already retired, recovery preserves and logs any unidentified
+  residual sidecar or quarantine artifact instead of deleting data it cannot
+  authorize. Parent replacement, source recreation, unknown version-3
+  quarantine state, metadata-only divergence, or any other ambiguous state
   fails closed.
   Startup reserves the published destination only after migration or recovery
   returns.

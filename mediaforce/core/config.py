@@ -5,6 +5,7 @@ import errno
 import hashlib
 from importlib import resources
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -26,6 +27,8 @@ from mediaforce.core.file_integrity import (
 )
 from mediaforce.library.library_settings import configured_library_definitions, library_definition_map, \
     library_production_supported
+
+LOGGER = logging.getLogger(__name__)
 
 _SOURCE_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SOURCE_DEFAULT_CONFIG_PATH = _SOURCE_PROJECT_ROOT / "config" / "defaults.toml"
@@ -81,7 +84,10 @@ class _LegacySQLiteMigrationSource(Protocol):
             self,
             *,
             before_remove: Callable[[], None],
+            expected_sidecar_snapshots: dict[str, dict[str, object]],
     ) -> None: ...
+
+    def assert_cleanup_complete(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -594,7 +600,13 @@ def _migrate_legacy_sqlite_database(
 
                     locked_source.discard_after_publish(
                         before_remove=assert_destination_authoritative,
+                        expected_sidecar_snapshots=(
+                            _legacy_sqlite_migration_sidecar_snapshots(
+                                cleaning_intent["source_sidecar_snapshots"]
+                            )
+                        ),
                     )
+                    locked_source.assert_cleanup_complete()
                     destination_binding.assert_file_matches(
                         destination.name,
                         staging_snapshot,
@@ -606,7 +618,7 @@ def _migrate_legacy_sqlite_database(
                         staging_path.name,
                         staging_snapshot,
                     )
-                    locked_source.assert_parent_stable()
+                    locked_source.assert_cleanup_complete()
                     destination_binding.discard_intent(intent_path.name)
         except BaseException as exc:
             if not ready_intent:
@@ -1244,7 +1256,7 @@ def _resume_legacy_sqlite_migration_intent(
                     )
 
                 def finish_migration(
-                        assert_source_parent_stable: Callable[[], None],
+                        assert_source_cleanup_complete: Callable[[], None],
                 ) -> None:
                     destination_binding.assert_file_matches(
                         destination.name,
@@ -1252,13 +1264,14 @@ def _resume_legacy_sqlite_migration_intent(
                         allowed_link_counts=published_link_counts,
                     )
                     destination_binding.assert_database_valid()
-                    assert_source_parent_stable()
+                    assert_source_cleanup_complete()
                     if staging_exists:
                         destination_binding.discard_staging(
                             staging_path.name,
                             staging_snapshot,
                         )
-                        assert_source_parent_stable()
+                        assert_source_cleanup_complete()
+                    assert_source_cleanup_complete()
                     destination_binding.discard_intent(intent_path.name)
 
                 if _path_entry_exists(source):
@@ -1286,9 +1299,17 @@ def _resume_legacy_sqlite_migration_intent(
                             payload = cleaning_payload
                             locked_source.discard_after_publish(
                                 before_remove=assert_destination_authoritative,
+                                expected_sidecar_snapshots=(
+                                    _legacy_sqlite_migration_sidecar_snapshots(
+                                        cleaning_payload[
+                                            "source_sidecar_snapshots"
+                                        ]
+                                    )
+                                ),
                             )
-                        finish_migration(locked_source.assert_parent_stable)
+                        finish_migration(locked_source.assert_cleanup_complete)
                 else:
+                    preserve_unmanifested_sidecars = False
                     if payload.get("phase") == "cleaning":
                         sidecar_snapshots = payload.get(
                             "source_sidecar_snapshots"
@@ -1298,11 +1319,12 @@ def _resume_legacy_sqlite_migration_intent(
                         and payload.get("phase") == "ready"
                     ):
                         sidecar_snapshots = None
+                        preserve_unmanifested_sidecars = True
                     else:
                         raise OSError(
                             "legacy SQLite migration source disappeared before cleanup was authorized"
                         )
-                    _complete_legacy_sqlite_source_cleanup(
+                    retained_artifacts = _complete_legacy_sqlite_source_cleanup(
                         source,
                         expected_parent_identity=payload.get(
                             "source_parent_identity"
@@ -1312,15 +1334,27 @@ def _resume_legacy_sqlite_migration_intent(
                         ),
                         expected_sidecar_snapshots=sidecar_snapshots,
                         before_remove=assert_destination_authoritative,
+                        preserve_unmanifested_sidecars=(
+                            preserve_unmanifested_sidecars
+                        ),
                     )
-
-                    def assert_source_parent_stable() -> None:
-                        _assert_legacy_sqlite_migration_source_parent_stable(
-                            source,
-                            payload.get("source_parent_identity"),
+                    if retained_artifacts:
+                        LOGGER.warning(
+                            "Retained legacy SQLite v2 sidecar artifacts after "
+                            "safe migration: %s",
+                            ", ".join(retained_artifacts),
                         )
 
-                    finish_migration(assert_source_parent_stable)
+                    def assert_source_cleanup_complete() -> None:
+                        _assert_legacy_sqlite_source_cleanup_complete(
+                            source,
+                            expected_parent_identity=payload.get(
+                                "source_parent_identity"
+                            ),
+                            allowed_sidecar_artifacts=retained_artifacts,
+                        )
+
+                    finish_migration(assert_source_cleanup_complete)
             return True
         if not _path_entry_exists(source) or not staging_exists:
             raise OSError(
@@ -1672,7 +1706,8 @@ def _complete_legacy_sqlite_source_cleanup(
         expected_main_snapshot: object,
         expected_sidecar_snapshots: object,
         before_remove: Callable[[], None] | None = None,
-) -> None:
+        preserve_unmanifested_sidecars: bool = False,
+) -> tuple[str, ...]:
     if (
         not isinstance(expected_parent_identity, list)
         or len(expected_parent_identity) != 2
@@ -1758,20 +1793,23 @@ def _complete_legacy_sqlite_source_cleanup(
             before_remove=before_remove,
         )
         assert_parent_stable()
+        retained_artifacts: tuple[str, ...] = ()
         if sidecar_snapshots is None:
-            for suffix in ("-wal", "-shm", "-journal"):
-                assert_parent_stable()
-                name = f"{source.name}{suffix}"
-                if _legacy_sqlite_directory_entry_exists(
-                        directory_descriptor,
-                        name,
-                ) or any(
-                    candidate.startswith(f".{name}.mediaforce-retired-")
-                    for candidate in os.listdir(directory_descriptor)
-                ):
-                    raise OSError(
-                        "legacy SQLite migration source cleanup is incomplete"
+            retained_artifacts = tuple(sorted(
+                candidate
+                for candidate in os.listdir(directory_descriptor)
+                if any(
+                    candidate == f"{source.name}{suffix}"
+                    or candidate.startswith(
+                        f".{source.name}{suffix}.mediaforce-retired-"
                     )
+                    for suffix in ("-wal", "-shm", "-journal")
+                )
+            ))
+            if retained_artifacts and not preserve_unmanifested_sidecars:
+                raise OSError(
+                    "legacy SQLite migration source cleanup is incomplete"
+                )
         else:
             for suffix in ("-wal", "-shm", "-journal"):
                 assert_parent_stable()
@@ -1822,18 +1860,78 @@ def _complete_legacy_sqlite_source_cleanup(
                     before_remove=before_remove,
                 )
                 assert_parent_stable()
-        quarantine_prefixes = tuple(
-            f".{source.name}{suffix}.mediaforce-retired-"
-            for suffix in ("", "-wal", "-shm", "-journal")
-        )
-        if any(
-            candidate.startswith(quarantine_prefixes)
-            for candidate in os.listdir(directory_descriptor)
+        remaining_names = set(os.listdir(directory_descriptor))
+        main_quarantine_prefix = f".{source.name}.mediaforce-retired-"
+        if (
+            source.name in remaining_names
+            or any(
+                candidate.startswith(main_quarantine_prefix)
+                for candidate in remaining_names
+            )
+        ):
+            raise OSError("legacy SQLite migration source cleanup is incomplete")
+        if not preserve_unmanifested_sidecars and any(
+            candidate == f"{source.name}{suffix}"
+            or candidate.startswith(
+                f".{source.name}{suffix}.mediaforce-retired-"
+            )
+            for candidate in remaining_names
+            for suffix in ("-wal", "-shm", "-journal")
         ):
             raise OSError("legacy SQLite migration source cleanup is incomplete")
         assert_parent_stable()
         os.fsync(directory_descriptor)
         assert_parent_stable()
+        return retained_artifacts
+    except FileIntegrityError as exc:
+        raise OSError("legacy SQLite migration source parent is unsafe") from exc
+    finally:
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
+
+
+def _assert_legacy_sqlite_source_cleanup_complete(
+        source: Path,
+        *,
+        expected_parent_identity: object,
+        allowed_sidecar_artifacts: tuple[str, ...],
+) -> None:
+    if (
+        not isinstance(expected_parent_identity, list)
+        or len(expected_parent_identity) != 2
+        or any(type(value) is not int for value in expected_parent_identity)
+    ):
+        raise OSError("legacy SQLite migration source parent identity is invalid")
+    directory_descriptor = -1
+    try:
+        _, directory_descriptor = open_stable_directory(source.parent)
+        directory_info = os.fstat(directory_descriptor)
+        if [directory_info.st_dev, directory_info.st_ino] != expected_parent_identity:
+            raise OSError("legacy SQLite migration source parent changed")
+        names = set(os.listdir(directory_descriptor))
+        main_quarantine_prefix = f".{source.name}.mediaforce-retired-"
+        if (
+            source.name in names
+            or any(name.startswith(main_quarantine_prefix) for name in names)
+        ):
+            raise OSError("legacy SQLite migration source cleanup is incomplete")
+        current_sidecar_artifacts = {
+            name
+            for name in names
+            if any(
+            name == f"{source.name}{suffix}"
+            or name.startswith(
+                f".{source.name}{suffix}.mediaforce-retired-"
+            )
+                for suffix in ("-wal", "-shm", "-journal")
+            )
+        }
+        if current_sidecar_artifacts != set(allowed_sidecar_artifacts):
+            raise OSError("legacy SQLite migration source cleanup is incomplete")
+        _assert_legacy_sqlite_migration_source_parent_stable(
+            source,
+            expected_parent_identity,
+        )
     except FileIntegrityError as exc:
         raise OSError("legacy SQLite migration source parent is unsafe") from exc
     finally:

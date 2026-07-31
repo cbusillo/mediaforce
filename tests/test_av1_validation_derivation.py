@@ -247,6 +247,10 @@ def _run_test_git(repository: Path, *arguments: str) -> str:
             "user.email=mediaforce-test@example.invalid",
             "-c",
             "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "init.templateDir=",
             *arguments,
         ],
         capture_output=True,
@@ -1905,11 +1909,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         for ignored in (False, True):
             with self.subTest(ignored=ignored), tempfile.TemporaryDirectory() as directory:
                 repository = Path(directory)
-                git_environment = {
-                    key: value
-                    for key, value in os.environ.items()
-                    if not key.startswith("GIT_")
-                }
                 scripts_directory = repository / "scripts"
                 scripts_directory.mkdir()
                 runner = scripts_directory / source_runner.name
@@ -1919,43 +1918,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         "scripts/argparse.py\n",
                         encoding="utf-8",
                     )
-                subprocess.run(
-                    ["/usr/bin/git", "init", "-q"],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
-                subprocess.run(
-                    ["/usr/bin/git", "config", "user.name", "Mediaforce Test"],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
-                subprocess.run(
-                    [
-                        "/usr/bin/git",
-                        "config",
-                        "user.email",
-                        "mediaforce-test@example.invalid",
-                    ],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
+                _run_test_git(repository, "init", "-q")
                 paths_to_add = ["scripts"]
                 if ignored:
                     paths_to_add.append(".gitignore")
-                subprocess.run(
-                    ["/usr/bin/git", "add", *paths_to_add],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
-                subprocess.run(
-                    ["/usr/bin/git", "commit", "-qm", "bootstrap fixture"],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
+                _run_test_git(repository, "add", *paths_to_add)
+                _run_test_git(
+                    repository,
+                    "commit",
+                    "-qm",
+                    "bootstrap fixture",
                 )
                 sentinel = repository / "shadow-imported"
                 (scripts_directory / "argparse.py").write_text(
@@ -1999,41 +1971,20 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 '"""fixture"""\n',
                 encoding="utf-8",
             )
-            git_environment = {
-                key: value
-                for key, value in os.environ.items()
-                if not key.startswith("GIT_")
-            }
             for arguments in (
                 ("init", "-q"),
-                ("config", "user.name", "Mediaforce Test"),
-                (
-                    "config",
-                    "user.email",
-                    "mediaforce-test@example.invalid",
-                ),
                 ("add", "mediaforce", "scripts"),
                 ("commit", "-qm", "bootstrap fixture"),
             ):
-                subprocess.run(
-                    ["/usr/bin/git", *arguments],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
+                _run_test_git(repository, *arguments)
             alternate_worktree = repository / "alternate-worktree"
             shutil.copytree(scripts_directory, alternate_worktree / "scripts")
             shutil.copytree(mediaforce_directory, alternate_worktree / "mediaforce")
-            subprocess.run(
-                [
-                    "/usr/bin/git",
-                    "config",
-                    "core.worktree",
-                    str(alternate_worktree),
-                ],
-                cwd=repository,
-                env=git_environment,
-                check=True,
+            _run_test_git(
+                repository,
+                "config",
+                "core.worktree",
+                str(alternate_worktree),
             )
             shadow_module.write_text("VALUE = 'modified'\n", encoding="utf-8")
 
@@ -2051,6 +2002,87 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 completed.stderr,
             )
 
+    def test_preregistration_bootstrap_rejects_transient_git_directory_swap(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            (repository / "scripts").mkdir(parents=True)
+            (repository / "mediaforce").mkdir()
+            (repository / "scripts" / "runner.py").write_text(
+                "VALUE = 'tracked'\n",
+                encoding="utf-8",
+            )
+            (repository / "mediaforce" / "__init__.py").write_text(
+                '"""fixture"""\n',
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "init", "-q")
+            _run_test_git(repository, "add", "mediaforce", "scripts")
+            _run_test_git(
+                repository,
+                "commit",
+                "-qm",
+                "transient authority fixture",
+            )
+            sentinel = Path(directory) / "git-probe-started"
+            swapper = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    (
+                        "import pathlib,sys,time; "
+                        "repository=pathlib.Path(sys.argv[1]); "
+                        "sentinel=pathlib.Path(sys.argv[2]); "
+                        "deadline=time.monotonic()+5; "
+                        "exec('while not sentinel.exists():\\n "
+                        "   assert time.monotonic() < deadline\\n "
+                        "   time.sleep(0.01)'); "
+                        "original=repository/'.git-original'; "
+                        "metadata=repository/'.git'; "
+                        "metadata.rename(original); metadata.mkdir(); "
+                        "time.sleep(0.05); metadata.rmdir(); "
+                        "original.rename(metadata)"
+                    ),
+                    str(repository),
+                    str(sentinel),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            real_execve = os.execve
+
+            def delayed_execve(
+                    path: str,
+                    arguments: tuple[str, ...],
+                    environment: dict[str, str],
+            ) -> None:
+                sentinel.touch()
+                time.sleep(0.3)
+                real_execve(path, arguments, environment)
+
+            try:
+                with (
+                    patch.object(os, "execve", new=delayed_execve),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "detected changed Git metadata",
+                    ),
+                ):
+                    verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                        repository
+                    )
+            finally:
+                try:
+                    _stdout, stderr = swapper.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    swapper.kill()
+                    _stdout, stderr = swapper.communicate()
+                self.assertEqual(swapper.returncode, 0, stderr)
+
     def test_preregistration_bootstrap_rejects_foreign_git_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2067,28 +2099,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     '"""fixture"""\n',
                     encoding="utf-8",
                 )
-            git_environment = {
-                key: value
-                for key, value in os.environ.items()
-                if not key.startswith("GIT_")
-            }
             for arguments in (
                 ("init", "-q"),
-                ("config", "user.name", "Mediaforce Test"),
-                (
-                    "config",
-                    "user.email",
-                    "mediaforce-test@example.invalid",
-                ),
                 ("add", "mediaforce", "scripts"),
                 ("commit", "-qm", "foreign fixture"),
             ):
-                subprocess.run(
-                    ["/usr/bin/git", *arguments],
-                    cwd=foreign_repository,
-                    env=git_environment,
-                    check=True,
-                )
+                _run_test_git(foreign_repository, *arguments)
             (repository / ".git").write_text(
                 f"gitdir: {foreign_repository / '.git'}\n",
                 encoding="utf-8",
@@ -2120,28 +2136,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     '"""fixture"""\n',
                     encoding="utf-8",
                 )
-            git_environment = {
-                key: value
-                for key, value in os.environ.items()
-                if not key.startswith("GIT_")
-            }
             for arguments in (
                 ("init", "-q"),
-                ("config", "user.name", "Mediaforce Test"),
-                (
-                    "config",
-                    "user.email",
-                    "mediaforce-test@example.invalid",
-                ),
                 ("add", "mediaforce", "scripts"),
                 ("commit", "-qm", "foreign fixture"),
             ):
-                subprocess.run(
-                    ["/usr/bin/git", *arguments],
-                    cwd=foreign_repository,
-                    env=git_environment,
-                    check=True,
-                )
+                _run_test_git(foreign_repository, *arguments)
             (repository / ".git").symlink_to(
                 foreign_repository / ".git",
                 target_is_directory=True,
@@ -2172,41 +2172,20 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 '"""fixture"""\n',
                 encoding="utf-8",
             )
-            git_environment = {
-                key: value
-                for key, value in os.environ.items()
-                if not key.startswith("GIT_")
-            }
             for arguments in (
                 ("init", "-q"),
-                ("config", "user.name", "Mediaforce Test"),
-                (
-                    "config",
-                    "user.email",
-                    "mediaforce-test@example.invalid",
-                ),
                 ("add", "mediaforce", "scripts"),
                 ("commit", "-qm", "linked fixture"),
             ):
-                subprocess.run(
-                    ["/usr/bin/git", *arguments],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
-            subprocess.run(
-                [
-                    "/usr/bin/git",
-                    "worktree",
-                    "add",
-                    "--detach",
-                    "-q",
-                    str(linked_worktree),
-                    "HEAD",
-                ],
-                cwd=repository,
-                env=git_environment,
-                check=True,
+                _run_test_git(repository, *arguments)
+            _run_test_git(
+                repository,
+                "worktree",
+                "add",
+                "--detach",
+                "-q",
+                str(linked_worktree),
+                "HEAD",
             )
 
             verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
@@ -2231,28 +2210,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 '"""fixture"""\n',
                 encoding="utf-8",
             )
-            git_environment = {
-                key: value
-                for key, value in os.environ.items()
-                if not key.startswith("GIT_")
-            }
             for arguments in (
                 ("init", "-q"),
-                ("config", "user.name", "Mediaforce Test"),
-                (
-                    "config",
-                    "user.email",
-                    "mediaforce-test@example.invalid",
-                ),
                 ("add", "mediaforce", "scripts"),
                 ("commit", "-qm", "launcher fixture"),
             ):
-                subprocess.run(
-                    ["/usr/bin/git", *arguments],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
+                _run_test_git(repository, *arguments)
             virtual_environment = repository / ".venv"
             launcher = virtual_environment / "bin" / "python-unapproved"
             launcher.parent.mkdir(parents=True)
@@ -2299,28 +2262,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "import sqlalchemy\n",
                 encoding="utf-8",
             )
-            git_environment = {
-                key: value
-                for key, value in os.environ.items()
-                if not key.startswith("GIT_")
-            }
             for arguments in (
                 ("init", "-q"),
-                ("config", "user.name", "Mediaforce Test"),
-                (
-                    "config",
-                    "user.email",
-                    "mediaforce-test@example.invalid",
-                ),
                 ("add", "mediaforce", "scripts"),
                 ("commit", "-qm", "bootstrap fixture"),
             ):
-                subprocess.run(
-                    ["/usr/bin/git", *arguments],
-                    cwd=repository,
-                    env=git_environment,
-                    check=True,
-                )
+                _run_test_git(repository, *arguments)
             canonical_python = repository / ".venv" / "bin" / "python3"
             canonical_python.parent.mkdir(parents=True)
             canonical_python.symlink_to(sys.executable)
@@ -4014,6 +3961,50 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     verify_av1_cold_start_preregistration,
                     "run_command",
                     side_effect=replace_git_directory,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "Git authority changed",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
+            self.assertTrue(replaced)
+
+    def test_review_git_identity_rejects_transient_git_directory_replacement(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            original_git_directory = repository / ".git-original"
+            replaced = False
+
+            def replace_and_restore_git_directory(
+                    *_args: object,
+                    **_kwargs: object,
+            ) -> SimpleNamespace:
+                nonlocal replaced
+                (repository / ".git").rename(original_git_directory)
+                (repository / ".git").mkdir()
+                (repository / ".git").rmdir()
+                original_git_directory.rename(repository / ".git")
+                replaced = True
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"{'a' * 40}\n{'b' * 40}\n",
+                    stderr="",
+                )
+
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "run_command",
+                    side_effect=replace_and_restore_git_directory,
                 ),
                 self.assertRaisesRegex(
                     AV1ValidationDerivationError,

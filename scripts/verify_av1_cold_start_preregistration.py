@@ -202,14 +202,27 @@ def _assert_preregistration_import_tree_clean(
         git_common_directory,
         git_common_directory_identity,
     ) = resolved_git_metadata()
+    root_info = bootstrap_os.stat(root, follow_symlinks=False)
+    if (
+        not bootstrap_stat.S_ISDIR(root_info.st_mode)
+        or bootstrap_stat.S_ISLNK(root_info.st_mode)
+    ):
+        raise RuntimeError(
+            "AV1 preregistration runner refuses unsafe repository root"
+        )
+    root_identity = (root_info.st_dev, root_info.st_ino)
 
     def git_output(*arguments: str) -> tuple[int, bytes]:
         bootstrap_time = __import__("time")
         git_descriptors: list[int] = []
+        darwin_watcher = None
+        inotify_descriptor = -1
 
         def pinned_git_directory(
                 path: str,
                 expected_identity: tuple[int, int],
+                *,
+                require_metadata_permissions: bool,
         ) -> str:
             flags = bootstrap_os.O_RDONLY | getattr(bootstrap_os, "O_DIRECTORY", 0)
             if hasattr(bootstrap_os, "O_NOFOLLOW"):
@@ -217,10 +230,16 @@ def _assert_preregistration_import_tree_clean(
             descriptor = bootstrap_os.open(path, flags)
             descriptor_info = bootstrap_os.fstat(descriptor)
             if (
-                (descriptor_info.st_dev, descriptor_info.st_ino)
+                not bootstrap_stat.S_ISDIR(descriptor_info.st_mode)
+                or (descriptor_info.st_dev, descriptor_info.st_ino)
                 != expected_identity
-                or descriptor_info.st_uid != bootstrap_os.getuid()
-                or descriptor_info.st_mode & 0o022
+                or (
+                    require_metadata_permissions
+                    and (
+                        descriptor_info.st_uid != bootstrap_os.getuid()
+                        or descriptor_info.st_mode & 0o022
+                    )
+                )
             ):
                 bootstrap_os.close(descriptor)
                 raise RuntimeError(
@@ -230,14 +249,150 @@ def _assert_preregistration_import_tree_clean(
             git_descriptors.append(descriptor)
             return path
 
+        pinned_root = pinned_git_directory(
+            root,
+            root_identity,
+            require_metadata_permissions=False,
+        )
         pinned_git_dir = pinned_git_directory(
             git_directory,
             git_directory_identity,
+            require_metadata_permissions=True,
         )
         pinned_git_common_dir = pinned_git_directory(
             git_common_directory,
             git_common_directory_identity,
+            require_metadata_permissions=True,
         )
+
+        def start_authority_monitor() -> None:
+            nonlocal darwin_watcher, inotify_descriptor
+            if bootstrap_sys.platform == "darwin":
+                bootstrap_select = __import__("select")
+                watcher = bootstrap_select.kqueue()
+                flags = (
+                    bootstrap_select.KQ_NOTE_WRITE
+                    | bootstrap_select.KQ_NOTE_DELETE
+                    | bootstrap_select.KQ_NOTE_RENAME
+                    | bootstrap_select.KQ_NOTE_LINK
+                    | bootstrap_select.KQ_NOTE_REVOKE
+                    | bootstrap_select.KQ_NOTE_ATTRIB
+                )
+                watcher.control(
+                    [
+                        bootstrap_select.kevent(
+                            descriptor,
+                            filter=bootstrap_select.KQ_FILTER_VNODE,
+                            flags=(
+                                bootstrap_select.KQ_EV_ADD
+                                | bootstrap_select.KQ_EV_CLEAR
+                            ),
+                            fflags=flags,
+                        )
+                        for descriptor in git_descriptors
+                    ],
+                    0,
+                    0,
+                )
+                darwin_watcher = watcher
+                return
+            if (
+                not bootstrap_sys.platform.startswith("linux")
+                or not bootstrap_os.path.isdir("/proc/self/fd")
+            ):
+                raise RuntimeError(
+                    "AV1 preregistration Git authority monitoring is unavailable"
+                )
+            bootstrap_ctypes = __import__("ctypes")
+            libc = bootstrap_ctypes.CDLL(None, use_errno=True)
+            inotify_init1 = getattr(libc, "inotify_init1", None)
+            inotify_add_watch = getattr(libc, "inotify_add_watch", None)
+            if inotify_init1 is None or inotify_add_watch is None:
+                raise RuntimeError(
+                    "AV1 preregistration Git authority monitoring is unavailable"
+                )
+            inotify_init1.argtypes = (bootstrap_ctypes.c_int,)
+            inotify_init1.restype = bootstrap_ctypes.c_int
+            inotify_add_watch.argtypes = (
+                bootstrap_ctypes.c_int,
+                bootstrap_ctypes.c_char_p,
+                bootstrap_ctypes.c_uint32,
+            )
+            inotify_add_watch.restype = bootstrap_ctypes.c_int
+            descriptor = inotify_init1(
+                bootstrap_os.O_NONBLOCK
+                | getattr(bootstrap_os, "O_CLOEXEC", 0)
+            )
+            if descriptor < 0:
+                error_number = bootstrap_ctypes.get_errno()
+                raise RuntimeError(
+                    "AV1 preregistration Git authority monitoring is unavailable"
+                ) from OSError(
+                    error_number,
+                    bootstrap_os.strerror(error_number),
+                )
+            inotify_descriptor = descriptor
+            mask = (
+                0x00000004
+                | 0x00000040
+                | 0x00000080
+                | 0x00000100
+                | 0x00000200
+                | 0x00000400
+                | 0x00000800
+            )
+            for authority_descriptor in git_descriptors:
+                watch = inotify_add_watch(
+                    descriptor,
+                    bootstrap_os.fsencode(
+                        f"/proc/self/fd/{authority_descriptor}"
+                    ),
+                    mask,
+                )
+                if watch < 0:
+                    error_number = bootstrap_ctypes.get_errno()
+                    raise RuntimeError(
+                        "AV1 preregistration Git authority monitoring is unavailable"
+                    ) from OSError(
+                        error_number,
+                        bootstrap_os.strerror(error_number),
+                    )
+
+        def authority_monitor_changed() -> bool:
+            if darwin_watcher is not None:
+                try:
+                    return bool(darwin_watcher.control(None, 64, 0))
+                except OSError:
+                    return True
+            if inotify_descriptor < 0:
+                return True
+            changed = False
+            while True:
+                try:
+                    data = bootstrap_os.read(inotify_descriptor, 64 * 1024)
+                except BlockingIOError:
+                    break
+                except OSError:
+                    return True
+                if not data:
+                    return True
+                changed = True
+            return changed
+
+        try:
+            start_authority_monitor()
+            if authority_monitor_changed():
+                raise RuntimeError(
+                    "AV1 preregistration runner detected changed Git metadata"
+                )
+        except BaseException:
+            if darwin_watcher is not None:
+                darwin_watcher.close()
+            if inotify_descriptor >= 0:
+                bootstrap_os.close(inotify_descriptor)
+            for descriptor in git_descriptors:
+                bootstrap_os.close(descriptor)
+            raise
         read_descriptor, write_descriptor = bootstrap_os.pipe()
         process_id = bootstrap_os.fork()
         if process_id == 0:
@@ -253,7 +408,7 @@ def _assert_preregistration_import_tree_clean(
                 bootstrap_os.close(write_descriptor)
                 if null_descriptor > 2:
                     bootstrap_os.close(null_descriptor)
-                bootstrap_os.chdir(root)
+                bootstrap_os.chdir(pinned_root)
                 bootstrap_os.execve(
                     "/usr/bin/git",
                     (
@@ -344,11 +499,15 @@ def _assert_preregistration_import_tree_clean(
             raise
         finally:
             bootstrap_os.close(read_descriptor)
-            metadata_changed = False
+            metadata_changed = authority_monitor_changed()
             for descriptor, path, expected_identity in zip(
                     git_descriptors,
-                    (git_directory, git_common_directory),
-                    (git_directory_identity, git_common_directory_identity),
+                    (root, git_directory, git_common_directory),
+                    (
+                        root_identity,
+                        git_directory_identity,
+                        git_common_directory_identity,
+                    ),
                     strict=True,
             ):
                 try:
@@ -366,6 +525,12 @@ def _assert_preregistration_import_tree_clean(
                     metadata_changed = True
                 finally:
                     bootstrap_os.close(descriptor)
+            if authority_monitor_changed():
+                metadata_changed = True
+            if darwin_watcher is not None:
+                darwin_watcher.close()
+            if inotify_descriptor >= 0:
+                bootstrap_os.close(inotify_descriptor)
             if metadata_changed:
                 raise RuntimeError(
                     "AV1 preregistration runner detected changed Git metadata"
@@ -618,6 +783,7 @@ import json
 import os
 from pathlib import Path
 import pwd
+import select
 import shutil
 import stat
 import subprocess
@@ -2420,6 +2586,175 @@ _ReviewGitAuthoritySnapshot: TypeAlias = tuple[
 ]
 
 
+class _ReviewGitAuthorityMonitor:
+    _IN_ATTRIB = 0x00000004
+    _IN_MOVED_FROM = 0x00000040
+    _IN_MOVED_TO = 0x00000080
+    _IN_CREATE = 0x00000100
+    _IN_DELETE = 0x00000200
+    _IN_DELETE_SELF = 0x00000400
+    _IN_MOVE_SELF = 0x00000800
+
+    def __init__(self, authority: _ReviewGitAuthoritySnapshot) -> None:
+        self._descriptors: list[int] = []
+        self._darwin_watcher = None
+        self._inotify_descriptor = -1
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            for path, expected_identity in authority:
+                descriptor = os.open(path, flags)
+                self._descriptors.append(descriptor)
+                descriptor_info = os.fstat(descriptor)
+                path_info = path.lstat()
+                if (
+                    not stat.S_ISDIR(descriptor_info.st_mode)
+                    or not stat.S_ISDIR(path_info.st_mode)
+                    or stat.S_ISLNK(path_info.st_mode)
+                    or (descriptor_info.st_dev, descriptor_info.st_ino)
+                    != expected_identity
+                    or (path_info.st_dev, path_info.st_ino)
+                    != expected_identity
+                ):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation review Git authority changed"
+                    )
+            self._start_monitoring()
+            self.assert_quiet()
+        except BaseException:
+            self.close()
+            raise
+
+    def _start_monitoring(self) -> None:
+        if sys.platform == "darwin":
+            watcher = select.kqueue()
+            flags = (
+                select.KQ_NOTE_WRITE
+                | select.KQ_NOTE_DELETE
+                | select.KQ_NOTE_RENAME
+                | select.KQ_NOTE_LINK
+                | select.KQ_NOTE_REVOKE
+                | select.KQ_NOTE_ATTRIB
+            )
+            watcher.control(
+                [
+                    select.kevent(
+                        descriptor,
+                        filter=select.KQ_FILTER_VNODE,
+                        flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                        fflags=flags,
+                    )
+                    for descriptor in self._descriptors
+                ],
+                0,
+                0,
+            )
+            self._darwin_watcher = watcher
+            return
+        if not sys.platform.startswith("linux") or not Path(
+                "/proc/self/fd"
+        ).is_dir():
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority monitoring is unavailable"
+            )
+        libc = ctypes.CDLL(None, use_errno=True)
+        inotify_init1 = getattr(libc, "inotify_init1", None)
+        inotify_add_watch = getattr(libc, "inotify_add_watch", None)
+        if inotify_init1 is None or inotify_add_watch is None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority monitoring is unavailable"
+            )
+        inotify_init1.argtypes = (ctypes.c_int,)
+        inotify_init1.restype = ctypes.c_int
+        inotify_add_watch.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        )
+        inotify_add_watch.restype = ctypes.c_int
+        descriptor = inotify_init1(
+            os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+        )
+        if descriptor < 0:
+            error_number = ctypes.get_errno()
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority monitoring is unavailable"
+            ) from OSError(error_number, os.strerror(error_number))
+        self._inotify_descriptor = descriptor
+        mask = (
+            self._IN_ATTRIB
+            | self._IN_MOVED_FROM
+            | self._IN_MOVED_TO
+            | self._IN_CREATE
+            | self._IN_DELETE
+            | self._IN_DELETE_SELF
+            | self._IN_MOVE_SELF
+        )
+        for authority_descriptor in self._descriptors:
+            watch = inotify_add_watch(
+                descriptor,
+                os.fsencode(f"/proc/self/fd/{authority_descriptor}"),
+                mask,
+            )
+            if watch < 0:
+                error_number = ctypes.get_errno()
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review Git authority monitoring is unavailable"
+                ) from OSError(error_number, os.strerror(error_number))
+
+    def assert_quiet(self) -> None:
+        try:
+            if self._darwin_watcher is not None:
+                if self._darwin_watcher.control(None, 64, 0):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation review Git authority changed"
+                    )
+                return
+            if self._inotify_descriptor < 0:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review Git authority monitoring is unavailable"
+                )
+            changed = False
+            while True:
+                try:
+                    data = os.read(self._inotify_descriptor, 64 * 1024)
+                except BlockingIOError:
+                    break
+                if not data:
+                    changed = True
+                    break
+                changed = True
+            if changed:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review Git authority changed"
+                )
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git authority monitoring is unavailable"
+            ) from exc
+
+    def close(self) -> None:
+        if self._darwin_watcher is not None:
+            try:
+                self._darwin_watcher.close()
+            except OSError:
+                pass
+            self._darwin_watcher = None
+        if self._inotify_descriptor >= 0:
+            try:
+                os.close(self._inotify_descriptor)
+            except OSError:
+                pass
+            self._inotify_descriptor = -1
+        for descriptor in self._descriptors:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        self._descriptors.clear()
+
+
 def _review_git_authority_snapshot(
         repository_root: Path,
 ) -> _ReviewGitAuthoritySnapshot:
@@ -2592,28 +2927,42 @@ def _run_review_git_process(
         git_authority: _ReviewGitAuthoritySnapshot,
         text: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    _assert_review_git_authority(repository_root, git_authority)
+    monitor = _ReviewGitAuthorityMonitor(git_authority)
     try:
-        completed = run_command(
-            command,
-            process_controller=process_controller,
-            cwd=repository_root,
-            env=git_environment,
-            text=text,
-            timeout=15,
-            check=False,
-        )
-    except BaseException as exc:
+        _assert_review_git_authority(repository_root, git_authority)
+        monitor.assert_quiet()
         try:
-            _assert_review_git_authority(repository_root, git_authority)
-        except AV1ValidationDerivationError as authority_error:
-            exc.add_note(
-                "AV1 derivation review Git authority also changed: "
-                f"{authority_error}"
+            completed = run_command(
+                command,
+                process_controller=process_controller,
+                cwd=repository_root,
+                env=git_environment,
+                text=text,
+                timeout=15,
+                check=False,
             )
-        raise
-    _assert_review_git_authority(repository_root, git_authority)
-    return completed
+        except BaseException as exc:
+            for assertion in (
+                lambda: _assert_review_git_authority(
+                    repository_root,
+                    git_authority,
+                ),
+                monitor.assert_quiet,
+            ):
+                try:
+                    assertion()
+                except AV1ValidationDerivationError as authority_error:
+                    exc.add_note(
+                        "AV1 derivation review Git authority also changed: "
+                        f"{authority_error}"
+                    )
+            raise
+        monitor.assert_quiet()
+        _assert_review_git_authority(repository_root, git_authority)
+        monitor.assert_quiet()
+        return completed
+    finally:
+        monitor.close()
 
 
 def _review_git_commit_tree(

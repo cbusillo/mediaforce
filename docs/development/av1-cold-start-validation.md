@@ -248,9 +248,13 @@ so every read probe is non-writing. The verifier validates the checkout's main
 or linked-worktree metadata, pins `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` to that one authority tuple, disables system and configured
 attribute files, and disables repository-configured fsmonitor hooks for these
-probes. The same frozen tuple is reused across each multi-command identity or
-review-bundle proof and revalidated immediately before and after every Git
-child. It does not
+probes. Every Git child runs while retained descriptors for the worktree, Git
+directory, and common directory are watched with kqueue on macOS or inotify on
+Linux. Any rename, replacement, relink, attribute change, or namespace write is
+a permanent authority failure even if the original path is restored before the
+child exits. The same frozen tuple is reused across each multi-command identity
+or review-bundle proof and revalidated immediately before and after every Git
+child and monitor drain. It does not
 blanket-disable repository-local configuration, because ordinary linked-worktree
 and core/remote/branch behavior must remain intact. Instead, the only local
 configuration vectors that could reinterpret authority are neutralized at the
@@ -270,7 +274,10 @@ CPython isolated/no-site startup before importing `argparse`, dependencies, or
 fixed `/usr/bin/git` through a
 sanitized environment with validated `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` values pinned to the canonical checkout, so repo-local
-`core.worktree` or a foreign `.git` pointer cannot redirect the proof. It refuses modified,
+`core.worktree` or a foreign `.git` pointer cannot redirect the proof. The
+stdlib-only bootstrap establishes the same retained-descriptor directory
+monitor before forking `/usr/bin/git`, so a transient replace-and-restore of the
+checkout or either metadata directory fails closed. It refuses modified,
 exceptional-index, untracked, or ignored state anywhere under `mediaforce/` or
 `scripts/`; it also rejects
 repository bytecode caches and disables bytecode writes. The bootstrap removes

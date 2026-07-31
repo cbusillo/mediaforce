@@ -604,7 +604,11 @@ class LegacySQLiteMigrationSource:
             self,
             *,
             before_remove: Callable[[], None],
+            expected_sidecar_snapshots: dict[str, dict[str, object]],
     ) -> None:
+        sidecar_snapshots = _legacy_sqlite_sidecar_cleanup_snapshots(
+            expected_sidecar_snapshots
+        )
         self.assert_stable()
         before_remove()
         self.assert_stable()
@@ -623,11 +627,24 @@ class LegacySQLiteMigrationSource:
             before_remove()
             self.assert_parent_stable()
             try:
-                self._mutation_guard.retire_sidecar(suffix)
+                self._mutation_guard.retire_sidecar(
+                    suffix,
+                    expected_snapshot=sidecar_snapshots[suffix],
+                )
             except (FileIntegrityError, OSError) as exc:
                 raise MediaforceRuntimeBusyError(
                     "Legacy SQLite source cleanup failed after publication"
                 ) from exc
+        self.assert_cleanup_complete()
+
+    def assert_cleanup_complete(self) -> None:
+        self.assert_parent_stable()
+        try:
+            self._mutation_guard.assert_cleanup_complete()
+        except (FileIntegrityError, OSError) as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source cleanup is incomplete"
+            ) from exc
         self.assert_parent_stable()
 
 
@@ -680,6 +697,7 @@ class _LegacySQLiteMutationGuard:
         ] = {}
         self._sidecars_prepared = False
         self._sidecars_bound = False
+        self._cleanup_sealed = False
         self._violated = False
         try:
             self._prepare_sidecar_bindings_before_monitoring()
@@ -905,7 +923,12 @@ class _LegacySQLiteMutationGuard:
                 "legacy SQLite sidecar identity changed during cleanup"
             )
 
-    def retire_sidecar(self, suffix: str) -> None:
+    def retire_sidecar(
+            self,
+            suffix: str,
+            *,
+            expected_snapshot: tuple[int, int, int, int, int, int, int, int],
+    ) -> None:
         self.assert_sidecar_bound(suffix)
         name = f"{self._path.name}{suffix}"
         binding = self._sidecar_bindings.get(name)
@@ -913,23 +936,48 @@ class _LegacySQLiteMutationGuard:
             raise FileIntegrityError(
                 "legacy SQLite sidecar binding is unavailable"
             )
-        info = os.fstat(binding.descriptor)
-        expected_snapshot = (
-            info.st_dev,
-            info.st_ino,
-            info.st_size,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-            info.st_nlink,
-            info.st_uid,
-            stat.S_IMODE(info.st_mode),
-        )
         _retire_bound_legacy_sqlite_entry(
             directory_descriptor=self._directory_descriptor,
             name=name,
             expected_snapshot=expected_snapshot,
             descriptor=binding.descriptor,
         )
+
+    def assert_cleanup_complete(self) -> None:
+        if self._cleanup_sealed:
+            file_changed, directory_changed, directory_names = (
+                self._drain_mutation_events()
+            )
+            if file_changed or directory_changed or directory_names:
+                raise FileIntegrityError(
+                    "legacy SQLite source cleanup namespace changed"
+                )
+        else:
+            self._drain_mutation_events()
+        names = set(os.listdir(self._directory_descriptor))
+        live_names = {
+            self._path.name,
+            *self._sidecar_names,
+        }
+        quarantine_prefixes = tuple(
+            f".{name}.mediaforce-retired-"
+            for name in live_names
+        )
+        if any(
+            name in live_names or name.startswith(quarantine_prefixes)
+            for name in names
+        ):
+            raise FileIntegrityError(
+                "legacy SQLite source cleanup namespace is not empty"
+            )
+        file_changed, directory_changed, directory_names = (
+            self._drain_mutation_events()
+        )
+        if file_changed or directory_changed or directory_names:
+            raise FileIntegrityError(
+                "legacy SQLite source cleanup namespace changed"
+            )
+        self._cleanup_sealed = True
 
     def _drain_mutation_events(self) -> tuple[bool, bool, set[str]]:
         file_changed = False
@@ -1774,6 +1822,66 @@ def _legacy_sqlite_source_snapshot(
     )
 
 
+def _legacy_sqlite_sidecar_cleanup_snapshots(
+        value: object,
+) -> dict[str, tuple[int, int, int, int, int, int, int, int]]:
+    if not isinstance(value, dict) or set(value) != {
+        "-wal",
+        "-shm",
+        "-journal",
+    }:
+        raise FileIntegrityError("legacy SQLite cleanup manifest is invalid")
+    snapshots: dict[
+        str,
+        tuple[int, int, int, int, int, int, int, int],
+    ] = {}
+    required = {
+        "device",
+        "inode",
+        "size",
+        "link_count",
+        "mtime_ns",
+        "ctime_ns",
+        "uid",
+        "mode",
+        "guard_created",
+    }
+    for suffix in ("-wal", "-shm", "-journal"):
+        snapshot = value.get(suffix)
+        if not isinstance(snapshot, dict) or set(snapshot) != required:
+            raise FileIntegrityError(
+                "legacy SQLite cleanup manifest is invalid"
+            )
+        values = tuple(
+            snapshot.get(key)
+            for key in (
+                "device",
+                "inode",
+                "size",
+                "mtime_ns",
+                "ctime_ns",
+                "link_count",
+                "uid",
+                "mode",
+            )
+        )
+        if (
+            any(type(item) is not int for item in values)
+            or values[0] < 0
+            or values[1] <= 0
+            or values[2] < 0
+            or values[5] != 1
+            or values[6] != os.getuid()
+            or not 0 <= values[7] <= 0o777
+            or type(snapshot.get("guard_created")) is not bool
+        ):
+            raise FileIntegrityError(
+                "legacy SQLite cleanup manifest is invalid"
+            )
+        snapshots[suffix] = values
+    return snapshots
+
+
 def _retire_bound_legacy_sqlite_entry(
         *,
         directory_descriptor: int,
@@ -1783,6 +1891,27 @@ def _retire_bound_legacy_sqlite_entry(
 ) -> None:
     if len(expected_snapshot) not in {6, 8}:
         raise FileIntegrityError("legacy SQLite cleanup snapshot is invalid")
+    descriptor_info = os.fstat(descriptor)
+    path_info = os.stat(
+        name,
+        dir_fd=directory_descriptor,
+        follow_symlinks=False,
+    )
+    if (
+        not _legacy_sqlite_live_snapshot_matches(
+            descriptor_info,
+            expected_snapshot,
+        )
+        or not _legacy_sqlite_live_snapshot_matches(
+            path_info,
+            expected_snapshot,
+        )
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (path_info.st_dev, path_info.st_ino)
+    ):
+        raise FileIntegrityError(
+            "legacy SQLite cleanup source changed before claim"
+        )
     quarantine_name = legacy_sqlite_migration_quarantine_name(
         name,
         device=expected_snapshot[0],
@@ -1856,6 +1985,27 @@ def _retire_bound_legacy_sqlite_entry(
         raise FileIntegrityError(
             "legacy SQLite cleanup entry reappeared"
         )
+
+
+def _legacy_sqlite_live_snapshot_matches(
+        info: os.stat_result,
+        expected_snapshot: tuple[int, ...],
+) -> bool:
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_nlink,
+    ) != expected_snapshot[:6]:
+        return False
+    return len(expected_snapshot) == 6 or (
+        info.st_uid,
+        stat.S_IMODE(info.st_mode),
+    ) == expected_snapshot[6:8]
 
 
 def _legacy_sqlite_retired_snapshot_matches(
