@@ -141,19 +141,80 @@ class ProcessControlTests(TestCase):
 
         self.assertEqual(result.returncode, 124)
 
-    def test_deadline_watchdog_kills_descendant_after_target_leader_exits(self) -> None:
+    def test_managed_command_preserves_signal_return_code(self) -> None:
+        result = run_command(
+            [
+                sys.executable,
+                "-c",
+                "import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+            ],
+            process_controller=ManagedProcessController(),
+        )
+
+        self.assertEqual(result.returncode, -signal.SIGTERM)
+
+    def test_managed_command_waits_for_detached_descendant_after_leader_exits(
+            self,
+    ) -> None:
         controller = ManagedProcessController()
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            marker_path = Path(temp_dir) / "descendant-ran"
+            root = Path(temp_dir)
+            leader_exited_path = root / "leader-exited"
+            descendant_finished_path = root / "descendant-finished"
             target_script = "\n".join((
+                "from pathlib import Path",
                 "import subprocess",
                 "import sys",
                 "subprocess.Popen([",
                 "    sys.executable, '-c',",
-                "    \"from pathlib import Path; import sys, time; time.sleep(1.0); Path(sys.argv[1]).write_text('ran')\",",
+                "    \"from pathlib import Path; import sys, time; time.sleep(0.3); Path(sys.argv[1]).write_text('finished')\",",
                 "    sys.argv[1],",
-                "])",
+                "], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)",
+                "Path(sys.argv[2]).write_text('exited')",
+            ))
+
+            started_at = time.monotonic()
+            result = run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    target_script,
+                    str(descendant_finished_path),
+                    str(leader_exited_path),
+                ],
+                process_controller=controller,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(leader_exited_path.exists())
+            self.assertTrue(descendant_finished_path.exists())
+            self.assertGreaterEqual(time.monotonic() - started_at, 0.25)
+
+    def test_deadline_kills_detached_descendant_after_leader_exits(self) -> None:
+        controller = ManagedProcessController()
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            leader_exited_path = root / "leader-exited"
+            descendant_started_path = root / "descendant-started"
+            descendant_finished_path = root / "descendant-finished"
+            descendant_script = "\n".join((
+                "from pathlib import Path",
+                "import sys",
+                "import time",
+                "Path(sys.argv[1]).write_text('started')",
+                "time.sleep(1.2)",
+                "Path(sys.argv[2]).write_text('finished')",
+            ))
+            target_script = "\n".join((
+                "from pathlib import Path",
+                "import subprocess",
+                "import sys",
+                "subprocess.Popen([",
+                "    sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3],",
+                "], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)",
+                "Path(sys.argv[4]).write_text('exited')",
             ))
 
             with (
@@ -167,43 +228,56 @@ class ProcessControlTests(TestCase):
                         sys.executable,
                         "-c",
                         target_script,
-                        str(marker_path),
+                        descendant_script,
+                        str(descendant_started_path),
+                        str(descendant_finished_path),
+                        str(leader_exited_path),
                     ],
                     process_controller=controller,
                 )
 
-            time.sleep(0.8)
-            self.assertFalse(marker_path.exists())
+            self.assertTrue(leader_exited_path.exists())
+            self.assertTrue(descendant_started_path.exists())
+            time.sleep(1.0)
+            self.assertFalse(descendant_finished_path.exists())
 
-    def test_cancellation_kills_descendant_after_target_leader_exits(self) -> None:
+    def test_cancellation_kills_detached_descendant_after_leader_exits(self) -> None:
         controller = ManagedProcessController()
+        unrelated_process = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            started_path = root / "descendant-started"
-            finished_path = root / "descendant-finished"
-            descendant_script = "\n".join((
-                "from pathlib import Path",
-                "import sys",
-                "import time",
-                "Path(sys.argv[1]).write_text('started')",
-                "time.sleep(1.5)",
-                "Path(sys.argv[2]).write_text('finished')",
-            ))
-            target_script = "\n".join((
-                "import subprocess",
-                "import sys",
-                "subprocess.Popen([",
-                "    sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3],",
-                "], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)",
-            ))
-            errors: list[BaseException] = []
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                leader_exited_path = root / "leader-exited"
+                started_path = root / "descendant-started"
+                finished_path = root / "descendant-finished"
+                descendant_script = "\n".join((
+                    "from pathlib import Path",
+                    "import sys",
+                    "import time",
+                    "Path(sys.argv[1]).write_text('started')",
+                    "time.sleep(1.2)",
+                    "Path(sys.argv[2]).write_text('finished')",
+                ))
+                target_script = "\n".join((
+                    "from pathlib import Path",
+                    "import subprocess",
+                    "import sys",
+                    "subprocess.Popen([",
+                    "    sys.executable, '-c', sys.argv[1], sys.argv[2], sys.argv[3],",
+                    "], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)",
+                    "Path(sys.argv[4]).write_text('exited')",
+                ))
+                errors: list[BaseException] = []
 
-            def run_target() -> None:
-                try:
-                    with controller.absolute_deadline(
-                        datetime.now(UTC) + timedelta(seconds=5)
-                    ):
+                def run_target() -> None:
+                    try:
                         run_command(
                             [
                                 sys.executable,
@@ -212,35 +286,38 @@ class ProcessControlTests(TestCase):
                                 descendant_script,
                                 str(started_path),
                                 str(finished_path),
+                                str(leader_exited_path),
                             ],
                             process_controller=controller,
                         )
-                except BaseException as exc:
-                    errors.append(exc)
+                    except BaseException as exc:
+                        errors.append(exc)
 
-            worker = threading.Thread(target=run_target)
-            worker.start()
-            wait_deadline = time.monotonic() + 3
-            while not started_path.exists() and time.monotonic() < wait_deadline:
-                time.sleep(0.02)
-            self.assertTrue(started_path.exists())
-            while (
-                controller.pid is not None
-                and worker.is_alive()
-                and time.monotonic() < wait_deadline
-            ):
-                time.sleep(0.02)
-            self.assertIsNone(controller.pid)
-            self.assertTrue(worker.is_alive())
+                worker = threading.Thread(target=run_target)
+                worker.start()
+                wait_deadline = time.monotonic() + 3
+                while (
+                    not started_path.exists() or not leader_exited_path.exists()
+                ) and time.monotonic() < wait_deadline:
+                    time.sleep(0.02)
+                self.assertTrue(started_path.exists())
+                self.assertTrue(leader_exited_path.exists())
+                self.assertIsNotNone(controller.pid)
+                self.assertTrue(worker.is_alive())
 
-            controller.cancel()
-            worker.join(timeout=5)
+                controller.cancel()
+                worker.join(timeout=5)
 
-            self.assertFalse(worker.is_alive())
-            self.assertEqual(len(errors), 1)
-            self.assertIsInstance(errors[0], ProcessCancelledError)
-            time.sleep(1.7)
-            self.assertFalse(finished_path.exists())
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], ProcessCancelledError)
+                self.assertIsNone(unrelated_process.poll())
+                time.sleep(1.3)
+                self.assertFalse(finished_path.exists())
+        finally:
+            if unrelated_process.poll() is None:
+                unrelated_process.terminate()
+            unrelated_process.wait(timeout=5)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_deadline_status_unexpected_eof_fails_closed(
@@ -409,74 +486,6 @@ class ProcessControlTests(TestCase):
             "\n".join(raised.exception.__notes__),
         )
 
-    def test_deadline_status_failure_with_live_target_and_sigkill_failure_is_bounded(
-            self,
-    ) -> None:
-        controller = ManagedProcessController()
-        errors: list[BaseException] = []
-        signals: list[int] = []
-
-        def run_target() -> None:
-            try:
-                with controller.absolute_deadline(
-                    datetime.now(UTC) + timedelta(seconds=30)
-                ):
-                    run_command(
-                        [sys.executable, "-c", "import time; time.sleep(30)"],
-                        process_controller=controller,
-                    )
-            except BaseException as exc:
-                errors.append(exc)
-
-        def fail_sigkill(_process_group: int, signal_number: int) -> None:
-            signals.append(signal_number)
-            if signal_number == signal.SIGKILL:
-                raise PermissionError(errno.EPERM, "SIGKILL denied")
-
-        worker = threading.Thread(target=run_target, daemon=True)
-        try:
-            with (
-                patch.object(
-                    process_control_module,
-                    "_read_deadline_status",
-                    side_effect=ProcessDeadlineEnforcementError(
-                        "Absolute process deadline enforcement status is unavailable."
-                    ),
-                ),
-                patch.object(
-                    process_control_module,
-                    "_wait_for_target_exit",
-                    return_value=False,
-                ),
-                patch.object(
-                    process_control_module.os,
-                    "killpg",
-                    side_effect=fail_sigkill,
-                ),
-            ):
-                worker.start()
-                worker.join(timeout=2)
-                self.assertFalse(
-                    worker.is_alive(),
-                    "run_command remained blocked in communicate() after watchdog failure",
-                )
-
-            self.assertEqual(len(errors), 1)
-            self.assertIsInstance(errors[0], ProcessDeadlineEnforcementError)
-            self.assertIn(signal.SIGTERM, signals)
-            self.assertIn(signal.SIGKILL, signals)
-            self.assertIn(
-                "PermissionError: [Errno 1] SIGKILL denied",
-                "\n".join(errors[0].__notes__),
-            )
-            self.assertIsNotNone(controller._process_group_id)
-            self.assertIsNotNone(controller.pid)
-        finally:
-            if controller._process_group_id is not None:
-                controller.terminate()
-                controller.reset()
-            worker.join(timeout=5)
-
     def test_terminate_process_propagates_non_esrch_signal_failures(self) -> None:
         process = Mock()
         process.pid = 1234
@@ -540,128 +549,41 @@ class ProcessControlTests(TestCase):
                 process_group_id=process.pid,
             )
 
-    def test_deadline_watchdog_reports_clean_completion(self) -> None:
-        status_read, status_write = os.pipe()
-        ready_read, ready_write = os.pipe()
-        close_waiter = Mock()
-
-        with (
-            patch.object(process_deadline_module.os, "setsid"),
-            patch.object(process_deadline_module, "_close_standard_streams"),
-            patch.object(
-                process_deadline_module,
-                "_exit_waiter",
-                return_value=(lambda _timeout: True, close_waiter),
-            ),
-            patch.object(
-                process_deadline_module,
-                "_process_group_exists",
-                return_value=False,
-            ),
-            patch.object(process_deadline_module, "_kill_process_group") as kill_group,
-        ):
-            process_deadline_module._watch_target(
-                target_pid=1234,
-                target_process_group=1234,
-                deadline_ns=time.time_ns() + 1_000_000_000,
-                status_descriptor=status_write,
-                ready_descriptor=ready_write,
-            )
-
-        self.assertEqual(os.read(ready_read, 1), b"R")
-        self.assertEqual(os.read(status_read, 1), b"C")
-        os.close(ready_read)
-        os.close(status_read)
-        close_waiter.assert_called_once_with()
-        kill_group.assert_not_called()
-
-    def test_deadline_watchdog_runtime_failure_fails_closed(self) -> None:
-        status_read, status_write = os.pipe()
-        ready_read, ready_write = os.pipe()
-        close_waiter = Mock()
-
-        def fail_wait(_timeout: float) -> bool:
-            raise RuntimeError("watchdog failed")
-
-        with (
-            patch.object(process_deadline_module.os, "setsid"),
-            patch.object(process_deadline_module, "_close_standard_streams"),
-            patch.object(
-                process_deadline_module,
-                "_exit_waiter",
-                return_value=(fail_wait, close_waiter),
-            ),
-            patch.object(process_deadline_module, "_kill_process_group") as kill_group,
-        ):
-            process_deadline_module._watch_target(
-                target_pid=1234,
-                target_process_group=4321,
-                deadline_ns=time.time_ns() + 1_000_000_000,
-                status_descriptor=status_write,
-                ready_descriptor=ready_write,
-            )
-
-        self.assertEqual(os.read(ready_read, 1), b"R")
-        self.assertEqual(os.read(status_read, 1), b"U")
-        os.close(ready_read)
-        os.close(status_read)
-        close_waiter.assert_called_once_with()
-        kill_group.assert_called_once_with(4321)
-
-    def test_deadline_watchdog_reports_kill_failure_as_unavailable(self) -> None:
-        for kill_succeeded, expected_status in ((True, b"E"), (False, b"U")):
-            with self.subTest(kill_succeeded=kill_succeeded):
-                status_read, status_write = os.pipe()
-                ready_read, ready_write = os.pipe()
-                close_waiter = Mock()
-
-                with (
-                    patch.object(process_deadline_module.os, "setsid"),
-                    patch.object(process_deadline_module, "_close_standard_streams"),
-                    patch.object(
-                        process_deadline_module,
-                        "_exit_waiter",
-                        return_value=(lambda _timeout: False, close_waiter),
-                    ),
-                    patch.object(
-                        process_deadline_module,
-                        "_kill_process_group",
-                        return_value=kill_succeeded,
-                    ) as kill_group,
-                ):
-                    process_deadline_module._watch_target(
-                        target_pid=1234,
-                        target_process_group=4321,
-                        deadline_ns=time.time_ns() - 1,
-                        status_descriptor=status_write,
-                        ready_descriptor=ready_write,
-                    )
-
-                self.assertEqual(os.read(ready_read, 1), b"R")
-                self.assertEqual(os.read(status_read, 1), expected_status)
-                os.close(ready_read)
+    def test_supervisor_fails_closed_before_launch_when_containment_unavailable(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            marker_path = Path(temp_dir) / "target-ran"
+            status_read, status_write = os.pipe()
+            helper_pid = os.fork()
+            if helper_pid == 0:
                 os.close(status_read)
-                close_waiter.assert_called_once_with()
-                kill_group.assert_called_once_with(4321)
+                with patch.object(
+                    process_deadline_module,
+                    "_process_tree",
+                    side_effect=RuntimeError("containment unavailable"),
+                ):
+                    exit_code = process_deadline_module._run(
+                        -1,
+                        status_write,
+                        [
+                            sys.executable,
+                            "-c",
+                            "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('ran')",
+                            str(marker_path),
+                        ],
+                    )
+                os.close(status_write)
+                os._exit(exit_code)
 
-    def test_kill_process_group_reports_signal_outcome(self) -> None:
-        with patch.object(process_deadline_module.os, "killpg") as kill_group:
-            self.assertTrue(process_deadline_module._kill_process_group(4321))
-        kill_group.assert_called_once_with(4321, signal.SIGKILL)
+            os.close(status_write)
+            _, wait_status = os.waitpid(helper_pid, 0)
+            status = os.read(status_read, 16)
+            os.close(status_read)
 
-        with patch.object(
-            process_deadline_module.os,
-            "killpg",
-            side_effect=OSError(errno.EPERM, "not permitted"),
-        ):
-            self.assertFalse(process_deadline_module._kill_process_group(4321))
-
-        with patch.object(
-            process_deadline_module.os,
-            "killpg",
-            side_effect=OSError(errno.ESRCH, "missing"),
-        ):
-            self.assertTrue(process_deadline_module._kill_process_group(4321))
+            self.assertEqual(os.waitstatus_to_exitcode(wait_status), 125)
+            self.assertEqual(status, b"U")
+            self.assertFalse(marker_path.exists())
 
     def test_nested_absolute_deadlines_use_earliest_and_restore_previous(self) -> None:
         controller = ManagedProcessController()
@@ -683,7 +605,9 @@ class ProcessControlTests(TestCase):
 
         self.assertIsNone(controller.process_deadline_ns())
 
-    def test_deadline_watchdog_kills_group_while_parent_is_stopped(self) -> None:
+    def test_deadline_supervisor_kills_detached_descendant_while_parent_is_stopped(
+            self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             started_path = root / "target-started"
@@ -692,14 +616,12 @@ class ProcessControlTests(TestCase):
                 "from pathlib import Path",
                 "import subprocess",
                 "import sys",
-                "import time",
                 "Path(sys.argv[1]).write_text('started')",
                 "subprocess.Popen([",
                 "    sys.executable, '-c',",
                 "    \"from pathlib import Path; import sys, time; time.sleep(2.2); Path(sys.argv[1]).write_text('ran')\",",
                 "    sys.argv[2],",
-                "])",
-                "time.sleep(10)",
+                "], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)",
             ))
             harness_script = "\n".join((
                 "from datetime import UTC, datetime, timedelta",
@@ -758,11 +680,24 @@ class ProcessControlTests(TestCase):
         process.returncode = 0
         popen_mock.return_value = process
 
-        result = run_command(["echo", "ok"], process_controller=ManagedProcessController())
+        with patch.object(
+            process_control_module,
+            "_read_deadline_status",
+            return_value=b"C",
+        ):
+            result = run_command(
+                ["echo", "ok"],
+                process_controller=ManagedProcessController(),
+            )
 
         self.assertEqual(result.returncode, 0)
         popen_mock.assert_called_once()
         self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
+        self.assertEqual(
+            popen_mock.call_args.args[0][-3:],
+            ["--", "echo", "ok"],
+        )
+        self.assertEqual(len(popen_mock.call_args.kwargs["pass_fds"]), 1)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_run_command_terminates_and_reaps_on_base_exception(self, popen_mock: Mock) -> None:
@@ -772,13 +707,17 @@ class ProcessControlTests(TestCase):
         controller = Mock(spec=ManagedProcessController)
         controller.process_deadline_ns.return_value = None
 
-        with self.assertRaises(KeyboardInterrupt):
+        with (
+            patch.object(
+                process_control_module,
+                "_read_deadline_status",
+                return_value=b"C",
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
             run_command(["echo", "ok"], process_controller=controller)
 
-        controller.attach.assert_called_once_with(
-            process,
-            terminate_process_group=True,
-        )
+        controller.attach.assert_called_once_with(process)
         controller.terminate.assert_called_once_with()
         self.assertEqual(process.communicate.call_count, 2)
         controller.clear.assert_called_once_with(process)
@@ -797,13 +736,19 @@ class ProcessControlTests(TestCase):
         controller.attach.side_effect = KeyboardInterrupt()
         controller.process_deadline_ns.return_value = None
 
-        with self.assertRaises(KeyboardInterrupt):
+        with (
+            patch.object(
+                process_control_module,
+                "_read_deadline_status",
+                return_value=b"C",
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
             run_command(["echo", "ok"], process_controller=controller)
 
         terminate_process_mock.assert_called_once_with(
             process,
-            terminate_process_group=True,
-            process_group_id=process.pid,
+            terminate_process_group=False,
         )
         process.communicate.assert_called_once_with(timeout=2.0)
         controller.clear.assert_called_once_with(process)

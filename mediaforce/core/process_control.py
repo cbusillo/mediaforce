@@ -30,7 +30,6 @@ class ProcessDeadlineEnforcementError(RuntimeError):
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
 _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
-_PROCESS_STATUS_DEADLINE_GRACE_SECONDS = 1.0
 
 
 class ManagedProcessController:
@@ -278,17 +277,17 @@ def _read_deadline_status(status_descriptor: int) -> bytes:
             chunks.append(chunk)
     except OSError as exc:
         raise ProcessDeadlineEnforcementError(
-            "Absolute process deadline enforcement status is unavailable."
+            "Managed process containment status is unavailable."
         ) from exc
     status = b"".join(chunks)
     if status not in {b"C", b"E"}:
         raise ProcessDeadlineEnforcementError(
-            "Absolute process deadline enforcement failed closed."
+            "Managed process containment failed closed."
         )
     return status
 
 
-class _DeadlineStatusMonitor:
+class _ContainmentStatusMonitor:
     def __init__(
             self,
             *,
@@ -326,7 +325,7 @@ class _DeadlineStatusMonitor:
     def status(self) -> bytes:
         if not self._completed.is_set() or self._status is None:
             raise ProcessDeadlineEnforcementError(
-                "Absolute process deadline enforcement status is unavailable."
+                "Managed process containment status is unavailable."
             )
         return self._status
 
@@ -351,7 +350,7 @@ class _DeadlineStatusMonitor:
             except BaseException as cleanup_error:
                 if self._error is None:
                     self._error = ProcessDeadlineEnforcementError(
-                        "Absolute process deadline enforcement status is unavailable."
+                        "Managed process containment status is unavailable."
                     )
                     self._cleanup_errors.append(cleanup_error)
                     self._status = None
@@ -369,8 +368,7 @@ class _DeadlineStatusMonitor:
             try:
                 _terminate_process(
                     self._process,
-                    terminate_process_group=True,
-                    process_group_id=self._process.pid,
+                    terminate_process_group=False,
                 )
             except BaseException as fallback_error:
                 self._cleanup_errors.append(fallback_error)
@@ -378,13 +376,13 @@ class _DeadlineStatusMonitor:
         return True
 
 
-def _communicate_with_deadline_monitor(
+def _communicate_with_containment_monitor(
         process: subprocess.Popen[str],
         *,
         cmd: list[str],
         input_text: str | None,
         timeout: float | None,
-        monitor: _DeadlineStatusMonitor,
+        monitor: _ContainmentStatusMonitor,
 ) -> tuple[str, str]:
     started_at = time.monotonic()
     pending_input = input_text
@@ -443,8 +441,7 @@ def _terminate_and_reap_managed_process(
         else:
             _terminate_process(
                 process,
-                terminate_process_group=True,
-                process_group_id=process.pid,
+                terminate_process_group=False,
             )
         termination_succeeded = True
     except BaseException as cleanup_error:
@@ -453,8 +450,7 @@ def _terminate_and_reap_managed_process(
             try:
                 _terminate_process(
                     process,
-                    terminate_process_group=True,
-                    process_group_id=process.pid,
+                    terminate_process_group=False,
                 )
                 termination_succeeded = True
             except BaseException as fallback_error:
@@ -464,16 +460,16 @@ def _terminate_and_reap_managed_process(
     return _reap_terminated_process(process, error)
 
 
-def _finish_deadline_status_failure(
+def _finish_containment_status_failure(
         *,
-        monitor: _DeadlineStatusMonitor,
+        monitor: _ContainmentStatusMonitor,
         process: subprocess.Popen[str],
         error: BaseException,
 ) -> bool:
     if not monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
         _add_managed_process_cleanup_note(
             error,
-            TimeoutError("deadline status cleanup did not finish"),
+            TimeoutError("containment status cleanup did not finish"),
         )
         return False
     monitor.add_cleanup_notes(error)
@@ -510,107 +506,65 @@ def run_command(
     process_deadline_ns = process_controller.process_deadline_ns()
     stdout_pipe = subprocess.PIPE if capture_output else None
     stderr_pipe = subprocess.PIPE if capture_output else None
-    deadline_status_descriptor = -1
-    deadline_status_write_descriptor = -1
-    process_cmd = cmd
-    if process_deadline_ns is not None:
-        if not hasattr(os, "fork"):
-            raise ProcessDeadlineEnforcementError(
-                "Absolute process deadline enforcement is unavailable."
-            )
-        deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
-        helper_path = Path(__file__).with_name("_process_deadline.py")
-        process_cmd = [
-            sys.executable,
-            "-I",
-            str(helper_path),
-            str(process_deadline_ns),
-            str(deadline_status_write_descriptor),
-            "--",
-            *cmd,
-        ]
+    if not hasattr(os, "fork"):
+        raise ProcessDeadlineEnforcementError(
+            "Managed process containment is unavailable."
+        )
+    deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
+    helper_path = Path(__file__).with_name("_process_deadline.py")
+    process_cmd = [
+        sys.executable,
+        "-I",
+        str(helper_path),
+        str(process_deadline_ns if process_deadline_ns is not None else -1),
+        str(deadline_status_write_descriptor),
+        "--",
+        *cmd,
+    ]
     try:
-        if deadline_status_write_descriptor >= 0:
-            process = subprocess.Popen(
-                process_cmd,
-                stdin=subprocess.PIPE if input_text is not None else None,
-                stdout=stdout_pipe,
-                stderr=stderr_pipe,
-                text=text,
-                cwd=cwd,
-                env=env,
-                start_new_session=True,
-                pass_fds=(deadline_status_write_descriptor,),
-            )
-        else:
-            process = subprocess.Popen(
-                process_cmd,
-                stdin=subprocess.PIPE if input_text is not None else None,
-                stdout=stdout_pipe,
-                stderr=stderr_pipe,
-                text=text,
-                cwd=cwd,
-                env=env,
-                start_new_session=True,
-            )
+        process = subprocess.Popen(
+            process_cmd,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=stdout_pipe,
+            stderr=stderr_pipe,
+            text=text,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+            pass_fds=(deadline_status_write_descriptor,),
+        )
     except BaseException:
-        if deadline_status_descriptor >= 0:
-            os.close(deadline_status_descriptor)
-        if deadline_status_write_descriptor >= 0:
-            os.close(deadline_status_write_descriptor)
-        raise
-    if deadline_status_write_descriptor >= 0:
+        os.close(deadline_status_descriptor)
         os.close(deadline_status_write_descriptor)
+        raise
+    os.close(deadline_status_write_descriptor)
     attached = False
-    process_cleared = False
-    process_group_retained = False
-    process_group_finalized = False
-    retain_process_group = False
-    status_monitor: _DeadlineStatusMonitor | None = None
+    containment_finalized = False
+    status_monitor = _ContainmentStatusMonitor(
+        status_descriptor=deadline_status_descriptor,
+        process_controller=process_controller,
+        process=process,
+    )
+    status_monitor.start()
     try:
-        process_controller.attach(process, terminate_process_group=True)
+        process_controller.attach(process)
         attached = True
-        if deadline_status_descriptor >= 0:
-            status_monitor = _DeadlineStatusMonitor(
-                status_descriptor=deadline_status_descriptor,
-                process_controller=process_controller,
-                process=process,
+        stdout, stderr = _communicate_with_containment_monitor(
+            process,
+            cmd=cmd,
+            input_text=input_text,
+            timeout=timeout,
+            monitor=status_monitor,
+        )
+        if not status_monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
+            raise ProcessDeadlineEnforcementError(
+                "Managed process containment status is unavailable."
             )
-            status_monitor.start()
-            stdout, stderr = _communicate_with_deadline_monitor(
-                process,
-                cmd=cmd,
-                input_text=input_text,
-                timeout=timeout,
-                monitor=status_monitor,
-            )
-        elif timeout is None:
-            stdout, stderr = process.communicate(input_text)
-        else:
-            stdout, stderr = process.communicate(input_text, timeout=timeout)
-        deadline_status = b""
-        if status_monitor is not None:
-            assert process_deadline_ns is not None
-            process_controller.clear(process, retain_process_group=True)
-            process_cleared = True
-            process_group_retained = True
-            remaining_seconds = max(
-                0.0,
-                (process_deadline_ns - time.time_ns()) / 1_000_000_000,
-            )
-            if not status_monitor.wait(
-                remaining_seconds + _PROCESS_STATUS_DEADLINE_GRACE_SECONDS
-            ):
-                raise ProcessDeadlineEnforcementError(
-                    "Absolute process deadline enforcement status is unavailable."
-                )
-            status_error = status_monitor.error()
-            if status_error is not None:
-                raise status_error
-            deadline_status = status_monitor.status()
-            process_controller.release_process_group(process.pid)
-            process_group_retained = False
-        process_group_finalized = True
+        status_error = status_monitor.error()
+        if status_error is not None:
+            raise status_error
+        deadline_status = status_monitor.status()
+        containment_finalized = True
         if deadline_status == b"E":
             raise ProcessDeadlineExpiredError(
                 "Process authorization deadline expired."
@@ -630,9 +584,9 @@ def run_command(
                 stderr=stderr,
             )
     except BaseException as exc:
-        if not process_group_finalized:
-            if status_monitor is not None and status_monitor.error() is exc:
-                cleanup_succeeded = _finish_deadline_status_failure(
+        if not containment_finalized:
+            if status_monitor.error() is exc:
+                cleanup_succeeded = _finish_containment_status_failure(
                     monitor=status_monitor,
                     process=process,
                     error=exc,
@@ -644,19 +598,15 @@ def run_command(
                     attached=attached,
                     error=exc,
                 )
-            retain_process_group = not cleanup_succeeded
-            if cleanup_succeeded and process_group_retained:
-                try:
-                    process_controller.release_process_group(process.pid)
-                    process_group_retained = False
-                except BaseException as cleanup_error:
-                    _add_managed_process_cleanup_note(exc, cleanup_error)
-        if not process_cleared and not retain_process_group:
-            try:
-                process_controller.clear(process)
-            except BaseException as cleanup_error:
-                _add_managed_process_cleanup_note(exc, cleanup_error)
+            if not cleanup_succeeded:
+                _add_managed_process_cleanup_note(
+                    exc,
+                    RuntimeError("managed process containment cleanup did not complete"),
+                )
+        try:
+            process_controller.clear(process)
+        except BaseException as cleanup_error:
+            _add_managed_process_cleanup_note(exc, cleanup_error)
         raise
-    if not process_cleared:
-        process_controller.clear(process)
+    process_controller.clear(process)
     return completed

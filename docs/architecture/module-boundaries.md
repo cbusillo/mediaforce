@@ -43,9 +43,16 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `binaries.py`
   - ffmpeg/ffprobe binary discovery
 - `process_control.py`
-  - managed subprocess cancellation, absolute deadlines, and command helpers
+  - managed subprocess cancellation, absolute deadlines, containment status,
+    and command helpers
 - `_process_deadline.py`
-  - private isolated target launcher and independent process-group watchdog
+  - private per-command supervisor that keeps ownership until every observed
+    descendant exits
+  - Linux uses a scoped child subreaper plus pidfds; macOS uses Darwin unique
+    parent identities plus audit-token signaling
+  - containment fails closed before command success when required host
+    primitives or descendant ownership proof are unavailable; it never falls
+    back to same-user process scans or signals
 
 Guidance:
 
