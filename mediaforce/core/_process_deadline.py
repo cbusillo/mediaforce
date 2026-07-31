@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import math
 import os
 import select
@@ -89,13 +90,14 @@ def _process_group_exists(process_group: int) -> bool:
     return True
 
 
-def _kill_process_group(process_group: int) -> None:
+def _kill_process_group(process_group: int) -> bool:
     try:
         os.killpg(process_group, signal.SIGKILL)
     except ProcessLookupError:
-        pass
-    except OSError:
-        pass
+        return True
+    except OSError as exc:
+        return exc.errno == errno.ESRCH
+    return True
 
 
 def _watch_target(
@@ -158,9 +160,14 @@ def _watch_target(
                 close_waiter()
             except BaseException:
                 status = _STATUS_UNAVAILABLE
-        _notify(status_descriptor, status)
         if status in {_STATUS_EXPIRED, _STATUS_UNAVAILABLE}:
-            _kill_process_group(target_process_group)
+            try:
+                kill_succeeded = _kill_process_group(target_process_group)
+            except BaseException:
+                kill_succeeded = False
+            if not kill_succeeded:
+                status = _STATUS_UNAVAILABLE
+        _notify(status_descriptor, status)
         try:
             os.close(status_descriptor)
         except OSError:

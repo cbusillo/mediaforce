@@ -711,7 +711,9 @@ def assert_av1_validation_derivation_execution_environment(
                     process_controller=controller,
                 )
             )
-    except (ProcessDeadlineExpiredError, ProcessDeadlineEnforcementError) as exc:
+    except ProcessDeadlineExpiredError:
+        raise
+    except ProcessDeadlineEnforcementError as exc:
         raise AV1ValidationDerivationError(
             "AV1 derivation execution environment could not be verified before authorization expired"
         ) from exc

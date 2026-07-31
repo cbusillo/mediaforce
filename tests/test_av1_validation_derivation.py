@@ -24,7 +24,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
+from mediaforce.core.process_control import (
+    ManagedProcessController,
+    ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
+    ProcessDeadlineExpiredError,
+)
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
@@ -788,6 +793,41 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             assert_av1_validation_derivation_execution_environment(self.plan)
 
         self.assertIs(raised.exception, operator_stop)
+
+    def test_execution_environment_preserves_deadline_expiry_classification(self) -> None:
+        deadline_expired = ProcessDeadlineExpiredError(
+            "authorization deadline expired"
+        )
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_derivation_execution_environment_sha256",
+                side_effect=deadline_expired,
+            ),
+            self.assertRaises(ProcessDeadlineExpiredError) as raised,
+        ):
+            assert_av1_validation_derivation_execution_environment(self.plan)
+
+        self.assertIs(raised.exception, deadline_expired)
+
+    def test_execution_environment_wraps_deadline_enforcement_failure(self) -> None:
+        enforcement_failed = ProcessDeadlineEnforcementError(
+            "deadline watchdog failed"
+        )
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.av1_validation_derivation_execution_environment_sha256",
+                side_effect=enforcement_failed,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "execution environment could not be verified",
+            ) as raised,
+        ):
+            assert_av1_validation_derivation_execution_environment(self.plan)
+
+        self.assertIs(raised.exception.__cause__, enforcement_failed)
 
     def test_implementation_identity_covers_complete_runtime_tree(self) -> None:
         repository_root = Path(__file__).resolve().parents[1]
@@ -4178,6 +4218,114 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         pinned_source.assert_not_called()
         calibration.assert_not_called()
         terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.reason_code, "authorization_expired")
+
+    def test_final_execution_contract_expiry_is_authorization_expired(self) -> None:
+        assignment = self.plan.assignments[0]
+        source = next(
+            item
+            for item in self.partition.inventory_sources
+            if item.local_item_id == assignment.local_item_id
+        )
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        sample_item = {
+            "library_item_id": assignment.local_item_id,
+            "source_size_bytes": SOURCE_SIZE_BYTES,
+            "resolved_policy": {},
+        }
+        source_commitment = av1_validation_derivation_plan_source_commitment(
+            self.plan,
+            assignment.assignment_id,
+        )
+        pinned_source = SimpleNamespace(
+            path=self.runtime_artifact_root / "source-snapshots" / "source.mkv",
+            content_sha256=source_commitment.source_sha256,
+            size_bytes=source_commitment.source_size_bytes,
+            content_version_fingerprint=source.source_identity,
+        )
+        deadline_expired = ProcessDeadlineExpiredError(
+            "authorization deadline expired during final contract check"
+        )
+
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+                side_effect=(None, deadline_expired),
+            ) as execution_contract,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                return_value=SimpleNamespace(free=100 * 1024 ** 3),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.purge_transient_artifacts",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(SimpleNamespace()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_sample_item",
+                return_value=sample_item,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._bind_derivation_intent",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._validate_bound_sample_item",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.snapshot_staged_artifact",
+                return_value=None,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.restore_staged_artifact",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.resolve_item_source_path",
+                return_value=Path("/private/source.mkv"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._pinned_derivation_source",
+                return_value=nullcontext(pinned_source),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.run_sampled_calibration",
+                return_value=({"review_artifact_fingerprint": "unused"}, None),
+            ),
+        ):
+            attempt = _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                now_iso=lambda: "2026-07-31T23:59:59Z",
+            )
+
+        self.assertEqual(execution_contract.call_count, 2)
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "authorization_expired")
+        terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
+        self.assertEqual(terminal.status, "failed")
         self.assertEqual(terminal.reason_code, "authorization_expired")
 
     def test_execution_rechecks_live_source_commitments_before_artifact_writes(self) -> None:

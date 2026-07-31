@@ -224,6 +224,45 @@ def _terminate_process(
         return
 
 
+def _add_managed_process_cleanup_note(
+        error: BaseException,
+        cleanup_error: BaseException,
+) -> None:
+    error.add_note(
+        "Managed process cleanup also failed: "
+        f"{type(cleanup_error).__name__}: {cleanup_error}"
+    )
+
+
+def _cleanup_retained_process_group_after_status_failure(
+        *,
+        process_controller: ManagedProcessController,
+        process: subprocess.Popen[str],
+        status_descriptor: int,
+        error: BaseException,
+) -> None:
+    try:
+        process_controller.terminate()
+    except BaseException as cleanup_error:
+        _add_managed_process_cleanup_note(error, cleanup_error)
+        try:
+            _terminate_process(
+                process,
+                terminate_process_group=True,
+                process_group_id=process.pid,
+            )
+        except BaseException as fallback_error:
+            _add_managed_process_cleanup_note(error, fallback_error)
+    try:
+        os.close(status_descriptor)
+    except BaseException as cleanup_error:
+        _add_managed_process_cleanup_note(error, cleanup_error)
+    try:
+        process_controller.release_process_group(process.pid)
+    except BaseException as cleanup_error:
+        _add_managed_process_cleanup_note(error, cleanup_error)
+
+
 def run_command(
         cmd: list[str],
         *,
@@ -331,10 +370,7 @@ def run_command(
         except BaseException as reap_error:
             cleanup_errors.append(reap_error)
         for error in cleanup_errors:
-            exc.add_note(
-                "Managed process cleanup also failed: "
-                f"{type(error).__name__}: {error}"
-            )
+            _add_managed_process_cleanup_note(exc, error)
         if deadline_status_descriptor >= 0:
             os.close(deadline_status_descriptor)
         raise
@@ -352,22 +388,28 @@ def run_command(
                     chunks.append(chunk)
                 deadline_status = b"".join(chunks)
             except OSError as exc:
-                process_controller.terminate()
                 raise ProcessDeadlineEnforcementError(
                     "Absolute process deadline enforcement status is unavailable."
                 ) from exc
-            if deadline_status == b"E":
-                raise ProcessDeadlineExpiredError(
-                    "Process authorization deadline expired."
-                )
-            if deadline_status != b"C":
-                process_controller.terminate()
+            if deadline_status not in {b"C", b"E"}:
                 raise ProcessDeadlineEnforcementError(
                     "Absolute process deadline enforcement failed closed."
                 )
-        finally:
+        except BaseException as exc:
+            _cleanup_retained_process_group_after_status_failure(
+                process_controller=process_controller,
+                process=process,
+                status_descriptor=deadline_status_descriptor,
+                error=exc,
+            )
+            raise
+        else:
             os.close(deadline_status_descriptor)
             process_controller.release_process_group(process.pid)
+        if deadline_status == b"E":
+            raise ProcessDeadlineExpiredError(
+                "Process authorization deadline expired."
+            )
     process_controller.throw_if_cancelled()
     completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     if check and completed.returncode:

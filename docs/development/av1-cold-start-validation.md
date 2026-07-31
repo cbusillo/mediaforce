@@ -471,15 +471,17 @@ lock path resolves `web_state_dir` symlinks before choosing that domain, so
 aliases cannot create a second one. Guarded SQLite engines verify the reserved
 database identity before and after connection creation, every cursor operation,
 writable transaction commit, and the raw legacy-schema bootstrap. Connection
-creation also snapshots the path's device, inode, change time, and link count,
-then inspects the newly opened SQLite file descriptor. Its kernel path and
-device/inode/change-time/link-count identity must match the resolved reserved
-database itself; unavailable descriptor inspection fails closed while an
-identity guard is active. Guarded connection creation and connection close are
-serialized so descriptor-number reuse cannot hide the newly opened main
-database descriptor. A database swap-and-restore or transient ancestor symlink
-substitution therefore cannot attach SQLite to another file even when the
-guarded pathname is restored before the connection factory returns.
+creation pins the resolved parent directory and expected database inode, then
+opens SQLite through the parent directory's stable kernel identity: `/.vol`
+directory identity on macOS and a retained `/proc/self/fd` directory handle on
+Linux. The original read-only or read-write URI query is preserved, so WAL and
+read-only enforcement remain SQLite-native. The expected file handle stays
+retained for the SQLite connection lifetime, and its device, inode, change
+time, and link count must remain identical to both the pinned directory entry
+and resolved path after connection creation. Unsupported pinned-path identity
+inspection fails closed. A database swap-and-restore, transient ancestor
+substitution, or unrelated concurrent open therefore cannot redirect or spoof
+the returned connection.
 Persistent or transient path replacement during connect, query, migration, or
 commit fails closed before later evidence publication can proceed without
 weakening read-only URI or WAL behavior.
@@ -492,11 +494,13 @@ if the parent operator process is stopped. If a group leader exits while its
 descendants remain, the watchdog keeps policing the process group until every
 descendant exits or the deadline kills the group. A dedicated status pipe
 reports explicit clean completion, deadline expiry, or enforcement failure.
-The parent retains the target process-group identity until that final status EOF
-is consumed, so an operator cancellation after the group leader exits still
-terminates descendants. Empty or unexpected status EOF fails closed, and a
-watchdog runtime exception reports enforcement unavailable before killing the
-target group. Toolchain and quality-metric capability probes use
+The watchdog sends the deadline kill before reporting expiry; a kill error other
+than an already-absent process group reports enforcement unavailable instead.
+The parent retains the target process-group identity until final status EOF is
+consumed and validated. Empty or unexpected status, status-read interruption,
+and watchdog unavailability all trigger parent-side descendant cleanup before
+the retained group is released, while cleanup failures remain notes on the
+original exception. Toolchain and quality-metric capability probes use
 that same controller and deadline; the assignment's already-frozen quality
 metric and target are selected without launching a second unmanaged probe.
 Fresh execution samples its authorization
@@ -707,7 +711,10 @@ rejects a kernel-observable post-expiration publication. Assignment claims are
 the narrow recovery exception: a claim whose rename landed after expiration is
 loaded only as terminal evidence, marked late in memory, and recovered as
 `failed/authorization_expired`. It can never authorize work or permanently
-poison recovery.
+poison recovery. A deadline expiry raised by the final execution-contract
+recheck keeps that same `failed/authorization_expired` classification; deadline
+enforcement failure remains a wrapped contract safety stop rather than being
+misreported as ordinary expiry.
 Finalization requires exactly five resolved claims and five matching approvals
 over one unanimous repository commit/tree identity; any unresolved, divergent,
 or rejected claim blocks it permanently.

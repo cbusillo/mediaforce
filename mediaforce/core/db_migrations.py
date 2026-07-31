@@ -1,6 +1,5 @@
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-import importlib
 from importlib.resources import as_file
 from importlib.resources import files
 import os
@@ -8,8 +7,8 @@ from pathlib import Path
 import sqlite3
 import stat
 import sys
-import threading
 from typing import Any, cast
+from urllib.parse import quote
 
 # noinspection PyPackageRequirements
 from alembic import command
@@ -25,14 +24,42 @@ SQLITE_BUSY_TIMEOUT_MS = 30_000
 INITIAL_REVISION = "20260401_0001"
 SQLiteConnectionFactory = Callable[..., sqlite3.Connection]
 DatabaseConnectionPathSnapshot = tuple[int, int, int, int]
-DatabaseConnectionDescriptorSnapshot = tuple[int, int, int, int, str]
-_DATABASE_CONNECTION_IDENTITY_LOCK = threading.RLock()
 
 
 class _DatabaseIdentityConnection(sqlite3.Connection):
+    _database_identity_descriptors: tuple[int, ...] = ()
+
+    def retain_database_identity_descriptors(
+            self,
+            descriptors: tuple[int, ...],
+    ) -> None:
+        if self._database_identity_descriptors:
+            raise RuntimeError(
+                "Mediaforce database identity descriptors are already retained"
+            )
+        self._database_identity_descriptors = descriptors
+
     def close(self) -> None:
-        with _DATABASE_CONNECTION_IDENTITY_LOCK:
+        descriptors = self._database_identity_descriptors
+        self._database_identity_descriptors = ()
+        close_error: BaseException | None = None
+        try:
             super().close()
+        except BaseException as exc:
+            close_error = exc
+        for descriptor in descriptors:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if close_error is None:
+                    close_error = exc
+                else:
+                    close_error.add_note(
+                        "Database identity descriptor cleanup also failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+        if close_error is not None:
+            raise close_error
 
 
 def database_url(
@@ -88,30 +115,58 @@ def database_identity_connection_factory(
     resolved_path = db_path.expanduser().resolve()
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
-        with _DATABASE_CONNECTION_IDENTITY_LOCK:
+        identity_guard()
+        expected = _database_connection_path_snapshot(resolved_path)
+        identity_guard()
+        pinned_path, descriptors = _pin_database_connection_path(
+            resolved_path,
+            expected=expected,
+        )
+        connection: _DatabaseIdentityConnection | None = None
+        descriptors_retained = False
+        try:
+            connection_args, connection_kwargs = (
+                _database_connection_arguments_for_pinned_path(
+                    args,
+                    kwargs,
+                    pinned_path=pinned_path,
+                )
+            )
+            connection_kwargs.pop("factory", None)
+            connection = _DatabaseIdentityConnection(
+                *connection_args,
+                **connection_kwargs,
+            )
+            connection.retain_database_identity_descriptors(descriptors)
+            descriptors_retained = True
             identity_guard()
-            before = _database_connection_path_snapshot(resolved_path)
-            identity_guard()
-            before_descriptors = _database_connection_descriptor_snapshot()
-            kwargs.pop("factory", None)
-            connection = _DatabaseIdentityConnection(*args, **kwargs)
-            try:
-                after_descriptors = _database_connection_descriptor_snapshot()
-                identity_guard()
-                after = _database_connection_path_snapshot(resolved_path)
-                if after != before or not _database_connection_opened_expected_file(
-                    resolved_path,
-                    expected=before,
-                    before=before_descriptors,
-                    after=after_descriptors,
-                ):
-                    raise RuntimeError(
-                        "Mediaforce database identity changed during connection"
+            if not _database_connection_path_remains_pinned(
+                resolved_path,
+                expected=expected,
+                descriptors=descriptors,
+            ):
+                raise RuntimeError(
+                    "Mediaforce database identity changed during connection"
+                )
+        except BaseException as exc:
+            if connection is not None:
+                try:
+                    connection.close()
+                except BaseException as cleanup_error:
+                    exc.add_note(
+                        "Database connection cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
                     )
-            except BaseException:
-                connection.close()
-                raise
-            return connection
+            if not descriptors_retained:
+                try:
+                    _close_database_identity_descriptors(descriptors)
+                except BaseException as cleanup_error:
+                    exc.add_note(
+                        "Database identity descriptor cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+            raise
+        return connection
 
     return connect
 
@@ -128,80 +183,192 @@ def _database_connection_path_snapshot(
     )
 
 
-def _database_connection_descriptor_snapshot(
-) -> dict[int, DatabaseConnectionDescriptorSnapshot]:
-    if sys.platform == "darwin":
-        try:
-            fcntl = importlib.import_module("fcntl")
-        except ImportError as exc:
-            raise RuntimeError(
-                "Mediaforce database actual-opened identity inspection is unavailable"
-            ) from exc
-        if not hasattr(fcntl, "F_GETPATH"):
-            raise RuntimeError(
-                "Mediaforce database actual-opened identity inspection is unavailable"
-            )
-        descriptor_directory = Path("/dev/fd")
+def _database_connection_info_snapshot(
+        info: os.stat_result,
+) -> DatabaseConnectionPathSnapshot:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_ctime_ns,
+        info.st_nlink,
+    )
 
-        def descriptor_path(descriptor: int) -> str:
-            raw_path = fcntl.fcntl(
-                descriptor,
-                fcntl.F_GETPATH,
-                b"\0" * 1024,
-            )
-            return os.fsdecode(raw_path.split(b"\0", 1)[0])
-    elif sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
-        descriptor_directory = Path("/proc/self/fd")
 
-        def descriptor_path(descriptor: int) -> str:
-            return os.readlink(descriptor_directory / str(descriptor))
-    else:
+def _pin_database_connection_path(
+        db_path: Path,
+        *,
+        expected: DatabaseConnectionPathSnapshot,
+) -> tuple[Path, tuple[int, int]]:
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
         raise RuntimeError(
             "Mediaforce database actual-opened identity inspection is unavailable"
         )
-
+    directory_flags |= os.O_DIRECTORY
+    file_flags |= os.O_NOFOLLOW
     try:
-        descriptor_names = os.listdir(descriptor_directory)
+        directory_descriptor = os.open(db_path.parent, directory_flags)
     except OSError as exc:
         raise RuntimeError(
             "Mediaforce database actual-opened identity inspection is unavailable"
         ) from exc
-    snapshot: dict[int, DatabaseConnectionDescriptorSnapshot] = {}
-    for name in descriptor_names:
-        if not name.isdecimal():
-            continue
-        descriptor = int(name)
-        try:
-            info = os.fstat(descriptor)
-            path = descriptor_path(descriptor)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode):
-            snapshot[descriptor] = (
-                info.st_dev,
-                info.st_ino,
-                info.st_ctime_ns,
-                info.st_nlink,
-                path,
+    try:
+        file_descriptor = os.open(
+            db_path.name,
+            file_flags,
+            dir_fd=directory_descriptor,
+        )
+    except OSError as exc:
+        os.close(directory_descriptor)
+        raise RuntimeError(
+            "Mediaforce database identity changed during connection"
+        ) from exc
+    descriptors = (file_descriptor, directory_descriptor)
+    try:
+        directory_info = os.fstat(directory_descriptor)
+        file_info = os.fstat(file_descriptor)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or not stat.S_ISREG(file_info.st_mode)
+            or _database_connection_info_snapshot(file_info) != expected
+        ):
+            raise RuntimeError(
+                "Mediaforce database identity changed during connection"
             )
-    return snapshot
+        pinned_path = _database_connection_path_for_directory_descriptor(
+            directory_descriptor,
+            directory_info=directory_info,
+            filename=db_path.name,
+        )
+        pinned_info = pinned_path.stat()
+        if (
+            not stat.S_ISREG(pinned_info.st_mode)
+            or _database_connection_info_snapshot(pinned_info) != expected
+        ):
+            raise RuntimeError(
+                "Mediaforce database identity changed during connection"
+            )
+    except BaseException:
+        _close_database_identity_descriptors(descriptors)
+        raise
+    return pinned_path, descriptors
 
 
-def _database_connection_opened_expected_file(
+def _database_connection_path_for_directory_descriptor(
+        directory_descriptor: int,
+        *,
+        directory_info: os.stat_result,
+        filename: str,
+) -> Path:
+    if sys.platform == "darwin":
+        pinned_directory = (
+            Path("/.vol")
+            / str(directory_info.st_dev)
+            / str(directory_info.st_ino)
+        )
+    elif sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
+        pinned_directory = Path("/proc/self/fd") / str(directory_descriptor)
+    else:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
+    pinned_path = pinned_directory / filename
+    try:
+        pinned_parent_info = pinned_directory.stat()
+    except OSError as exc:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        ) from exc
+    if (
+        pinned_parent_info.st_dev,
+        pinned_parent_info.st_ino,
+    ) != (
+        directory_info.st_dev,
+        directory_info.st_ino,
+    ):
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
+    return pinned_path
+
+
+def _database_connection_arguments_for_pinned_path(
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        pinned_path: Path,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    connection_args = list(args)
+    connection_kwargs = dict(kwargs)
+    if connection_args:
+        database = connection_args[0]
+    elif "database" in connection_kwargs:
+        database = connection_kwargs["database"]
+    else:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
+    database_text = os.fspath(database)
+    if not isinstance(database_text, str):
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
+    pinned_text = os.fspath(pinned_path)
+    if database_text.startswith("file:"):
+        if connection_kwargs.get("uri") is not True:
+            raise RuntimeError(
+                "Mediaforce database actual-opened identity inspection is unavailable"
+            )
+        _, separator, query = database_text.partition("?")
+        pinned_database = f"file:{quote(pinned_text, safe='/')}"
+        if separator:
+            pinned_database = f"{pinned_database}?{query}"
+    else:
+        pinned_database = pinned_text
+    if connection_args:
+        connection_args[0] = pinned_database
+    else:
+        connection_kwargs["database"] = pinned_database
+    return tuple(connection_args), connection_kwargs
+
+
+def _database_connection_path_remains_pinned(
         db_path: Path,
         *,
         expected: DatabaseConnectionPathSnapshot,
-        before: dict[int, DatabaseConnectionDescriptorSnapshot],
-        after: dict[int, DatabaseConnectionDescriptorSnapshot],
+        descriptors: tuple[int, int],
 ) -> bool:
-    expected_descriptor = (*expected, str(db_path))
-    opened_expected_descriptors = [
-        identity
-        for descriptor, identity in after.items()
-        if before.get(descriptor) != identity
-        and identity == expected_descriptor
-    ]
-    return opened_expected_descriptors == [expected_descriptor]
+    file_descriptor, directory_descriptor = descriptors
+    try:
+        descriptor_info = os.fstat(file_descriptor)
+        relative_info = os.stat(
+            db_path.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        path_info = db_path.stat()
+    except OSError:
+        return False
+    return all(
+        stat.S_ISREG(info.st_mode)
+        and _database_connection_info_snapshot(info) == expected
+        for info in (descriptor_info, relative_info, path_info)
+    )
+
+
+def _close_database_identity_descriptors(
+        descriptors: tuple[int, ...],
+) -> None:
+    close_error: OSError | None = None
+    for descriptor in descriptors:
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            if close_error is None:
+                close_error = exc
+    if close_error is not None:
+        raise close_error
 
 
 def register_database_identity_guards(

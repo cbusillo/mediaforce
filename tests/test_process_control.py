@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import errno
 import os
 from pathlib import Path
 import signal
@@ -251,6 +252,144 @@ class ProcessControlTests(TestCase):
             run_command(["echo", "ok"], process_controller=controller)
         terminate.assert_called_once_with()
 
+    @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_deadline_status_unavailable_retains_group_until_cleanup(
+            self,
+            popen_mock: Mock,
+    ) -> None:
+        process = Mock()
+        process.pid = 987654
+        process.returncode = 0
+        process.communicate.return_value = ("", "")
+        popen_mock.return_value = process
+        controller = Mock(spec=ManagedProcessController)
+        controller.process_deadline_ns.return_value = time.time_ns() + 2_000_000_000
+        events: list[str] = []
+        controller.clear.side_effect = lambda *_args, **_kwargs: events.append("retain")
+        controller.terminate.side_effect = lambda: events.append("terminate")
+        controller.release_process_group.side_effect = (
+            lambda _process_group: events.append("release")
+        )
+
+        with (
+            patch.object(process_control_module.os, "pipe", return_value=(101, 102)),
+            patch.object(
+                process_control_module.os,
+                "read",
+                side_effect=(b"U", b""),
+            ),
+            patch.object(
+                process_control_module.os,
+                "close",
+                side_effect=lambda descriptor: events.append(f"close:{descriptor}"),
+            ),
+            self.assertRaisesRegex(
+                ProcessDeadlineEnforcementError,
+                "failed closed",
+            ),
+        ):
+            run_command(["echo", "ok"], process_controller=controller)
+
+        self.assertEqual(
+            events,
+            ["close:102", "retain", "terminate", "close:101", "release"],
+        )
+
+    @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_deadline_status_read_base_exceptions_cleanup_before_reraise(
+            self,
+            popen_mock: Mock,
+    ) -> None:
+        for interruption in (KeyboardInterrupt(), SystemExit(17)):
+            with self.subTest(error_type=type(interruption).__name__):
+                process = Mock()
+                process.pid = 987654
+                process.returncode = 0
+                process.communicate.return_value = ("", "")
+                popen_mock.return_value = process
+                controller = Mock(spec=ManagedProcessController)
+                controller.process_deadline_ns.return_value = (
+                    time.time_ns() + 2_000_000_000
+                )
+                events: list[str] = []
+                controller.clear.side_effect = (
+                    lambda *_args, **_kwargs: events.append("retain")
+                )
+                controller.terminate.side_effect = lambda: events.append("terminate")
+                controller.release_process_group.side_effect = (
+                    lambda _process_group: events.append("release")
+                )
+
+                with (
+                    patch.object(
+                        process_control_module.os,
+                        "pipe",
+                        return_value=(101, 102),
+                    ),
+                    patch.object(
+                        process_control_module.os,
+                        "read",
+                        side_effect=interruption,
+                    ),
+                    patch.object(
+                        process_control_module.os,
+                        "close",
+                        side_effect=(
+                            lambda descriptor: events.append(f"close:{descriptor}")
+                        ),
+                    ),
+                    self.assertRaises(type(interruption)) as raised,
+                ):
+                    run_command(["echo", "ok"], process_controller=controller)
+
+                self.assertIs(raised.exception, interruption)
+                self.assertEqual(
+                    events,
+                    ["close:102", "retain", "terminate", "close:101", "release"],
+                )
+
+    @patch(
+        "mediaforce.core.process_control._terminate_process",
+        side_effect=RuntimeError("fallback cleanup failed"),
+    )
+    @patch("mediaforce.core.process_control.subprocess.Popen")
+    def test_deadline_status_read_preserves_cleanup_failures_as_notes(
+            self,
+            popen_mock: Mock,
+            _terminate_process_mock: Mock,
+    ) -> None:
+        process = Mock()
+        process.pid = 987654
+        process.returncode = 0
+        process.communicate.return_value = ("", "")
+        popen_mock.return_value = process
+        interruption = KeyboardInterrupt()
+        controller = Mock(spec=ManagedProcessController)
+        controller.process_deadline_ns.return_value = time.time_ns() + 2_000_000_000
+        controller.terminate.side_effect = RuntimeError("controller cleanup failed")
+
+        with (
+            patch.object(process_control_module.os, "pipe", return_value=(101, 102)),
+            patch.object(
+                process_control_module.os,
+                "read",
+                side_effect=interruption,
+            ),
+            patch.object(process_control_module.os, "close"),
+            self.assertRaises(KeyboardInterrupt) as raised,
+        ):
+            run_command(["echo", "ok"], process_controller=controller)
+
+        self.assertIs(raised.exception, interruption)
+        self.assertIn(
+            "RuntimeError: controller cleanup failed",
+            "\n".join(raised.exception.__notes__),
+        )
+        self.assertIn(
+            "RuntimeError: fallback cleanup failed",
+            "\n".join(raised.exception.__notes__),
+        )
+
     def test_deadline_watchdog_reports_clean_completion(self) -> None:
         status_read, status_write = os.pipe()
         ready_read, ready_write = os.pipe()
@@ -318,6 +457,61 @@ class ProcessControlTests(TestCase):
         os.close(status_read)
         close_waiter.assert_called_once_with()
         kill_group.assert_called_once_with(4321)
+
+    def test_deadline_watchdog_reports_kill_failure_as_unavailable(self) -> None:
+        for kill_succeeded, expected_status in ((True, b"E"), (False, b"U")):
+            with self.subTest(kill_succeeded=kill_succeeded):
+                status_read, status_write = os.pipe()
+                ready_read, ready_write = os.pipe()
+                close_waiter = Mock()
+
+                with (
+                    patch.object(process_deadline_module.os, "setsid"),
+                    patch.object(process_deadline_module, "_close_standard_streams"),
+                    patch.object(
+                        process_deadline_module,
+                        "_exit_waiter",
+                        return_value=(lambda _timeout: False, close_waiter),
+                    ),
+                    patch.object(
+                        process_deadline_module,
+                        "_kill_process_group",
+                        return_value=kill_succeeded,
+                    ) as kill_group,
+                ):
+                    process_deadline_module._watch_target(
+                        target_pid=1234,
+                        target_process_group=4321,
+                        deadline_ns=time.time_ns() - 1,
+                        status_descriptor=status_write,
+                        ready_descriptor=ready_write,
+                    )
+
+                self.assertEqual(os.read(ready_read, 1), b"R")
+                self.assertEqual(os.read(status_read, 1), expected_status)
+                os.close(ready_read)
+                os.close(status_read)
+                close_waiter.assert_called_once_with()
+                kill_group.assert_called_once_with(4321)
+
+    def test_kill_process_group_reports_signal_outcome(self) -> None:
+        with patch.object(process_deadline_module.os, "killpg") as kill_group:
+            self.assertTrue(process_deadline_module._kill_process_group(4321))
+        kill_group.assert_called_once_with(4321, signal.SIGKILL)
+
+        with patch.object(
+            process_deadline_module.os,
+            "killpg",
+            side_effect=OSError(errno.EPERM, "not permitted"),
+        ):
+            self.assertFalse(process_deadline_module._kill_process_group(4321))
+
+        with patch.object(
+            process_deadline_module.os,
+            "killpg",
+            side_effect=OSError(errno.ESRCH, "missing"),
+        ):
+            self.assertTrue(process_deadline_module._kill_process_group(4321))
 
     def test_nested_absolute_deadlines_use_earliest_and_restore_previous(self) -> None:
         controller = ManagedProcessController()
