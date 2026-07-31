@@ -35,7 +35,11 @@ from mediaforce.core.process_control import (
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
+    AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST,
+    AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
+    AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
+    AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
     AV1ValidationDerivationAttempt,
     AV1ValidationDerivationCandidateProposal,
@@ -48,8 +52,6 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationVerdictRetryMismatchError,
     _attempt_semantic_payload,
     _bind_owner_only_directory,
-    _code_review_marker,
-    _completed_code_review_message,
     _derivation_id,
     _payload_sha256,
     _read_owner_only_bytes,
@@ -59,6 +61,8 @@ from mediaforce.tuning.av1_validation_derivation import (
     _write_owner_only,
     assert_av1_validation_derivation_authorization_active,
     assert_av1_validation_derivation_source_commitments,
+    av1_validation_derivation_review_analysis_sha256,
+    av1_validation_derivation_review_developer_text,
     av1_validation_derivation_plan_public_summary,
     av1_validation_derivation_plan_from_payload,
     av1_validation_derivation_plan_source_commitment,
@@ -68,9 +72,10 @@ from mediaforce.tuning.av1_validation_derivation import (
     build_av1_validation_derivation_plan,
     build_av1_validation_derivation_source_commitments,
     build_av1_validation_derivation_review_claim,
-    build_av1_validation_derivation_review_prompt,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
+    build_av1_validation_derivation_review_request,
+    build_av1_validation_derivation_review_response_schema,
     build_av1_validation_derivation_terminal_record,
     ensure_av1_validation_derivation_verdict_claim,
     ensure_av1_validation_derivation_terminal_intent,
@@ -89,7 +94,9 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_terminal_records,
     resolve_av1_validation_derivation_verdict_intent,
     retain_av1_validation_derivation_publication_directories,
+    validate_av1_validation_derivation_review_bundle,
     validate_av1_validation_derivation_review_run_evidence,
+    validate_av1_validation_derivation_review_response,
     validate_av1_validation_derivation_plan_binding,
     write_av1_validation_derivation_candidate_proposal,
     write_av1_validation_derivation_plan,
@@ -1625,7 +1632,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ) as load_proposal,
             patch.object(
                 verify_av1_cold_start_preregistration,
-                "_run_code_agent_review",
+                "_run_code_llm_review",
             ) as run_review,
             self.assertRaisesRegex(
                 AV1ValidationDerivationError,
@@ -1773,7 +1780,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
-                "_run_code_agent_review",
+                "_run_code_llm_review",
             ) as run_review,
             patch.object(
                 verify_av1_cold_start_preregistration,
@@ -1876,7 +1883,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
-                "_run_code_agent_review",
+                "_run_code_llm_review",
             ) as run_review,
             patch.object(
                 verify_av1_cold_start_preregistration,
@@ -2296,1125 +2303,230 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         }
         self.assertTrue(expected_identities.issubset(fsynced_identities))
 
-    def test_review_attestation_identity_comes_from_code_managed_result(self) -> None:
-        agent_id = "12345678-1234-1234-1234-123456789abc"
-        cell_plan_id = self.plan.assignments[0].cell_plan_id
-        assignments = [
-            assignment
-            for assignment in self.plan.assignments
-            if assignment.cell_plan_id == cell_plan_id
-        ]
-        records = [
-            self._observed_record(assignment.assignment_id, crf=28.0)
-            for assignment in assignments
-        ]
-        evaluation = evaluate_av1_validation_derivation_candidate(
-            manifest=self.manifest,
-            plan=self.plan,
-            partition=self.partition,
-            cell_plan_id=cell_plan_id,
-            attempts=self._attempts(records),
-            records=records,
-            current_observations=self._current_observations(records),
-            proposed_at="2026-07-28T02:00:00Z",
-        )
-        assert evaluation.proposal is not None
-        proposal = evaluation.proposal
-        expected_claim = build_av1_validation_derivation_review_claim(
-            plan=self.plan,
-            proposal=proposal,
-            repository_commit=REVIEW_REPOSITORY_COMMIT,
-            repository_tree=REVIEW_REPOSITORY_TREE,
-            lane="architecture",
-            review_run_id=agent_id,
-            review_runner_canonical_path_sha256=(
-                self.plan.review_runner_canonical_path_sha256
-            ),
-            review_runner_binary_sha256=(
-                self.plan.review_runner_binary_sha256
-            ),
-            claimed_at="2026-07-28T03:00:00Z",
-        )
-        marker = {
-            "decision": "approved",
-            "lane": "architecture",
-            "proposal_id": proposal.proposal_id,
-            "proposal_payload_sha256": proposal.payload_sha256,
-            "repository_commit": REVIEW_REPOSITORY_COMMIT,
-            "repository_tree": REVIEW_REPOSITORY_TREE,
-            "review_claim_id": expected_claim.claim_id,
-            "review_claim_payload_sha256": expected_claim.payload_sha256,
-            "review_run_id": agent_id,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            code_binary = root / "code"
-            isolated_repository = root / "isolated-repository"
-            code_binary.write_bytes(REVIEW_RUNNER_BYTES)
-            code_binary.chmod(0o700)
-            caller_secret = f"caller-secret:{root}/private-token"
-            final_message = (
-                f"Résumé\u2028review\u2029complete. {caller_secret}\n"
-                "MEDIAFORCE_AV1_REVIEW_V2 "
-                f"{json.dumps(marker, sort_keys=True, separators=(',', ':'))}"
-            )
-            prompt = verify_av1_cold_start_preregistration._agent_review_prompt(
-                proposal=proposal,
-                claim=expected_claim,
-            )
-            stdout = "\n".join((
-                json.dumps({
-                    "provider": "test",
-                    "model": "test-model",
-                    "workdir": str(root),
-                    "approval": "never",
-                    "sandbox": "read-only",
-                }, ensure_ascii=False),
-                json.dumps({"prompt": prompt}, ensure_ascii=False),
-                json.dumps({
-                    "msg": {
-                        "type": "agent_message",
-                        "message": final_message,
-                    }
-                }, ensure_ascii=False),
-                json.dumps({
-                    "msg": {
-                        "type": "task_lifecycle",
-                        "phase": "quiescent",
-                        "last_agent_message": final_message,
-                    }
-                }, ensure_ascii=False),
-            ))
-            completed = SimpleNamespace(
-                returncode=0,
-                stdout=stdout,
-                stderr=f"stderr:{caller_secret}",
-            )
-            with (
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_repository_review_identity",
-                    return_value=(
-                        REVIEW_REPOSITORY_COMMIT,
-                        REVIEW_REPOSITORY_TREE,
-                    ),
-                ) as repository_identity,
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_authorized_review_runner_identity",
-                    return_value=(
-                        code_binary,
-                        self.plan.review_runner_canonical_path_sha256,
-                        self.plan.review_runner_binary_sha256,
-                        REVIEW_RUNNER_BYTES,
-                    ),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_isolated_review_repository",
-                    return_value=_context_value(isolated_repository),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "run_command",
-                    return_value=completed,
-                ) as run_review,
-                patch.object(
-                    verify_av1_cold_start_preregistration.uuid,
-                    "uuid4",
-                    return_value=agent_id,
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_now_iso",
-                    return_value="2026-07-28T03:00:00Z",
-                ),
-            ):
-                claim, evidence, decision = (
-                    verify_av1_cold_start_preregistration._run_code_agent_review(
-                        artifact_root=self.runtime_artifact_root,
-                        plan=self.plan,
-                        proposal=proposal,
-                        lane="architecture",
-                    )
-                )
-            self.assertEqual(claim, expected_claim)
-            self.assertEqual(decision, "approved")
-            launched_runner = Path(run_review.call_args.args[0][0])
-            self.assertNotEqual(launched_runner, code_binary)
-            self.assertFalse(launched_runner.exists())
-            self.assertFalse(launched_runner.parent.exists())
-            review_command = run_review.call_args.args[0]
-            self.assertIn('shell_environment_policy.inherit="none"', review_command)
-            shell_home_override = next(
-                value
-                for value in review_command
-                if value.startswith("shell_environment_policy.set.HOME=")
-            )
-            shell_home = Path(json.loads(shell_home_override.split("=", 1)[1]))
-            self.assertFalse(shell_home.exists())
-            self.assertNotEqual(
-                shell_home,
-                Path(verify_av1_cold_start_preregistration._review_user_home()),
-            )
-            self.assertIn(
-                "shell_environment_policy.set.USER=\"mediaforce-review\"",
-                review_command,
-            )
-            self.assertIn(
-                "shell_environment_policy.set.LOGNAME=\"mediaforce-review\"",
-                review_command,
-            )
-            self.assertEqual(
-                run_review.call_args.kwargs["cwd"],
-                isolated_repository,
-            )
-            self.assertNotEqual(
-                run_review.call_args.kwargs["cwd"],
-                verify_av1_cold_start_preregistration.REPOSITORY_ROOT,
-            )
-            review_environment = run_review.call_args.kwargs["env"]
-            self.assertEqual(
-                review_environment["PATH"],
-                verify_av1_cold_start_preregistration._AGENT_REVIEW_SAFE_PATH,
-            )
-            evidence_payload = json.loads(evidence)
-            self.assertEqual(evidence, canonical_json_bytes(evidence_payload))
-            self.assertEqual(evidence_payload["review_run_id"], agent_id)
-            self.assertEqual(evidence_payload["returncode"], 0)
-            self.assertEqual(evidence_payload["schema_version"], 2)
-            self.assertNotIn("stdout", evidence_payload)
-            self.assertNotIn("stderr", evidence_payload)
-            self.assertEqual(
-                evidence_payload["repository_commit"],
-                REVIEW_REPOSITORY_COMMIT,
-            )
-            self.assertEqual(
-                evidence_payload["repository_tree"],
-                REVIEW_REPOSITORY_TREE,
-            )
-            self.assertEqual(repository_identity.call_count, 2)
-            self.assertNotIn(str(code_binary), evidence.decode("utf-8"))
-            self.assertNotIn(str(root), evidence.decode("utf-8"))
-            self.assertNotIn(
-                verify_av1_cold_start_preregistration._review_user_home(),
-                evidence.decode("utf-8"),
-            )
-            self.assertNotIn(caller_secret, evidence.decode("utf-8"))
-            review = build_av1_validation_derivation_review_attestation(
-                proposal=proposal,
-                claim=claim,
-                review_evidence_sha256=(
-                    f"sha256:{hashlib.sha256(evidence).hexdigest()}"
-                ),
-                decision=decision,
-                reviewed_at="2026-07-28T03:00:00Z",
-            )
-            validate_av1_validation_derivation_review_run_evidence(
-                evidence,
-                review=review,
-            )
-
-    def test_review_runner_rejects_interpreter_script(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            runner = Path(directory) / "code"
-            runner.write_text("#!/usr/bin/env node\n", encoding="utf-8")
-            runner.chmod(0o700)
-            with (
-                patch.object(
-                    verify_av1_cold_start_preregistration.shutil,
-                    "which",
-                    return_value=str(runner),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_trusted_code_ancestor_path",
-                    return_value=runner.resolve(),
-                ),
-                self.assertRaisesRegex(
-                    AV1ValidationDerivationError,
-                    "native Mach-O",
-                ),
-            ):
-                verify_av1_cold_start_preregistration._review_runner_identity()
-
-    def test_review_recorder_rejects_noncanonical_transcript(self) -> None:
-        agent_id = "12345678-1234-1234-1234-123456789abd"
+    def test_structured_review_uses_no_tool_request_and_removes_request_file(self) -> None:
         proposal = self._candidate_proposal()
-        expected_claim = build_av1_validation_derivation_review_claim(
-            plan=self.plan,
-            proposal=proposal,
-            repository_commit=REVIEW_REPOSITORY_COMMIT,
-            repository_tree=REVIEW_REPOSITORY_TREE,
-            lane="architecture",
-            review_run_id=agent_id,
-            review_runner_canonical_path_sha256=(
-                self.plan.review_runner_canonical_path_sha256
-            ),
-            review_runner_binary_sha256=(
-                self.plan.review_runner_binary_sha256
-            ),
-            claimed_at="2026-07-28T03:00:00Z",
-        )
-        prompt = verify_av1_cold_start_preregistration._agent_review_prompt(
-            proposal=proposal,
-            claim=expected_claim,
-        )
-        with tempfile.TemporaryDirectory() as directory:
-            code_binary = Path(directory) / "code"
-            isolated_repository = Path(directory) / "isolated-repository"
-            code_binary.write_bytes(REVIEW_RUNNER_BYTES)
-            code_binary.chmod(0o700)
-            completed = SimpleNamespace(
-                returncode=0,
-                stdout="\n".join((
-                    json.dumps({
-                        "provider": "test",
-                        "model": "test-model",
-                        "workdir": directory,
-                        "approval": "never",
-                        "sandbox": "read-only",
-                    }),
-                    json.dumps({"prompt": prompt}),
-                    "not-json",
-                )),
-                stderr="",
-            )
-            with (
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_repository_review_identity",
-                    return_value=(
-                        REVIEW_REPOSITORY_COMMIT,
-                        REVIEW_REPOSITORY_TREE,
-                    ),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_authorized_review_runner_identity",
-                    return_value=(
-                        code_binary,
-                        self.plan.review_runner_canonical_path_sha256,
-                        self.plan.review_runner_binary_sha256,
-                        REVIEW_RUNNER_BYTES,
-                    ),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_isolated_review_repository",
-                    return_value=_context_value(isolated_repository),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "run_command",
-                    return_value=completed,
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration.uuid,
-                    "uuid4",
-                    return_value=agent_id,
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_now_iso",
-                    return_value="2026-07-28T03:00:00Z",
-                ),
-                self.assertRaisesRegex(
-                    AV1ValidationDerivationError,
-                    "not canonical JSONL",
-                ),
-            ):
-                verify_av1_cold_start_preregistration._run_code_agent_review(
-                    artifact_root=self.runtime_artifact_root,
-                    plan=self.plan,
-                    proposal=proposal,
-                    lane="architecture",
-                )
+        request_path: Path | None = None
+        request_payload: dict[str, object] | None = None
+        trusted_runner = Path("/private/trusted-code")
+
+        def bundle_for_claim(*, claim: object, **_kwargs: object) -> dict[str, object]:
+            return _review_bundle_for_claim(claim)
+
+        def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+            nonlocal request_path, request_payload
+            self.assertEqual(command[:3], [str(trusted_runner), "llm", "request"])
+            self.assertNotIn("exec", command)
+            self.assertFalse(any(item in {"--tools", "--sandbox", "-a"} for item in command))
+            request_path = Path(command[command.index("--request-file") + 1])
+            self.assertEqual(stat.S_IMODE(request_path.stat().st_mode), 0o400)
+            request_payload = json.loads(request_path.read_text(encoding="utf-8"))
             self.assertEqual(
-                load_av1_validation_derivation_review_claims(
-                    self.runtime_artifact_root,
-                    plan=self.plan,
-                    proposal=proposal,
-                ),
-                (expected_claim,),
+                command[command.index("--developer") + 1],
+                av1_validation_derivation_review_developer_text("architecture"),
             )
-
-    def test_review_transcript_requires_ordered_valid_config_and_prompt(self) -> None:
-        config = {
-            "provider": "test",
-            "model": "test-model",
-            "workdir": "/private/test",
-            "approval": "never",
-            "sandbox": "read-only",
-        }
-        prompt = {"prompt": "review prompt"}
-        final_message = "Review complete."
-        message = {
-            "msg": {
-                "type": "agent_message",
-                "message": final_message,
-            }
-        }
-        completion = {
-            "msg": {
-                "type": "task_lifecycle",
-                "phase": "quiescent",
-                "last_agent_message": final_message,
-            }
-        }
-        cases = (
-            (
-                "malformed config",
-                ({**config, "provider": None}, prompt, message, completion),
-                "configuration is invalid",
-            ),
-            (
-                "config with message fields",
-                (
-                    {
-                        **config,
-                        "msg": {
-                            "type": "agent_message",
-                            "message": final_message,
-                        },
-                    },
-                    prompt,
-                    message,
-                    completion,
-                ),
-                "configuration is invalid",
-            ),
-            (
-                "duplicate prompt",
-                (config, prompt, prompt, message, completion),
-                "prompt is duplicated or out of order",
-            ),
-            (
-                "smuggled duplicate prompt",
-                (
-                    config,
-                    prompt,
-                    {
-                        "prompt": "drifted prompt",
-                        "msg": {
-                            "type": "agent_message",
-                            "message": final_message,
-                        },
-                    },
-                    completion,
-                ),
-                "prompt is duplicated or out of order",
-            ),
-            (
-                "smuggled config field",
-                (
-                    config,
-                    prompt,
-                    {
-                        "provider": "drifted-provider",
-                        "msg": {
-                            "type": "agent_message",
-                            "message": final_message,
-                        },
-                    },
-                    completion,
-                ),
-                "configuration is duplicated or out of order",
-            ),
-            (
-                "prompt after completion",
-                (config, prompt, message, completion, prompt),
-                "events after completion",
-            ),
-            (
-                "malformed early completion",
-                (
-                    config,
-                    prompt,
-                    {
-                        "msg": {
-                            "type": "task_lifecycle",
-                            "phase": "quiescent",
-                            "last_agent_message": None,
-                        }
-                    },
-                    message,
-                    completion,
-                ),
-                "completion is invalid",
-            ),
-        )
-        for label, events, expected_error in cases:
-            with self.subTest(label=label), self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                expected_error,
+            response_schema = json.loads(command[command.index("--schema") + 1])
+            for field in (
+                "lane",
+                "proposal_id",
+                "proposal_payload_sha256",
+                "repository_commit",
+                "repository_tree",
+                "review_claim_id",
+                "review_claim_payload_sha256",
+                "review_run_id",
             ):
-                _completed_code_review_message("\n".join(
-                    canonical_json_bytes(event).decode("utf-8")
-                    for event in events
-                ))
-
-        duplicate_key_lines = (
-            (
-                "duplicate prompt key",
-                '{"prompt":"first","prompt":"review prompt"}',
-            ),
-            (
-                "duplicate config key",
-                (
-                    '{"provider":"first","provider":"test",'
-                    '"model":"test-model","workdir":"/private/test",'
-                    '"approval":"never","sandbox":"read-only"}'
-                ),
-            ),
-        )
-        for label, duplicate_line in duplicate_key_lines:
-            lines = [
-                canonical_json_bytes(config).decode("utf-8"),
-                canonical_json_bytes(prompt).decode("utf-8"),
-                canonical_json_bytes(message).decode("utf-8"),
-                canonical_json_bytes(completion).decode("utf-8"),
-            ]
-            lines[0 if "config" in label else 1] = duplicate_line
-            with self.subTest(label=label), self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "duplicate JSON keys",
-            ):
-                _completed_code_review_message("\n".join(lines))
-
-        with self.assertRaisesRegex(
-            AV1ValidationDerivationError,
-            "duplicate JSON keys",
-        ):
-            _code_review_marker(
-                'MEDIAFORCE_AV1_REVIEW_V2 '
-                '{"decision":"approved","decision":"rejected"}'
+                self.assertEqual(
+                    response_schema["properties"][field],
+                    {"const": request_payload[field]},
+                )
+            response = _structured_review_response_from_request(request_payload)
+            return SimpleNamespace(
+                returncode=0,
+                stdout=canonical_json_bytes(response).decode("utf-8") + "\n",
+                stderr="parent stderr must not become review evidence",
             )
 
-    def test_review_runner_environment_removes_injection_overrides(self) -> None:
-        with patch.dict(
-            os.environ,
-            {
-                "DYLD_INSERT_LIBRARIES": "/private/injected.dylib",
-                "HOME": "/private/fake-home",
-                "GIT_EXEC_PATH": "/private/git-tools",
-                "LD_PRELOAD": "/private/injected.so",
-                "NODE_OPTIONS": "--require=/private/injected.js",
-                "OPENAI_BASE_URL": "https://invalid.example",
-                "PATH": "/private/bin:/usr/bin",
-                "SAFE_REVIEW_VALUE": "retained",
-            },
-            clear=False,
-        ):
-            environment = (
-                verify_av1_cold_start_preregistration._review_runner_environment()
-            )
-        self.assertEqual(
-            environment["PATH"],
-            verify_av1_cold_start_preregistration._AGENT_REVIEW_SAFE_PATH,
-        )
-        self.assertNotIn("SAFE_REVIEW_VALUE", environment)
-        self.assertEqual(
-            environment["HOME"],
-            verify_av1_cold_start_preregistration._review_user_home(),
-        )
-        self.assertEqual(environment["USER"], "mediaforce-review")
-        self.assertEqual(environment["LOGNAME"], "mediaforce-review")
-        self.assertEqual(environment["SHELL"], "/bin/zsh")
-        for key in (
-            "AWS_SECRET_ACCESS_KEY",
-            "GITHUB_TOKEN",
-            "DYLD_INSERT_LIBRARIES",
-            "GIT_EXEC_PATH",
-            "LD_PRELOAD",
-            "NODE_OPTIONS",
-            "OPENAI_BASE_URL",
-        ):
-            self.assertNotIn(key, environment)
-
-    def test_review_shell_environment_uses_ephemeral_generic_identity(self) -> None:
-        with verify_av1_cold_start_preregistration._isolated_review_shell_home() as home:
-            environment = (
-                verify_av1_cold_start_preregistration._review_shell_environment(home)
-            )
-            self.assertTrue(home.is_dir())
-            self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o700)
-            self.assertEqual(environment["HOME"], str(home))
-            self.assertEqual(environment["USER"], "mediaforce-review")
-            self.assertEqual(environment["LOGNAME"], "mediaforce-review")
-            self.assertEqual(environment["TMPDIR"], str(home / "tmp"))
-            self.assertNotEqual(
-                environment["HOME"],
-                verify_av1_cold_start_preregistration._review_user_home(),
-            )
-        self.assertFalse(home.exists())
-
-    def test_review_runner_rejects_non_ancestor_native_binary(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            runner = Path(directory) / "code"
-            runner.write_bytes(REVIEW_RUNNER_BYTES)
-            runner.chmod(0o700)
-            with (
-                patch.object(
-                    verify_av1_cold_start_preregistration.shutil,
-                    "which",
-                    return_value=str(runner),
-                ),
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "_trusted_code_ancestor_path",
-                    return_value=Path("/private/trusted/code"),
-                ),
-                self.assertRaisesRegex(
-                    AV1ValidationDerivationError,
-                    "active trusted runner",
-                ),
-            ):
-                verify_av1_cold_start_preregistration._review_runner_identity()
-
-    def test_review_runner_rejects_path_substitution_before_launch(self) -> None:
         with (
             patch.object(
                 verify_av1_cold_start_preregistration,
-                "_review_runner_identity",
+                "assert_av1_validation_derivation_execution_environment",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_authorized_review_runner_identity",
                 return_value=(
-                    Path("/private/substitute-code"),
-                    f"sha256:{'c' * 64}",
+                    trusted_runner,
+                    self.plan.review_runner_canonical_path_sha256,
                     self.plan.review_runner_binary_sha256,
-                    REVIEW_RUNNER_BYTES,
                 ),
-            ),
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "run_command",
-            ) as run_review,
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "drifted from the plan",
-            ),
-        ):
-            verify_av1_cold_start_preregistration._run_code_agent_review(
-                artifact_root=self.runtime_artifact_root,
-                plan=self.plan,
-                proposal=self._candidate_proposal(),
-                lane="architecture",
-            )
-        run_review.assert_not_called()
-
-    def test_repository_review_identity_requires_clean_tracked_state(self) -> None:
-        controller = ManagedProcessController()
-        identity_result = SimpleNamespace(
-            returncode=0,
-            stdout=(
-                f"{REVIEW_REPOSITORY_COMMIT}\n"
-                f"{REVIEW_REPOSITORY_TREE}\n"
-            ),
-        )
-        clean_result = SimpleNamespace(returncode=0, stdout="")
-        with patch.object(
-            verify_av1_cold_start_preregistration,
-            "run_command",
-            side_effect=(identity_result, clean_result, identity_result),
-        ) as run_git:
-            identity = (
-                verify_av1_cold_start_preregistration._repository_review_identity(
-                    process_controller=controller,
-                )
-            )
-        self.assertEqual(
-            identity,
-            (REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
-        )
-        self.assertEqual(run_git.call_count, 3)
-        self.assertEqual(run_git.call_args_list[0].args[0][:3], [
-            "/usr/bin/git",
-            "rev-parse",
-            "HEAD",
-        ])
-        self.assertEqual(
-            run_git.call_args_list[1].args[0][3],
-            REVIEW_REPOSITORY_COMMIT,
-        )
-
-        dirty_result = SimpleNamespace(returncode=1, stdout="")
-        with (
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "run_command",
-                side_effect=(identity_result, dirty_result),
-            ),
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "uncommitted tracked changes",
-            ),
-        ):
-            verify_av1_cold_start_preregistration._repository_review_identity(
-                process_controller=controller,
-            )
-
-    def test_repository_review_identity_rejects_mid_check_ref_drift(self) -> None:
-        controller = ManagedProcessController()
-        identity_result = SimpleNamespace(
-            returncode=0,
-            stdout=(
-                f"{REVIEW_REPOSITORY_COMMIT}\n"
-                f"{REVIEW_REPOSITORY_TREE}\n"
-            ),
-        )
-        drifted_result = SimpleNamespace(
-            returncode=0,
-            stdout=(f"{'b' * 40}\n{'c' * 40}\n"),
-        )
-        clean_result = SimpleNamespace(returncode=0, stdout="")
-        with (
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "run_command",
-                side_effect=(identity_result, clean_result, drifted_result),
-            ),
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "changed during verification",
-            ),
-        ):
-            verify_av1_cold_start_preregistration._repository_review_identity(
-                process_controller=controller,
-            )
-
-    def test_assignment_action_passes_live_repository_identity_resolver(self) -> None:
-        args = SimpleNamespace(
-            action="run-derivation-assignment",
-            config=Path("unused.toml"),
-            manifest=Path("manifest.json"),
-            partition=Path("partition.json"),
-            plan=Path("plan.json"),
-            key=Path("partition.key"),
-            assignment_id=self.plan.assignments[0].assignment_id,
-            json_output=True,
-        )
-        attempt = SimpleNamespace(
-            attempt_id="attempt-test",
-            payload_sha256="sha256:" + "d" * 64,
-            status="review_pending",
-        )
-        with (
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "assert_private_artifact_path",
-            ),
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "load_av1_validation_manifest_v2",
-                return_value=self.manifest,
-            ),
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "load_av1_validation_private_partition",
-                return_value=self.partition,
-            ),
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "_load_recovery_capable_derivation_plan",
-                return_value=(self.plan, self.runtime_artifact_root),
-            ),
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "load_av1_validation_partition_key",
-                return_value=self.token_key,
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_repository_review_identity",
-                return_value=self._matching_repository_identity(),
-            ) as repository_identity,
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "run_av1_validation_derivation_assignment",
-                return_value=attempt,
-            ) as run_assignment,
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "_print_partition_payload",
-            ),
-        ):
-            exit_code = verify_av1_cold_start_preregistration._run_derivation_action_body(
-                args,
-                locked_config=None,
-            )
-            process_controller = run_assignment.call_args.kwargs["process_controller"]
-            resolver = run_assignment.call_args.kwargs["repository_identity_resolver"]
-            process_controller.cancel()
-            first_identity = resolver()
-            second_identity = resolver()
-
-        self.assertEqual(exit_code, 0)
-        self.assertIsInstance(process_controller, ManagedProcessController)
-        self.assertEqual(first_identity, self._matching_repository_identity())
-        self.assertEqual(second_identity, self._matching_repository_identity())
-        self.assertEqual(repository_identity.call_count, 2)
-        resolver_controllers = [
-            item.kwargs["process_controller"]
-            for item in repository_identity.call_args_list
-        ]
-        self.assertTrue(all(
-            isinstance(controller, ManagedProcessController)
-            for controller in resolver_controllers
-        ))
-        self.assertTrue(all(
-            controller is not process_controller
-            for controller in resolver_controllers
-        ))
-        self.assertIsNot(resolver_controllers[0], resolver_controllers[1])
-
-    def test_isolated_review_repository_excludes_live_untracked_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source_repository = root / "source"
-            source_repository.mkdir()
-            _run_test_git(source_repository, "init", "--quiet")
-            (source_repository / "tracked.txt").write_text(
-                "committed\n",
-                encoding="utf-8",
-            )
-            _run_test_git(source_repository, "add", "tracked.txt")
-            _run_test_git(source_repository, "commit", "--quiet", "-m", "initial")
-            repository_commit = _run_test_git(
-                source_repository,
-                "rev-parse",
-                "HEAD",
-            )
-            repository_tree = _run_test_git(
-                source_repository,
-                "rev-parse",
-                "HEAD^{tree}",
-            )
-            live_worktree = root / "live-worktree"
-            _run_test_git(
-                source_repository,
-                "worktree",
-                "add",
-                "--quiet",
-                "--detach",
-                str(live_worktree),
-                repository_commit,
-            )
-            (live_worktree / "live-only.txt").write_text(
-                "must not be reviewed\n",
-                encoding="utf-8",
-            )
-            isolated_root: Path | None = None
-
-            with patch.object(
-                verify_av1_cold_start_preregistration,
-                "REPOSITORY_ROOT",
-                live_worktree,
-            ):
-                with verify_av1_cold_start_preregistration._isolated_review_repository(
-                    repository_commit=repository_commit,
-                    repository_tree=repository_tree,
-                    process_controller=ManagedProcessController(),
-                ) as isolated_repository:
-                    isolated_root = isolated_repository.parent
-                    self.assertEqual(
-                        stat.S_IMODE(isolated_root.stat().st_mode),
-                        0o700,
-                    )
-                    self.assertEqual(
-                        stat.S_IMODE(isolated_repository.stat().st_mode),
-                        0o700,
-                    )
-                    self.assertEqual(
-                        (isolated_repository / "tracked.txt").read_text(
-                            encoding="utf-8"
-                        ),
-                        "committed\n",
-                    )
-                    self.assertFalse(
-                        (isolated_repository / "live-only.txt").exists()
-                    )
-                    self.assertEqual(
-                        _run_test_git(isolated_repository, "remote"),
-                        "",
-                    )
-
-            assert isolated_root is not None
-            self.assertFalse(isolated_root.exists())
-
-    def test_isolated_review_repository_identity_drift_fails_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source_repository = root / "source"
-            source_repository.mkdir()
-            _run_test_git(source_repository, "init", "--quiet")
-            tracked_path = source_repository / "tracked.txt"
-            tracked_path.write_text("first\n", encoding="utf-8")
-            _run_test_git(source_repository, "add", "tracked.txt")
-            _run_test_git(source_repository, "commit", "--quiet", "-m", "first")
-            first_commit = _run_test_git(source_repository, "rev-parse", "HEAD")
-            first_tree = _run_test_git(
-                source_repository,
-                "rev-parse",
-                "HEAD^{tree}",
-            )
-            tracked_path.write_text("second\n", encoding="utf-8")
-            _run_test_git(source_repository, "commit", "--quiet", "-am", "second")
-            second_commit = _run_test_git(source_repository, "rev-parse", "HEAD")
-            isolated_root: Path | None = None
-
-            with (
-                patch.object(
-                    verify_av1_cold_start_preregistration,
-                    "REPOSITORY_ROOT",
-                    source_repository,
-                ),
-                self.assertRaisesRegex(
-                    AV1ValidationDerivationError,
-                    "changed during review",
-                ),
-            ):
-                with verify_av1_cold_start_preregistration._isolated_review_repository(
-                    repository_commit=first_commit,
-                    repository_tree=first_tree,
-                    process_controller=ManagedProcessController(),
-                ) as isolated_repository:
-                    isolated_root = isolated_repository.parent
-                    _run_test_git(
-                        isolated_repository,
-                        "checkout",
-                        "--quiet",
-                        "--detach",
-                        "--force",
-                        second_commit,
-                    )
-
-            assert isolated_root is not None
-            self.assertFalse(isolated_root.exists())
-
-    def test_review_runner_is_reverified_after_launch(self) -> None:
-        proposal = self._candidate_proposal()
-        before_identity = (
-            Path("/private/authorized-code"),
-            self.plan.review_runner_canonical_path_sha256,
-            self.plan.review_runner_binary_sha256,
-            REVIEW_RUNNER_BYTES,
-        )
-        after_identity = (
-            Path("/private/substitute-code"),
-            f"sha256:{'c' * 64}",
-            self.plan.review_runner_binary_sha256,
-            REVIEW_RUNNER_BYTES,
-        )
-        completed = SimpleNamespace(returncode=0, stdout="", stderr="")
-        with (
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "_repository_review_identity",
-                return_value=(
-                    REVIEW_REPOSITORY_COMMIT,
-                    REVIEW_REPOSITORY_TREE,
-                ),
+                return_value=(REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
-                "_review_runner_identity",
-                side_effect=(before_identity, after_identity),
-            ),
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "_isolated_review_repository",
-                return_value=_context_value(Path("/private/isolated-review")),
+                "_build_av1_validation_derivation_review_bundle",
+                side_effect=bundle_for_claim,
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "run_command",
-                return_value=completed,
-            ) as run_review,
+                side_effect=fake_run,
+            ),
             patch.object(
                 verify_av1_cold_start_preregistration.uuid,
                 "uuid4",
-                return_value="60000000-0000-0000-0000-000000000001",
+                return_value="90000000-0000-0000-0000-000000000001",
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_now_iso",
                 return_value="2026-07-28T03:00:01Z",
             ),
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "drifted from the plan",
-            ),
         ):
-            verify_av1_cold_start_preregistration._run_code_agent_review(
+            claim, evidence, decision = verify_av1_cold_start_preregistration._run_code_llm_review(
                 artifact_root=self.runtime_artifact_root,
                 plan=self.plan,
                 proposal=proposal,
                 lane="architecture",
             )
-        run_review.assert_called_once()
+        self.assertEqual(decision, "approved")
+        assert request_path is not None
+        self.assertFalse(request_path.exists())
+        self.assertFalse(request_path.parent.exists())
+        assert request_payload is not None
+        evidence_payload = json.loads(evidence)
         self.assertEqual(
-            len(load_av1_validation_derivation_review_claims(
-                self.runtime_artifact_root,
-                plan=self.plan,
-                proposal=proposal,
-            )),
-            1,
+            evidence_payload["schema"],
+            AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
         )
+        self.assertEqual(evidence_payload["request"], request_payload)
+        self.assertEqual(evidence_payload["safe_bundle"], request_payload["safe_bundle"])
+        self.assertNotIn("stderr", evidence_payload)
+        self.assertNotIn("transcript", evidence_payload)
+        review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=f"sha256:{hashlib.sha256(evidence).hexdigest()}",
+            decision=decision,
+            reviewed_at="2026-07-28T03:00:02Z",
+        )
+        validate_av1_validation_derivation_review_run_evidence(evidence, review=review)
 
-    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
-    def test_private_review_runner_detects_swap_and_restore(self) -> None:
-        expected_sha256 = (
-            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
+    def test_review_bundle_uses_tracked_utf8_allowlist_and_rejects_unsafe_blobs(
+            self,
+    ) -> None:
+        cases = (
+            ("valid", "allowed.txt", b"tracked review text\n", False, None),
+            ("symlink", "allowed-link", b"target\n", True, "allowlisted blob"),
+            ("oversize", "oversized.txt", b"x" * (96 * 1024 + 1), False, "oversized"),
+            ("utf8", "invalid.txt", b"\xff", False, "not UTF-8"),
         )
-        runner_directory: Path | None = None
-        with self.assertRaisesRegex(
-            AV1ValidationDerivationError,
-            "changed during review",
-        ):
-            with verify_av1_cold_start_preregistration._private_review_runner(
-                REVIEW_RUNNER_BYTES,
-                expected_sha256=expected_sha256,
-            ) as runner:
-                runner_directory = runner.parent
-                substitute = runner.with_name("substitute")
-                original = runner.with_name("original")
-                substitute.write_bytes(b"substitute-code-binary")
-                substitute.chmod(0o500)
-                runner.rename(original)
-                substitute.rename(runner)
-                runner.rename(substitute)
-                original.rename(runner)
-        assert runner_directory is not None
-        self.assertEqual(
-            (runner_directory / "code").read_bytes(),
-            REVIEW_RUNNER_BYTES,
-        )
-        shutil.rmtree(runner_directory)
-
-    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
-    def test_private_review_runner_detects_parent_swap_and_restore(self) -> None:
-        expected_sha256 = (
-            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
-        )
-        runner_directory: Path | None = None
-        with self.assertRaisesRegex(
-            AV1ValidationDerivationError,
-            "changed during review",
-        ):
-            with verify_av1_cold_start_preregistration._private_review_runner(
-                REVIEW_RUNNER_BYTES,
-                expected_sha256=expected_sha256,
-            ) as runner:
-                runner_directory = runner.parent
-                moved_directory = runner_directory.with_name(
-                    f"{runner_directory.name}-moved"
+        for label, path, payload, symlink, error in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                repository = Path(directory) / "repository"
+                repository.mkdir()
+                _run_test_git(repository, "init", "--quiet")
+                if symlink:
+                    (repository / "target").write_bytes(payload)
+                    (repository / path).symlink_to("target")
+                    _run_test_git(repository, "add", "target", path)
+                else:
+                    (repository / path).write_bytes(payload)
+                    _run_test_git(repository, "add", path)
+                _run_test_git(repository, "commit", "--quiet", "-m", label)
+                claim = SimpleNamespace(
+                    lane="architecture",
+                    repository_commit=_run_test_git(repository, "rev-parse", "HEAD"),
+                    repository_tree=_run_test_git(repository, "rev-parse", "HEAD^{tree}"),
                 )
-                runner_directory.rename(moved_directory)
-                try:
-                    runner_directory.mkdir(mode=0o700)
-                    replacement = runner_directory / runner.name
-                    replacement.write_bytes(REVIEW_RUNNER_BYTES)
-                    replacement.chmod(0o500)
-                    self.assertEqual(runner.read_bytes(), REVIEW_RUNNER_BYTES)
-                finally:
-                    if runner_directory.exists():
-                        replacement = runner_directory / runner.name
-                        if replacement.exists():
-                            replacement.chmod(0o600)
-                            replacement.unlink()
-                        runner_directory.rmdir()
-                    moved_directory.rename(runner_directory)
-        assert runner_directory is not None
-        self.assertEqual(
-            (runner_directory / "code").read_bytes(),
-            REVIEW_RUNNER_BYTES,
-        )
-        shutil.rmtree(runner_directory)
-
-    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
-    def test_private_review_runner_detects_write_and_restore(self) -> None:
-        expected_sha256 = (
-            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
-        )
-        runner_directory: Path | None = None
-        with self.assertRaisesRegex(
-            AV1ValidationDerivationError,
-            "changed during review",
-        ):
-            with verify_av1_cold_start_preregistration._private_review_runner(
-                REVIEW_RUNNER_BYTES,
-                expected_sha256=expected_sha256,
-            ) as runner:
-                runner_directory = runner.parent
-                runner.chmod(0o700)
-                runner.write_bytes(b"substitute-code-binary")
-                runner.write_bytes(REVIEW_RUNNER_BYTES)
-                runner.chmod(0o500)
-        assert runner_directory is not None
-        self.assertTrue(runner_directory.exists())
-        shutil.rmtree(runner_directory)
-
-    def test_private_review_runner_cleans_without_recursive_delete(self) -> None:
-        expected_sha256 = (
-            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
-        )
-        runner_directory: Path | None = None
-        with (
-            patch.object(
-                verify_av1_cold_start_preregistration.shutil,
-                "rmtree",
-                side_effect=AssertionError("review runner must not rmtree"),
-            ),
-            verify_av1_cold_start_preregistration._private_review_runner(
-                REVIEW_RUNNER_BYTES,
-                expected_sha256=expected_sha256,
-            ) as runner,
-        ):
-            runner_directory = runner.parent
-            self.assertEqual(runner.read_bytes(), REVIEW_RUNNER_BYTES)
-        assert runner_directory is not None
-        self.assertFalse(runner_directory.exists())
-
-    @unittest.skipUnless(hasattr(__import__("select"), "kqueue"), "requires kqueue")
-    def test_private_review_runner_preserves_parent_replacement(self) -> None:
-        expected_sha256 = (
-            f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
-        )
-        runner_directory: Path | None = None
-        moved_directory: Path | None = None
-        replacement_bytes = b"outside-runner-replacement"
-        try:
-            with self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "changed during review",
-            ):
-                with verify_av1_cold_start_preregistration._private_review_runner(
-                    REVIEW_RUNNER_BYTES,
-                    expected_sha256=expected_sha256,
-                ) as runner:
-                    runner_directory = runner.parent
-                    moved_directory = runner_directory.with_name(
-                        f"{runner_directory.name}-moved"
+                with patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST",
+                    {"architecture": (path,)},
+                ):
+                    if error is not None:
+                        with self.assertRaisesRegex(AV1ValidationDerivationError, error):
+                            verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                                claim=claim,
+                                process_controller=ManagedProcessController(),
+                                repository_root=repository,
+                            )
+                        continue
+                    bundle = verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                        claim=claim,
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
                     )
-                    runner_directory.rename(moved_directory)
-                    runner_directory.mkdir(mode=0o700)
-                    replacement = runner_directory / runner.name
-                    replacement.write_bytes(replacement_bytes)
-                    replacement.chmod(0o500)
-            assert runner_directory is not None
-            assert moved_directory is not None
-            self.assertEqual(
-                (runner_directory / "code").read_bytes(),
-                replacement_bytes,
+                    (repository / "untracked-secret.txt").write_text(
+                        "never include me", encoding="utf-8"
+                    )
+                    repeated = verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                        claim=claim,
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    )
+                self.assertEqual(bundle, repeated)
+                self.assertNotIn(
+                    "untracked-secret",
+                    canonical_json_bytes(bundle).decode("utf-8"),
+                )
+
+    def test_structured_response_and_evidence_reject_binding_decision_and_path_drift(
+            self,
+    ) -> None:
+        proposal = self._candidate_proposal()
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
+            lane="architecture",
+            review_run_id="91000000-0000-0000-0000-000000000001",
+            review_runner_canonical_path_sha256=self.plan.review_runner_canonical_path_sha256,
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        response = _structured_review_response(proposal, claim)
+        self.assertEqual(
+            validate_av1_validation_derivation_review_response(
+                response,
+                proposal=proposal,
+                claim=claim,
+            ),
+            "approved",
+        )
+        binding_drift = dict(response)
+        binding_drift["lane"] = "adversarial"
+        with self.assertRaisesRegex(AV1ValidationDerivationError, "bindings"):
+            validate_av1_validation_derivation_review_response(
+                binding_drift,
+                proposal=proposal,
+                claim=claim,
             )
-            self.assertEqual(
-                (moved_directory / "code").read_bytes(),
-                REVIEW_RUNNER_BYTES,
+        decision_drift = dict(response)
+        decision_drift["decision"] = "rejected"
+        with self.assertRaisesRegex(AV1ValidationDerivationError, "decision"):
+            validate_av1_validation_derivation_review_response(
+                decision_drift,
+                proposal=proposal,
+                claim=claim,
             )
-        finally:
-            if runner_directory is not None:
-                shutil.rmtree(runner_directory, ignore_errors=True)
-            if moved_directory is not None:
-                shutil.rmtree(moved_directory, ignore_errors=True)
+        evidence = _review_run_evidence(proposal=proposal, claim=claim)
+        review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=f"sha256:{hashlib.sha256(evidence).hexdigest()}",
+            decision="approved",
+            reviewed_at="2026-07-28T03:00:02Z",
+        )
+        evidence_payload = json.loads(evidence)
+        evidence_payload["safe_bundle"]["files"][0]["path"] = "path-drift.txt"
+        drifted = canonical_json_bytes(evidence_payload)
+        with self.assertRaisesRegex(AV1ValidationDerivationError, "path or size"):
+            validate_av1_validation_derivation_review_run_evidence(drifted, review=review)
 
     def test_attempt_rejects_persisted_stream_budget_drift(self) -> None:
         assignment = self.plan.assignments[0]
@@ -3730,7 +2842,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 review=review,
             )
 
-    def test_review_evidence_rejects_prompt_drift_with_matching_digest(self) -> None:
+    def test_review_evidence_rejects_developer_binding_drift_with_matching_digest(self) -> None:
         proposal = self._candidate_proposal()
         claim = build_av1_validation_derivation_review_claim(
             plan=self.plan,
@@ -3750,9 +2862,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         evidence_payload = json.loads(
             _review_run_evidence(proposal=proposal, claim=claim)
         )
-        drifted_prompt = f"proposal_id={proposal.proposal_id}"
-        evidence_payload["prompt_sha256"] = (
-            f"sha256:{hashlib.sha256(drifted_prompt.encode('utf-8')).hexdigest()}"
+        drifted_developer_text = f"proposal_id={proposal.proposal_id}"
+        evidence_payload["developer_text_sha256"] = (
+            f"sha256:{hashlib.sha256(drifted_developer_text.encode('utf-8')).hexdigest()}"
         )
         evidence = canonical_json_bytes(evidence_payload)
         review = build_av1_validation_derivation_review_attestation(
@@ -3766,18 +2878,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
-            "prompt does not match its frozen inputs",
+            "structured review evidence bindings are invalid",
         ):
             validate_av1_validation_derivation_review_run_evidence(
                 evidence,
                 review=review,
             )
 
-    def test_review_set_rejects_duplicate_transcript_digests(self) -> None:
+    def test_review_set_rejects_duplicate_substantive_analyses(self) -> None:
         proposal = self._candidate_proposal()
         claims: list[AV1ValidationDerivationReviewClaim] = []
         envelopes = []
-        duplicate_transcript_sha256 = f"sha256:{'a' * 64}"
+        duplicate_analysis = (
+            "The immutable candidate request is internally consistent across the "
+            "frozen proposal, claim, repository identity, and bounded evidence bundle."
+        )
         for index, lane in enumerate(
             AV1_VALIDATION_DERIVATION_REVIEW_LANES,
             start=1,
@@ -3801,8 +2916,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 _review_run_evidence(proposal=proposal, claim=claim)
             )
             if index <= 2:
-                evidence_payload["transcript_sha256"] = (
-                    duplicate_transcript_sha256
+                evidence_payload["model_response"]["analysis"] = duplicate_analysis
+                evidence_payload["analysis_sha256"] = (
+                    f"sha256:{hashlib.sha256(duplicate_analysis.casefold().encode('utf-8')).hexdigest()}"
+                )
+                evidence_payload["model_response_sha256"] = (
+                    "sha256:"
+                    f"{hashlib.sha256(canonical_json_bytes(evidence_payload['model_response'])).hexdigest()}"
                 )
             evidence = canonical_json_bytes(evidence_payload)
             review = build_av1_validation_derivation_review_attestation(
@@ -9684,7 +8804,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         root / "private-code-runner",
                         self.plan.review_runner_canonical_path_sha256,
                         self.plan.review_runner_binary_sha256,
-                        REVIEW_RUNNER_BYTES,
                     ),
                 ),
                 patch.object(
@@ -10136,89 +9255,145 @@ def _review_run_evidence(
         claim: AV1ValidationDerivationReviewClaim,
         decision: Literal["approved", "rejected"] = "approved",
 ) -> bytes:
-    proposal_id = str(getattr(proposal, "proposal_id"))
-    proposal_payload_sha256 = str(getattr(proposal, "payload_sha256"))
-    lane = str(getattr(claim, "lane"))
-    review_run_id = str(getattr(claim, "review_run_id"))
-    review_claim_id = str(getattr(claim, "claim_id"))
-    review_claim_payload_sha256 = str(getattr(claim, "payload_sha256"))
-    repository_commit = str(getattr(claim, "repository_commit"))
-    repository_tree = str(getattr(claim, "repository_tree"))
-    prompt = build_av1_validation_derivation_review_prompt(
+    safe_bundle = _review_bundle_for_claim(claim)
+    request = build_av1_validation_derivation_review_request(
+        proposal=proposal,
+        claim=claim,
+        safe_bundle=safe_bundle,
+    )
+    developer_text = av1_validation_derivation_review_developer_text(claim.lane)
+    response_schema = build_av1_validation_derivation_review_response_schema(
         proposal=proposal,
         claim=claim,
     )
-    marker = {
-        "decision": decision,
-        "lane": lane,
-        "proposal_id": proposal_id,
-        "proposal_payload_sha256": proposal_payload_sha256,
-        "repository_commit": repository_commit,
-        "repository_tree": repository_tree,
-        "review_claim_id": review_claim_id,
-        "review_claim_payload_sha256": review_claim_payload_sha256,
-        "review_run_id": review_run_id,
-    }
-    final_message = (
-        "Review complete.\n"
-        "MEDIAFORCE_AV1_REVIEW_V2 "
-        f"{canonical_json_bytes(marker).decode('utf-8')}"
-    )
-    stdout = "\n".join((
-        canonical_json_bytes({
-            "provider": "test",
-            "model": "test-model",
-            "workdir": "/private/test",
-            "approval": "never",
-            "sandbox": "read-only",
-        }).decode("utf-8"),
-        canonical_json_bytes({"prompt": prompt}).decode("utf-8"),
-        canonical_json_bytes({
-            "msg": {
-                "type": "agent_message",
-                "message": final_message,
-            }
-        }).decode("utf-8"),
-        canonical_json_bytes({
-            "msg": {
-                "type": "task_lifecycle",
-                "phase": "quiescent",
-                "last_agent_message": final_message,
-            }
-        }).decode("utf-8"),
-    ))
+    model_response = _structured_review_response(proposal, claim, decision=decision)
     return canonical_json_bytes({
-        "schema": "mediaforce.av1_derivation_agent_review_run",
-        "schema_version": 2,
-        "review_run_id": review_run_id,
-        "reviewer_token": f"agent:{review_run_id}",
-        "proposal_id": proposal_id,
-        "proposal_payload_sha256": proposal_payload_sha256,
-        "repository_commit": repository_commit,
-        "repository_tree": repository_tree,
-        "review_claim_id": review_claim_id,
-        "review_claim_payload_sha256": review_claim_payload_sha256,
-        "lane": lane,
+        "schema": AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
+        "review_run_id": claim.review_run_id,
+        "reviewer_token": claim.reviewer_token,
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "lane": claim.lane,
         "decision": decision,
-        "review_runner_canonical_path_sha256": str(
-            getattr(claim, "review_runner_canonical_path_sha256")
-        ),
-        "review_runner_binary_sha256": str(
-            getattr(claim, "review_runner_binary_sha256")
-        ),
+        "review_runner_canonical_path_sha256": claim.review_runner_canonical_path_sha256,
+        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
         "proposal": proposal.to_payload(),
         "review_claim": claim.to_payload(),
-        "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
-        "completion_marker": marker,
-        "completion_message_sha256": (
-            f"sha256:{hashlib.sha256(final_message.encode('utf-8')).hexdigest()}"
+        "safe_bundle": safe_bundle,
+        "request": request,
+        "request_sha256": f"sha256:{hashlib.sha256(canonical_json_bytes(request)).hexdigest()}",
+        "developer_text": developer_text,
+        "developer_text_sha256": (
+            f"sha256:{hashlib.sha256(developer_text.encode('utf-8')).hexdigest()}"
         ),
-        "transcript_sha256": (
-            f"sha256:{hashlib.sha256(stdout.encode('utf-8')).hexdigest()}"
+        "response_schema": response_schema,
+        "response_schema_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(response_schema)).hexdigest()}"
         ),
-        "stderr_sha256": f"sha256:{hashlib.sha256(b'').hexdigest()}",
-        "returncode": 0,
+        "model_response": model_response,
+        "model_response_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(model_response)).hexdigest()}"
+        ),
+        "analysis_sha256": av1_validation_derivation_review_analysis_sha256(
+            model_response
+        ),
     })
+
+
+def _review_bundle_for_claim(claim: object) -> dict[str, object]:
+    lane = str(getattr(claim, "lane"))
+    files: list[dict[str, object]] = []
+    for ordinal, path in enumerate(
+            AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST[lane],
+            start=1,
+    ):
+        text = f"Fixture review bundle for {lane}: {path}.\n"
+        encoded = text.encode("utf-8")
+        files.append({
+            "path": path,
+            "blob_id": f"{ordinal:040x}",
+            "blob_size_bytes": len(encoded),
+            "blob_sha256": f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+            "text": text,
+        })
+    semantic_payload = {
+        "schema": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
+        "lane": lane,
+        "repository_commit": str(getattr(claim, "repository_commit")),
+        "repository_tree": str(getattr(claim, "repository_tree")),
+        "files": files,
+    }
+    return {
+        **semantic_payload,
+        "payload_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(semantic_payload)).hexdigest()}"
+        ),
+    }
+
+
+def _structured_review_response(
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+        *,
+        decision: Literal["approved", "rejected"] = "approved",
+) -> dict[str, object]:
+    findings: list[dict[str, object]] = []
+    if decision == "rejected":
+        findings.append({
+            "severity": "blocking",
+            "summary": "The frozen authorization binding is incomplete.",
+            "basis": "The candidate cannot be approved until its immutable request and proposal bindings agree.",
+        })
+    return {
+        "schema": "mediaforce.av1_derivation_review_response",
+        "schema_version": 1,
+        "decision": decision,
+        "lane": claim.lane,
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "review_run_id": claim.review_run_id,
+        "analysis": (
+            f"The {claim.lane} lane independently compared the immutable proposal, "
+            "claim, and bounded repository bundle. The frozen identifiers, measured "
+            "constraints, authorization window, and review scope are internally "
+            "consistent, and no blocking discrepancy was found in this fixture."
+        ),
+        "findings": findings,
+    }
+
+
+def _structured_review_response_from_request(
+        request: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "schema": "mediaforce.av1_derivation_review_response",
+        "schema_version": 1,
+        "decision": "approved",
+        "lane": request["lane"],
+        "proposal_id": request["proposal_id"],
+        "proposal_payload_sha256": request["proposal_payload_sha256"],
+        "repository_commit": request["repository_commit"],
+        "repository_tree": request["repository_tree"],
+        "review_claim_id": request["review_claim_id"],
+        "review_claim_payload_sha256": request["review_claim_payload_sha256"],
+        "review_run_id": request["review_run_id"],
+        "analysis": (
+            "The immutable request binds the lane, proposal, review claim, repository "
+            "commit, and bounded tracked-blob bundle. The fixture found no blocking "
+            "discrepancy in those frozen values and therefore approves this candidate."
+        ),
+        "findings": [],
+    }
 
 
 def _source_identity(

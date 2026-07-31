@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import pwd
 import shutil
 import stat
 import subprocess
@@ -23,10 +22,6 @@ from mediaforce.core.config import (
 )
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.evidence import canonical_json_bytes
-from mediaforce.core.file_integrity import (
-    FileIntegrityError,
-    MacOSFileIntegrityGuard,
-)
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
@@ -54,6 +49,12 @@ from mediaforce.tuning.av1_validation_v2 import (
 )
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
+    AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST,
+    AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
+    AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
+    AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
+    AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
+    AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
@@ -64,18 +65,19 @@ from mediaforce.tuning.av1_validation_derivation import (
     assert_av1_validation_derivation_authorization_active,
     assert_av1_validation_derivation_repository_identity,
     AV1ValidationDerivationReviewLane,
-    _code_review_marker,
-    _completed_code_review_message,
+    av1_validation_derivation_review_analysis_sha256,
+    av1_validation_derivation_review_developer_text,
     av1_validation_derivation_candidate_evaluation_public_summary,
     av1_validation_derivation_plan_public_summary,
     av1_validation_derivation_statistics_contract_sha256,
     assert_av1_validation_derivation_source_commitments,
     build_av1_validation_derivation_plan,
     build_av1_validation_derivation_source_commitments,
-    build_av1_validation_derivation_review_prompt,
     build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
+    build_av1_validation_derivation_review_request,
+    build_av1_validation_derivation_review_response_schema,
     evaluate_av1_validation_derivation_candidate,
     load_av1_validation_derivation_attempts,
     load_av1_validation_derivation_candidate_proposal,
@@ -84,6 +86,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_review_envelope,
     load_av1_validation_derivation_terminal_records,
     retain_av1_validation_derivation_publication_directories,
+    validate_av1_validation_derivation_review_response,
     validate_av1_validation_derivation_artifact_root_binding,
     write_av1_validation_derivation_candidate_proposal,
     write_av1_validation_derivation_plan,
@@ -772,7 +775,7 @@ def _run_derivation_action_body(
                 repository_tree=repository_tree,
             )
             if existing_review is None:
-                claim, review_evidence, decision = _run_code_agent_review(
+                claim, review_evidence, decision = _run_code_llm_review(
                     artifact_root=artifact_root,
                     plan=plan,
                     proposal=proposal,
@@ -901,7 +904,6 @@ def _run_derivation_plan_action(
             _review_runner_path,
             review_runner_canonical_path_sha256,
             review_runner_binary_sha256,
-            _review_runner_bytes,
         ) = _review_runner_identity()
         repository_commit, repository_tree = _repository_review_identity(
             process_controller=ManagedProcessController(),
@@ -1280,7 +1282,7 @@ def _load_bound_derivation_plan(
     return plan, artifact_root
 
 
-def _review_runner_identity() -> tuple[Path, str, str, bytes]:
+def _review_runner_identity() -> tuple[Path, str, str]:
     code_binary = shutil.which("code")
     if code_binary is None:
         raise AV1ValidationDerivationError(
@@ -1329,12 +1331,12 @@ def _review_runner_identity() -> tuple[Path, str, str, bytes]:
         f"sha256:{hashlib.sha256(str(resolved_binary).encode('utf-8')).hexdigest()}"
     )
     binary_sha256 = f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}"
-    return resolved_binary, canonical_path_sha256, binary_sha256, binary_bytes
+    return resolved_binary, canonical_path_sha256, binary_sha256
 
 
 def _authorized_review_runner_identity(
         plan: AV1ValidationDerivationPlan,
-) -> tuple[Path, str, str, bytes]:
+) -> tuple[Path, str, str]:
     identity = _review_runner_identity()
     if (
         identity[1] != plan.review_runner_canonical_path_sha256
@@ -1359,7 +1361,7 @@ def _repository_review_identity(
             ["/usr/bin/git", "rev-parse", "HEAD", "HEAD^{tree}"],
             process_controller=process_controller,
             cwd=root,
-            env=_review_runner_environment(),
+            env=_review_git_environment(),
             timeout=15,
             check=False,
         )
@@ -1383,7 +1385,7 @@ def _repository_review_identity(
         ["/usr/bin/git", "diff", "--quiet", object_ids[0], "--"],
         process_controller=process_controller,
         cwd=root,
-        env=_review_runner_environment(),
+        env=_review_git_environment(),
         timeout=15,
         check=False,
     )
@@ -1405,7 +1407,7 @@ def _repository_review_identity(
             ],
             process_controller=process_controller,
             cwd=root,
-            env=_review_runner_environment(),
+            env=_review_git_environment(),
             timeout=15,
             check=False,
         )
@@ -1431,187 +1433,321 @@ def _live_repository_identity() -> tuple[str, str]:
     )
 
 
-def _run_isolated_review_git(
+def _review_git_environment() -> dict[str, str]:
+    return {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_PAGER": "cat",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PAGER": "cat",
+        "PATH": _AGENT_REVIEW_SAFE_PATH,
+    }
+
+
+def _run_review_git(
         command: list[str],
         *,
-        cwd: Path,
+        repository_root: Path,
         process_controller: ManagedProcessController,
-        failure: str,
-) -> str:
+        binary: bool = False,
+) -> str | bytes:
     try:
         completed = run_command(
             command,
             process_controller=process_controller,
-            cwd=cwd,
-            env=_review_runner_environment(),
-            timeout=120,
+            cwd=repository_root,
+            env=_review_git_environment(),
+            text=not binary,
+            timeout=15,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise AV1ValidationDerivationError(failure) from exc
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git data is unavailable"
+        ) from exc
     if completed.returncode != 0:
-        raise AV1ValidationDerivationError(failure)
-    return completed.stdout
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git data is unavailable"
+        )
+    output = completed.stdout
+    if binary:
+        if not isinstance(output, bytes):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review Git blob data is invalid"
+            )
+        return output
+    if not isinstance(output, str):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git text data is invalid"
+        )
+    return output
 
 
-def _cleanup_isolated_review_repository(
-        directory: Path,
-        expected_identity: tuple[int, int],
-) -> None:
-    if not shutil.rmtree.avoids_symlink_attacks:
+def _build_av1_validation_derivation_review_bundle(
+        *,
+        claim: AV1ValidationDerivationReviewClaim,
+        process_controller: ManagedProcessController,
+        repository_root: Path = REPOSITORY_ROOT,
+) -> dict[str, object]:
+    resolved_tree = _run_review_git(
+        [
+            "/usr/bin/git",
+            "rev-parse",
+            "--verify",
+            f"{claim.repository_commit}^{{tree}}",
+        ],
+        repository_root=repository_root,
+        process_controller=process_controller,
+    ).strip()
+    if resolved_tree != claim.repository_tree:
         raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review repository cleanup is unavailable"
+            "AV1 derivation review bundle repository identity drifted"
         )
-    try:
-        info = directory.lstat()
-    except OSError as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review repository cleanup identity is unavailable"
-        ) from exc
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-        or (info.st_dev, info.st_ino) != expected_identity
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review repository cleanup identity changed"
+    allowed_paths = AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST.get(claim.lane)
+    if allowed_paths is None:
+        raise AV1ValidationDerivationError("AV1 derivation review bundle lane is invalid")
+    files: list[dict[str, object]] = []
+    total_size = 0
+    for path in allowed_paths:
+        listing = _run_review_git(
+            [
+                "/usr/bin/git",
+                "ls-tree",
+                "-z",
+                "--full-tree",
+                claim.repository_commit,
+                "--",
+                path,
+            ],
+            repository_root=repository_root,
+            process_controller=process_controller,
+            binary=True,
         )
-    try:
-        shutil.rmtree(directory)
-    except OSError as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review repository cleanup failed"
-        ) from exc
+        records = [record for record in listing.split(b"\0") if record]
+        if len(records) != 1 or b"\t" not in records[0]:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review bundle allowlisted path is unavailable"
+            )
+        metadata, encoded_path = records[0].split(b"\t", 1)
+        try:
+            mode, object_type, blob_id_bytes = metadata.split(b" ", 2)
+            listed_path = encoded_path.decode("utf-8")
+            blob_id = blob_id_bytes.decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review bundle tree entry is invalid"
+            ) from exc
+        if (
+            listed_path != path
+            or mode not in {b"100644", b"100755"}
+            or object_type != b"blob"
+            or len(blob_id) not in {40, 64}
+            or any(character not in "0123456789abcdef" for character in blob_id)
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review bundle tree entry is not an allowlisted blob"
+            )
+        raw_size = _run_review_git(
+            ["/usr/bin/git", "cat-file", "-s", blob_id],
+            repository_root=repository_root,
+            process_controller=process_controller,
+        )
+        try:
+            blob_size = int(raw_size.strip())
+        except ValueError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review bundle blob size is invalid"
+            ) from exc
+        if (
+            blob_size < 0
+            or blob_size > AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES
+            or total_size + blob_size
+            > AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES
+        ):
+            raise AV1ValidationDerivationError("AV1 derivation review bundle is oversized")
+        blob = _run_review_git(
+            ["/usr/bin/git", "cat-file", "blob", blob_id],
+            repository_root=repository_root,
+            process_controller=process_controller,
+            binary=True,
+        )
+        if len(blob) != blob_size:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review bundle blob size drifted"
+            )
+        try:
+            text = blob.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review bundle blob is not UTF-8"
+            ) from exc
+        files.append({
+            "path": path,
+            "blob_id": blob_id,
+            "blob_size_bytes": blob_size,
+            "blob_sha256": f"sha256:{hashlib.sha256(blob).hexdigest()}",
+            "text": text,
+        })
+        total_size += blob_size
+    semantic_payload = {
+        "schema": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
+        "lane": claim.lane,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "files": files,
+    }
+    return {
+        **semantic_payload,
+        "payload_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(semantic_payload)).hexdigest()}"
+        ),
+    }
+
+
+def _write_review_request(descriptor: int, payload: bytes) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(descriptor, remaining)
+        if written <= 0:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review request file could not be written"
+            )
+        remaining = remaining[written:]
 
 
 @contextmanager
-def _isolated_review_repository(
-        *,
-        repository_commit: str,
-        repository_tree: str,
-        process_controller: ManagedProcessController,
-) -> Iterator[Path]:
-    directory = Path(tempfile.mkdtemp(prefix="mediaforce-av1-review-repository-"))
-    os.chmod(directory, 0o700)
-    directory_info = directory.lstat()
-    directory_identity = (directory_info.st_dev, directory_info.st_ino)
-    repository = directory / "repository"
+def _owner_only_review_request_file(request: bytes) -> Iterator[Path]:
+    directory = Path(tempfile.mkdtemp(prefix="mediaforce-av1-review-request-", dir="/tmp"))
+    path = directory / "request.json"
+    descriptor = -1
+    directory_identity: tuple[int, int] | None = None
+    file_identity: tuple[int, int] | None = None
     try:
+        os.chmod(directory, 0o700)
+        directory_info = directory.lstat()
         if (
             not stat.S_ISDIR(directory_info.st_mode)
             or directory_info.st_uid != os.getuid()
             or stat.S_IMODE(directory_info.st_mode) != 0o700
         ):
             raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository is not owner-only"
+                "AV1 derivation review request directory is not owner-only"
             )
-        _run_isolated_review_git(
-            [
-                "/usr/bin/git",
-                "clone",
-                "--local",
-                "--no-hardlinks",
-                "--no-checkout",
-                "--quiet",
-                "--",
-                str(REPOSITORY_ROOT),
-                str(repository),
-            ],
-            cwd=directory,
-            process_controller=process_controller,
-            failure="AV1 derivation isolated review repository could not be created",
-        )
-        os.chmod(repository, 0o700)
-        repository_info = repository.lstat()
-        repository_identity = (repository_info.st_dev, repository_info.st_ino)
+        directory_identity = (directory_info.st_dev, directory_info.st_ino)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags, 0o600)
+        file_info = os.fstat(descriptor)
+        file_identity = (file_info.st_dev, file_info.st_ino)
+        _write_review_request(descriptor, request)
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o400)
+        file_info = os.fstat(descriptor)
         if (
-            not stat.S_ISDIR(repository_info.st_mode)
-            or repository_info.st_uid != os.getuid()
-            or stat.S_IMODE(repository_info.st_mode) != 0o700
+            not stat.S_ISREG(file_info.st_mode)
+            or file_info.st_uid != os.getuid()
+            or stat.S_IMODE(file_info.st_mode) != 0o400
+            or file_info.st_nlink != 1
         ):
             raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository is not owner-only"
+                "AV1 derivation review request file is not owner-only"
             )
-        _run_isolated_review_git(
-            [
-                "/usr/bin/git",
-                "-C",
-                str(repository),
-                "remote",
-                "remove",
-                "origin",
-            ],
-            cwd=directory,
-            process_controller=process_controller,
-            failure="AV1 derivation isolated review repository origin could not be removed",
-        )
-        _run_isolated_review_git(
-            [
-                "/usr/bin/git",
-                "-C",
-                str(repository),
-                "checkout",
-                "--detach",
-                "--force",
-                repository_commit,
-            ],
-            cwd=directory,
-            process_controller=process_controller,
-            failure="AV1 derivation isolated review repository commit is unavailable",
-        )
-        remotes = _run_isolated_review_git(
-            ["/usr/bin/git", "-C", str(repository), "remote"],
-            cwd=directory,
-            process_controller=process_controller,
-            failure="AV1 derivation isolated review repository remotes are unavailable",
-        )
-        if remotes:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository retained a remote"
-            )
-        before_identity = _repository_review_identity(
-            process_controller=process_controller,
-            repository_root=repository,
-            require_clean=True,
-        )
-        if before_identity != (repository_commit, repository_tree):
-            raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository identity does not match its claim"
-            )
-        yield repository
-        after_identity = _repository_review_identity(
-            process_controller=process_controller,
-            repository_root=repository,
-            require_clean=True,
-        )
-        if after_identity != before_identity:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository changed during review"
-            )
-        after_repository_info = repository.lstat()
-        if (
-            not stat.S_ISDIR(after_repository_info.st_mode)
-            or after_repository_info.st_uid != os.getuid()
-            or stat.S_IMODE(after_repository_info.st_mode) != 0o700
-            or (after_repository_info.st_dev, after_repository_info.st_ino)
-            != repository_identity
-        ):
-            raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository directory changed during review"
-            )
-        remotes = _run_isolated_review_git(
-            ["/usr/bin/git", "-C", str(repository), "remote"],
-            cwd=directory,
-            process_controller=process_controller,
-            failure="AV1 derivation isolated review repository remotes are unavailable",
-        )
-        if remotes:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository gained a remote"
-            )
+        os.close(descriptor)
+        descriptor = -1
+        yield path
     finally:
-        _cleanup_isolated_review_repository(directory, directory_identity)
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_identity is None:
+            return
+        try:
+            directory_info = directory.lstat()
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review request cleanup identity is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or directory_info.st_uid != os.getuid()
+            or stat.S_IMODE(directory_info.st_mode) != 0o700
+            or (directory_info.st_dev, directory_info.st_ino) != directory_identity
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review request cleanup identity changed"
+            )
+        try:
+            if file_identity is not None:
+                file_info = path.lstat()
+                if (
+                    not stat.S_ISREG(file_info.st_mode)
+                    or stat.S_ISLNK(file_info.st_mode)
+                    or (file_info.st_dev, file_info.st_ino) != file_identity
+                    or file_info.st_uid != os.getuid()
+                    or stat.S_IMODE(file_info.st_mode) != 0o400
+                    or file_info.st_nlink != 1
+                ):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation review request cleanup identity changed"
+                    )
+                path.unlink()
+            elif path.exists() or path.is_symlink():
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review request cleanup identity is unavailable"
+                )
+            directory.rmdir()
+        except OSError as exc:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review request cleanup failed"
+            ) from exc
+
+
+def _structured_review_response(
+        stdout: str,
+        *,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+) -> tuple[dict[str, object], AV1ValidationDerivationReviewDecision]:
+    response_text = stdout.removesuffix("\n")
+    if not response_text or response_text != response_text.strip():
+        raise AV1ValidationDerivationError(
+            "AV1 derivation structured review did not return one JSON response"
+        )
+    try:
+        response = json.loads(
+            response_text,
+            object_pairs_hook=_review_response_json_object,
+        )
+        response_payload = dict(response)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation structured review response is invalid"
+        ) from exc
+    if canonical_json_bytes(response_payload).decode("utf-8") != response_text:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation structured review response is not canonical"
+        )
+    decision = validate_av1_validation_derivation_review_response(
+        response_payload,
+        proposal=proposal,
+        claim=claim,
+    )
+    return response_payload, decision
+
+
+def _review_response_json_object(
+        pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    response: dict[str, object] = {}
+    for key, value in pairs:
+        if key in response:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation structured review response has duplicate JSON keys"
+            )
+        response[key] = value
+    return response
 
 
 def _assert_native_review_runner(binary_bytes: bytes) -> None:
@@ -1619,24 +1755,6 @@ def _assert_native_review_runner(binary_bytes: bytes) -> None:
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code executable must be a native Mach-O binary"
         )
-
-
-def _review_runner_environment() -> dict[str, str]:
-    return {
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_PAGER": "cat",
-        "HOME": _review_user_home(),
-        "LANG": "C",
-        "LC_ALL": "C",
-        "LOGNAME": _AGENT_REVIEW_GENERIC_IDENTITY,
-        "PAGER": "cat",
-        "PATH": _AGENT_REVIEW_SAFE_PATH,
-        "SHELL": "/bin/zsh",
-        "TMPDIR": "/tmp",
-        "USER": _AGENT_REVIEW_GENERIC_IDENTITY,
-        "ZDOTDIR": "/var/empty",
-    }
 
 
 def _trusted_code_ancestor_path() -> Path:
@@ -1672,225 +1790,6 @@ def _trusted_code_ancestor_path() -> Path:
     raise AV1ValidationDerivationError(
         "AV1 derivation must run from the active trusted Every Code session"
     )
-
-
-def _review_user_home() -> str:
-    return pwd.getpwuid(os.getuid()).pw_dir
-
-
-def _review_shell_environment(home: Path) -> dict[str, str]:
-    home_path = str(home)
-    return {
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_PAGER": "cat",
-        "HOME": home_path,
-        "LANG": "C",
-        "LC_ALL": "C",
-        "LOGNAME": _AGENT_REVIEW_GENERIC_IDENTITY,
-        "PAGER": "cat",
-        "PATH": _AGENT_REVIEW_SAFE_PATH,
-        "SHELL": "/bin/zsh",
-        "TMPDIR": str(home / "tmp"),
-        "USER": _AGENT_REVIEW_GENERIC_IDENTITY,
-        "XDG_CACHE_HOME": str(home / ".cache"),
-        "XDG_CONFIG_HOME": str(home / ".config"),
-        "XDG_DATA_HOME": str(home / ".local" / "share"),
-        "XDG_STATE_HOME": str(home / ".local" / "state"),
-        "ZDOTDIR": home_path,
-    }
-
-
-def _review_shell_environment_overrides(home: Path) -> tuple[str, ...]:
-    return (
-        'shell_environment_policy.inherit="none"',
-        "shell_environment_policy.ignore_default_excludes=false",
-        *(
-            f"shell_environment_policy.set.{key}={json.dumps(value)}"
-            for key, value in sorted(_review_shell_environment(home).items())
-        ),
-    )
-
-
-def _cleanup_isolated_review_shell_home(
-        directory: Path,
-        expected_identity: tuple[int, int],
-) -> None:
-    if not shutil.rmtree.avoids_symlink_attacks:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review shell-home cleanup is unavailable"
-        )
-    try:
-        info = directory.lstat()
-    except OSError as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review shell-home cleanup identity is unavailable"
-        ) from exc
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-        or (info.st_dev, info.st_ino) != expected_identity
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review shell-home cleanup identity changed"
-        )
-    try:
-        shutil.rmtree(directory)
-    except OSError as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review shell-home cleanup failed"
-        ) from exc
-
-
-@contextmanager
-def _isolated_review_shell_home() -> Iterator[Path]:
-    directory = Path(tempfile.mkdtemp(
-        prefix="mediaforce-av1-review-home-",
-        dir="/tmp",
-    ))
-    os.chmod(directory, 0o700)
-    info = directory.lstat()
-    identity = (info.st_dev, info.st_ino)
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation isolated review shell home is not owner-only"
-        )
-    try:
-        for relative_path in (
-            Path("tmp"),
-            Path(".cache"),
-            Path(".config"),
-            Path(".local"),
-            Path(".local/share"),
-            Path(".local/state"),
-        ):
-            path = directory / relative_path
-            path.mkdir(mode=0o700, exist_ok=True)
-            os.chmod(path, 0o700)
-        yield directory
-    finally:
-        _cleanup_isolated_review_shell_home(directory, identity)
-
-
-def _review_runner_descriptor_sha256(descriptor: int) -> str:
-    digest = hashlib.sha256()
-    offset = 0
-    while chunk := os.pread(descriptor, 1024 * 1024, offset):
-        digest.update(chunk)
-        offset += len(chunk)
-    return f"sha256:{digest.hexdigest()}"
-
-
-def _assert_private_review_runner_identity(
-        path: Path,
-        descriptor: int,
-        *,
-        expected_sha256: str,
-) -> None:
-    descriptor_info = os.fstat(descriptor)
-    path_info = path.lstat()
-    if (
-        not stat.S_ISREG(descriptor_info.st_mode)
-        or stat.S_ISLNK(path_info.st_mode)
-        or descriptor_info.st_uid != os.getuid()
-        or stat.S_IMODE(descriptor_info.st_mode) != 0o500
-        or (descriptor_info.st_dev, descriptor_info.st_ino)
-        != (path_info.st_dev, path_info.st_ino)
-        or not os.access(path, os.X_OK)
-        or _review_runner_descriptor_sha256(descriptor) != expected_sha256
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation private Every Code executable identity is invalid"
-        )
-
-
-@contextmanager
-def _private_review_runner(
-        binary_bytes: bytes,
-        *,
-        expected_sha256: str,
-) -> Iterator[Path]:
-    _assert_native_review_runner(binary_bytes)
-    if f"sha256:{hashlib.sha256(binary_bytes).hexdigest()}" != expected_sha256:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation private Every Code executable does not match the authorization"
-        )
-    directory = Path(tempfile.mkdtemp(prefix="mediaforce-av1-review-runner-"))
-    path = directory / "code"
-    descriptor = -1
-    guard: MacOSFileIntegrityGuard | None = None
-    cleanup_allowed = False
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        write_descriptor = os.open(path, flags, 0o500)
-        try:
-            view = memoryview(binary_bytes)
-            while view:
-                written = os.write(write_descriptor, view)
-                if written <= 0:
-                    raise AV1ValidationDerivationError(
-                        "AV1 derivation private Every Code executable could not be written"
-                    )
-                view = view[written:]
-            os.fchmod(write_descriptor, 0o500)
-            os.fsync(write_descriptor)
-        finally:
-            os.close(write_descriptor)
-        read_flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            read_flags |= os.O_NOFOLLOW
-        descriptor = os.open(path, read_flags)
-        try:
-            guard = MacOSFileIntegrityGuard(
-                path=path,
-                descriptor=descriptor,
-                require_single_link=True,
-            )
-        except FileIntegrityError as exc:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation secure Every Code execution monitoring is unavailable"
-            ) from exc
-        path = guard.path
-        _assert_private_review_runner_identity(
-            path,
-            descriptor,
-            expected_sha256=expected_sha256,
-        )
-        try:
-            yield path
-        finally:
-            try:
-                guard.assert_quiet()
-            except FileIntegrityError as exc:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation private Every Code executable changed during review"
-                ) from exc
-            _assert_private_review_runner_identity(
-                path,
-                descriptor,
-                expected_sha256=expected_sha256,
-            )
-            cleanup_allowed = True
-    finally:
-        if guard is not None:
-            guard.close()
-        if descriptor >= 0:
-            os.close(descriptor)
-        if cleanup_allowed:
-            try:
-                path.unlink()
-                directory.rmdir()
-            except OSError as exc:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation private Every Code executable cleanup failed"
-                ) from exc
 
 
 def _load_existing_derivation_review(
@@ -1946,7 +1845,7 @@ def _load_existing_derivation_review(
     return claim, envelope
 
 
-def _run_code_agent_review(
+def _run_code_llm_review(
         *,
         artifact_root: Path,
         plan: AV1ValidationDerivationPlan,
@@ -1973,7 +1872,7 @@ def _run_code_agent_review(
     process_controller = ManagedProcessController()
     try:
         with process_controller.absolute_deadline(deadline.astimezone(UTC)):
-            return _run_code_agent_review_before_deadline(
+            return _run_code_llm_review_before_deadline(
                 artifact_root=artifact_root,
                 plan=plan,
                 proposal=proposal,
@@ -1987,7 +1886,7 @@ def _run_code_agent_review(
         ) from exc
 
 
-def _run_code_agent_review_before_deadline(
+def _run_code_llm_review_before_deadline(
         *,
         artifact_root: Path,
         plan: AV1ValidationDerivationPlan,
@@ -2027,48 +1926,46 @@ def _run_code_agent_review_before_deadline(
         claim=claim,
         before_publish=before_publish,
     )
-    prompt = _agent_review_prompt(
+    safe_bundle = _build_av1_validation_derivation_review_bundle(
+        claim=claim,
+        process_controller=process_controller,
+    )
+    request = build_av1_validation_derivation_review_request(
+        proposal=proposal,
+        claim=claim,
+        safe_bundle=safe_bundle,
+    )
+    developer_text = av1_validation_derivation_review_developer_text(claim.lane)
+    response_schema = build_av1_validation_derivation_review_response_schema(
         proposal=proposal,
         claim=claim,
     )
+    request_bytes = canonical_json_bytes(request)
+    response_schema_text = canonical_json_bytes(response_schema).decode("utf-8")
     try:
-        with _private_review_runner(
-            before_identity[3],
-            expected_sha256=before_identity[2],
-        ) as review_runner, _isolated_review_repository(
-            repository_commit=claim.repository_commit,
-            repository_tree=claim.repository_tree,
-            process_controller=process_controller,
-        ) as review_repository, _isolated_review_shell_home() as review_home:
+        with _owner_only_review_request_file(request_bytes) as request_path:
             command = [
-                str(review_runner),
-                "-a",
-                "never",
-                "exec",
-                "-s",
-                "read-only",
+                str(before_identity[0]),
+                "llm",
+                "request",
+                "--developer",
+                developer_text,
+                "--schema",
+                response_schema_text,
+                "--request-file",
+                str(request_path),
             ]
-            for override in _review_shell_environment_overrides(review_home):
-                command.extend(("-c", override))
-            command.extend((
-                "--json",
-                "--max-seconds",
-                str(_AGENT_REVIEW_MAX_SECONDS),
-                "-",
-            ))
             try:
                 completed = run_command(
                     command,
                     process_controller=process_controller,
-                    cwd=review_repository,
-                    input_text=prompt,
+                    cwd=request_path.parent,
                     timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
                     check=False,
-                    env=_review_runner_environment(),
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise AV1ValidationDerivationError(
-                    "AV1 derivation Every Code review did not complete"
+                    "AV1 derivation Every Code structured review did not complete"
                 ) from exc
     finally:
         integrity_errors: list[BaseException] = []
@@ -2084,7 +1981,7 @@ def _run_code_agent_review_before_deadline(
             integrity_errors.append(exc)
         try:
             after_identity = _authorized_review_runner_identity(plan)
-            if after_identity[:3] != before_identity[:3]:
+            if after_identity != before_identity:
                 raise AV1ValidationDerivationError(
                     "AV1 derivation Every Code executable changed during review"
                 )
@@ -2100,88 +1997,50 @@ def _run_code_agent_review_before_deadline(
             raise primary_error
     if completed.returncode != 0:
         raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code review failed"
+            "AV1 derivation Every Code structured review failed"
         )
-    final_message, transcript_prompt = _completed_code_review_message(
-        completed.stdout
-    )
-    if transcript_prompt != prompt:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code review prompt drifted during execution"
-        )
-    decision = _agent_review_decision(
-        final_message,
+    model_response, decision = _structured_review_response(
+        completed.stdout,
         proposal=proposal,
         claim=claim,
     )
-    completion_marker = _code_review_marker(final_message)
     evidence = canonical_json_bytes({
-            "schema": "mediaforce.av1_derivation_agent_review_run",
-            "schema_version": 2,
-            "review_run_id": review_run_id,
-            "reviewer_token": f"agent:{review_run_id}",
-            "proposal_id": proposal.proposal_id,
-            "proposal_payload_sha256": proposal.payload_sha256,
-            "review_claim_id": claim.claim_id,
-            "review_claim_payload_sha256": claim.payload_sha256,
-            "lane": claim.lane,
-            "decision": decision,
-            "repository_commit": claim.repository_commit,
-            "repository_tree": claim.repository_tree,
-            "review_runner_canonical_path_sha256": before_identity[1],
-            "review_runner_binary_sha256": before_identity[2],
-            "proposal": proposal.to_payload(),
-            "review_claim": claim.to_payload(),
-            "prompt_sha256": f"sha256:{hashlib.sha256(prompt.encode('utf-8')).hexdigest()}",
-            "completion_marker": completion_marker,
-            "completion_message_sha256": (
-                f"sha256:{hashlib.sha256(final_message.encode('utf-8')).hexdigest()}"
-            ),
-            "transcript_sha256": (
-                f"sha256:{hashlib.sha256(completed.stdout.encode('utf-8')).hexdigest()}"
-            ),
-            "stderr_sha256": (
-                f"sha256:{hashlib.sha256(completed.stderr.encode('utf-8')).hexdigest()}"
-            ),
-            "returncode": completed.returncode,
+        "schema": AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
+        "review_run_id": review_run_id,
+        "reviewer_token": f"agent:{review_run_id}",
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "lane": claim.lane,
+        "decision": decision,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "review_runner_canonical_path_sha256": before_identity[1],
+        "review_runner_binary_sha256": before_identity[2],
+        "proposal": proposal.to_payload(),
+        "review_claim": claim.to_payload(),
+        "safe_bundle": safe_bundle,
+        "request": request,
+        "request_sha256": f"sha256:{hashlib.sha256(request_bytes).hexdigest()}",
+        "developer_text": developer_text,
+        "developer_text_sha256": (
+            f"sha256:{hashlib.sha256(developer_text.encode('utf-8')).hexdigest()}"
+        ),
+        "response_schema": response_schema,
+        "response_schema_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(response_schema)).hexdigest()}"
+        ),
+        "model_response": model_response,
+        "model_response_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(model_response)).hexdigest()}"
+        ),
+        "analysis_sha256": av1_validation_derivation_review_analysis_sha256(
+            model_response
+        ),
     })
     return claim, evidence, decision
-
-
-def _agent_review_decision(
-        message: str,
-        *,
-        proposal: AV1ValidationDerivationCandidateProposal,
-        claim: AV1ValidationDerivationReviewClaim,
-) -> AV1ValidationDerivationReviewDecision:
-    marker = _code_review_marker(message)
-    decision = marker.get("decision")
-    if (
-        marker.get("proposal_id") != proposal.proposal_id
-        or marker.get("proposal_payload_sha256") != proposal.payload_sha256
-        or marker.get("repository_commit") != claim.repository_commit
-        or marker.get("repository_tree") != claim.repository_tree
-        or marker.get("review_claim_id") != claim.claim_id
-        or marker.get("review_claim_payload_sha256") != claim.payload_sha256
-        or marker.get("lane") != claim.lane
-        or marker.get("review_run_id") != claim.review_run_id
-        or decision not in {"approved", "rejected"}
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review verdict does not match its run, proposal, and lane"
-        )
-    return cast(AV1ValidationDerivationReviewDecision, decision)
-
-
-def _agent_review_prompt(
-        *,
-        proposal: AV1ValidationDerivationCandidateProposal,
-        claim: AV1ValidationDerivationReviewClaim,
-) -> str:
-    return build_av1_validation_derivation_review_prompt(
-        proposal=proposal,
-        claim=claim,
-    )
 
 
 def _print_partition_payload(payload: dict[str, object], *, json_output: bool) -> None:

@@ -690,32 +690,31 @@ unchanged search naturally selects its first measured candidate; the workflow
 does not force exploratory probes that production search would not perform.
 
 The resulting proposal is explicitly non-authoritative. Finalization requires
-five proposal-bound approvals from distinct completed Every Code agent runs:
-architecture, statistical/model-contract, privacy/security,
-experimental-design, and adversarial. `record-derivation-review` launches a new
-read-only `code exec --json` process itself; it accepts no caller-supplied result
-path. Before launch it atomically creates one immutable proposal/lane claim that
-binds the run nonce, authorization, proposal, lane, canonical runner-path
-digest, and runner-binary digest. A concurrent or repeated lane cannot replace
-that claim; a crash before a complete lane envelope exists leaves an unresolved
-terminal claim that cannot launch another agent. A retry after the complete
-matching claim and envelope are visible validates both, re-fsyncs the envelope
-parent, returns the original decision and `reviewed_at`, and does not launch a
-second agent. A rejected review remains terminal. The review command and its
+five proposal-bound approvals from distinct completed no-tool Every Code
+structured requests: architecture, statistical/model-contract,
+privacy/security, experimental-design, and adversarial.
+`record-derivation-review` invokes `code llm request`, never `code exec`, and
+accepts no caller-supplied result path. Before launch it atomically creates one
+immutable proposal/lane claim that binds the run nonce, authorization, proposal,
+lane, canonical runner-path digest, runner-binary digest, repository commit, and
+repository tree. A concurrent or repeated lane cannot replace that claim; a
+crash before a complete lane envelope exists leaves an unresolved terminal claim
+that cannot launch another request. A retry after the complete matching claim
+and envelope are visible validates both, re-fsyncs the envelope parent, returns
+the original decision and `reviewed_at`, and does not launch a second request.
+A rejected review remains terminal. The review command and its
 repository/toolchain probes remain under the plan's absolute authorization
-deadline. Before claim publication, the reviewer verifies that the live Git
-commit and tree exactly equal the immutable plan snapshot, rejects uncommitted
-tracked changes, and repeats that repository
-identity check after the run. It never launches Code in that live source
-worktree. Instead it creates an owner-only local clone without shared object
-hardlinks, removes `origin`, checks out the claimed commit detached, and verifies
-the exact HEAD, tree, no-remotes state, and fully clean tracked/untracked state
-before and after the run. Code receives that committed clone as its working
-directory, so an untracked live-worktree file cannot affect the review. Snapshot
-identity drift fails closed, and the stable owner-only temporary root is removed
-through the symlink-safe cleanup path. The prompt, completion marker, and
-canonical run evidence all bind the same commit and tree, so later validation
-cannot silently reinterpret an approval against another repository snapshot.
+deadline. Before claim publication, the verifier checks that the live Git commit
+and tree equal the immutable plan snapshot, rejects uncommitted tracked changes,
+and repeats that identity check after the request. It never launches Code in a
+live source worktree. It builds a deterministic lane-specific bundle directly
+from the claimed Git commit instead. Every entry must be an exact allowlisted
+regular tracked blob with its Git blob ID, path, byte size, SHA-256 digest, and
+UTF-8 text. Per-blob and total-bundle bounds apply. Code receives no repository
+directory, so an untracked live-worktree file cannot affect the review. The
+canonical request binds the proposal, immutable claim, and exact safe bundle to
+that same commit and tree, so later validation cannot reinterpret an approval
+against another repository snapshot.
 All five immutable claims must name exactly that same repository commit and
 tree; both review-set validation and candidate finalization reject a divergent
 lane, and the review-set digest includes the plan ID, plan digest, unanimous
@@ -725,39 +724,28 @@ before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
 unbound interpreter. Its canonical path must also match the active ancestor Code
 process that is conducting the operator session, so a different PATH-selected
-native binary cannot establish its own trust root. Those bytes are executed from
-an owner-only ephemeral copy
-rather than reopening the mutable PATH-selected source. After an unchanged run,
-the copy is unlinked and its empty owner-only directory is removed without a
-recursive delete; an integrity failure leaves any suspicious replacement
-untouched. The review process uses
-a fixed system `PATH` and a strict allowlisted process environment containing no
-caller secrets. The parent Code process retains only the account home and
-path needed to load its existing local authentication and configuration; its
-environment identity is generic too. Agent shell commands do not inherit that
-home: each run receives a fresh
-owner-only home and temp/XDG tree, the generic `mediaforce-review` identity, and
-the same explicit minimal environment with no caller-environment inheritance.
-On the macOS execution host,
-a held no-follow descriptor and the canonical path-chain kqueue guard reject any
-write, delete, rename, link, revoke, or parent-path substitution event on that
-copy before its output can become evidence; unavailable secure monitoring fails
-closed. Each attestation binds the claim plus the SHA-256 digest of canonical
-immutable owner-only completion evidence. That evidence contains only the exact
-parsed completion marker and SHA-256 commitments to the prompt, final message,
-raw JSONL transcript, and stderr; it never retains raw stdout, stderr, model
-prose, workdir paths, or other untrusted transcript fields. The loader
+native binary cannot establish its own trust root. The verifier invokes that
+authorized runner directly as `code llm request` from an owner-only temporary
+request directory. The request file is owner-read-only after a durable write,
+is verified before launch, and is unlinked with its empty directory immediately
+after use. No ephemeral shell home, repository checkout, agent shell, or tool
+permission is created for the model. The request supplies deterministic developer
+text plus a strict dynamic JSON Schema whose constants bind the lane, proposal,
+claim, run, repository commit, and tree. The model must return one canonical
+structured JSON response. Its decision must agree with its finding severities:
+approval has no blocking finding, while rejection has at least one. Each
+attestation binds the claim plus the SHA-256 digest of canonical
+immutable owner-only completion evidence. That evidence contains the exact safe
+bundle; proposal, claim, request, developer-text, and response-schema bindings;
+the exact parsed model response; and the necessary SHA-256 commitments. It stores
+no shell/tool transcript, raw command output, or parent stderr. The loader
 recomputes the canonical evidence digest before trusting it. The attestation and
 completion evidence are written together as one immutable atomic lane envelope.
-Duplicate run IDs or raw-transcript digests are rejected. The completed process
-must emit a matching quiescent agent message whose final non-empty line is the exact
-proposal-, lane-, claim-, and run-bound `MEDIAFORCE_AV1_REVIEW_V2` JSON marker;
-the JSONL parser requires one ordered config record and one ordered prompt,
-rejects duplicate JSON keys, reserved-field mixing, malformed or repeated
-completion, and any event after quiescence, and treats only LF/CRLF as record
-boundaries so Unicode line separators remain inside their JSON strings.
-The decision is extracted rather than supplied by the operator. Public summaries
-expose only that the runner identity is bound, never the canonical private path.
+Duplicate run IDs, evidence digests, and normalized analysis digests are rejected.
+All five immutable claims must name the same commit and tree; every response must
+be substantive and the five lane analyses must be distinct. The decision is
+extracted rather than supplied by the operator. Public summaries expose only
+that the runner identity is bound, never the canonical private path.
 Review, verdict, proposal, lock, and assignment-claim payload timestamps come
 from the runtime clock only for their first immutable publication; recovery
 reuses persisted timestamps. Fresh assignment-claim, proposal, candidate-lock,
