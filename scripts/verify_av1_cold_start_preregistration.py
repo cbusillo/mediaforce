@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import cast, Iterator, Sequence, TypeAlias
+from typing import Callable, cast, Iterator, Sequence, TypeAlias
 import uuid
 
 from mediaforce.core.config import (
@@ -62,6 +62,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationReviewDecision,
     AV1ValidationDerivationReviewEnvelope,
     assert_av1_validation_derivation_authorization_active,
+    assert_av1_validation_derivation_repository_identity,
     AV1ValidationDerivationReviewLane,
     _code_review_marker,
     _completed_code_review_message,
@@ -82,6 +83,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelope,
     load_av1_validation_derivation_terminal_records,
+    retain_av1_validation_derivation_publication_directories,
     validate_av1_validation_derivation_artifact_root_binding,
     write_av1_validation_derivation_candidate_proposal,
     write_av1_validation_derivation_plan,
@@ -734,44 +736,69 @@ def _run_derivation_action_body(
             plan=plan,
             cell_plan_id=args.cell_plan_id,
         )
-        existing_review = _load_existing_derivation_review(
-            artifact_root=artifact_root,
-            plan=plan,
-            proposal=proposal,
-            lane=args.lane,
-        )
-        if existing_review is None:
-            claim, review_evidence, decision = _run_code_agent_review(
+        with retain_av1_validation_derivation_publication_directories((
+            (
+                artifact_root / "review-claims" / proposal.proposal_id,
+                "review_claims",
+                proposal.proposal_id,
+                proposal.payload_sha256,
+            ),
+            (
+                artifact_root / "reviews" / proposal.proposal_id,
+                "reviews",
+                proposal.proposal_id,
+                proposal.payload_sha256,
+            ),
+        )) as publication_guard:
+            existing_review = _load_existing_derivation_review(
                 artifact_root=artifact_root,
                 plan=plan,
                 proposal=proposal,
                 lane=args.lane,
             )
-            review_evidence_sha256 = (
-                f"sha256:{hashlib.sha256(review_evidence).hexdigest()}"
+            repository_commit, repository_tree = _repository_review_identity(
+                process_controller=ManagedProcessController(),
             )
-            review = build_av1_validation_derivation_review_attestation(
+            assert_av1_validation_derivation_repository_identity(
+                plan,
+                repository_commit=repository_commit,
+                repository_tree=repository_tree,
+            )
+            if existing_review is None:
+                claim, review_evidence, decision = _run_code_agent_review(
+                    artifact_root=artifact_root,
+                    plan=plan,
+                    proposal=proposal,
+                    lane=args.lane,
+                    before_publish=publication_guard,
+                )
+                review_evidence_sha256 = (
+                    f"sha256:{hashlib.sha256(review_evidence).hexdigest()}"
+                )
+                review = build_av1_validation_derivation_review_attestation(
+                    proposal=proposal,
+                    claim=claim,
+                    review_evidence_sha256=review_evidence_sha256,
+                    decision=decision,
+                    reviewed_at=_now_iso(),
+                )
+                envelope = build_av1_validation_derivation_review_envelope(
+                    review=review,
+                    evidence=review_evidence,
+                )
+            else:
+                claim, envelope = existing_review
+                review = envelope.review
+            assert_av1_validation_derivation_execution_environment(plan)
+            write_av1_validation_derivation_review_envelope(
+                artifact_root,
+                plan=plan,
                 proposal=proposal,
                 claim=claim,
-                review_evidence_sha256=review_evidence_sha256,
-                decision=decision,
-                reviewed_at=_now_iso(),
+                envelope=envelope,
+                before_publish=publication_guard,
             )
-            envelope = build_av1_validation_derivation_review_envelope(
-                review=review,
-                evidence=review_evidence,
-            )
-        else:
-            claim, envelope = existing_review
-            review = envelope.review
-        assert_av1_validation_derivation_execution_environment(plan)
-        write_av1_validation_derivation_review_envelope(
-            artifact_root,
-            plan=plan,
-            proposal=proposal,
-            claim=claim,
-            envelope=envelope,
-        )
+            publication_guard()
         _print_partition_payload(
             {
                 "proposal_id": proposal.proposal_id,
@@ -801,6 +828,9 @@ def _run_derivation_action_body(
             manifest=manifest,
             token_key=token_key,
         )
+        repository_commit, repository_tree = _repository_review_identity(
+            process_controller=ManagedProcessController(),
+        )
         lock_envelope = finalize_av1_validation_derivation_candidate_lock(
             config_path=args.config,
             manifest=manifest,
@@ -808,6 +838,8 @@ def _run_derivation_action_body(
             token_key=token_key,
             plan_path=args.plan,
             cell_plan_id=args.cell_plan_id,
+            repository_commit=repository_commit,
+            repository_tree=repository_tree,
             now_iso=_now_iso,
         )
         candidate_lock = lock_envelope.candidate_lock
@@ -868,6 +900,9 @@ def _run_derivation_plan_action(
             review_runner_binary_sha256,
             _review_runner_bytes,
         ) = _review_runner_identity()
+        repository_commit, repository_tree = _repository_review_identity(
+            process_controller=ManagedProcessController(),
+        )
         if args.action == "create-derivation-plan":
             artifact_root = (
                 config.paths.web_state_dir
@@ -909,6 +944,8 @@ def _run_derivation_plan_action(
                         review_runner_canonical_path_sha256
                     ),
                     review_runner_binary_sha256=review_runner_binary_sha256,
+                    repository_commit=repository_commit,
+                    repository_tree=repository_tree,
                     source_commitments=source_commitments,
                 )
                 artifact_root = _derivation_artifact_root_for_plan(
@@ -934,6 +971,11 @@ def _run_derivation_plan_action(
             raise AV1ValidationDerivationError(
                 "AV1 derivation plan execution contract drifted"
             )
+        assert_av1_validation_derivation_repository_identity(
+            plan,
+            repository_commit=repository_commit,
+            repository_tree=repository_tree,
+        )
         rebuilt = build_av1_validation_derivation_plan(
             manifest=manifest,
             partition=partition,
@@ -945,6 +987,8 @@ def _run_derivation_plan_action(
                 review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=review_runner_binary_sha256,
+            repository_commit=repository_commit,
+            repository_tree=repository_tree,
             source_commitments=source_commitments,
         )
         if rebuilt != plan:
@@ -1809,6 +1853,7 @@ def _run_code_agent_review(
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
         lane: AV1ValidationDerivationReviewLane,
+        before_publish: Callable[[], None] | None = None,
 ) -> tuple[
     AV1ValidationDerivationReviewClaim,
     bytes,
@@ -1835,6 +1880,7 @@ def _run_code_agent_review(
                 proposal=proposal,
                 lane=lane,
                 process_controller=process_controller,
+                before_publish=before_publish,
             )
     except (ProcessCancelledError, ProcessDeadlineEnforcementError) as exc:
         raise AV1ValidationDerivationError(
@@ -1849,6 +1895,7 @@ def _run_code_agent_review_before_deadline(
         proposal: AV1ValidationDerivationCandidateProposal,
         lane: AV1ValidationDerivationReviewLane,
         process_controller: ManagedProcessController,
+        before_publish: Callable[[], None] | None = None,
 ) -> tuple[
     AV1ValidationDerivationReviewClaim,
     bytes,
@@ -1879,6 +1926,7 @@ def _run_code_agent_review_before_deadline(
         plan=plan,
         proposal=proposal,
         claim=claim,
+        before_publish=before_publish,
     )
     prompt = _agent_review_prompt(
         proposal=proposal,

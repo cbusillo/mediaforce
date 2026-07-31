@@ -80,6 +80,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationVerdictRetryMismatchError,
     AV1ValidationDerivationTerminalRecord,
     assert_av1_validation_derivation_authorization_active,
+    assert_av1_validation_derivation_repository_identity,
     assert_av1_validation_derivation_source_commitments,
     av1_validation_derivation_plan_source_commitment,
     av1_validation_derivation_statistics_contract_sha256,
@@ -103,6 +104,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     _load_av1_validation_derivation_candidate_lock_envelope,
     _load_verified_av1_validation_derivation_candidate_lock,
     resolve_av1_validation_derivation_verdict_intent,
+    retain_av1_validation_derivation_publication_directories,
     validate_av1_validation_derivation_artifact_root_binding,
     validate_av1_validation_derivation_attempt_binding,
     validate_av1_validation_derivation_plan_binding,
@@ -1540,12 +1542,19 @@ def finalize_av1_validation_derivation_candidate_lock(
         token_key: bytes,
         plan_path: Path,
         cell_plan_id: str,
+        repository_commit: str,
+        repository_tree: str,
         now_iso: Callable[[], str] | None = None,
 ) -> AV1ValidationDerivationCandidateLockEnvelope:
     config = load_config(config_path)
     plan, artifact_root = _load_canonical_av1_validation_derivation_plan(
         config=config,
         plan_path=plan_path,
+    )
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
     )
     validate_av1_validation_private_partition(
         partition,
@@ -1599,7 +1608,21 @@ def finalize_av1_validation_derivation_candidate_lock(
                 proposal=proposal,
                 claims=review_claims,
             )
-            with open_db(config.paths.db_path) as connection, ExitStack() as source_stack:
+            with (
+                retain_av1_validation_derivation_publication_directories((
+                    (
+                        artifact_root / "candidate-locks",
+                        "candidate_locks",
+                        plan.plan_id,
+                        plan.authorization.authorization_id,
+                    ),
+                )) as publication_guard,
+                open_db(
+                    config.paths.db_path,
+                    before_commit=publication_guard,
+                ) as connection,
+                ExitStack() as source_stack,
+            ):
                 connection.exec_driver_sql("BEGIN IMMEDIATE")
                 inventory = load_av1_validation_partition_inventory(
                     connection,
@@ -1656,11 +1679,13 @@ def finalize_av1_validation_derivation_candidate_lock(
                     plan,
                 )
                 def _before_candidate_lock_publish() -> None:
+                    publication_guard()
                     source_sha256_resolver.assert_quiet()
                     assert_av1_validation_derivation_authorization_active(
                         plan,
                         at=clock(),
                     )
+                    publication_guard()
 
                 return _finalize_and_write_av1_validation_derivation_candidate_lock(
                     artifact_root,
@@ -1670,6 +1695,8 @@ def finalize_av1_validation_derivation_candidate_lock(
                     review_envelopes=review_envelopes,
                     current_evaluation=current_evaluation,
                     locked_at=locked_at,
+                    repository_commit=repository_commit,
+                    repository_tree=repository_tree,
                     before_publish=(
                         _before_candidate_lock_publish if fresh_lock else None
                     ),
@@ -1707,11 +1734,18 @@ def load_verified_av1_validation_derivation_candidate_lock(
         token_key: bytes,
         plan_path: Path,
         cell_plan_id: str,
+        repository_commit: str,
+        repository_tree: str,
 ) -> AV1ValidationDerivationCandidateLockEnvelope:
     config = load_config(config_path)
     plan, artifact_root = _load_canonical_av1_validation_derivation_plan(
         config=config,
         plan_path=plan_path,
+    )
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
     )
     validate_av1_validation_private_partition(
         partition,
@@ -1820,6 +1854,8 @@ def load_verified_av1_validation_derivation_candidate_lock(
                     review_envelopes=review_envelopes,
                     current_evaluation=current_evaluation,
                     cell_plan_id=cell_plan_id,
+                    repository_commit=repository_commit,
+                    repository_tree=repository_tree,
                 )
     except MediaforceRuntimeBusyError as exc:
         raise AV1ValidationDerivationError(
@@ -1896,14 +1932,31 @@ def record_av1_validation_derivation_visual_verdict(
                     attempt=attempt,
                     review_failure_reason_code="safety_stop",
                 )
-                ensure_av1_validation_derivation_terminal_intent(
-                    artifact_root / "terminal-intents",
-                    terminal,
-                )
-                ensure_av1_validation_derivation_terminal_record(
-                    canonical_terminal_records_directory,
-                    terminal,
-                )
+                with retain_av1_validation_derivation_publication_directories((
+                    (
+                        artifact_root / "terminal-intents",
+                        "terminal_intents",
+                        plan.plan_id,
+                        plan.authorization.authorization_id,
+                    ),
+                    (
+                        canonical_terminal_records_directory,
+                        "terminal_records",
+                        plan.plan_id,
+                        plan.authorization.authorization_id,
+                    ),
+                )) as publication_guard:
+                    ensure_av1_validation_derivation_terminal_intent(
+                        artifact_root / "terminal-intents",
+                        terminal,
+                        before_publish=publication_guard,
+                    )
+                    ensure_av1_validation_derivation_terminal_record(
+                        canonical_terminal_records_directory,
+                        terminal,
+                        before_publish=publication_guard,
+                    )
+                    publication_guard()
                 return terminal
     except MediaforceRuntimeBusyError as exc:
         raise AV1ValidationDerivationError(
@@ -2037,7 +2090,19 @@ def _record_av1_validation_derivation_visual_verdict_locked(
             ) from exc
     terminal_publication_started = False
     try:
-        with open_db(config.paths.db_path) as connection:
+        publication_guards: list[Callable[[], None]] = []
+
+        def _assert_publication_directories() -> None:
+            for guard in publication_guards:
+                guard()
+
+        with (
+            ExitStack() as publication_stack,
+            open_db(
+                config.paths.db_path,
+                before_commit=_assert_publication_directories,
+            ) as connection,
+        ):
             connection.exec_driver_sql("BEGIN IMMEDIATE")
             inventory = load_av1_validation_partition_inventory(
                 connection,
@@ -2073,6 +2138,29 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                         "AV1 derivation review media is unavailable or changed"
                     )
                 assert_av1_validation_derivation_execution_contract(manifest, plan)
+                verdict_publication_guard = publication_stack.enter_context(
+                    retain_av1_validation_derivation_publication_directories((
+                        (
+                            artifact_root / "verdict-claims",
+                            "verdict_claims",
+                            plan.plan_id,
+                            plan.authorization.authorization_id,
+                        ),
+                        (
+                            artifact_root / "verdict-intents",
+                            "verdict_intents",
+                            plan.plan_id,
+                            plan.authorization.authorization_id,
+                        ),
+                    ))
+                )
+                publication_guards.append(verdict_publication_guard)
+
+                def _assert_verdict_intent_publication() -> None:
+                    verdict_publication_guard()
+                    _assert_fresh_authorization()
+                    verdict_publication_guard()
+
                 verdict_intent = resolve_av1_validation_derivation_verdict_intent(
                     artifact_root / "verdict-intents",
                     plan=plan,
@@ -2083,7 +2171,9 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                     moment_indexes=moment_indexes,
                     recorded_at=effective_recorded_at,
                     before_publish=(
-                        _assert_fresh_authorization if claim_created else None
+                        _assert_verdict_intent_publication
+                        if claim_created
+                        else None
                     ),
                 )
                 frozen_verdict = str(verdict_intent["verdict"])
@@ -2141,13 +2231,32 @@ def _record_av1_validation_derivation_visual_verdict_locked(
                 assert_av1_validation_derivation_execution_contract(manifest, plan)
                 source_sha256_resolver.verify()
             terminal_publication_started = True
+            terminal_publication_guard = publication_stack.enter_context(
+                retain_av1_validation_derivation_publication_directories((
+                    (
+                        artifact_root / "terminal-intents",
+                        "terminal_intents",
+                        plan.plan_id,
+                        plan.authorization.authorization_id,
+                    ),
+                    (
+                        terminal_records_directory,
+                        "terminal_records",
+                        plan.plan_id,
+                        plan.authorization.authorization_id,
+                    ),
+                ))
+            )
+            publication_guards.append(terminal_publication_guard)
             ensure_av1_validation_derivation_terminal_intent(
                 artifact_root / "terminal-intents",
                 terminal,
+                before_publish=terminal_publication_guard,
             )
             ensure_av1_validation_derivation_terminal_record(
                 terminal_records_directory,
                 terminal,
+                before_publish=terminal_publication_guard,
             )
     except _AV1ValidationDerivationVerdictSafetyStop:
         raise

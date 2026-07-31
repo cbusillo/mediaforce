@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -23,6 +24,7 @@ from unittest.mock import call, patch
 from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.core.db import open_db
 from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
 from mediaforce.core.process_control import (
     ManagedProcessController,
@@ -58,6 +60,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     assert_av1_validation_derivation_authorization_active,
     assert_av1_validation_derivation_source_commitments,
     av1_validation_derivation_plan_public_summary,
+    av1_validation_derivation_plan_from_payload,
     av1_validation_derivation_plan_source_commitment,
     av1_validation_derivation_source_commitment_sha256,
     av1_validation_derivation_statistics_contract_sha256,
@@ -85,6 +88,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_review_envelopes,
     load_av1_validation_derivation_terminal_records,
     resolve_av1_validation_derivation_verdict_intent,
+    retain_av1_validation_derivation_publication_directories,
     validate_av1_validation_derivation_review_run_evidence,
     validate_av1_validation_derivation_plan_binding,
     write_av1_validation_derivation_candidate_proposal,
@@ -125,6 +129,7 @@ from mediaforce.web.runtime_lock import (
     MediaforceRuntimeLockOwnershipError,
     exclusive_mediaforce_runtime_lock,
     mediaforce_runtime_lock_path,
+    reserve_mediaforce_database_identity,
 )
 from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationError,
@@ -427,6 +432,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             review_runner_binary_sha256=(
                 f"sha256:{hashlib.sha256(REVIEW_RUNNER_BYTES).hexdigest()}"
             ),
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
             source_commitments=self.source_commitments,
         )
         self.runtime_artifact_root = (
@@ -528,6 +535,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertTrue(summary["derivation_execution_authorized"])
         self.assertFalse(summary["holdout_execution_authorized"])
         self.assertFalse(summary["guided_probe_allowed"])
+        self.assertTrue(summary["repository_snapshot_bound"])
 
     def test_plan_identity_binds_source_commitments(self) -> None:
         changed_item_id = self.plan.assignments[0].local_item_id
@@ -554,6 +562,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
             source_commitments=commitments,
         )
         self.assertNotEqual(drifted_plan.plan_id, self.plan.plan_id)
@@ -604,6 +614,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     review_runner_binary_sha256=(
                         self.plan.review_runner_binary_sha256
                     ),
+                    repository_commit=self.plan.repository_commit,
+                    repository_tree=self.plan.repository_tree,
                     source_commitments=commitments,
                 )
 
@@ -628,6 +640,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     self.plan.review_runner_canonical_path_sha256
                 ),
                 review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
                 source_commitments=commitments,
             )
 
@@ -654,6 +668,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 review_runner_binary_sha256=(
                     self.plan.review_runner_binary_sha256
                 ),
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
                 source_commitments=commitments,
             )
 
@@ -708,6 +724,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
             source_commitments=build_av1_validation_derivation_source_commitments(
                 partition=self.partition,
                 assignments=self.plan.assignments,
@@ -728,6 +746,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
             source_commitments=self.plan.source_commitments,
         )
         changed_runner = build_av1_validation_derivation_plan(
@@ -739,10 +759,37 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             statistics_contract_sha256=self.plan.statistics_contract_sha256,
             review_runner_canonical_path_sha256=f"sha256:{'f' * 64}",
             review_runner_binary_sha256=f"sha256:{'0' * 64}",
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
             source_commitments=self.plan.source_commitments,
         )
         self.assertNotEqual(changed_environment.plan_id, self.plan.plan_id)
         self.assertNotEqual(changed_runner.plan_id, self.plan.plan_id)
+
+        changed_repository = build_av1_validation_derivation_plan(
+            manifest=self.manifest,
+            partition=self.partition,
+            authorization=self.authorization,
+            runtime_context_sha256=self.plan.runtime_context_sha256,
+            execution_environment_sha256=self.plan.execution_environment_sha256,
+            statistics_contract_sha256=self.plan.statistics_contract_sha256,
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            repository_commit="3" * 40,
+            repository_tree="4" * 40,
+            source_commitments=self.plan.source_commitments,
+        )
+        self.assertNotEqual(changed_repository.plan_id, self.plan.plan_id)
+
+    def test_v2_plan_parsing_fails_closed_without_repository_identity(self) -> None:
+        for missing_key in ("repository_commit", "repository_tree"):
+            with self.subTest(missing_key=missing_key):
+                payload = self.plan.to_payload()
+                del payload[missing_key]
+                with self.assertRaises(AV1ValidationDerivationError):
+                    av1_validation_derivation_plan_from_payload(payload)
 
     def test_implementation_drift_invalidates_execution_environment(self) -> None:
         with (
@@ -907,6 +954,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
             authorization=self.plan.authorization,
             assignments=tuple(assignments),
             source_commitments=tuple(source_commitments),
@@ -1133,6 +1182,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         token_key=self.token_key,
                         plan_path=aliased_artifact_root / "plan.json",
                         cell_plan_id=self.plan.assignments[0].cell_plan_id,
+                        repository_commit=self.plan.repository_commit,
+                        repository_tree=self.plan.repository_tree,
                     )
                 load_proposal.assert_not_called()
         self.assertFalse((self.runtime_artifact_root / "candidate-locks").exists())
@@ -1547,6 +1598,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "assert_av1_validation_derivation_execution_environment",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=(
+                    self.plan.repository_commit,
+                    self.plan.repository_tree,
+                ),
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
@@ -3180,6 +3239,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "all five immutable review claims",
         ):
             finalize_av1_validation_derivation_candidate_lock(
+                plan=self.plan,
                 proposal=proposal,
                 review_claims=persisted_claims,
                 reviews=(),
@@ -3192,6 +3252,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     ),
                 ),
                 locked_at=proposal.proposed_at,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
             )
 
     def test_rejected_review_is_persisted_and_cannot_be_replaced(self) -> None:
@@ -3287,6 +3349,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 proposed_at="2026-07-28T03:10:00Z"
             )
             finalize_av1_validation_derivation_candidate_lock(
+                plan=self.plan,
                 proposal=proposal,
                 review_claims=claims,
                 reviews=reviews,
@@ -3299,6 +3362,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     ),
                 ),
                 locked_at="2026-07-28T03:10:00Z",
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
             )
 
     def test_review_evidence_digest_must_match_canonical_evidence(self) -> None:
@@ -3728,6 +3793,108 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 observation_exclusion_reason="content_intent_observation_excluded",
             )
 
+    def test_authoritative_writes_reject_renamed_away_publication_directories(
+            self,
+    ) -> None:
+        for kind, filename in (
+            ("terminal_records", "terminal.json"),
+            ("candidate_locks", "candidate.json"),
+            ("reviews", "review.json"),
+            ("candidate_proposals", "proposal.json"),
+        ):
+            with self.subTest(kind=kind):
+                parent = self.runtime_artifact_root / f"swap-{kind}"
+                retired_parent = parent.with_name(f"{parent.name}-retired")
+                replacement_parent = parent.with_name(
+                    f"{parent.name}-replacement"
+                )
+                _bind_owner_only_directory(
+                    parent,
+                    kind=kind,
+                    binding_id=self.plan.plan_id,
+                    binding_digest=self.plan.authorization.authorization_id,
+                )
+                replacement_parent.mkdir(mode=0o700)
+
+                def swap_parent() -> None:
+                    parent.rename(retired_parent)
+                    replacement_parent.rename(parent)
+
+                try:
+                    with self.assertRaisesRegex(
+                        AV1ValidationDerivationError,
+                        "directory binding drifted",
+                    ):
+                        _write_owner_only(
+                            parent / filename,
+                            b"{}",
+                            before_publish=swap_parent,
+                        )
+                    self.assertFalse((parent / filename).exists())
+                    self.assertFalse((retired_parent / filename).exists())
+                finally:
+                    if parent.exists():
+                        parent.rename(replacement_parent)
+                    if retired_parent.exists():
+                        retired_parent.rename(parent)
+
+    def test_publication_directory_swap_rolls_back_database_transaction(self) -> None:
+        reserve_mediaforce_database_identity(
+            self.runtime_config,
+            create_if_missing=True,
+        )
+        with open_db(self.runtime_config.paths.db_path) as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE IF NOT EXISTS publication_guard_probe "
+                "(value INTEGER NOT NULL)"
+            )
+            connection.exec_driver_sql("DELETE FROM publication_guard_probe")
+
+        directory = self.runtime_artifact_root / "transaction-terminal-records"
+        retired_directory = directory.with_name(f"{directory.name}-retired")
+        replacement_directory = directory.with_name(
+            f"{directory.name}-replacement"
+        )
+        replacement_directory.mkdir(mode=0o700)
+        specifications = ((
+            directory,
+            "terminal_records",
+            self.plan.plan_id,
+            self.plan.authorization.authorization_id,
+        ),)
+        try:
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "directory binding drifted",
+            ):
+                with (
+                    retain_av1_validation_derivation_publication_directories(
+                        specifications
+                    ) as publication_guard,
+                    open_db(
+                        self.runtime_config.paths.db_path,
+                        before_commit=publication_guard,
+                    ) as connection,
+                ):
+                    connection.exec_driver_sql(
+                        "INSERT INTO publication_guard_probe (value) VALUES (1)"
+                    )
+                    _write_owner_only(directory / "terminal.json", b"{}")
+                    directory.rename(retired_directory)
+                    replacement_directory.rename(directory)
+            self.assertFalse((directory / "terminal.json").exists())
+        finally:
+            if directory.exists():
+                directory.rename(replacement_directory)
+            if retired_directory.exists():
+                retired_directory.rename(directory)
+
+        with sqlite3.connect(self.runtime_config.paths.db_path) as connection:
+            row_count = connection.execute(
+                "SELECT COUNT(*) FROM publication_guard_probe"
+            ).fetchone()
+        self.assertEqual(row_count, (0,))
+
     def test_artifact_directories_are_bound_to_one_plan(self) -> None:
         second_authorization = build_av1_validation_v2_derivation_authorization(
             manifest=self.manifest,
@@ -3747,6 +3914,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 self.plan.review_runner_canonical_path_sha256
             ),
             review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
             source_commitments=self.plan.source_commitments,
         )
         with self.assertRaisesRegex(
@@ -5591,7 +5760,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             )
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
 
         with (
@@ -5681,7 +5853,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
 
         with (
@@ -5854,6 +6029,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                             token_key=self.token_key,
                             plan_path=plan_path,
                             cell_plan_id=self.plan.assignments[0].cell_plan_id,
+                            repository_commit=self.plan.repository_commit,
+                            repository_tree=self.plan.repository_tree,
                         )
 
     def test_derivation_review_media_is_owner_only_and_no_follow(self) -> None:
@@ -6505,7 +6682,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         events: list[str] = []
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             events.append("db-enter")
             connection = SimpleNamespace(
                 exec_driver_sql=lambda _sql: events.append("begin")
@@ -6561,11 +6741,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_intent",
-                side_effect=lambda *_args: events.append("safety-terminal-intent"),
+                side_effect=lambda *_args, **_kwargs: events.append(
+                    "safety-terminal-intent"
+                ),
             ),
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.ensure_av1_validation_derivation_terminal_record",
-                side_effect=lambda *_args: events.append("safety-terminal-record"),
+                side_effect=lambda *_args, **_kwargs: events.append(
+                    "safety-terminal-record"
+                ),
             ),
         ):
             terminal = record_av1_validation_derivation_visual_verdict(
@@ -6615,7 +6799,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         events: list[str] = []
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             events.append("db-enter")
             connection = SimpleNamespace(
                 exec_driver_sql=lambda _sql: events.append("begin")
@@ -6787,7 +6974,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         events: list[str] = []
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             events.append("db-enter")
             connection = SimpleNamespace(
                 exec_driver_sql=lambda _sql: events.append("begin")
@@ -6917,7 +7107,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         database_calls = 0
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             nonlocal database_calls
             database_calls += 1
             yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
@@ -7306,7 +7499,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 lock_held = False
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             self.assertTrue(lock_held)
             events.append("db-enter")
             try:
@@ -7333,7 +7529,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 label: str,
                 kwargs: dict[str, object],
         ) -> None:
-            self.assertNotIn("before_publish", kwargs)
+            before_publish = kwargs.get("before_publish")
+            self.assertTrue(callable(before_publish))
+            assert callable(before_publish)
+            before_publish()
             record_event(label)
 
         @contextmanager
@@ -8067,7 +8266,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         expected_envelope = SimpleNamespace(payload_sha256="sha256:test")
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
 
         @contextmanager
@@ -8192,6 +8394,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 token_key=self.token_key,
                 plan_path=self.runtime_artifact_root / "plan.json",
                 cell_plan_id=cell_plan_id,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
                 now_iso=sample_clock,
             )
         self.assertIs(envelope, expected_envelope)
@@ -8228,7 +8432,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         events: list[str] = []
 
         @contextmanager
-        def database(_path: Path) -> Iterator[SimpleNamespace]:
+        def database(
+                _path: Path,
+                **_kwargs: object,
+        ) -> Iterator[SimpleNamespace]:
             yield SimpleNamespace(exec_driver_sql=lambda _sql: None)
 
         @contextmanager
@@ -8349,6 +8556,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 token_key=self.token_key,
                 plan_path=self.runtime_artifact_root / "plan.json",
                 cell_plan_id=cell_plan_id,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
                 now_iso=sample_expired_clock,
             )
         publish_candidate_lock_mock.assert_called_once()
@@ -8433,73 +8642,49 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             current_observations=self._current_observations(records),
             proposed_at=locked_at,
         )
-        divergent_claim = build_av1_validation_derivation_review_claim(
-            plan=self.plan,
-            proposal=evaluation.proposal,
-            repository_commit="3" * 40,
-            repository_tree="4" * 40,
-            lane=review_claims[-1].lane,
-            review_run_id=review_claims[-1].review_run_id,
-            review_runner_canonical_path_sha256=(
-                self.plan.review_runner_canonical_path_sha256
-            ),
-            review_runner_binary_sha256=(
-                self.plan.review_runner_binary_sha256
-            ),
-            claimed_at=review_claims[-1].claimed_at,
-        )
-        divergent_evidence = _review_run_evidence(
-            proposal=evaluation.proposal,
-            claim=divergent_claim,
-        )
-        divergent_review = build_av1_validation_derivation_review_attestation(
-            proposal=evaluation.proposal,
-            claim=divergent_claim,
-            review_evidence_sha256=(
-                f"sha256:{hashlib.sha256(divergent_evidence).hexdigest()}"
-            ),
-            decision="approved",
-            reviewed_at=reviews[-1].reviewed_at,
-        )
-        divergent_claims = [*review_claims[:-1], divergent_claim]
-        divergent_reviews = [*reviews[:-1], divergent_review]
-        divergent_envelopes = [
-            build_av1_validation_derivation_review_envelope(
-                review=review,
-                evidence=(
-                    divergent_evidence
-                    if review is divergent_review
-                    else review_evidence[review.lane]
-                ),
-            )
-            for review in divergent_reviews
-        ]
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
-            "share one repository commit and tree",
+            "repository snapshot drifted",
         ):
-            _av1_validation_derivation_review_set_sha256(
-                divergent_claims,
-                divergent_envelopes,
+            build_av1_validation_derivation_review_claim(
+                plan=self.plan,
+                proposal=evaluation.proposal,
+                repository_commit="3" * 40,
+                repository_tree="4" * 40,
+                lane=review_claims[-1].lane,
+                review_run_id=review_claims[-1].review_run_id,
+                review_runner_canonical_path_sha256=(
+                    self.plan.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.plan.review_runner_binary_sha256
+                ),
+                claimed_at=review_claims[-1].claimed_at,
             )
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
-            "share one repository commit and tree",
+            "repository snapshot drifted",
         ):
             finalize_av1_validation_derivation_candidate_lock(
+                plan=self.plan,
                 proposal=evaluation.proposal,
-                review_claims=divergent_claims,
-                reviews=divergent_reviews,
+                review_claims=review_claims,
+                reviews=reviews,
                 current_evaluation=current_evaluation,
                 locked_at=locked_at,
+                repository_commit="3" * 40,
+                repository_tree="4" * 40,
             )
         with self.assertRaisesRegex(AV1ValidationDerivationError, "all five"):
             finalize_av1_validation_derivation_candidate_lock(
+                plan=self.plan,
                 proposal=evaluation.proposal,
                 review_claims=review_claims,
                 reviews=reviews[:-1],
                 current_evaluation=current_evaluation,
                 locked_at=locked_at,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
             )
         duplicate_evidence_claims = [
             build_av1_validation_derivation_review_claim(
@@ -8537,18 +8722,24 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "independent agent runs",
         ):
             finalize_av1_validation_derivation_candidate_lock(
+                plan=self.plan,
                 proposal=evaluation.proposal,
                 review_claims=duplicate_evidence_claims,
                 reviews=duplicate_evidence_reviews,
                 current_evaluation=current_evaluation,
                 locked_at=locked_at,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
             )
         lock = finalize_av1_validation_derivation_candidate_lock(
+            plan=self.plan,
             proposal=evaluation.proposal,
             review_claims=review_claims,
             reviews=reviews,
             current_evaluation=current_evaluation,
             locked_at=locked_at,
+            repository_commit=self.plan.repository_commit,
+            repository_tree=self.plan.repository_tree,
         )
         self.assertEqual(lock.review_state, "approved_for_holdout")
         self.assertEqual(lock.derivation_snapshot_sha256, evaluation.derivation_snapshot_sha256)
@@ -8708,6 +8899,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     review_envelopes=loaded_envelopes,
                     current_evaluation=current_evaluation,
                     locked_at=locked_at,
+                    repository_commit=self.plan.repository_commit,
+                    repository_tree=self.plan.repository_tree,
                 )
             self.assertTrue(lock_path.exists())
             recovered_parent_sync = False
@@ -8730,6 +8923,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     review_envelopes=loaded_envelopes,
                     current_evaluation=current_evaluation,
                     locked_at=locked_at,
+                    repository_commit=self.plan.repository_commit,
+                    repository_tree=self.plan.repository_tree,
                 )
             self.assertTrue(recovered_parent_sync)
             self.assertEqual(persisted_envelope.candidate_lock, lock)
@@ -8753,6 +8948,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     review_envelopes=loaded_envelopes,
                     current_evaluation=current_evaluation,
                     cell_plan_id=cell_plan_id,
+                    repository_commit=self.plan.repository_commit,
+                    repository_tree=self.plan.repository_tree,
                 ),
                 persisted_envelope,
             )
@@ -8778,11 +8975,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "no longer current",
         ):
             finalize_av1_validation_derivation_candidate_lock(
+                plan=self.plan,
                 proposal=evaluation.proposal,
                 review_claims=review_claims,
                 reviews=reviews,
                 current_evaluation=stale_evaluation,
                 locked_at=locked_at,
+                repository_commit=self.plan.repository_commit,
+                repository_tree=self.plan.repository_tree,
             )
 
     def test_candidate_lock_uses_merged_v1_token_shape(self) -> None:
@@ -8885,6 +9085,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         self.plan.review_runner_canonical_path_sha256,
                         self.plan.review_runner_binary_sha256,
                         REVIEW_RUNNER_BYTES,
+                    ),
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_repository_review_identity",
+                    return_value=(
+                        self.plan.repository_commit,
+                        self.plan.repository_tree,
                     ),
                 ),
             ):

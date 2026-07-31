@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import hashlib
@@ -12,7 +13,7 @@ import re
 import secrets
 import stat
 from statistics import median
-from typing import Any, Callable, Literal, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
 
 from mediaforce.core.evidence import canonical_json_bytes
 from mediaforce.core.file_integrity import (
@@ -187,6 +188,102 @@ class _AV1ValidationDerivationArtifactAlreadyExists(
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class _RetainedOwnerOnlyDirectory:
+    path: Path
+    descriptor: int
+    label: str
+
+    def assert_current(self) -> None:
+        _assert_owner_only_directory_descriptor_binding(
+            self.path,
+            self.descriptor,
+            self.label,
+        )
+
+
+@contextmanager
+def retain_av1_validation_derivation_publication_directories(
+        specifications: Sequence[tuple[Path, str, str, str]],
+) -> Iterator[Callable[[], None]]:
+    retained: list[_RetainedOwnerOnlyDirectory] = []
+    active_error: BaseException | None = None
+    try:
+        seen_paths: dict[Path, tuple[str, str, str]] = {}
+        for path, kind, binding_id, binding_digest in specifications:
+            normalized_path = stable_absolute_path(path)
+            specification = kind, binding_id, binding_digest
+            existing_specification = seen_paths.get(normalized_path)
+            if (
+                existing_specification is not None
+                and existing_specification != specification
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation publication directory has conflicting bindings"
+                )
+            if existing_specification is not None:
+                continue
+            seen_paths[normalized_path] = specification
+            _bind_owner_only_directory(
+                normalized_path,
+                kind=kind,
+                binding_id=binding_id,
+                binding_digest=binding_digest,
+            )
+            canonical_path, descriptor = open_stable_directory(
+                normalized_path,
+                require_owner_only=True,
+            )
+            try:
+                binding = _load_owner_only_directory_binding(
+                    canonical_path,
+                    expected_kind=kind,
+                )
+                if (
+                    binding["binding_id"] != binding_id
+                    or binding["binding_digest"] != binding_digest
+                ):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation publication directory binding drifted"
+                    )
+            except BaseException:
+                os.close(descriptor)
+                raise
+            retained.append(_RetainedOwnerOnlyDirectory(
+                path=canonical_path,
+                descriptor=descriptor,
+                label="derivation publication",
+            ))
+
+        def assert_current() -> None:
+            for binding in retained:
+                binding.assert_current()
+
+        assert_current()
+        yield assert_current
+    except BaseException as exc:
+        active_error = exc
+        raise
+    finally:
+        cleanup_errors: list[OSError] = []
+        for binding in reversed(retained):
+            try:
+                os.close(binding.descriptor)
+            except OSError as exc:
+                cleanup_errors.append(exc)
+        if cleanup_errors:
+            if active_error is not None:
+                for cleanup_error in cleanup_errors:
+                    active_error.add_note(
+                        "AV1 publication directory cleanup also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
+            else:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation publication directory cleanup failed"
+                ) from cleanup_errors[0]
+
+
 def av1_validation_derivation_statistics_contract_sha256(
         manifest: AV1ValidationManifestV2,
 ) -> str:
@@ -268,6 +365,8 @@ class AV1ValidationDerivationPlan:
     statistics_contract_sha256: str
     review_runner_canonical_path_sha256: str
     review_runner_binary_sha256: str
+    repository_commit: str
+    repository_tree: str
     authorization: AV1ValidationV2DerivationAuthorization
     assignments: tuple[AV1ValidationPartitionAssignment, ...]
     source_commitments: tuple[AV1ValidationDerivationSourceCommitment, ...]
@@ -292,6 +391,14 @@ class AV1ValidationDerivationPlan:
             (self.payload_sha256, "plan digest"),
         ):
             _require_sha256(value, label)
+        _require_git_object_id(
+            self.repository_commit,
+            "plan repository commit",
+        )
+        _require_git_object_id(
+            self.repository_tree,
+            "plan repository tree",
+        )
         if not self.manifest_id.startswith("av1vmanifest2_"):
             raise AV1ValidationDerivationError("AV1 derivation plan manifest is invalid")
         if not self.partition_id.startswith("av1vpartition1_"):
@@ -345,6 +452,8 @@ class AV1ValidationDerivationPlan:
                 self.review_runner_canonical_path_sha256
             ),
             "review_runner_binary_sha256": self.review_runner_binary_sha256,
+            "repository_commit": self.repository_commit,
+            "repository_tree": self.repository_tree,
             "authorization": self.authorization.to_payload(),
             "execution_scope": AV1_VALIDATION_DERIVATION_EXECUTION_SCOPE,
             "search_mode": AV1_VALIDATION_DERIVATION_SEARCH_MODE,
@@ -1361,6 +1470,8 @@ def build_av1_validation_derivation_plan(
         statistics_contract_sha256: str,
         review_runner_canonical_path_sha256: str,
         review_runner_binary_sha256: str,
+        repository_commit: str,
+        repository_tree: str,
         source_commitments: Sequence[AV1ValidationDerivationSourceCommitment],
 ) -> AV1ValidationDerivationPlan:
     assert_preregistered_av1_validation_manifest_v2(manifest)
@@ -1448,6 +1559,8 @@ def build_av1_validation_derivation_plan(
             review_runner_canonical_path_sha256
         ),
         review_runner_binary_sha256=review_runner_binary_sha256,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
         assignments=assignments,
         source_commitments=canonical_source_commitments,
         source_commitment_sha256=source_commitment_sha256,
@@ -1468,6 +1581,8 @@ def build_av1_validation_derivation_plan(
             review_runner_canonical_path_sha256
         ),
         review_runner_binary_sha256=review_runner_binary_sha256,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
         authorization=authorization,
         assignments=assignments,
         source_commitments=canonical_source_commitments,
@@ -1545,6 +1660,23 @@ def build_av1_validation_derivation_attempt(
         calibration_payload_sha256=calibration_sha256,
         payload_sha256=_payload_sha256({"attempt_id": attempt_id, **semantic_payload}),
     )
+
+
+def assert_av1_validation_derivation_repository_identity(
+        plan: AV1ValidationDerivationPlan,
+        *,
+        repository_commit: str,
+        repository_tree: str,
+) -> None:
+    _require_git_object_id(repository_commit, "current repository commit")
+    _require_git_object_id(repository_tree, "current repository tree")
+    if (
+        repository_commit != plan.repository_commit
+        or repository_tree != plan.repository_tree
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation repository snapshot drifted from the immutable plan"
+        )
 
 
 def build_av1_validation_derivation_terminal_record(
@@ -2021,8 +2153,11 @@ def build_av1_validation_derivation_review_claim(
         raise AV1ValidationDerivationError(
             "AV1 derivation review runner does not match the authorization"
         )
-    _require_git_object_id(repository_commit, "review repository commit")
-    _require_git_object_id(repository_tree, "review repository tree")
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
+    )
     if not (
         _parse_timestamp(proposal.proposed_at, "proposal timestamp")
         <= claimed
@@ -2212,6 +2347,7 @@ def build_av1_validation_derivation_review_envelope(
 
 
 def _av1_validation_derivation_review_set_sha256(
+        plan: AV1ValidationDerivationPlan,
         claims: Sequence[AV1ValidationDerivationReviewClaim],
         envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
 ) -> str:
@@ -2233,6 +2369,11 @@ def _av1_validation_derivation_review_set_sha256(
     repository_commit, repository_tree = (
         _av1_validation_derivation_review_repository_identity(claims)
     )
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
+    )
     if any(
         not _av1_validation_derivation_review_matches_claim(
             review,
@@ -2245,6 +2386,8 @@ def _av1_validation_derivation_review_set_sha256(
         )
     return _payload_sha256({
         "contract_version": AV1_VALIDATION_DERIVATION_CONTRACT_VERSION,
+        "plan_id": plan.plan_id,
+        "plan_payload_sha256": plan.payload_sha256,
         "repository_commit": repository_commit,
         "repository_tree": repository_tree,
         "reviews": [
@@ -2298,17 +2441,28 @@ def _av1_validation_derivation_review_matches_claim(
 
 def finalize_av1_validation_derivation_candidate_lock(
         *,
+        plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
         review_claims: Sequence[AV1ValidationDerivationReviewClaim],
         reviews: Sequence[AV1ValidationDerivationReviewAttestation],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         locked_at: str,
+        repository_commit: str,
+        repository_tree: str,
 ) -> AV1ColdStartValidationCandidateLockV1:
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
+    )
     current_proposal = current_evaluation.proposal
     locked = _parse_timestamp(locked_at, "candidate lock timestamp")
     if (
         current_evaluation.blockers
         or current_proposal is None
+        or proposal.plan_id != plan.plan_id
+        or proposal.manifest_id != plan.manifest_id
+        or proposal.selection_lock_sha256 != plan.selection_lock_sha256
         or current_evaluation.cell_plan_id != proposal.cell_plan_id
         or current_evaluation.derivation_snapshot_sha256
         != proposal.derivation_snapshot_sha256
@@ -2337,7 +2491,14 @@ def finalize_av1_validation_derivation_candidate_lock(
         raise AV1ValidationDerivationError(
             "AV1 derivation candidate requires all five immutable review claims"
         )
-    _av1_validation_derivation_review_repository_identity(review_claims)
+    review_repository_commit, review_repository_tree = (
+        _av1_validation_derivation_review_repository_identity(review_claims)
+    )
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=review_repository_commit,
+        repository_tree=review_repository_tree,
+    )
     if {review.lane for review in reviews} != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES):
         raise AV1ValidationDerivationError("AV1 derivation candidate requires all five review lanes")
     if len(reviews) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES):
@@ -2405,15 +2566,20 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         review_envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         locked_at: str,
+        repository_commit: str,
+        repository_tree: str,
         before_publish: Callable[[], None] | None = None,
 ) -> AV1ValidationDerivationCandidateLockEnvelope:
     reviews = tuple(envelope.review for envelope in review_envelopes)
     candidate_lock = finalize_av1_validation_derivation_candidate_lock(
+        plan=plan,
         proposal=proposal,
         review_claims=review_claims,
         reviews=reviews,
         current_evaluation=current_evaluation,
         locked_at=locked_at,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
     )
     root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
     if (
@@ -2457,6 +2623,7 @@ def _finalize_and_write_av1_validation_derivation_candidate_lock(
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
         "review_set_sha256": _av1_validation_derivation_review_set_sha256(
+            plan,
             review_claims,
             review_envelopes
         ),
@@ -2556,6 +2723,8 @@ def _load_verified_av1_validation_derivation_candidate_lock(
         review_envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
         current_evaluation: AV1ValidationDerivationCandidateEvaluation,
         cell_plan_id: str,
+        repository_commit: str,
+        repository_tree: str,
 ) -> AV1ValidationDerivationCandidateLockEnvelope:
     root = _assert_av1_validation_derivation_artifact_root_binding(
         artifact_root,
@@ -2568,11 +2737,14 @@ def _load_verified_av1_validation_derivation_candidate_lock(
     )
     reviews = tuple(item.review for item in review_envelopes)
     expected_lock = finalize_av1_validation_derivation_candidate_lock(
+        plan=plan,
         proposal=proposal,
         review_claims=review_claims,
         reviews=reviews,
         current_evaluation=current_evaluation,
         locked_at=envelope.candidate_lock.locked_at,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
     )
     root_binding = _read_owner_only_bytes(
         root / ".binding",
@@ -2586,6 +2758,7 @@ def _load_verified_av1_validation_derivation_candidate_lock(
         "proposal_id": proposal.proposal_id,
         "proposal_payload_sha256": proposal.payload_sha256,
         "review_set_sha256": _av1_validation_derivation_review_set_sha256(
+            plan,
             review_claims,
             review_envelopes
         ),
@@ -2767,6 +2940,8 @@ def load_av1_validation_derivation_attempts(
 def write_av1_validation_derivation_terminal_record(
         directory: Path,
         record: AV1ValidationDerivationTerminalRecord,
+        *,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     _bind_owner_only_directory(
         directory,
@@ -2776,7 +2951,11 @@ def write_av1_validation_derivation_terminal_record(
     )
     path = directory / f"{record.assignment_id}.json"
     try:
-        _write_owner_only(path, canonical_json_bytes(record.to_payload()))
+        _write_owner_only(
+            path,
+            canonical_json_bytes(record.to_payload()),
+            before_publish=before_publish,
+        )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         payload, raw = _load_owner_only_json(path, "derivation terminal record")
         existing = av1_validation_derivation_terminal_record_from_payload(
@@ -3473,8 +3652,14 @@ def write_av1_validation_derivation_review_claim(
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=claim.repository_commit,
+        repository_tree=claim.repository_tree,
+    )
     if (
         proposal.plan_id != plan.plan_id
         or proposal.manifest_id != plan.manifest_id
@@ -3501,6 +3686,7 @@ def write_av1_validation_derivation_review_claim(
     _write_owner_only(
         path,
         canonical_json_bytes(claim.to_payload()),
+        before_publish=before_publish,
         published_before=plan.authorization.valid_until,
     )
     return path
@@ -3547,6 +3733,11 @@ def load_av1_validation_derivation_review_claims(
             payload,
             raw=raw,
         )
+        assert_av1_validation_derivation_repository_identity(
+            plan,
+            repository_commit=claim.repository_commit,
+            repository_tree=claim.repository_tree,
+        )
         if (
             claim.plan_id != plan.plan_id
             or claim.authorization_id != plan.authorization.authorization_id
@@ -3577,9 +3768,15 @@ def write_av1_validation_derivation_review_envelope(
         proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
         envelope: AV1ValidationDerivationReviewEnvelope,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     review = envelope.review
     root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=claim.repository_commit,
+        repository_tree=claim.repository_tree,
+    )
     if (
         proposal.plan_id != plan.plan_id
         or proposal.manifest_id != plan.manifest_id
@@ -3602,6 +3799,7 @@ def write_av1_validation_derivation_review_envelope(
         _write_owner_only(
             path,
             canonical_json_bytes(envelope.to_payload()),
+            before_publish=before_publish,
             published_before=plan.authorization.valid_until,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
@@ -3629,6 +3827,11 @@ def load_av1_validation_derivation_review_envelope(
     root = _assert_av1_validation_derivation_artifact_root_binding(
         artifact_root,
         plan,
+    )
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=claim.repository_commit,
+        repository_tree=claim.repository_tree,
     )
     if (
         proposal.plan_id != plan.plan_id
@@ -3729,7 +3932,7 @@ def load_av1_validation_derivation_review_envelopes(
         for review in reviews
     ):
         raise AV1ValidationDerivationError("AV1 derivation review directory binding drifted")
-    _av1_validation_derivation_review_set_sha256(claims, envelopes)
+    _av1_validation_derivation_review_set_sha256(plan, claims, envelopes)
     return envelopes
 
 
@@ -4027,6 +4230,7 @@ def av1_validation_derivation_plan_public_summary(
         "derivation_partition_sha256": plan.derivation_partition_sha256,
         "runtime_context_bound": True,
         "review_runner_identity_bound": True,
+        "repository_snapshot_bound": True,
         "authorization_id": plan.authorization.authorization_id,
         "derivation_assignment_count": len(plan.assignments),
         "candidate_count": len({assignment.cell_plan_id for assignment in plan.assignments}),
@@ -4079,6 +4283,7 @@ def av1_validation_derivation_plan_from_payload(
         "selection_lock_sha256", "derivation_partition_sha256", "runtime_context_sha256",
         "execution_environment_sha256", "statistics_contract_sha256",
         "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
+        "repository_commit", "repository_tree",
         "authorization",
         "execution_scope", "search_mode", "derivation_execution_authorized",
         "cold_start_warm_start_allowed", "validation_harness_allowed", "guided_probe_allowed",
@@ -4130,6 +4335,14 @@ def av1_validation_derivation_plan_from_payload(
         review_runner_binary_sha256=_required_text(
             value.get("review_runner_binary_sha256"),
             "review-runner binary digest",
+        ),
+        repository_commit=_required_text(
+            value.get("repository_commit"),
+            "plan repository commit",
+        ),
+        repository_tree=_required_text(
+            value.get("repository_tree"),
+            "plan repository tree",
         ),
         authorization=av1_validation_v2_derivation_authorization_from_payload(object_dict(value.get("authorization"))),
         assignments=tuple(_assignment_from_payload(object_dict(item)) for item in object_list(value.get("assignments"))),
@@ -4586,6 +4799,8 @@ def _plan_semantic_payload(
         statistics_contract_sha256: str,
         review_runner_canonical_path_sha256: str,
         review_runner_binary_sha256: str,
+        repository_commit: str,
+        repository_tree: str,
         assignments: Sequence[AV1ValidationPartitionAssignment],
         source_commitments: Sequence[AV1ValidationDerivationSourceCommitment],
         source_commitment_sha256: str,
@@ -4607,6 +4822,8 @@ def _plan_semantic_payload(
             review_runner_canonical_path_sha256
         ),
         "review_runner_binary_sha256": review_runner_binary_sha256,
+        "repository_commit": repository_commit,
+        "repository_tree": repository_tree,
         "authorization": authorization.to_payload(),
         "execution_scope": AV1_VALIDATION_DERIVATION_EXECUTION_SCOPE,
         "search_mode": AV1_VALIDATION_DERIVATION_SEARCH_MODE,
@@ -5346,7 +5563,14 @@ def _write_owner_only(
     temporary_created = False
     published = False
     try:
-        _, parent_descriptor = ensure_owner_only_directory(path.parent)
+        canonical_parent, parent_descriptor = ensure_owner_only_directory(
+            path.parent
+        )
+        _assert_owner_only_directory_descriptor_binding(
+            canonical_parent,
+            parent_descriptor,
+            "private derivation artifact",
+        )
         descriptor = os.open(
             temporary_name,
             flags,
@@ -5399,6 +5623,11 @@ def _write_owner_only(
             )
         if before_publish is not None:
             before_publish()
+        _assert_owner_only_directory_descriptor_binding(
+            canonical_parent,
+            parent_descriptor,
+            "private derivation artifact",
+        )
         try:
             _rename_owner_only_exclusive(
                 parent_descriptor=parent_descriptor,
@@ -5436,6 +5665,17 @@ def _write_owner_only(
                 info=final_info,
                 published_before=published_before,
             )
+        try:
+            _assert_owner_only_directory_descriptor_binding(
+                canonical_parent,
+                parent_descriptor,
+                "private derivation artifact",
+            )
+        except AV1ValidationDerivationError:
+            os.unlink(path.name, dir_fd=parent_descriptor)
+            published = False
+            os.fsync(parent_descriptor)
+            raise
         os.fsync(parent_descriptor)
     except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(
@@ -5497,14 +5737,46 @@ def _fsync_owner_only_artifact(descriptor: int) -> None:
     fsync_durable_file(descriptor)
 
 
+def _assert_owner_only_directory_descriptor_binding(
+        path: Path,
+        descriptor: int,
+        label: str,
+) -> None:
+    try:
+        descriptor_info = os.fstat(descriptor)
+        path_info = path.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise AV1ValidationDerivationError(
+            f"AV1 {label} directory binding drifted"
+        ) from exc
+    if (
+        not stat.S_ISDIR(descriptor_info.st_mode)
+        or not stat.S_ISDIR(path_info.st_mode)
+        or descriptor_info.st_uid != os.getuid()
+        or path_info.st_uid != os.getuid()
+        or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+        or stat.S_IMODE(path_info.st_mode) & 0o077
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (path_info.st_dev, path_info.st_ino)
+    ):
+        raise AV1ValidationDerivationError(
+            f"AV1 {label} directory binding drifted"
+        )
+
+
 def _fsync_owner_only_parent(path: Path, label: str) -> None:
     assert_mediaforce_runtime_lock_held()
     parent_descriptor = -1
     completed = False
     try:
-        _, parent_descriptor = open_stable_directory(
+        canonical_parent, parent_descriptor = open_stable_directory(
             path.parent,
             require_owner_only=True,
+        )
+        _assert_owner_only_directory_descriptor_binding(
+            canonical_parent,
+            parent_descriptor,
+            label,
         )
         os.fsync(parent_descriptor)
         completed = True

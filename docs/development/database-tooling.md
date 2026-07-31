@@ -55,6 +55,28 @@ Mediaforce's SQLite schema.
   context exit. Derivation runtime-context commitments include the database
   device and inode so a replacement between separately locked phases cannot be
   adopted as the same frozen context.
+- Guarded SQLite connects bind two identities: the canonical parent directory
+  device/inode and the database leaf's device, inode, change time, and link
+  count. The parent and leaf are opened with no-follow descriptor-relative
+  operations; the opened parent descriptor must match the expected canonical
+  parent before SQLite is called. After the DBAPI connection opens, Mediaforce
+  revalidates the canonical parent and leaf, the held parent and leaf
+  descriptors, the descriptor-relative leaf, and the platform-pinned path
+  (`/.vol` on macOS or `/proc/self/fd` on Linux). Both descriptors remain open
+  until the SQLite connection closes. This prevents a substituted directory or
+  a hardlink to the same database inode from redirecting SQLite's WAL/SHM
+  namespace to another parent.
+- SQLite URLs use URI modes explicitly: `rwc` for first-use creation, `rw` for
+  guarded existing databases, and `ro` for read-only opens. Path components are
+  percent-quoted so spaces, `#`, `?`, `%`, and legal colons remain part of the
+  filename rather than URI syntax. Alembic configuration escapes the encoded
+  percent signs only at the ConfigParser boundary; SQLAlchemy and the DBAPI see
+  the original URI.
+- Authoritative workflows may register a final `open_db()` pre-commit guard.
+  The guard runs while the transaction is still reversible; if a retained
+  artifact directory no longer matches its canonical path, the guard fails and
+  `open_db()` explicitly rolls the transaction back before closing the
+  connection.
 - End SQLite write transactions before starting ffmpeg, ffprobe, ab-av1, remote
   host waits, or other long-running media work.
 - Persist the queued or running state, commit it, perform the media work, then

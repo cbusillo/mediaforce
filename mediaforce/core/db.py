@@ -14,6 +14,7 @@ from sqlalchemy.engine import RowMapping
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
 from mediaforce.core.db_migrations import create_engine_for_path
 from mediaforce.core.db_migrations import database_identity_connection_factory
+from mediaforce.core.db_migrations import readonly_database_url
 from mediaforce.core.db_migrations import register_database_identity_guards
 from mediaforce.core.db_migrations import run_migrations
 
@@ -110,7 +111,11 @@ def _connect_with_reserved_identity(
 
 
 @contextmanager
-def open_db(db_path: Path) -> Iterator[Connection]:
+def open_db(
+        db_path: Path,
+        *,
+        before_commit: Callable[[], None] | None = None,
+) -> Iterator[Connection]:
     resolved_path = db_path.expanduser().resolve()
     reserved_lease_identity = _assert_writable_database_identity_reserved(
         resolved_path
@@ -133,13 +138,29 @@ def open_db(db_path: Path) -> Iterator[Connection]:
             connection.close()
         raise
     else:
+        transaction_committed = False
         try:
             if identity_guard is not None:
                 identity_guard()
+            if before_commit is not None:
+                before_commit()
+                if identity_guard is not None:
+                    identity_guard()
             if connection.in_transaction():
                 connection.commit()
+                transaction_committed = True
             if identity_guard is not None:
                 identity_guard()
+        except BaseException as exc:
+            try:
+                if not transaction_committed and connection.in_transaction():
+                    connection.rollback()
+            except BaseException as cleanup_error:
+                exc.add_note(
+                    "Database transaction rollback also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise
         finally:
             connection.close()
 
@@ -166,7 +187,7 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
     if connection_factory is not None:
         connect_args["factory"] = connection_factory
     engine = create_engine(
-        f"sqlite+pysqlite:///file:{resolved_path}?mode=ro&uri=true",
+        readonly_database_url(resolved_path),
         connect_args=connect_args,
     )
     register_database_identity_guards(engine, identity_guard)

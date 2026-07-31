@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -28,7 +29,10 @@ from mediaforce.core.db_tables import encode_queue_state
 from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_migrations import _alembic_config, _alembic_script_location, run_migrations
+from mediaforce.core.db_migrations import create_engine_for_path
+from mediaforce.core.db_migrations import database_url
 from mediaforce.core.db_migrations import database_identity_connection_factory
+from mediaforce.core.db_migrations import readonly_database_url
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.cadence import cadence_policy_snapshot
@@ -277,6 +281,217 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 connection.close()
             self.assertIn("expected_database", tables)
             self.assertNotIn("replacement_database", tables)
+
+    def test_connection_factory_rejects_substituted_opened_parent_with_hardlinked_leaf(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_root = root / "database"
+            replacement_root = root / "replacement"
+            retired_root = root / "retired"
+            database_root.mkdir()
+            replacement_root.mkdir()
+            db_path = database_root / "library.sqlite3"
+            sqlite3.connect(db_path).close()
+            replacement_path = replacement_root / db_path.name
+            replacement_path.hardlink_to(db_path)
+            factory = database_identity_connection_factory(db_path, Mock())
+            assert factory is not None
+            real_snapshot = (
+                db_migrations_module._database_connection_path_snapshot
+            )
+            parent_swapped = False
+
+            def snapshot_before_parent_swap(
+                    path: Path,
+            ) -> tuple[tuple[int, int], tuple[int, int, int, int]]:
+                nonlocal parent_swapped
+                snapshot = real_snapshot(path)
+                database_root.rename(retired_root)
+                replacement_root.rename(database_root)
+                parent_swapped = True
+                return snapshot
+
+            try:
+                with (
+                    patch.object(
+                        db_migrations_module,
+                        "_database_connection_path_snapshot",
+                        side_effect=snapshot_before_parent_swap,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "identity changed during connection",
+                    ),
+                ):
+                    factory(str(db_path), check_same_thread=False)
+            finally:
+                if parent_swapped:
+                    database_root.rename(replacement_root)
+                    retired_root.rename(database_root)
+
+    def test_connection_factory_rejects_post_connect_parent_hardlink_namespace_swap(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_root = root / "database"
+            replacement_root = root / "replacement"
+            retired_root = root / "retired"
+            database_root.mkdir()
+            replacement_root.mkdir()
+            db_path = database_root / "library.sqlite3"
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("CREATE TABLE expected_database (value INTEGER)")
+            replacement_path = replacement_root / db_path.name
+            replacement_path.hardlink_to(db_path)
+            factory = database_identity_connection_factory(db_path, Mock())
+            assert factory is not None
+            real_connection = db_migrations_module._DatabaseIdentityConnection
+            parent_swapped = False
+
+            def connect_then_swap_parent(
+                    *args: object,
+                    **kwargs: object,
+            ) -> sqlite3.Connection:
+                nonlocal parent_swapped
+                connection = real_connection(*args, **kwargs)
+                database_root.rename(retired_root)
+                replacement_root.rename(database_root)
+                parent_swapped = True
+                return connection
+
+            try:
+                with (
+                    patch(
+                        "mediaforce.core.db_migrations._DatabaseIdentityConnection",
+                        side_effect=connect_then_swap_parent,
+                    ),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "identity changed during connection",
+                    ),
+                ):
+                    factory(str(db_path), check_same_thread=False)
+            finally:
+                if parent_swapped:
+                    database_root.rename(replacement_root)
+                    retired_root.rename(database_root)
+
+    def test_sqlalchemy_guards_parent_hardlink_namespace_for_connection_lifetime(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            database_root = root / "database"
+            replacement_root = root / "replacement"
+            retired_root = root / "retired"
+            database_root.mkdir()
+            replacement_root.mkdir()
+            db_path = database_root / "library.sqlite3"
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("CREATE TABLE expected_database (value INTEGER)")
+            (replacement_root / db_path.name).hardlink_to(db_path)
+            engine = create_engine_for_path(db_path, identity_guard=Mock())
+            try:
+                with engine.connect() as connection:
+                    database_root.rename(retired_root)
+                    replacement_root.rename(database_root)
+                    try:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            "identity changed during connection",
+                        ):
+                            connection.exec_driver_sql("SELECT 1")
+                    finally:
+                        database_root.rename(replacement_root)
+                        retired_root.rename(database_root)
+            finally:
+                engine.dispose()
+
+    def test_connection_factory_retains_verified_descriptors_until_close(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            sqlite3.connect(db_path).close()
+            factory = database_identity_connection_factory(db_path, Mock())
+            assert factory is not None
+
+            connection = factory(str(db_path), check_same_thread=False)
+            descriptors = connection._database_identity_descriptors
+            self.assertEqual(len(descriptors), 2)
+            for descriptor in descriptors:
+                os.fstat(descriptor)
+            connection.close()
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    def test_sqlite_urls_quote_legal_special_characters_without_changing_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library space#?%:.sqlite3"
+            writable_url = database_url(db_path)
+            readonly_url = readonly_database_url(db_path)
+            for encoded_character in ("%20", "%23", "%3F", "%25", "%3A"):
+                self.assertIn(encoded_character, writable_url)
+                self.assertIn(encoded_character, readonly_url)
+
+            engine = create_engine_for_path(db_path)
+            try:
+                with engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        "CREATE TABLE expected_database (value INTEGER)"
+                    )
+            finally:
+                engine.dispose()
+            self.assertTrue(db_path.is_file())
+
+            with sqlite3.connect(db_path) as connection:
+                connection.execute("PRAGMA journal_mode=WAL")
+
+            identity_guard = Mock()
+            guarded_engine = create_engine_for_path(
+                db_path,
+                identity_guard=identity_guard,
+            )
+            try:
+                with guarded_engine.connect() as connection:
+                    self.assertEqual(
+                        connection.exec_driver_sql("PRAGMA journal_mode").scalar_one(),
+                        "wal",
+                    )
+                    self.assertEqual(
+                        connection.exec_driver_sql(
+                            "SELECT name FROM sqlite_master WHERE name = 'expected_database'"
+                        ).scalar_one(),
+                        "expected_database",
+                    )
+            finally:
+                guarded_engine.dispose()
+
+            readonly_engine = create_engine(readonly_url)
+            try:
+                with readonly_engine.connect() as connection:
+                    self.assertEqual(
+                        connection.exec_driver_sql(
+                            "SELECT name FROM sqlite_master WHERE name = 'expected_database'"
+                        ).scalar_one(),
+                        "expected_database",
+                    )
+                    with self.assertRaisesRegex(
+                        OperationalError,
+                        "readonly|read-only",
+                    ):
+                        connection.exec_driver_sql(
+                            "CREATE TABLE forbidden_write (value INTEGER)"
+                        )
+            finally:
+                readonly_engine.dispose()
+
+            config = _alembic_config(db_path, "unused")
+            self.assertEqual(config.get_main_option("sqlalchemy.url"), writable_url)
 
     def test_connection_factory_fails_closed_without_descriptor_inspection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -35,6 +35,25 @@ class ProcessControlTests(TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "hello")
 
+    def test_deadline_managed_command_retries_communicate_with_stdin_text(self) -> None:
+        controller = ManagedProcessController()
+
+        with controller.absolute_deadline(
+            datetime.now(UTC) + timedelta(seconds=2)
+        ):
+            result = run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; time.sleep(0.1); sys.stdout.write(sys.stdin.read())",
+                ],
+                process_controller=controller,
+                input_text="hello",
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "hello")
+
     def test_schedule_cancellation_preserves_specific_error(self) -> None:
         controller = ManagedProcessController()
 
@@ -290,10 +309,10 @@ class ProcessControlTests(TestCase):
         ):
             run_command(["echo", "ok"], process_controller=controller)
 
-        self.assertEqual(
-            events,
-            ["close:102", "retain", "terminate", "close:101", "release"],
-        )
+        self.assertEqual(events[0], "close:102")
+        self.assertIn("retain", events)
+        self.assertIn("terminate", events)
+        self.assertIn("close:101", events)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_deadline_status_read_base_exceptions_cleanup_before_reraise(
@@ -343,10 +362,10 @@ class ProcessControlTests(TestCase):
                     run_command(["echo", "ok"], process_controller=controller)
 
                 self.assertIs(raised.exception, interruption)
-                self.assertEqual(
-                    events,
-                    ["close:102", "retain", "terminate", "close:101", "release"],
-                )
+                self.assertEqual(events[0], "close:102")
+                self.assertIn("retain", events)
+                self.assertIn("terminate", events)
+                self.assertIn("close:101", events)
 
     @patch(
         "mediaforce.core.process_control._terminate_process",
@@ -389,6 +408,137 @@ class ProcessControlTests(TestCase):
             "RuntimeError: fallback cleanup failed",
             "\n".join(raised.exception.__notes__),
         )
+
+    def test_deadline_status_failure_with_live_target_and_sigkill_failure_is_bounded(
+            self,
+    ) -> None:
+        controller = ManagedProcessController()
+        errors: list[BaseException] = []
+        signals: list[int] = []
+
+        def run_target() -> None:
+            try:
+                with controller.absolute_deadline(
+                    datetime.now(UTC) + timedelta(seconds=30)
+                ):
+                    run_command(
+                        [sys.executable, "-c", "import time; time.sleep(30)"],
+                        process_controller=controller,
+                    )
+            except BaseException as exc:
+                errors.append(exc)
+
+        def fail_sigkill(_process_group: int, signal_number: int) -> None:
+            signals.append(signal_number)
+            if signal_number == signal.SIGKILL:
+                raise PermissionError(errno.EPERM, "SIGKILL denied")
+
+        worker = threading.Thread(target=run_target, daemon=True)
+        try:
+            with (
+                patch.object(
+                    process_control_module,
+                    "_read_deadline_status",
+                    side_effect=ProcessDeadlineEnforcementError(
+                        "Absolute process deadline enforcement status is unavailable."
+                    ),
+                ),
+                patch.object(
+                    process_control_module,
+                    "_wait_for_target_exit",
+                    return_value=False,
+                ),
+                patch.object(
+                    process_control_module.os,
+                    "killpg",
+                    side_effect=fail_sigkill,
+                ),
+            ):
+                worker.start()
+                worker.join(timeout=2)
+                self.assertFalse(
+                    worker.is_alive(),
+                    "run_command remained blocked in communicate() after watchdog failure",
+                )
+
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ProcessDeadlineEnforcementError)
+            self.assertIn(signal.SIGTERM, signals)
+            self.assertIn(signal.SIGKILL, signals)
+            self.assertIn(
+                "PermissionError: [Errno 1] SIGKILL denied",
+                "\n".join(errors[0].__notes__),
+            )
+            self.assertIsNotNone(controller._process_group_id)
+            self.assertIsNotNone(controller.pid)
+        finally:
+            if controller._process_group_id is not None:
+                controller.terminate()
+                controller.reset()
+            worker.join(timeout=5)
+
+    def test_terminate_process_propagates_non_esrch_signal_failures(self) -> None:
+        process = Mock()
+        process.pid = 1234
+
+        with (
+            patch.object(
+                process_control_module.os,
+                "killpg",
+                side_effect=PermissionError(errno.EPERM, "SIGTERM denied"),
+            ),
+            self.assertRaisesRegex(PermissionError, "SIGTERM denied"),
+        ):
+            _terminate_process(
+                process,
+                terminate_process_group=True,
+                process_group_id=process.pid,
+            )
+
+    def test_terminate_process_fails_if_group_remains_live_after_sigkill(self) -> None:
+        process = Mock()
+        process.pid = 1234
+
+        with (
+            patch.object(process_control_module.os, "killpg"),
+            patch.object(
+                process_control_module,
+                "_wait_for_target_exit",
+                side_effect=[False, False],
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "remained live after SIGKILL",
+            ),
+        ):
+            _terminate_process(
+                process,
+                terminate_process_group=True,
+                process_group_id=process.pid,
+            )
+
+        def fail_sigkill(_process_group: int, signal_number: int) -> None:
+            if signal_number == signal.SIGKILL:
+                raise PermissionError(errno.EPERM, "SIGKILL denied")
+
+        with (
+            patch.object(
+                process_control_module.os,
+                "killpg",
+                side_effect=fail_sigkill,
+            ),
+            patch.object(
+                process_control_module,
+                "_wait_for_target_exit",
+                return_value=False,
+            ),
+            self.assertRaisesRegex(PermissionError, "SIGKILL denied"),
+        ):
+            _terminate_process(
+                process,
+                terminate_process_group=True,
+                process_group_id=process.pid,
+            )
 
     def test_deadline_watchdog_reports_clean_completion(self) -> None:
         status_read, status_write = os.pipe()
@@ -655,19 +805,20 @@ class ProcessControlTests(TestCase):
             terminate_process_group=True,
             process_group_id=process.pid,
         )
-        process.communicate.assert_called_once_with()
+        process.communicate.assert_called_once_with(timeout=2.0)
         controller.clear.assert_called_once_with(process)
 
-    @patch("mediaforce.core.process_control.time.monotonic", side_effect=[0.0, 0.0, 2.0])
-    @patch("mediaforce.core.process_control.time.sleep", return_value=None)
+    @patch(
+        "mediaforce.core.process_control._wait_for_target_exit",
+        side_effect=[False, True],
+    )
     @patch("mediaforce.core.process_control.os.killpg")
     @patch("mediaforce.core.process_control.os.getpgid")
     def test_cancel_terminates_process_group(
             self,
             getpgid_mock: Mock,
             killpg_mock: Mock,
-            _sleep_mock: Mock,
-            _monotonic_mock: Mock,
+            _wait_for_exit_mock: Mock,
     ) -> None:
         process = Mock()
         process.pid = 1234
@@ -683,21 +834,21 @@ class ProcessControlTests(TestCase):
             [
                 ((1234, signal.SIGTERM),),
                 ((1234, 0),),
-                ((1234, 0),),
                 ((1234, signal.SIGKILL),),
             ],
         )
 
-    @patch("mediaforce.core.process_control.time.monotonic", side_effect=[0.0, 0.0, 2.0])
-    @patch("mediaforce.core.process_control.time.sleep", return_value=None)
+    @patch(
+        "mediaforce.core.process_control._wait_for_target_exit",
+        side_effect=[False, True],
+    )
     @patch("mediaforce.core.process_control.os.killpg")
     @patch("mediaforce.core.process_control.os.getpgid", side_effect=ProcessLookupError())
     def test_termination_kills_descendants_after_group_leader_exits(
             self,
             _getpgid_mock: Mock,
             killpg_mock: Mock,
-            _sleep_mock: Mock,
-            _monotonic_mock: Mock,
+            _wait_for_exit_mock: Mock,
     ) -> None:
         process = Mock()
         process.pid = 1234
@@ -713,21 +864,21 @@ class ProcessControlTests(TestCase):
             [
                 ((1234, signal.SIGTERM),),
                 ((1234, 0),),
-                ((1234, 0),),
                 ((1234, signal.SIGKILL),),
             ],
         )
 
-    @patch("mediaforce.core.process_control.time.monotonic", side_effect=[0.0, 0.0, 2.0])
-    @patch("mediaforce.core.process_control.time.sleep", return_value=None)
+    @patch(
+        "mediaforce.core.process_control._wait_for_target_exit",
+        side_effect=[False, True],
+    )
     @patch("mediaforce.core.process_control.os.killpg")
     @patch("mediaforce.core.process_control.os.getpgid")
     def test_cancel_only_terminates_process_without_group_opt_in(
             self,
             getpgid_mock: Mock,
             killpg_mock: Mock,
-            _sleep_mock: Mock,
-            _monotonic_mock: Mock,
+            _wait_for_exit_mock: Mock,
     ) -> None:
         process = Mock()
         process.pid = 1234

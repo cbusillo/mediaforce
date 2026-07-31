@@ -1,3 +1,4 @@
+import errno
 import os
 import signal
 import subprocess
@@ -24,6 +25,12 @@ class ProcessDeadlineExpiredError(ScheduleWindowClosedError):
 
 class ProcessDeadlineEnforcementError(RuntimeError):
     pass
+
+
+_PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
+_PROCESS_REAP_TIMEOUT_SECONDS = 2.0
+_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
+_PROCESS_STATUS_DEADLINE_GRACE_SECONDS = 1.0
 
 
 class ManagedProcessController:
@@ -181,7 +188,7 @@ def _terminate_process(
                 return
             try:
                 process_group_id = os.getpgid(process.pid)
-            except OSError:
+            except ProcessLookupError:
                 process_group_id = process.pid
     elif process is None or process.poll() is not None:
         return
@@ -197,8 +204,12 @@ def _terminate_process(
             os.killpg(process_group_id, 0)
         except ProcessLookupError:
             return False
-        except OSError:
-            return True
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return False
+            if exc.errno == errno.EPERM:
+                return True
+            raise
         return True
 
     try:
@@ -206,22 +217,48 @@ def _terminate_process(
             os.killpg(process_group_id, signal.SIGTERM)
         elif process is not None:
             process.terminate()
-    except OSError:
+    except ProcessLookupError:
         return
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return
+        raise
     if not target_running():
         return
-    end_time = time.monotonic() + 1.5
-    while time.monotonic() < end_time:
-        if not target_running():
-            return
-        time.sleep(0.05)
+    if _wait_for_target_exit(target_running, timeout=1.5):
+        return
     try:
         if process_group_id is not None:
             os.killpg(process_group_id, signal.SIGKILL)
         elif process is not None:
             process.kill()
-    except OSError:
+    except ProcessLookupError:
         return
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return
+        raise
+    if _wait_for_target_exit(target_running, timeout=1.5):
+        return
+    target_label = (
+        f"process group {process_group_id}"
+        if process_group_id is not None
+        else "managed process"
+    )
+    raise RuntimeError(f"{target_label} remained live after SIGKILL")
+
+
+def _wait_for_target_exit(
+        target_running: Callable[[], bool],
+        *,
+        timeout: float,
+) -> bool:
+    end_time = time.monotonic() + timeout
+    while time.monotonic() < end_time:
+        if not target_running():
+            return True
+        time.sleep(0.05)
+    return False
 
 
 def _add_managed_process_cleanup_note(
@@ -234,33 +271,215 @@ def _add_managed_process_cleanup_note(
     )
 
 
-def _cleanup_retained_process_group_after_status_failure(
+def _read_deadline_status(status_descriptor: int) -> bytes:
+    try:
+        chunks: list[bytes] = []
+        while chunk := os.read(status_descriptor, 16):
+            chunks.append(chunk)
+    except OSError as exc:
+        raise ProcessDeadlineEnforcementError(
+            "Absolute process deadline enforcement status is unavailable."
+        ) from exc
+    status = b"".join(chunks)
+    if status not in {b"C", b"E"}:
+        raise ProcessDeadlineEnforcementError(
+            "Absolute process deadline enforcement failed closed."
+        )
+    return status
+
+
+class _DeadlineStatusMonitor:
+    def __init__(
+            self,
+            *,
+            status_descriptor: int,
+            process_controller: ManagedProcessController,
+            process: subprocess.Popen[str],
+    ) -> None:
+        self._status_descriptor = status_descriptor
+        self._process_controller = process_controller
+        self._process = process
+        self._failure_detected = threading.Event()
+        self._completed = threading.Event()
+        self._status: bytes | None = None
+        self._error: BaseException | None = None
+        self._cleanup_errors: list[BaseException] = []
+        self._termination_succeeded = False
+        self._thread = threading.Thread(
+            target=self._run,
+            name="mediaforce-process-deadline-status",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def failure_detected(self) -> bool:
+        return self._failure_detected.is_set()
+
+    def error(self) -> BaseException | None:
+        return self._error
+
+    def wait(self, timeout: float | None = None) -> bool:
+        return self._completed.wait(timeout)
+
+    def status(self) -> bytes:
+        if not self._completed.is_set() or self._status is None:
+            raise ProcessDeadlineEnforcementError(
+                "Absolute process deadline enforcement status is unavailable."
+            )
+        return self._status
+
+    def add_cleanup_notes(self, error: BaseException) -> None:
+        for cleanup_error in self._cleanup_errors:
+            _add_managed_process_cleanup_note(error, cleanup_error)
+
+    @property
+    def termination_succeeded(self) -> bool:
+        return self._termination_succeeded
+
+    def _run(self) -> None:
+        try:
+            self._status = _read_deadline_status(self._status_descriptor)
+        except BaseException as exc:
+            self._error = exc
+            self._failure_detected.set()
+            self._termination_succeeded = self._terminate_target()
+        finally:
+            try:
+                os.close(self._status_descriptor)
+            except BaseException as cleanup_error:
+                if self._error is None:
+                    self._error = ProcessDeadlineEnforcementError(
+                        "Absolute process deadline enforcement status is unavailable."
+                    )
+                    self._cleanup_errors.append(cleanup_error)
+                    self._status = None
+                    self._failure_detected.set()
+                    self._termination_succeeded = self._terminate_target()
+                else:
+                    self._cleanup_errors.append(cleanup_error)
+            self._completed.set()
+
+    def _terminate_target(self) -> bool:
+        try:
+            self._process_controller.terminate()
+        except BaseException as cleanup_error:
+            self._cleanup_errors.append(cleanup_error)
+            try:
+                _terminate_process(
+                    self._process,
+                    terminate_process_group=True,
+                    process_group_id=self._process.pid,
+                )
+            except BaseException as fallback_error:
+                self._cleanup_errors.append(fallback_error)
+                return False
+        return True
+
+
+def _communicate_with_deadline_monitor(
+        process: subprocess.Popen[str],
+        *,
+        cmd: list[str],
+        input_text: str | None,
+        timeout: float | None,
+        monitor: _DeadlineStatusMonitor,
+) -> tuple[str, str]:
+    started_at = time.monotonic()
+    pending_input = input_text
+    while True:
+        monitor_error = monitor.error() if monitor.failure_detected() else None
+        if monitor_error is not None:
+            raise monitor_error
+        poll_timeout = _PROCESS_COMMUNICATION_POLL_SECONDS
+        if timeout is not None:
+            remaining = timeout - (time.monotonic() - started_at)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            poll_timeout = min(poll_timeout, remaining)
+        try:
+            return process.communicate(
+                pending_input,
+                timeout=poll_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            pending_input = None
+            monitor_error = monitor.error() if monitor.failure_detected() else None
+            if monitor_error is not None:
+                raise monitor_error
+            if timeout is not None and time.monotonic() - started_at >= timeout:
+                raise subprocess.TimeoutExpired(
+                    cmd,
+                    timeout,
+                    output=exc.output,
+                    stderr=exc.stderr,
+                ) from exc
+
+
+def _reap_terminated_process(
+        process: subprocess.Popen[str],
+        error: BaseException,
+) -> bool:
+    try:
+        process.communicate(timeout=_PROCESS_REAP_TIMEOUT_SECONDS)
+    except BaseException as cleanup_error:
+        _add_managed_process_cleanup_note(error, cleanup_error)
+        return process.poll() is not None
+    return True
+
+
+def _terminate_and_reap_managed_process(
         *,
         process_controller: ManagedProcessController,
         process: subprocess.Popen[str],
-        status_descriptor: int,
+        attached: bool,
         error: BaseException,
-) -> None:
+) -> bool:
+    termination_succeeded = False
     try:
-        process_controller.terminate()
-    except BaseException as cleanup_error:
-        _add_managed_process_cleanup_note(error, cleanup_error)
-        try:
+        if attached:
+            process_controller.terminate()
+        else:
             _terminate_process(
                 process,
                 terminate_process_group=True,
                 process_group_id=process.pid,
             )
-        except BaseException as fallback_error:
-            _add_managed_process_cleanup_note(error, fallback_error)
-    try:
-        os.close(status_descriptor)
+        termination_succeeded = True
     except BaseException as cleanup_error:
         _add_managed_process_cleanup_note(error, cleanup_error)
-    try:
-        process_controller.release_process_group(process.pid)
-    except BaseException as cleanup_error:
-        _add_managed_process_cleanup_note(error, cleanup_error)
+        if attached:
+            try:
+                _terminate_process(
+                    process,
+                    terminate_process_group=True,
+                    process_group_id=process.pid,
+                )
+                termination_succeeded = True
+            except BaseException as fallback_error:
+                _add_managed_process_cleanup_note(error, fallback_error)
+    if not termination_succeeded:
+        return False
+    return _reap_terminated_process(process, error)
+
+
+def _finish_deadline_status_failure(
+        *,
+        monitor: _DeadlineStatusMonitor,
+        process: subprocess.Popen[str],
+        error: BaseException,
+) -> bool:
+    if not monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
+        _add_managed_process_cleanup_note(
+            error,
+            TimeoutError("deadline status cleanup did not finish"),
+        )
+        return False
+    monitor.add_cleanup_notes(error)
+    if not monitor.termination_succeeded:
+        return False
+    return _reap_terminated_process(process, error)
 
 
 def run_command(
@@ -343,80 +562,101 @@ def run_command(
     if deadline_status_write_descriptor >= 0:
         os.close(deadline_status_write_descriptor)
     attached = False
-    communication_completed = False
+    process_cleared = False
+    process_group_retained = False
+    process_group_finalized = False
+    retain_process_group = False
+    status_monitor: _DeadlineStatusMonitor | None = None
     try:
         process_controller.attach(process, terminate_process_group=True)
         attached = True
-        if timeout is None:
+        if deadline_status_descriptor >= 0:
+            status_monitor = _DeadlineStatusMonitor(
+                status_descriptor=deadline_status_descriptor,
+                process_controller=process_controller,
+                process=process,
+            )
+            status_monitor.start()
+            stdout, stderr = _communicate_with_deadline_monitor(
+                process,
+                cmd=cmd,
+                input_text=input_text,
+                timeout=timeout,
+                monitor=status_monitor,
+            )
+        elif timeout is None:
             stdout, stderr = process.communicate(input_text)
         else:
             stdout, stderr = process.communicate(input_text, timeout=timeout)
-        communication_completed = True
-    except BaseException as exc:
-        cleanup_errors: list[BaseException] = []
-        try:
-            if attached:
-                process_controller.terminate()
-            else:
-                _terminate_process(
-                    process,
-                    terminate_process_group=True,
-                    process_group_id=process.pid,
-                )
-        except BaseException as terminate_error:
-            cleanup_errors.append(terminate_error)
-        try:
-            process.communicate()
-        except BaseException as reap_error:
-            cleanup_errors.append(reap_error)
-        for error in cleanup_errors:
-            _add_managed_process_cleanup_note(exc, error)
-        if deadline_status_descriptor >= 0:
-            os.close(deadline_status_descriptor)
-        raise
-    finally:
-        if communication_completed and deadline_status_descriptor >= 0:
+        deadline_status = b""
+        if status_monitor is not None:
+            assert process_deadline_ns is not None
             process_controller.clear(process, retain_process_group=True)
-        else:
-            process_controller.clear(process)
-    deadline_status = b""
-    if deadline_status_descriptor >= 0:
-        try:
-            try:
-                chunks: list[bytes] = []
-                while chunk := os.read(deadline_status_descriptor, 16):
-                    chunks.append(chunk)
-                deadline_status = b"".join(chunks)
-            except OSError as exc:
+            process_cleared = True
+            process_group_retained = True
+            remaining_seconds = max(
+                0.0,
+                (process_deadline_ns - time.time_ns()) / 1_000_000_000,
+            )
+            if not status_monitor.wait(
+                remaining_seconds + _PROCESS_STATUS_DEADLINE_GRACE_SECONDS
+            ):
                 raise ProcessDeadlineEnforcementError(
                     "Absolute process deadline enforcement status is unavailable."
-                ) from exc
-            if deadline_status not in {b"C", b"E"}:
-                raise ProcessDeadlineEnforcementError(
-                    "Absolute process deadline enforcement failed closed."
                 )
-        except BaseException as exc:
-            _cleanup_retained_process_group_after_status_failure(
-                process_controller=process_controller,
-                process=process,
-                status_descriptor=deadline_status_descriptor,
-                error=exc,
-            )
-            raise
-        else:
-            os.close(deadline_status_descriptor)
+            status_error = status_monitor.error()
+            if status_error is not None:
+                raise status_error
+            deadline_status = status_monitor.status()
             process_controller.release_process_group(process.pid)
+            process_group_retained = False
+        process_group_finalized = True
         if deadline_status == b"E":
             raise ProcessDeadlineExpiredError(
                 "Process authorization deadline expired."
             )
-    process_controller.throw_if_cancelled()
-    completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
-    if check and completed.returncode:
-        raise subprocess.CalledProcessError(
-            completed.returncode,
+        process_controller.throw_if_cancelled()
+        completed = subprocess.CompletedProcess(
             cmd,
-            output=stdout,
-            stderr=stderr,
+            process.returncode,
+            stdout,
+            stderr,
         )
+        if check and completed.returncode:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                cmd,
+                output=stdout,
+                stderr=stderr,
+            )
+    except BaseException as exc:
+        if not process_group_finalized:
+            if status_monitor is not None and status_monitor.error() is exc:
+                cleanup_succeeded = _finish_deadline_status_failure(
+                    monitor=status_monitor,
+                    process=process,
+                    error=exc,
+                )
+            else:
+                cleanup_succeeded = _terminate_and_reap_managed_process(
+                    process_controller=process_controller,
+                    process=process,
+                    attached=attached,
+                    error=exc,
+                )
+            retain_process_group = not cleanup_succeeded
+            if cleanup_succeeded and process_group_retained:
+                try:
+                    process_controller.release_process_group(process.pid)
+                    process_group_retained = False
+                except BaseException as cleanup_error:
+                    _add_managed_process_cleanup_note(exc, cleanup_error)
+        if not process_cleared and not retain_process_group:
+            try:
+                process_controller.clear(process)
+            except BaseException as cleanup_error:
+                _add_managed_process_cleanup_note(exc, cleanup_error)
+        raise
+    if not process_cleared:
+        process_controller.clear(process)
     return completed

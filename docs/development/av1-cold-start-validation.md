@@ -217,6 +217,15 @@ without its plan is an explicit interrupted-state failure, not permission to
 mint another authorization. The plan binds a
 privacy-safe digest of the resolved database, review, and web-state locations;
 every later command must use that same machine-local runtime context. Every
+new v2 plan also embeds the exact repository `HEAD` commit and `HEAD^{tree}` in
+its semantic payload, plan ID, and payload digest. The repo-local verifier reads
+that identity with Git, rejects uncommitted tracked changes, and supplies the
+values to the deterministic plan builder. Existing v2 payloads that omit either
+identity fail closed rather than being compatibility-filled. Plan retries,
+review claims, review envelopes, review-set verification, candidate-lock
+finalization, and verified-lock loading must all resolve to the plan's exact
+commit/tree pair; advancing the checkout requires a new derivation plan and
+review set rather than reusing approvals from the earlier snapshot. Every
 execution, proposal, and finalization also re-compares the plan's complete
 twenty-four-assignment payload with the frozen partition rather than trusting
 top-level digests alone, and every write-capable source session revalidates the
@@ -282,6 +291,20 @@ normal pre-publication failure durably removes its temporary and surfaces any
 unlink, close, or cleanup-sync failure. A hard interruption before the rename
 leaves only an ignored temporary; after the rename, the canonical name contains
 a complete payload, but progress still waits for the parent directory sync.
+The writer retains the opened publication-directory descriptor and compares it
+with the canonical path immediately before the no-replace rename and again
+after publication. If the directory was renamed away or replaced, the new file
+is removed through the retained descriptor and the publication fails. Review
+claim/envelope directories remain retained across one review publication, while
+verdict claim/intent and terminal directories are retained from their first
+authoritative write through the SQLite commit boundary. Candidate-lock
+directories are retained through finalization. The final `open_db()`
+pre-commit callback rechecks every active binding while rollback is still
+possible; a swap rejects the operation and rolls back any observation or other
+database state rather than accepting an artifact written into an orphaned
+directory. The same descriptor/path check covers plans, attempts, proposals,
+claims, reviews, terminal records, candidate locks, and other owner-only
+authoritative JSON artifacts even when no database transaction is involved.
 Reads require one owner-owned link, exact `0400` mode, stable
 descriptor/path identity, and unchanged size, timestamps, and inode before and
 after the complete read.
@@ -475,13 +498,16 @@ creation pins the resolved parent directory and expected database inode, then
 opens SQLite through the parent directory's stable kernel identity: `/.vol`
 directory identity on macOS and a retained `/proc/self/fd` directory handle on
 Linux. The original read-only or read-write URI query is preserved, so WAL and
-read-only enforcement remain SQLite-native. The expected file handle stays
-retained for the SQLite connection lifetime, and its device, inode, change
-time, and link count must remain identical to both the pinned directory entry
-and resolved path after connection creation. Unsupported pinned-path identity
-inspection fails closed. A database swap-and-restore, transient ancestor
-substitution, or unrelated concurrent open therefore cannot redirect or spoof
-the returned connection.
+read-only enforcement remain SQLite-native. The canonical parent device/inode
+and leaf device, inode, change time, and link count are frozen before open. The
+opened parent descriptor must match that expected parent, and both parent and
+leaf descriptors stay retained for the SQLite connection lifetime. After DBAPI
+connect, the canonical parent/leaf, descriptor-relative leaf, descriptor
+identities, and platform-pinned parent/leaf path must all still match.
+Unsupported pinned-path identity inspection fails closed. A database
+swap-and-restore, substituted parent, hardlink-backed alternate WAL namespace,
+transient ancestor substitution, or unrelated concurrent open therefore cannot
+redirect or spoof the returned connection.
 Persistent or transient path replacement during connect, query, migration, or
 commit fails closed before later evidence publication can proceed without
 weakening read-only URI or WAL behavior.
@@ -496,11 +522,18 @@ descendant exits or the deadline kills the group. A dedicated status pipe
 reports explicit clean completion, deadline expiry, or enforcement failure.
 The watchdog sends the deadline kill before reporting expiry; a kill error other
 than an already-absent process group reports enforcement unavailable instead.
-The parent retains the target process-group identity until final status EOF is
-consumed and validated. Empty or unexpected status, status-read interruption,
-and watchdog unavailability all trigger parent-side descendant cleanup before
-the retained group is released, while cleanup failures remain notes on the
-original exception. Toolchain and quality-metric capability probes use
+The parent consumes that pipe on a dedicated monitor while `communicate()` runs
+in bounded polling slices. Empty or unexpected status, status-read interruption,
+and watchdog unavailability are therefore observed while a target is still
+running; the monitor starts parent-side group cleanup immediately rather than
+waiting for target output EOF. Parent communication and reap attempts remain
+bounded even when cleanup cannot kill the target. Non-`ESRCH` `SIGTERM` and
+`SIGKILL` failures propagate explicitly and remain cleanup notes on the original
+deadline or cancellation exception. A group is released only after cleanup can
+prove success; otherwise the controller retains both the possibly live target
+and its process-group identity for a later explicit cleanup attempt. Ordinary
+cancellation, deadline-expired, and deadline-enforcement classifications remain
+distinct. Toolchain and quality-metric capability probes use
 that same controller and deadline; the assignment's already-frozen quality
 metric and target are selected without launching a second unmanaged probe.
 Fresh execution samples its authorization
@@ -652,8 +685,9 @@ matching claim and envelope are visible validates both, re-fsyncs the envelope
 parent, returns the original decision and `reviewed_at`, and does not launch a
 second agent. A rejected review remains terminal. The review command and its
 repository/toolchain probes remain under the plan's absolute authorization
-deadline. Before claim publication, the reviewer records the exact Git commit
-and tree, rejects uncommitted tracked changes, and repeats that repository
+deadline. Before claim publication, the reviewer verifies that the live Git
+commit and tree exactly equal the immutable plan snapshot, rejects uncommitted
+tracked changes, and repeats that repository
 identity check after the run. It never launches Code in that live source
 worktree. Instead it creates an owner-only local clone without shared object
 hardlinks, removes `origin`, checks out the claimed commit detached, and verifies
@@ -666,8 +700,8 @@ canonical run evidence all bind the same commit and tree, so later validation
 cannot silently reinterpret an approval against another repository snapshot.
 All five immutable claims must name exactly that same repository commit and
 tree; both review-set validation and candidate finalization reject a divergent
-lane, and the review-set digest includes the unanimous commit and tree
-explicitly. The exact PATH-selected runner must match the authorization
+lane, and the review-set digest includes the plan ID, plan digest, unanimous
+commit, and unanimous tree explicitly. The exact PATH-selected runner must match the authorization
 before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
 unbound interpreter. Its canonical path must also match the active ancestor Code
@@ -716,8 +750,12 @@ recheck keeps that same `failed/authorization_expired` classification; deadline
 enforcement failure remains a wrapped contract safety stop rather than being
 misreported as ordinary expiry.
 Finalization requires exactly five resolved claims and five matching approvals
-over one unanimous repository commit/tree identity; any unresolved, divergent,
-or rejected claim blocks it permanently.
+over the plan's unanimous repository commit/tree identity; any unresolved,
+divergent, or rejected claim blocks it permanently. The repo-local command
+reads the current verified `HEAD` and tree again immediately before entering
+the runtime-owned finalization API. A checkout advanced from snapshot A to
+snapshot B therefore cannot finalize snapshot A's reviews, even if every stored
+claim and envelope is internally self-consistent.
 Finalization loads configuration once, opens an immediate database write
 transaction, revalidates the frozen partition against inventory in that same
 transaction, resolves every frozen source commitment, rereads current

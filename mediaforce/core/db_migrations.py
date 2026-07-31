@@ -17,31 +17,43 @@ from alembic.config import Config
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
-from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 INITIAL_REVISION = "20260401_0001"
 SQLiteConnectionFactory = Callable[..., sqlite3.Connection]
+DatabaseDirectoryIdentity = tuple[int, int]
 DatabaseConnectionPathSnapshot = tuple[int, int, int, int]
+DatabaseConnectionLifetimeIdentity = tuple[int, int, int]
 
 
 class _DatabaseIdentityConnection(sqlite3.Connection):
     _database_identity_descriptors: tuple[int, ...] = ()
+    _database_identity_validator: Callable[[], bool] | None = None
 
     def retain_database_identity_descriptors(
             self,
             descriptors: tuple[int, ...],
+            validator: Callable[[], bool],
     ) -> None:
         if self._database_identity_descriptors:
             raise RuntimeError(
                 "Mediaforce database identity descriptors are already retained"
             )
         self._database_identity_descriptors = descriptors
+        self._database_identity_validator = validator
+
+    def assert_database_identity(self) -> None:
+        validator = self._database_identity_validator
+        if validator is None or not validator():
+            raise RuntimeError(
+                "Mediaforce database identity changed during connection"
+            )
 
     def close(self) -> None:
         descriptors = self._database_identity_descriptors
         self._database_identity_descriptors = ()
+        self._database_identity_validator = None
         close_error: BaseException | None = None
         try:
             super().close()
@@ -67,9 +79,17 @@ def database_url(
         *,
         require_existing: bool = False,
 ) -> str:
-    if require_existing:
-        return f"sqlite+pysqlite:///file:{db_path}?mode=rw&uri=true"
-    return str(URL.create("sqlite+pysqlite", database=str(db_path)))
+    mode = "rw" if require_existing else "rwc"
+    return _database_uri_url(db_path, mode=mode)
+
+
+def readonly_database_url(db_path: Path) -> str:
+    return _database_uri_url(db_path, mode="ro")
+
+
+def _database_uri_url(db_path: Path, *, mode: str) -> str:
+    quoted_path = quote(os.fspath(db_path), safe="/")
+    return f"sqlite+pysqlite:///file:{quoted_path}?mode={mode}&uri=true"
 
 
 @contextmanager
@@ -116,10 +136,13 @@ def database_identity_connection_factory(
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         identity_guard()
-        expected = _database_connection_path_snapshot(resolved_path)
+        expected_parent, expected = _database_connection_path_snapshot(
+            resolved_path
+        )
         identity_guard()
         pinned_path, descriptors = _pin_database_connection_path(
             resolved_path,
+            expected_parent=expected_parent,
             expected=expected,
         )
         connection: _DatabaseIdentityConnection | None = None
@@ -137,17 +160,33 @@ def database_identity_connection_factory(
                 *connection_args,
                 **connection_kwargs,
             )
-            connection.retain_database_identity_descriptors(descriptors)
+            connection.retain_database_identity_descriptors(
+                descriptors,
+                lambda: _database_connection_path_remains_bound(
+                    resolved_path,
+                    pinned_path=pinned_path,
+                    expected_parent=expected_parent,
+                    expected=(
+                        expected[0],
+                        expected[1],
+                        expected[3],
+                    ),
+                    descriptors=descriptors,
+                ),
+            )
             descriptors_retained = True
             identity_guard()
             if not _database_connection_path_remains_pinned(
                 resolved_path,
+                pinned_path=pinned_path,
+                expected_parent=expected_parent,
                 expected=expected,
                 descriptors=descriptors,
             ):
                 raise RuntimeError(
                     "Mediaforce database identity changed during connection"
                 )
+            connection.assert_database_identity()
         except BaseException as exc:
             if connection is not None:
                 try:
@@ -173,14 +212,19 @@ def database_identity_connection_factory(
 
 def _database_connection_path_snapshot(
         db_path: Path,
-) -> DatabaseConnectionPathSnapshot:
-    info = db_path.stat()
+) -> tuple[DatabaseDirectoryIdentity, DatabaseConnectionPathSnapshot]:
+    parent_info = db_path.parent.stat(follow_symlinks=False)
+    file_info = db_path.stat(follow_symlinks=False)
     return (
-        info.st_dev,
-        info.st_ino,
-        info.st_ctime_ns,
-        info.st_nlink,
+        _database_directory_identity(parent_info),
+        _database_connection_info_snapshot(file_info),
     )
+
+
+def _database_directory_identity(
+        info: os.stat_result,
+) -> DatabaseDirectoryIdentity:
+    return info.st_dev, info.st_ino
 
 
 def _database_connection_info_snapshot(
@@ -194,9 +238,16 @@ def _database_connection_info_snapshot(
     )
 
 
+def _database_connection_lifetime_info_snapshot(
+        info: os.stat_result,
+) -> DatabaseConnectionLifetimeIdentity:
+    return info.st_dev, info.st_ino, info.st_nlink
+
+
 def _pin_database_connection_path(
         db_path: Path,
         *,
+        expected_parent: DatabaseDirectoryIdentity,
         expected: DatabaseConnectionPathSnapshot,
 ) -> tuple[Path, tuple[int, int]]:
     directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -206,6 +257,7 @@ def _pin_database_connection_path(
             "Mediaforce database actual-opened identity inspection is unavailable"
         )
     directory_flags |= os.O_DIRECTORY
+    directory_flags |= os.O_NOFOLLOW
     file_flags |= os.O_NOFOLLOW
     try:
         directory_descriptor = os.open(db_path.parent, directory_flags)
@@ -213,6 +265,18 @@ def _pin_database_connection_path(
         raise RuntimeError(
             "Mediaforce database actual-opened identity inspection is unavailable"
         ) from exc
+    try:
+        directory_info = os.fstat(directory_descriptor)
+        if (
+            not stat.S_ISDIR(directory_info.st_mode)
+            or _database_directory_identity(directory_info) != expected_parent
+        ):
+            raise RuntimeError(
+                "Mediaforce database identity changed during connection"
+            )
+    except BaseException:
+        os.close(directory_descriptor)
+        raise
     try:
         file_descriptor = os.open(
             db_path.name,
@@ -226,11 +290,9 @@ def _pin_database_connection_path(
         ) from exc
     descriptors = (file_descriptor, directory_descriptor)
     try:
-        directory_info = os.fstat(directory_descriptor)
         file_info = os.fstat(file_descriptor)
         if (
-            not stat.S_ISDIR(directory_info.st_mode)
-            or not stat.S_ISREG(file_info.st_mode)
+            not stat.S_ISREG(file_info.st_mode)
             or _database_connection_info_snapshot(file_info) != expected
         ):
             raise RuntimeError(
@@ -336,24 +398,85 @@ def _database_connection_arguments_for_pinned_path(
 def _database_connection_path_remains_pinned(
         db_path: Path,
         *,
+        pinned_path: Path,
+        expected_parent: DatabaseDirectoryIdentity,
         expected: DatabaseConnectionPathSnapshot,
         descriptors: tuple[int, int],
+) -> bool:
+    return _database_connection_path_matches(
+        db_path,
+        pinned_path=pinned_path,
+        expected_parent=expected_parent,
+        expected=expected,
+        descriptors=descriptors,
+        snapshot=_database_connection_info_snapshot,
+    )
+
+
+def _database_connection_path_remains_bound(
+        db_path: Path,
+        *,
+        pinned_path: Path,
+        expected_parent: DatabaseDirectoryIdentity,
+        expected: DatabaseConnectionLifetimeIdentity,
+        descriptors: tuple[int, int],
+) -> bool:
+    return _database_connection_path_matches(
+        db_path,
+        pinned_path=pinned_path,
+        expected_parent=expected_parent,
+        expected=expected,
+        descriptors=descriptors,
+        snapshot=_database_connection_lifetime_info_snapshot,
+    )
+
+
+def _database_connection_path_matches(
+        db_path: Path,
+        *,
+        pinned_path: Path,
+        expected_parent: DatabaseDirectoryIdentity,
+        expected: tuple[int, ...],
+        descriptors: tuple[int, int],
+        snapshot: Callable[[os.stat_result], tuple[int, ...]],
 ) -> bool:
     file_descriptor, directory_descriptor = descriptors
     try:
         descriptor_info = os.fstat(file_descriptor)
+        directory_descriptor_info = os.fstat(directory_descriptor)
         relative_info = os.stat(
             db_path.name,
             dir_fd=directory_descriptor,
             follow_symlinks=False,
         )
-        path_info = db_path.stat()
+        path_info = db_path.stat(follow_symlinks=False)
+        parent_info = db_path.parent.stat(follow_symlinks=False)
+        pinned_info = pinned_path.stat(follow_symlinks=False)
+        pinned_parent_info = pinned_path.parent.stat()
     except OSError:
         return False
-    return all(
-        stat.S_ISREG(info.st_mode)
-        and _database_connection_info_snapshot(info) == expected
-        for info in (descriptor_info, relative_info, path_info)
+    return (
+        stat.S_ISDIR(directory_descriptor_info.st_mode)
+        and stat.S_ISDIR(parent_info.st_mode)
+        and stat.S_ISDIR(pinned_parent_info.st_mode)
+        and all(
+            _database_directory_identity(info) == expected_parent
+            for info in (
+                directory_descriptor_info,
+                parent_info,
+                pinned_parent_info,
+            )
+        )
+        and all(
+            stat.S_ISREG(info.st_mode)
+            and snapshot(info) == expected
+            for info in (
+                descriptor_info,
+                relative_info,
+                path_info,
+                pinned_info,
+            )
+        )
     )
 
 
@@ -377,20 +500,49 @@ def register_database_identity_guards(
 ) -> None:
     if identity_guard is None:
         return
+
+    def assert_driver_connection_identity(
+            driver_connection: Any,
+    ) -> None:
+        assert_identity = getattr(
+            driver_connection,
+            "assert_database_identity",
+            None,
+        )
+        if callable(assert_identity):
+            assert_identity()
+
+    def assert_connected_identity(
+            dbapi_connection: Any,
+            _record: Any,
+    ) -> None:
+        identity_guard()
+        assert_driver_connection_identity(dbapi_connection)
+
+    def assert_cursor_identity(
+            connection: Connection,
+            *_args: Any,
+            **_kwargs: Any,
+    ) -> None:
+        identity_guard()
+        assert_driver_connection_identity(
+            connection.connection.driver_connection
+        )
+
     event.listen(
         engine,
         "connect",
-        lambda _connection, _record: identity_guard(),
+        assert_connected_identity,
     )
     event.listen(
         engine,
         "before_cursor_execute",
-        lambda *_args, **_kwargs: identity_guard(),
+        assert_cursor_identity,
     )
     event.listen(
         engine,
         "after_cursor_execute",
-        lambda *_args, **_kwargs: identity_guard(),
+        assert_cursor_identity,
     )
 
 
@@ -549,12 +701,13 @@ def _alembic_config(
 ) -> Config:
     config = Config()
     config.set_main_option("script_location", script_location)
+    sqlalchemy_url = database_url(
+        db_path,
+        require_existing=identity_guard is not None,
+    ).replace("%", "%%")
     config.set_main_option(
         "sqlalchemy.url",
-        database_url(
-            db_path,
-            require_existing=identity_guard is not None,
-        ),
+        sqlalchemy_url,
     )
     if identity_guard is not None:
         config.attributes["database_identity_guard"] = identity_guard
