@@ -42,6 +42,7 @@ TERMINAL_SCAN_JOB_STATUSES = {"completed", "failed", "stopped", "paused"}
 SUCCESSFUL_SCAN_RUN_STATUS = "completed"
 DEFAULT_SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
 _SCAN_SCHEDULE_LOCK = threading.Lock()
+_SCAN_JOB_STATE_LOCK = threading.Lock()
 
 
 @dataclass(slots=True)
@@ -562,8 +563,10 @@ def maybe_schedule_scan(
             if not interrupted_restart and finished_at and datetime.now(tz=UTC) - finished_at < deps.scan_retry_cooldown:
                 return job
 
+        scan_id = uuid.uuid4().hex[:12]
         job_payload = {
-            "job_id": uuid.uuid4().hex[:12],
+            "job_id": scan_id,
+            "scan_id": scan_id,
             "status": "queued",
             "scope": "full" if prefix is None else "prefix",
             "prefix": prefix,
@@ -574,7 +577,7 @@ def maybe_schedule_scan(
             "error": None,
             "stats": None,
         }
-        deps.save_scan_job_state(config, prefix, job_payload)
+        _save_scan_job_state(config, prefix, job_payload, deps)
         thread_kwargs = {
             "config_path": config.paths.config_path,
             "prefix": prefix,
@@ -592,15 +595,17 @@ def maybe_schedule_scan(
                 )
                 thread.start()
         except BaseException as exc:
-            deps.save_scan_job_state(
+            _save_worker_scan_job_state(
                 config,
                 prefix,
+                str(job_payload["scan_id"]),
                 {
                     **job_payload,
                     "status": "failed",
                     "finished_at": deps.now_iso(),
                     "error": str(exc) or type(exc).__name__,
                 },
+                deps,
             )
             raise
         return job_payload
@@ -636,30 +641,36 @@ def run_scan_job(
         connection.commit()
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         try:
-            job = deps.load_scan_job_state(config, prefix) or {}
-            if background_work_is_paused(connection):
+            with _SCAN_JOB_STATE_LOCK:
+                job = deps.load_scan_job_state(config, prefix) or {}
+                if not _scan_job_owned_by_worker(job, scan_id=job_id):
+                    connection.rollback()
+                    return
+                if background_work_is_paused(connection):
+                    job.update(
+                        {
+                            "job_id": job_id,
+                            "scan_id": job_id,
+                            "status": "paused",
+                            "started_at": None,
+                            "finished_at": deps.now_iso(),
+                            "error": None,
+                            "stats": None,
+                        }
+                    )
+                    deps.save_scan_job_state(config, prefix, job)
+                    return
                 job.update(
                     {
                         "job_id": job_id,
-                        "status": "paused",
-                        "started_at": None,
-                        "finished_at": deps.now_iso(),
+                        "scan_id": job_id,
+                        "status": "running",
+                        "started_at": deps.now_iso(),
+                        "finished_at": None,
                         "error": None,
-                        "stats": None,
                     }
                 )
                 deps.save_scan_job_state(config, prefix, job)
-                return
-            job.update(
-                {
-                    "job_id": job_id,
-                    "status": "running",
-                    "started_at": deps.now_iso(),
-                    "finished_at": None,
-                    "error": None,
-                }
-            )
-            deps.save_scan_job_state(config, prefix, job)
         except BaseException:
             connection.rollback()
             raise
@@ -697,44 +708,53 @@ def run_scan_job(
         process_controller.throw_if_cancelled()
         deps.reset_folder_card_cache()
         process_controller.throw_if_cancelled()
-        deps.save_scan_job_state(
+        _save_worker_scan_job_state(
             config,
             prefix,
+            job_id,
             {
                 **job,
                 "job_id": job_id,
+                "scan_id": job_id,
                 "status": "completed",
                 "finished_at": deps.now_iso(),
                 "error": None,
                 "stats": _stats_payload(stats),
                 "metadata": metadata_stats,
             },
+            deps,
         )
     except ProcessCancelledError:
-        deps.save_scan_job_state(
+        _save_worker_scan_job_state(
             config,
             prefix,
+            job_id,
             {
                 **job,
                 "job_id": job_id,
+                "scan_id": job_id,
                 "status": "failed",
                 "finished_at": deps.now_iso(),
                 "error": deps.scan_interrupted_error,
                 "stats": None,
             },
+            deps,
         )
     except Exception as exc:
-        deps.save_scan_job_state(
+        _save_worker_scan_job_state(
             config,
             prefix,
+            job_id,
             {
                 **job,
                 "job_id": job_id,
+                "scan_id": job_id,
                 "status": "failed",
                 "finished_at": deps.now_iso(),
                 "error": str(exc),
                 "stats": None,
             },
+            deps,
         )
     finally:
         if cleanup_required:
@@ -961,6 +981,11 @@ def active_scan_from_db(
         row_status = str(row["status"] or "running")
         job_prefix = None if scope in {"full", "unknown"} else str(matched_prefix)
         job = deps.load_scan_job_state(config, job_prefix)
+        if job is not None and not _scan_job_matches_database_row(
+                job,
+                scan_id=str(row["scan_id"]),
+        ):
+            job = None
         job_status = str(job.get("status") or "") if job else ""
         if job and job_status in TERMINAL_SCAN_JOB_STATUSES:
             if repair_stale and job_status != SUCCESSFUL_SCAN_RUN_STATUS:
@@ -996,6 +1021,7 @@ def active_scan_from_db(
         if deps.scan_process_is_alive(row["owner_pid"]):
             return {
                 "job_id": str(row["scan_id"]),
+                "scan_id": str(row["scan_id"]),
                 "status": "running",
                 "scope": scope,
                 "prefix": None if prefix is None else (job_prefix or prefix),
@@ -1010,6 +1036,7 @@ def active_scan_from_db(
         if job and job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
             return {
                 "job_id": str(job.get("job_id") or row["scan_id"]),
+                "scan_id": str(job.get("scan_id") or row["scan_id"]),
                 "status": str(job.get("status") or "running"),
                 "scope": str(job.get("scope") or scope),
                 "prefix": job.get("prefix") if prefix is not None else None,
@@ -1020,7 +1047,7 @@ def active_scan_from_db(
                 "stats": job.get("stats"),
             }
 
-        if job is not None and repair_stale:
+        if repair_stale:
             _expire_scan_run(connection, str(row["scan_id"]), deps.scan_interrupted_error)
     return None
 
@@ -1056,7 +1083,14 @@ def repair_stale_scan_runs(
             job_prefixes = _prefixes_for_scan_run(row)
         for job_prefix in job_prefixes:
             job = deps.load_scan_job_state(config, job_prefix)
-            if job and str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
+            if (
+                job
+                and _scan_job_matches_database_row(
+                    job,
+                    scan_id=str(row["scan_id"]),
+                )
+                and str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES
+            ):
                 deps.save_scan_job_state(
                     config,
                     job_prefix,
@@ -1094,7 +1128,7 @@ def repair_stale_scan_runs(
             terminal_run = _latest_scan_terminal_job(
                 connection,
                 job_prefix,
-                job_id=str(job.get("job_id") or "") or None,
+                scan_id=_scan_job_database_id(job),
             )
             replacement = (
                 terminal_run
@@ -1216,6 +1250,7 @@ def _scan_run_terminal_job(
     finished_at = row["completed_at"] or row["last_progress_at"] or row["started_at"]
     return {
         "job_id": str(row["scan_id"]),
+        "scan_id": str(row["scan_id"]),
         "status": status,
         "scope": str(row["scope"] or "unknown"),
         "prefix": None if prefix is None else (job_prefix or prefix),
@@ -1304,7 +1339,7 @@ def _current_scan_job_snapshot(
     terminal_run = _latest_scan_terminal_job(
         connection,
         prefix,
-        job_id=str(job.get("job_id") or "") or None,
+        scan_id=_scan_job_database_id(job),
     )
     if (
         terminal_run is not None
@@ -1335,7 +1370,7 @@ def _latest_scan_terminal_job(
         connection: DBClient,
         prefix: str | None,
         *,
-        job_id: str | None = None,
+        scan_id: str | None = None,
 ) -> dict[str, Any] | None:
     terminal_selection = select(
         scan_runs.c.scan_id,
@@ -1350,10 +1385,10 @@ def _latest_scan_terminal_job(
         scan_runs.c.status,
         scan_runs.c.error,
     ).where(scan_runs.c.status.in_(tuple(TERMINAL_SCAN_JOB_STATUSES)))
-    if job_id is not None:
+    if scan_id is not None:
         exact_row = connection.execute(
             terminal_selection
-            .where(scan_runs.c.scan_id == job_id)
+            .where(scan_runs.c.scan_id == scan_id)
             .limit(1)
         ).mappings().first()
         if exact_row is not None:
@@ -1363,8 +1398,10 @@ def _latest_scan_terminal_job(
             )
             if exact_job is not None:
                 return exact_job
+        return None
     rows = connection.execute(
         terminal_selection
+        .where(scan_runs.c.status != SUCCESSFUL_SCAN_RUN_STATUS)
         .order_by(
             func.coalesce(
                 scan_runs.c.completed_at,
@@ -1406,7 +1443,15 @@ def _scan_run_supersedes_job(
         job: dict[str, Any],
         deps: JobRuntimeDeps,
 ) -> bool:
-    if str(scan_run.get("job_id") or "") == str(job.get("job_id") or ""):
+    job_scan_id = _scan_job_database_id(job)
+    scan_run_id = str(
+        scan_run.get("scan_id")
+        or scan_run.get("job_id")
+        or ""
+    )
+    if job_scan_id is not None:
+        return scan_run_id == job_scan_id
+    if scan_run_id == str(job.get("job_id") or ""):
         return True
     scan_started_at = deps.parse_iso(scan_run.get("started_at"))
     job_created_at = deps.parse_iso(
@@ -1417,6 +1462,58 @@ def _scan_run_supersedes_job(
         and job_created_at is not None
         and scan_started_at >= job_created_at
     )
+
+
+def _scan_job_database_id(job: dict[str, Any]) -> str | None:
+    value = str(job.get("scan_id") or "")
+    return value or None
+
+
+def _scan_job_owned_by_worker(
+        job: dict[str, Any],
+        *,
+        scan_id: str,
+) -> bool:
+    explicit_scan_id = _scan_job_database_id(job)
+    if explicit_scan_id is not None:
+        return explicit_scan_id == scan_id
+    return str(job.get("job_id") or "") == scan_id
+
+
+def _scan_job_matches_database_row(
+        job: dict[str, Any],
+        *,
+        scan_id: str,
+) -> bool:
+    return _scan_job_database_id(job) == scan_id
+
+
+def _save_scan_job_state(
+        config: MediaforceConfig,
+        prefix: str | None,
+        payload: dict[str, Any],
+        deps: JobRuntimeDeps,
+) -> None:
+    with _SCAN_JOB_STATE_LOCK:
+        deps.save_scan_job_state(config, prefix, payload)
+
+
+def _save_worker_scan_job_state(
+        config: MediaforceConfig,
+        prefix: str | None,
+        scan_id: str,
+        payload: dict[str, Any],
+        deps: JobRuntimeDeps,
+) -> bool:
+    with _SCAN_JOB_STATE_LOCK:
+        current = deps.load_scan_job_state(config, prefix)
+        if current is None or not _scan_job_owned_by_worker(
+                current,
+                scan_id=scan_id,
+        ) or str(current.get("status") or "") not in ACTIVE_SCAN_JOB_STATUSES:
+            return False
+        deps.save_scan_job_state(config, prefix, payload)
+        return True
 
 
 def _interrupted_scan_job(
@@ -1436,6 +1533,7 @@ def _interrupted_scan_job(
 def _malformed_scan_job(path: Path) -> dict[str, Any]:
     return {
         "job_id": path.stem,
+        "scan_id": None,
         "status": "failed",
         "scope": "unknown",
         "prefix": None,

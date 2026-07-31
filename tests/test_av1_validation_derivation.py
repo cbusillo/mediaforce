@@ -2375,6 +2375,108 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     published_before=AUTHORIZED_AT,
                 )
 
+    def test_derivation_plan_rejects_post_authorization_publication(self) -> None:
+        artifact_root = (
+            self.runtime_config.paths.web_state_dir.parent
+            / "late-state"
+            / AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY
+            / self.plan.partition_id
+        )
+        plan_path = artifact_root / "plan.json"
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+            return_value=10 ** 30,
+        ):
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                write_av1_validation_derivation_plan(artifact_root, self.plan)
+            self.assertTrue(plan_path.is_file())
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                load_av1_validation_derivation_plan(plan_path)
+
+    def test_review_pending_attempt_rejects_post_authorization_publication(self) -> None:
+        attempts_directory = self.runtime_config.paths.web_state_dir / "late-attempts"
+        attempt = self._review_pending_attempt()
+        attempt_path = attempts_directory / f"{attempt.assignment_id}.json"
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+            return_value=10 ** 30,
+        ):
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                write_av1_validation_derivation_attempt(
+                    attempts_directory,
+                    attempt,
+                    published_before=self.plan.authorization.valid_until,
+                )
+            self.assertTrue(attempt_path.is_file())
+            before_publish = unittest.mock.Mock()
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                write_av1_validation_derivation_attempt(
+                    attempts_directory,
+                    attempt,
+                    before_publish=before_publish,
+                    published_before=self.plan.authorization.valid_until,
+                )
+            before_publish.assert_called_once_with()
+            with self.assertRaises(AV1ValidationDerivationPublicationDeadlineError):
+                load_av1_validation_derivation_attempts(
+                    attempts_directory,
+                    review_pending_published_before=(
+                        self.plan.authorization.valid_until
+                    ),
+                )
+
+    def test_attempt_post_publish_identity_failure_removes_artifact(self) -> None:
+        attempts_directory = self.runtime_config.paths.web_state_dir / "drifted-attempts"
+        attempt = self._review_pending_attempt()
+        attempt_path = attempts_directory / f"{attempt.assignment_id}.json"
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "repository drift",
+        ):
+            write_av1_validation_derivation_attempt(
+                attempts_directory,
+                attempt,
+                after_publish=unittest.mock.Mock(
+                    side_effect=AV1ValidationDerivationError(
+                        "repository drift"
+                    )
+                ),
+                published_before=self.plan.authorization.valid_until,
+            )
+        self.assertFalse(attempt_path.exists())
+
+    def test_authoritative_attempt_load_requires_parent_durability(self) -> None:
+        attempts_directory = self.runtime_config.paths.web_state_dir / "durable-attempts"
+        attempt = self._review_pending_attempt()
+        write_av1_validation_derivation_attempt(
+            attempts_directory,
+            attempt,
+            published_before=self.plan.authorization.valid_until,
+        )
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation._fsync_owner_only_parent",
+                side_effect=AV1ValidationDerivationError(
+                    "attempt directory sync failed"
+                ),
+            ) as sync_parent,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "attempt directory sync failed",
+            ),
+        ):
+            load_av1_validation_derivation_attempts(
+                attempts_directory,
+                review_pending_published_before=(
+                    self.plan.authorization.valid_until
+                ),
+                require_durable=True,
+            )
+        sync_parent.assert_called_once_with(
+            attempts_directory / f"{attempt.assignment_id}.json",
+            "derivation attempt",
+        )
+
     def test_assignment_claim_loader_marks_post_deadline_publication(self) -> None:
         claims_directory = self.runtime_artifact_root / "attempts"
         assignment = self.plan.assignments[0]
@@ -3025,7 +3127,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     verify_av1_cold_start_preregistration._repository_review_identity(
                         process_controller=ManagedProcessController(),
                         repository_root=repository,
-                        require_clean=True,
                     ),
                     (commit, tree),
                 )
@@ -3042,12 +3143,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(
                     AV1ValidationDerivationError,
-                    "isolated review repository is not clean",
+                    "review repository is not clean",
                 ):
                     verify_av1_cold_start_preregistration._repository_review_identity(
                         process_controller=ManagedProcessController(),
                         repository_root=repository,
-                        require_clean=True,
                     )
                 self.assertEqual(
                     verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
@@ -9847,7 +9947,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     retry_exit_code = verify_av1_cold_start_preregistration.main(argv)
             self.assertEqual(exit_code, 0)
             self.assertEqual(retry_exit_code, 0)
-            now_iso.assert_called_once_with()
+            self.assertEqual(now_iso.call_count, 5)
             payload = json.loads(stdout.getvalue())
             self.assertEqual(json.loads(retry_stdout.getvalue()), payload)
             self.assertEqual(payload["derivation_assignment_count"], 24)

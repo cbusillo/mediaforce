@@ -239,8 +239,9 @@ blanket-disable repository-local configuration, because ordinary linked-worktree
 and core/remote/branch behavior must remain intact. Instead, the only local
 configuration vectors that could reinterpret authority are neutralized at the
 probe boundary: tracked-state checks use raw `diff-index` and `diff-files` with
-external diff, text conversion, and submodule ignoring disabled; the clean-state
-check explicitly includes all untracked files and submodules. Git aliases,
+external diff, text conversion, and submodule ignoring disabled; every
+repository-authority probe requires that clean state and explicitly includes all
+untracked files and submodules. Git aliases,
 remotes, hooks, and ordinary branch settings are not invoked by these direct
 built-in read commands, and remaining local configuration cannot alter the raw
 commit, tree, or blob object IDs they consume. Before any clean-tree decision,
@@ -301,14 +302,20 @@ be re-entered through the runtime-lock-held retry or recovery path before
 progress. A surviving orphaned claim is terminalized by that recovery rather
 than resuming the claimed action. A retry that finds an identical published
 artifact re-fsyncs its parent directory before accepting it, so a prior
-directory-sync error cannot be downgraded to an unsynced idempotent success. A
-fresh candidate proposal rechecks the live authorization immediately before its
-exclusive rename, then verifies that the renamed inode's kernel change time is
-strictly earlier than the immutable authorization expiration. Loaders repeat
-that publication-time check, including bulk recovery loads of already matching
-observed terminal intents and records, so a process paused across expiration
-cannot make a late artifact acceptable by retaining an earlier payload
-timestamp. A
+directory-sync error cannot be downgraded to an unsynced idempotent success.
+Authoritative attempt loaders also re-fsync the retained attempt parent before a
+visible attempt can authorize verdict, proposal, or finalization work; status
+reporting remains read-only. A
+fresh plan, favorable `review_pending` attempt, or candidate proposal rechecks
+the live authorization immediately before its exclusive rename, then verifies
+that the renamed inode's kernel change time is strictly earlier than the
+immutable authorization expiration. Plan and favorable-attempt loaders repeat
+that same-inode publication-time check; bulk recovery loaders also repeat it for
+already matching observed terminal intents and records. A process paused across
+expiration therefore cannot make a late favorable artifact acceptable by
+retaining an earlier payload timestamp. Unfavorable recovery attempts remain
+publishable after expiration because they cannot authorize another assignment.
+A
 candidate-proposal retry first loads the canonical existing proposal and reuses
 its original `proposed_at`; it never samples a replacement timestamp. A review
 retry accepts only a complete matching immutable lane claim and envelope,

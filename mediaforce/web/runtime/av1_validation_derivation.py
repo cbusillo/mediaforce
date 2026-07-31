@@ -1825,14 +1825,28 @@ def _run_av1_validation_derivation_assignment_locked(
     if attempt is None:
         raise AV1ValidationDerivationError("AV1 derivation attempt did not reach a terminal state")
 
-    def assert_attempt_publication_authority() -> None:
+    def assert_attempt_publication_identity() -> None:
         _source_commitment_guard()
         assert_live_repository_identity()
+
+    def assert_attempt_publication_authority() -> None:
+        assert_attempt_publication_identity()
+        if attempt.status == "review_pending":
+            assert_av1_validation_derivation_authorization_active(
+                plan,
+                at=clock(),
+            )
 
     write_av1_validation_derivation_attempt(
         attempts_directory,
         attempt,
         before_publish=assert_attempt_publication_authority,
+        after_publish=assert_attempt_publication_identity,
+        published_before=(
+            plan.authorization.valid_until
+            if attempt.status == "review_pending"
+            else None
+        ),
     )
     if attempt.status != "review_pending":
         terminal = build_av1_validation_derivation_terminal_record(
@@ -1947,7 +1961,9 @@ def finalize_av1_validation_derivation_candidate_lock(
                 cell_plan_id=cell_plan_id,
             )
             attempts = load_av1_validation_derivation_attempts(
-                artifact_root / "attempts"
+                artifact_root / "attempts",
+                review_pending_published_before=plan.authorization.valid_until,
+                require_durable=True,
             )
             records = load_av1_validation_derivation_terminal_records(
                 artifact_root / "terminal-records",
@@ -2143,7 +2159,9 @@ def load_verified_av1_validation_derivation_candidate_lock(
                 cell_plan_id=cell_plan_id,
             )
             attempts = load_av1_validation_derivation_attempts(
-                artifact_root / "attempts"
+                artifact_root / "attempts",
+                review_pending_published_before=plan.authorization.valid_until,
+                require_durable=True,
             )
             records = load_av1_validation_derivation_terminal_records(
                 artifact_root / "terminal-records",
@@ -2396,7 +2414,9 @@ def _record_av1_validation_derivation_visual_verdict_locked(
         (
             item
             for item in load_av1_validation_derivation_attempts(
-                artifact_root / "attempts"
+                artifact_root / "attempts",
+                review_pending_published_before=plan.authorization.valid_until,
+                require_durable=True,
             )
             if item.assignment_id == attempt.assignment_id
         ),
@@ -2820,7 +2840,11 @@ def _assert_next_assignment(
         for assignment in plan.assignments
     }
     attempts = (
-        load_av1_validation_derivation_attempts(attempts_directory)
+        load_av1_validation_derivation_attempts(
+            attempts_directory,
+            review_pending_published_before=plan.authorization.valid_until,
+            require_durable=True,
+        )
         if attempts_directory.exists()
         else ()
     )
@@ -2942,7 +2966,11 @@ def _recover_interrupted_derivation_state(
         before_observed_publish: Callable[[], None] | None = None,
 ) -> bool:
     attempts = (
-        load_av1_validation_derivation_attempts(attempts_directory)
+        load_av1_validation_derivation_attempts(
+            attempts_directory,
+            review_pending_published_before=plan.authorization.valid_until,
+            require_durable=True,
+        )
         if attempts_directory.exists()
         else ()
     )

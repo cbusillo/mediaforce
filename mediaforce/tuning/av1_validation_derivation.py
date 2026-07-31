@@ -3263,6 +3263,7 @@ def write_av1_validation_derivation_plan(
         plan: AV1ValidationDerivationPlan,
         *,
         before_publish: Callable[[], None] | None = None,
+        after_publish: Callable[[], None] | None = None,
 ) -> Path:
     root = _av1_validation_derivation_artifact_root_path(artifact_root, plan)
     path = root / "plan.json"
@@ -3271,6 +3272,8 @@ def write_av1_validation_derivation_plan(
             path,
             canonical_json_bytes(plan.to_payload()),
             before_publish=before_publish,
+            after_publish=after_publish,
+            published_before=plan.authorization.valid_until,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         existing = load_av1_validation_derivation_plan(path)
@@ -3284,8 +3287,18 @@ def write_av1_validation_derivation_plan(
 
 
 def load_av1_validation_derivation_plan(path: Path) -> AV1ValidationDerivationPlan:
-    payload, raw = _load_owner_only_json(path, "derivation plan")
-    return av1_validation_derivation_plan_from_payload(payload, raw=raw)
+    payload, raw, info = _load_owner_only_json_with_info(
+        path,
+        "derivation plan",
+    )
+    plan = av1_validation_derivation_plan_from_payload(payload, raw=raw)
+    _assert_owner_only_publication_before(
+        path,
+        "derivation plan",
+        info=info,
+        published_before=plan.authorization.valid_until,
+    )
+    return plan
 
 
 def write_av1_validation_derivation_attempt(
@@ -3293,6 +3306,8 @@ def write_av1_validation_derivation_attempt(
         attempt: AV1ValidationDerivationAttempt,
         *,
         before_publish: Callable[[], None] | None = None,
+        after_publish: Callable[[], None] | None = None,
+        published_before: str | None = None,
 ) -> Path:
     _bind_owner_only_directory(
         directory,
@@ -3306,9 +3321,15 @@ def write_av1_validation_derivation_attempt(
             path,
             canonical_json_bytes(attempt.to_payload()),
             before_publish=before_publish,
+            after_publish=after_publish,
+            published_before=published_before,
         )
     except _AV1ValidationDerivationArtifactAlreadyExists:
-        payload, raw = _load_owner_only_json(path, "derivation attempt")
+        payload, raw = _load_owner_only_json(
+            path,
+            "derivation attempt",
+            published_before=published_before,
+        )
         existing = av1_validation_derivation_attempt_from_payload(
             payload,
             raw=raw,
@@ -3323,14 +3344,34 @@ def write_av1_validation_derivation_attempt(
 
 def load_av1_validation_derivation_attempts(
         directory: Path,
+        *,
+        review_pending_published_before: str | None = None,
+        require_durable: bool = False,
 ) -> tuple[AV1ValidationDerivationAttempt, ...]:
     binding = _load_owner_only_directory_binding(directory, expected_kind="attempts")
     attempts_list: list[AV1ValidationDerivationAttempt] = []
     for path in sorted(directory.glob("*.json")):
-        payload, raw = _load_owner_only_json(path, "derivation attempt")
-        attempts_list.append(
-            av1_validation_derivation_attempt_from_payload(payload, raw=raw)
+        payload, raw, info = _load_owner_only_json_with_info(
+            path,
+            "derivation attempt",
         )
+        attempt = av1_validation_derivation_attempt_from_payload(
+            payload,
+            raw=raw,
+        )
+        if (
+            review_pending_published_before is not None
+            and attempt.status == "review_pending"
+        ):
+            _assert_owner_only_publication_before(
+                path,
+                "derivation attempt",
+                info=info,
+                published_before=review_pending_published_before,
+            )
+        if require_durable:
+            _fsync_owner_only_parent(path, "derivation attempt")
+        attempts_list.append(attempt)
     attempts = tuple(attempts_list)
     assignment_ids = [attempt.assignment_id for attempt in attempts]
     if len(assignment_ids) != len(set(assignment_ids)):
@@ -5830,13 +5871,31 @@ def _load_owner_only_json(
         *,
         published_before: str | None = None,
 ) -> tuple[dict[str, Any], bytes]:
-    raw = _read_owner_only_bytes(
+    raw, info = _read_owner_only_artifact(
         path,
         label,
-        published_before=published_before,
     )
+    if published_before is not None:
+        _assert_owner_only_publication_before(
+            path,
+            label,
+            info=info,
+            published_before=published_before,
+        )
+    return _decode_owner_only_json(raw, label), raw
+
+
+def _load_owner_only_json_with_info(
+        path: Path,
+        label: str,
+) -> tuple[dict[str, Any], bytes, os.stat_result]:
+    raw, info = _read_owner_only_artifact(path, label)
+    return _decode_owner_only_json(raw, label), raw, info
+
+
+def _decode_owner_only_json(raw: bytes, label: str) -> dict[str, Any]:
     try:
-        return object_dict(json.loads(raw.decode("utf-8"))), raw
+        return object_dict(json.loads(raw.decode("utf-8")))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
         raise AV1ValidationDerivationError(f"AV1 {label} is not valid JSON") from exc
 
@@ -5846,6 +5905,7 @@ def _write_owner_only(
         data: bytes,
         *,
         before_publish: Callable[[], None] | None = None,
+        after_publish: Callable[[], None] | None = None,
         published_before: str | None = None,
 ) -> None:
     assert_mediaforce_runtime_lock_held()
@@ -5965,15 +6025,23 @@ def _write_owner_only(
                 published_before=published_before,
             )
         try:
+            if after_publish is not None:
+                after_publish()
             _assert_owner_only_directory_descriptor_binding(
                 canonical_parent,
                 parent_descriptor,
                 "private derivation artifact",
             )
-        except AV1ValidationDerivationError:
-            os.unlink(path.name, dir_fd=parent_descriptor)
-            published = False
-            os.fsync(parent_descriptor)
+        except BaseException as exc:
+            try:
+                os.unlink(path.name, dir_fd=parent_descriptor)
+                published = False
+                os.fsync(parent_descriptor)
+            except OSError as cleanup_error:
+                exc.add_note(
+                    "AV1 private derivation artifact rollback also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
             raise
         os.fsync(parent_descriptor)
     except FileIntegrityError as exc:
@@ -6205,6 +6273,21 @@ def _read_owner_only_bytes(
         *,
         published_before: str | None = None,
 ) -> bytes:
+    result, info = _read_owner_only_artifact(path, label)
+    if published_before is not None:
+        _assert_owner_only_publication_before(
+            path,
+            label,
+            info=info,
+            published_before=published_before,
+        )
+    return result
+
+
+def _read_owner_only_artifact(
+        path: Path,
+        label: str,
+) -> tuple[bytes, os.stat_result]:
     parent_descriptor = -1
     descriptor = -1
     completed = False
@@ -6265,16 +6348,9 @@ def _read_owner_only_bytes(
             raise AV1ValidationDerivationError(
                 f"AV1 {label} changed while it was being read"
             )
-        if published_before is not None:
-            _assert_owner_only_publication_before(
-                path,
-                label,
-                info=final_info,
-                published_before=published_before,
-            )
         result = b"".join(chunks)
         completed = True
-        return result
+        return result, final_info
     except FileIntegrityError as exc:
         raise AV1ValidationDerivationError(f"AV1 {label} is unavailable") from exc
     except OSError as exc:

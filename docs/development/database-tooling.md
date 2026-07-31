@@ -69,9 +69,18 @@ Mediaforce's SQLite schema.
 - The one-time legacy `state/library.sqlite3` relocation is a separate,
   runtime-locked transfer rather than a file move. It fails closed unless the
   legacy source is a stable, single-link regular file protected by the same OFD
-  database-identity primitive used by active runtimes. The source is copied
-  through a verified SQLite snapshot while a no-wait source write gate excludes
-  new commits, preserving committed WAL state without moving WAL or SHM files.
+  database-identity primitive used by active runtimes. Both SQLite connections
+  open through the retained parent descriptor (`/.vol` on macOS or
+  `/proc/self/fd` on Linux), and the reported main-database inode must match the
+  retained source before and after backup. A retained vnode/inotify guard makes
+  any transient rename, relink, replacement, or write to that source identity a
+  permanent migration failure even if the original pathname is restored before
+  the next stat check. After the no-wait source write gate is held, the same
+  guard binds the existing WAL/SHM inode identities or their verified absence;
+  any later sidecar creation, removal, rename, relink, or WAL write fails the
+  transfer. The source is copied through that verified SQLite snapshot while
+  the write gate excludes new commits, preserving committed WAL state without
+  moving WAL or SHM files.
   The staged database is fsynced, atomically linked into an absent configured
   destination, and its directory is fsynced before the legacy main, WAL, and
   SHM files are removed. A failed transfer leaves the legacy source in place and

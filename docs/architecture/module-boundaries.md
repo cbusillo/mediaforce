@@ -108,8 +108,14 @@ Guidance:
   - `encode_scheduler.py`
   - `queue_actions.py`
   - `job_runtime.py`
-    - startup reconciliation binds new scan sidecars and `scan_runs` rows to the
-      same scan ID, resolves that exact ID before any scope/time fallback,
+    - new scan sidecars persist an explicit `scan_id` identical to the
+      `scan_runs` primary key; startup reconciliation resolves that exact ID
+      before any fallback, while legacy sidecars without an ID may use
+      scope/time only to inherit a conservative non-success result,
+    - workers revalidate sidecar ownership under the process-wide state lock
+      before startup and every terminal save, so an older worker cannot overwrite
+      a newer scan's sidecar; dead database rows are terminalized independently
+      of mismatched sidecar state,
       restores a completed database result over a stale active sidecar, and lets
       a matching or later database failure override contradictory legacy
       sidecar state

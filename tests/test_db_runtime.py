@@ -45,6 +45,7 @@ from mediaforce.encoding.cadence import cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import media_fingerprint_policy_snapshot
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
+    exclusive_legacy_sqlite_migration_source,
     exclusive_mediaforce_runtime_lock,
     reserve_mediaforce_database_identity,
 )
@@ -179,15 +180,18 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     "INSERT INTO migration_rows VALUES ('initial-row')"
                 )
                 writer_connection.commit()
-                source_uri = f"{source_path.as_uri()}?mode=rw"
-
                 def connect_with_gate_commit(
                         database: str | Path,
                         *args: object,
                         **kwargs: object,
                 ) -> sqlite3.Connection | CommitBeforeWriteGate:
                     connection = real_connect(database, *args, **kwargs)
-                    if str(database) == source_uri:
+                    database_text = os.fspath(database)
+                    if (
+                        isinstance(database_text, str)
+                        and database_text.startswith("file:")
+                        and "mode=rw" in database_text
+                    ):
                         return CommitBeforeWriteGate(connection)
                     return connection
 
@@ -379,6 +383,154 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 list(destination_path.parent.glob(".library.sqlite3.migration-*.sqlite3")),
                 [],
             )
+
+    def test_migrate_config_state_rejects_transient_replacement_during_sqlite_open(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            replacement_path = source_path.parent / "replacement.sqlite3"
+            original_path = source_path.parent / ".original.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as source_connection:
+                source_connection.execute("CREATE TABLE source_rows (value TEXT NOT NULL)")
+                source_connection.execute("INSERT INTO source_rows VALUES ('original')")
+            with sqlite3.connect(replacement_path) as replacement_connection:
+                replacement_connection.execute(
+                    "CREATE TABLE replacement_rows (value TEXT NOT NULL)"
+                )
+                replacement_connection.execute(
+                    "INSERT INTO replacement_rows VALUES ('replacement')"
+                )
+            real_connect = sqlite3.connect
+            source_connection_count = 0
+
+            def connect_with_transient_replacement(
+                    database: str | Path,
+                    *args: object,
+                    **kwargs: object,
+            ) -> sqlite3.Connection:
+                nonlocal source_connection_count
+                database_text = os.fspath(database)
+                if isinstance(database_text, str) and database_text.startswith("file:"):
+                    source_connection_count += 1
+                    if source_connection_count == 2:
+                        source_path.replace(original_path)
+                        replacement_path.replace(source_path)
+                        try:
+                            return real_connect(database, *args, **kwargs)
+                        finally:
+                            source_path.replace(replacement_path)
+                            original_path.replace(source_path)
+                return real_connect(database, *args, **kwargs)
+
+            with patch.object(
+                config_module.sqlite3,
+                "connect",
+                side_effect=connect_with_transient_replacement,
+            ):
+                with exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-open-replacement-probe"},
+                ):
+                    with self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "identity changed",
+                    ):
+                        migrate_config_state(config)
+
+            with sqlite3.connect(source_path) as source_connection:
+                self.assertEqual(
+                    source_connection.execute(
+                        "SELECT value FROM source_rows"
+                    ).fetchall(),
+                    [("original",)],
+                )
+            with sqlite3.connect(replacement_path) as replacement_connection:
+                self.assertEqual(
+                    replacement_connection.execute(
+                        "SELECT value FROM replacement_rows"
+                    ).fetchall(),
+                    [("replacement",)],
+                )
+            self.assertFalse(destination_path.exists())
+            self.assertEqual(
+                list(destination_path.parent.glob(".library.sqlite3.migration-*.sqlite3")),
+                [],
+            )
+
+    def test_legacy_migration_source_detects_transient_sidecar_replacement(self) -> None:
+        for suffix in ("-wal", "-shm"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                source_path = root / "state" / "library.sqlite3"
+                destination_path = root / "configured-state" / "library.sqlite3"
+                config = self._legacy_migration_config(
+                    root,
+                    database_path=destination_path,
+                    name="target",
+                )
+                source_path.parent.mkdir()
+                source_connection = sqlite3.connect(source_path)
+                try:
+                    self.assertEqual(
+                        source_connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                        ("wal",),
+                    )
+                    source_connection.execute(
+                        "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                    )
+                    source_connection.execute(
+                        "INSERT INTO migration_rows VALUES ('committed-wal-row')"
+                    )
+                    source_connection.commit()
+                    sidecar_path = Path(f"{source_path}{suffix}")
+                    self.assertTrue(sidecar_path.is_file())
+                    replacement_path = sidecar_path.with_name(
+                        f"{sidecar_path.name}.replacement"
+                    )
+                    original_path = sidecar_path.with_name(
+                        f"{sidecar_path.name}.original"
+                    )
+                    replacement_path.write_bytes(sidecar_path.read_bytes())
+
+                    with exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-sidecar-replacement-probe"},
+                    ):
+                        with exclusive_legacy_sqlite_migration_source(
+                            config,
+                            source_path,
+                        ) as locked_source:
+                            gate_connection = sqlite3.connect(
+                                locked_source.sqlite_uri(),
+                                uri=True,
+                                timeout=0,
+                                isolation_level=None,
+                            )
+                            try:
+                                gate_connection.execute("BEGIN IMMEDIATE")
+                                locked_source.bind_sqlite_sidecars()
+                                sidecar_path.replace(original_path)
+                                replacement_path.replace(sidecar_path)
+                                sidecar_path.replace(replacement_path)
+                                original_path.replace(sidecar_path)
+                                with self.assertRaisesRegex(
+                                    MediaforceRuntimeBusyError,
+                                    "identity changed",
+                                ):
+                                    locked_source.assert_stable()
+                            finally:
+                                if gate_connection.in_transaction:
+                                    gate_connection.rollback()
+                                gate_connection.close()
+                finally:
+                    source_connection.close()
 
     def test_migrate_config_state_cleans_staging_after_interrupted_copy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

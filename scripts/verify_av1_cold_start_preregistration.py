@@ -665,7 +665,10 @@ def _run_derivation_action_body(
         attempts_directory = artifact_root / "attempts"
         records_directory = artifact_root / "terminal-records"
         attempts = (
-            load_av1_validation_derivation_attempts(attempts_directory)
+            load_av1_validation_derivation_attempts(
+                attempts_directory,
+                review_pending_published_before=plan.authorization.valid_until,
+            )
             if attempts_directory.exists()
             else ()
         )
@@ -712,7 +715,8 @@ def _run_derivation_action_body(
             config_path=args.config,
         )
         attempts = load_av1_validation_derivation_attempts(
-            artifact_root / "attempts"
+            artifact_root / "attempts",
+            review_pending_published_before=plan.authorization.valid_until,
         )
         attempt = next(
             (item for item in attempts if item.assignment_id == args.assignment_id),
@@ -925,8 +929,9 @@ def _run_derivation_plan_action(
             review_runner_canonical_path_sha256,
             review_runner_binary_sha256,
         ) = _review_runner_identity()
+        repository_process_controller = ManagedProcessController()
         repository_commit, repository_tree = _repository_review_identity(
-            process_controller=ManagedProcessController(),
+            process_controller=repository_process_controller,
         )
         if args.action == "create-derivation-plan":
             artifact_root = (
@@ -1021,18 +1026,42 @@ def _run_derivation_plan_action(
                 "AV1 derivation plan does not match current locked inputs"
             )
         if args.action == "create-derivation-plan":
+            def _assert_plan_repository_identity() -> None:
+                current_identity = _repository_review_identity(
+                    process_controller=repository_process_controller,
+                )
+                if current_identity != (repository_commit, repository_tree):
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation plan repository identity changed before publication"
+                    )
+
             def _before_plan_publish() -> None:
+                assert_av1_validation_derivation_authorization_active(
+                    plan,
+                    at=_now_iso(),
+                )
+                _assert_plan_repository_identity()
                 source_sha256_session.assert_quiet()
                 assert_av1_validation_derivation_source_snapshot_capacity(
                     artifact_root,
                     plan=plan,
                 )
                 source_sha256_session.assert_quiet()
+                _assert_plan_repository_identity()
+                assert_av1_validation_derivation_authorization_active(
+                    plan,
+                    at=_now_iso(),
+                )
+
+            def _after_plan_publish() -> None:
+                source_sha256_session.assert_quiet()
+                _assert_plan_repository_identity()
 
             write_av1_validation_derivation_plan(
                 artifact_root,
                 plan,
                 before_publish=_before_plan_publish,
+                after_publish=_after_plan_publish,
             )
         _print_partition_payload(
             av1_validation_derivation_plan_public_summary(plan),
@@ -1080,7 +1109,9 @@ def _run_derivation_proposal_action(
     ) as (partition, source_sha256_session):
         assert_av1_validation_derivation_execution_environment(plan)
         attempts = load_av1_validation_derivation_attempts(
-            artifact_root / "attempts"
+            artifact_root / "attempts",
+            review_pending_published_before=plan.authorization.valid_until,
+            require_durable=True,
         )
         records = load_av1_validation_derivation_terminal_records(
             artifact_root / "terminal-records",
@@ -1400,7 +1431,6 @@ def _repository_review_identity(
         *,
         process_controller: ManagedProcessController,
         repository_root: Path | None = None,
-        require_clean: bool = False,
 ) -> tuple[str, str]:
     root = (REPOSITORY_ROOT if repository_root is None else repository_root).resolve()
 
@@ -1424,53 +1454,52 @@ def _repository_review_identity(
             )
         return object_ids[0], object_ids[1]
 
-    object_ids = resolve_identity()
-    index_state = run_command(
-        _review_git_command("ls-files", "-v", "-z"),
-        process_controller=process_controller,
-        cwd=root,
-        env=_review_git_environment(repository_root=root),
-        timeout=15,
-        check=False,
-    )
-    if index_state.returncode != 0:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository index state is unavailable"
-        )
-    if any(
-        not record.startswith("H ")
-        for record in index_state.stdout.split("\0")
-        if record
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository has unsafe index state"
-        )
-    for tracked_state_command in (
-        _review_git_diff_command(
-            "diff-index",
-            "--cached",
-            object_ids[0],
-            "--",
-        ),
-        _review_git_diff_command("diff-files", "--"),
-    ):
-        tracked_state = run_command(
-            tracked_state_command,
+    def assert_clean_state(object_ids: tuple[str, str]) -> None:
+        index_state = run_command(
+            _review_git_command("ls-files", "-v", "-z"),
             process_controller=process_controller,
             cwd=root,
             env=_review_git_environment(repository_root=root),
             timeout=15,
             check=False,
         )
-        if tracked_state.returncode == 1:
+        if index_state.returncode != 0:
             raise AV1ValidationDerivationError(
-                "AV1 derivation review repository has uncommitted tracked changes"
+                "AV1 derivation review repository index state is unavailable"
             )
-        if tracked_state.returncode != 0:
+        if any(
+            not record.startswith("H ")
+            for record in index_state.stdout.split("\0")
+            if record
+        ):
             raise AV1ValidationDerivationError(
-                "AV1 derivation review repository state is unavailable"
+                "AV1 derivation review repository has unsafe index state"
             )
-    if require_clean:
+        for tracked_state_command in (
+            _review_git_diff_command(
+                "diff-index",
+                "--cached",
+                object_ids[0],
+                "--",
+            ),
+            _review_git_diff_command("diff-files", "--"),
+        ):
+            tracked_state = run_command(
+                tracked_state_command,
+                process_controller=process_controller,
+                cwd=root,
+                env=_review_git_environment(repository_root=root),
+                timeout=15,
+                check=False,
+            )
+            if tracked_state.returncode == 1:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review repository has uncommitted tracked changes"
+                )
+            if tracked_state.returncode != 0:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review repository state is unavailable"
+                )
         repository_state = run_command(
             _review_git_command(
                 "status",
@@ -1486,17 +1515,21 @@ def _repository_review_identity(
         )
         if repository_state.returncode != 0:
             raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository state is unavailable"
+                "AV1 derivation review repository state is unavailable"
             )
         if repository_state.stdout:
             raise AV1ValidationDerivationError(
-                "AV1 derivation isolated review repository is not clean"
+                "AV1 derivation review repository is not clean"
             )
+
+    object_ids = resolve_identity()
+    assert_clean_state(object_ids)
     verified_object_ids = resolve_identity()
     if verified_object_ids != object_ids:
         raise AV1ValidationDerivationError(
             "AV1 derivation review repository identity changed during verification"
         )
+    assert_clean_state(verified_object_ids)
     return verified_object_ids
 
 

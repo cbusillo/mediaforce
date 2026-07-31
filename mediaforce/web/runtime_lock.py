@@ -11,12 +11,15 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select as select_module
 import stat
+import struct
 import sys
 import threading
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import register_database_identity_provider
+from mediaforce.core.file_integrity import FileIntegrityError, MacOSFileIntegrityGuard
 from mediaforce.core.utils import filesystem_collision_key
 
 
@@ -446,9 +449,11 @@ class LegacySQLiteMigrationSource:
     _directory_descriptor: int
     _file_snapshot: tuple[int, int, int, int, int, int]
     _directory_identity: tuple[int, int]
+    _mutation_guard: _LegacySQLiteMutationGuard
 
     def assert_stable(self) -> None:
         try:
+            self._mutation_guard.assert_quiet()
             descriptor_info = os.fstat(self._file_descriptor)
             directory_descriptor_info = os.fstat(self._directory_descriptor)
             relative_info = os.stat(
@@ -458,7 +463,7 @@ class LegacySQLiteMigrationSource:
             )
             path_info = self.path.lstat()
             parent_info = self.path.parent.lstat()
-        except OSError as exc:
+        except (FileIntegrityError, OSError) as exc:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite source identity changed during migration"
             ) from exc
@@ -481,6 +486,64 @@ class LegacySQLiteMigrationSource:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite source identity changed during migration"
             )
+        try:
+            self._mutation_guard.assert_quiet()
+        except FileIntegrityError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source identity changed during migration"
+            ) from exc
+
+    def sqlite_uri(self) -> str:
+        self.assert_stable()
+        try:
+            directory_info = os.fstat(self._directory_descriptor)
+            pinned_path = _legacy_sqlite_connection_path_for_directory_descriptor(
+                self._directory_descriptor,
+                directory_info=directory_info,
+                filename=self.path.name,
+            )
+            pinned_info = pinned_path.stat(follow_symlinks=False)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source identity changed during migration"
+            ) from exc
+        if _legacy_sqlite_source_snapshot(pinned_info) != self._file_snapshot:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source identity changed during migration"
+            )
+        self.assert_stable()
+        return f"{pinned_path.as_uri()}?mode=rw"
+
+    def bind_sqlite_sidecars(self) -> None:
+        try:
+            self._mutation_guard.bind_sqlite_sidecars()
+        except FileIntegrityError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite sidecar identity changed during migration"
+            ) from exc
+        self.assert_stable()
+
+    def assert_connection_bound(self, connection: object) -> None:
+        self.assert_stable()
+        try:
+            rows = connection.execute("PRAGMA database_list").fetchall()
+            main_paths = [
+                str(row[2])
+                for row in rows
+                if len(row) >= 3 and str(row[1]) == "main" and str(row[2])
+            ]
+            if len(main_paths) != 1:
+                raise OSError("SQLite main database path is unavailable")
+            connection_info = Path(main_paths[0]).stat(follow_symlinks=False)
+        except (AttributeError, IndexError, OSError, TypeError) as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite connection identity is unavailable"
+            ) from exc
+        if _legacy_sqlite_source_snapshot(connection_info) != self._file_snapshot:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite connection opened an unexpected database"
+            )
+        self.assert_stable()
 
     def discard_after_publish(self) -> None:
         self.assert_stable()
@@ -508,6 +571,376 @@ class LegacySQLiteMigrationSource:
             raise MediaforceRuntimeBusyError(
                 "Legacy SQLite source cleanup could not be synchronized"
             ) from exc
+
+
+class _LegacySQLiteMutationGuard:
+    _INOTIFY_EVENT = struct.Struct("iIII")
+    _IN_MODIFY = 0x00000002
+    _IN_ATTRIB = 0x00000004
+    _IN_MOVED_FROM = 0x00000040
+    _IN_MOVED_TO = 0x00000080
+    _IN_CREATE = 0x00000100
+    _IN_DELETE = 0x00000200
+    _IN_DELETE_SELF = 0x00000400
+    _IN_MOVE_SELF = 0x00000800
+    _IN_Q_OVERFLOW = 0x00004000
+
+    def __init__(
+            self,
+            *,
+            path: Path,
+            file_descriptor: int,
+            directory_descriptor: int,
+    ) -> None:
+        self._path = path
+        self._directory_descriptor = directory_descriptor
+        self._darwin_guard: MacOSFileIntegrityGuard | None = None
+        self._darwin_directory_watcher = None
+        self._inotify_descriptor = -1
+        self._inotify_add_watch = None
+        self._file_watch = -1
+        self._directory_watch = -1
+        self._sidecar_watches: set[int] = set()
+        self._watched_directory_names = {path.name}
+        self._sidecar_bindings: dict[
+            str,
+            tuple[int, tuple[int, int, int]] | None,
+        ] = {}
+        self._sidecars_bound = False
+        self._violated = False
+        if sys.platform == "darwin":
+            self._darwin_guard = MacOSFileIntegrityGuard(
+                path=path,
+                descriptor=file_descriptor,
+                require_single_link=True,
+            )
+            self._darwin_directory_watcher = select_module.kqueue()
+            directory_flags = (
+                select_module.KQ_NOTE_WRITE
+                | select_module.KQ_NOTE_DELETE
+                | select_module.KQ_NOTE_RENAME
+                | select_module.KQ_NOTE_LINK
+                | select_module.KQ_NOTE_REVOKE
+                | select_module.KQ_NOTE_ATTRIB
+            )
+            self._darwin_directory_watcher.control(
+                [
+                    select_module.kevent(
+                        directory_descriptor,
+                        filter=select_module.KQ_FILTER_VNODE,
+                        flags=(
+                            select_module.KQ_EV_ADD
+                            | select_module.KQ_EV_CLEAR
+                        ),
+                        fflags=directory_flags,
+                    )
+                ],
+                0,
+                0,
+            )
+            self.assert_quiet()
+            return
+        if not sys.platform.startswith("linux") or not Path("/proc/self/fd").is_dir():
+            raise FileIntegrityError(
+                "legacy SQLite source mutation monitoring is unavailable"
+            )
+        libc = ctypes.CDLL(None, use_errno=True)
+        inotify_init1 = getattr(libc, "inotify_init1", None)
+        inotify_add_watch = getattr(libc, "inotify_add_watch", None)
+        if inotify_init1 is None or inotify_add_watch is None:
+            raise FileIntegrityError(
+                "legacy SQLite source mutation monitoring is unavailable"
+            )
+        inotify_init1.argtypes = (ctypes.c_int,)
+        inotify_init1.restype = ctypes.c_int
+        inotify_add_watch.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        )
+        inotify_add_watch.restype = ctypes.c_int
+        self._inotify_add_watch = inotify_add_watch
+        descriptor = inotify_init1(os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        if descriptor < 0:
+            error_number = ctypes.get_errno()
+            raise FileIntegrityError(
+                "legacy SQLite source mutation monitoring is unavailable"
+            ) from OSError(error_number, os.strerror(error_number))
+        self._inotify_descriptor = descriptor
+        file_mask = (
+            self._IN_MODIFY
+            | self._IN_ATTRIB
+            | self._IN_DELETE_SELF
+            | self._IN_MOVE_SELF
+        )
+        directory_mask = (
+            self._IN_MOVED_FROM
+            | self._IN_MOVED_TO
+            | self._IN_CREATE
+            | self._IN_DELETE
+            | self._IN_DELETE_SELF
+            | self._IN_MOVE_SELF
+        )
+        self._file_watch = inotify_add_watch(
+            descriptor,
+            os.fsencode(f"/proc/self/fd/{file_descriptor}"),
+            file_mask,
+        )
+        self._directory_watch = inotify_add_watch(
+            descriptor,
+            os.fsencode(f"/proc/self/fd/{directory_descriptor}"),
+            directory_mask,
+        )
+        if self._file_watch < 0 or self._directory_watch < 0:
+            error_number = ctypes.get_errno()
+            self.close()
+            raise FileIntegrityError(
+                "legacy SQLite source mutation monitoring is unavailable"
+            ) from OSError(error_number, os.strerror(error_number))
+        self.assert_quiet()
+
+    def bind_sqlite_sidecars(self) -> None:
+        if self._sidecars_bound:
+            self.assert_quiet()
+            return
+        self.assert_quiet()
+        for suffix in ("-wal", "-shm"):
+            name = f"{self._path.name}{suffix}"
+            binding = self._open_sidecar_binding(name)
+            self._sidecar_bindings[name] = binding
+            self._watched_directory_names.add(name)
+            if binding is not None:
+                self._register_sidecar_watch(
+                    name,
+                    descriptor=binding[0],
+                )
+        self._sidecars_bound = True
+        self.assert_quiet()
+
+    def assert_quiet(self) -> None:
+        if self._darwin_guard is not None:
+            self._darwin_guard.assert_quiet()
+            watcher = self._darwin_directory_watcher
+            if watcher is None:
+                self._violated = True
+            else:
+                try:
+                    if watcher.control(None, 32, 0) and self._sidecars_bound:
+                        self._violated = True
+                except OSError:
+                    self._violated = True
+        else:
+            descriptor = self._inotify_descriptor
+            if descriptor < 0:
+                self._violated = True
+            else:
+                while True:
+                    try:
+                        data = os.read(descriptor, 64 * 1024)
+                    except BlockingIOError:
+                        break
+                    except OSError:
+                        self._violated = True
+                        break
+                    if not data:
+                        self._violated = True
+                        break
+                    offset = 0
+                    while offset + self._INOTIFY_EVENT.size <= len(data):
+                        watch, mask, _cookie, name_length = (
+                            self._INOTIFY_EVENT.unpack_from(data, offset)
+                        )
+                        offset += self._INOTIFY_EVENT.size
+                        name_bytes = data[offset:offset + name_length]
+                        offset += name_length
+                        name = os.fsdecode(name_bytes.split(b"\0", 1)[0])
+                        if (
+                            mask & self._IN_Q_OVERFLOW
+                            or watch == self._file_watch
+                            or watch in self._sidecar_watches
+                            or (
+                                watch == self._directory_watch
+                                and (
+                                    not name
+                                    or name in self._watched_directory_names
+                                )
+                            )
+                        ):
+                            self._violated = True
+        if not self._sidecar_bindings_match():
+            self._violated = True
+        if self._violated:
+            raise FileIntegrityError("legacy SQLite source changed")
+
+    def _open_sidecar_binding(
+            self,
+            name: str,
+    ) -> tuple[int, tuple[int, int, int]] | None:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(
+                name,
+                flags,
+                dir_fd=self._directory_descriptor,
+            )
+        except FileNotFoundError:
+            try:
+                os.stat(
+                    name,
+                    dir_fd=self._directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar identity is unavailable"
+                ) from exc
+            raise FileIntegrityError("legacy SQLite sidecar identity changed")
+        except OSError as exc:
+            raise FileIntegrityError(
+                "legacy SQLite sidecar identity is unavailable"
+            ) from exc
+        try:
+            descriptor_info = os.fstat(descriptor)
+            path_info = os.stat(
+                name,
+                dir_fd=self._directory_descriptor,
+                follow_symlinks=False,
+            )
+            snapshot = (
+                descriptor_info.st_dev,
+                descriptor_info.st_ino,
+                descriptor_info.st_nlink,
+            )
+            if (
+                not stat.S_ISREG(descriptor_info.st_mode)
+                or not stat.S_ISREG(path_info.st_mode)
+                or descriptor_info.st_nlink != 1
+                or path_info.st_nlink != 1
+                or (path_info.st_dev, path_info.st_ino, path_info.st_nlink)
+                != snapshot
+            ):
+                raise FileIntegrityError(
+                    "legacy SQLite sidecar identity is unsafe"
+                )
+            return descriptor, snapshot
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _register_sidecar_watch(self, name: str, *, descriptor: int) -> None:
+        if self._darwin_directory_watcher is not None:
+            flags = (
+                select_module.KQ_NOTE_DELETE
+                | select_module.KQ_NOTE_RENAME
+                | select_module.KQ_NOTE_LINK
+                | select_module.KQ_NOTE_REVOKE
+                | select_module.KQ_NOTE_ATTRIB
+            )
+            if name.endswith("-wal"):
+                flags |= (
+                    select_module.KQ_NOTE_WRITE
+                    | select_module.KQ_NOTE_EXTEND
+                )
+            self._darwin_directory_watcher.control(
+                [
+                    select_module.kevent(
+                        descriptor,
+                        filter=select_module.KQ_FILTER_VNODE,
+                        flags=(
+                            select_module.KQ_EV_ADD
+                            | select_module.KQ_EV_CLEAR
+                        ),
+                        fflags=flags,
+                    )
+                ],
+                0,
+                0,
+            )
+            return
+        inotify_add_watch = self._inotify_add_watch
+        if inotify_add_watch is None or self._inotify_descriptor < 0:
+            raise FileIntegrityError(
+                "legacy SQLite sidecar mutation monitoring is unavailable"
+            )
+        mask = self._IN_ATTRIB | self._IN_DELETE_SELF | self._IN_MOVE_SELF
+        if name.endswith("-wal"):
+            mask |= self._IN_MODIFY
+        watch = inotify_add_watch(
+            self._inotify_descriptor,
+            os.fsencode(f"/proc/self/fd/{descriptor}"),
+            mask,
+        )
+        if watch < 0:
+            error_number = ctypes.get_errno()
+            raise FileIntegrityError(
+                "legacy SQLite sidecar mutation monitoring is unavailable"
+            ) from OSError(error_number, os.strerror(error_number))
+        self._sidecar_watches.add(watch)
+
+    def _sidecar_bindings_match(self) -> bool:
+        if not self._sidecars_bound:
+            return True
+        for name, binding in self._sidecar_bindings.items():
+            if binding is None:
+                try:
+                    os.stat(
+                        name,
+                        dir_fd=self._directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    return False
+                return False
+            descriptor, snapshot = binding
+            try:
+                descriptor_info = os.fstat(descriptor)
+                path_info = os.stat(
+                    name,
+                    dir_fd=self._directory_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError:
+                return False
+            if (
+                not stat.S_ISREG(descriptor_info.st_mode)
+                or not stat.S_ISREG(path_info.st_mode)
+                or (
+                    descriptor_info.st_dev,
+                    descriptor_info.st_ino,
+                    descriptor_info.st_nlink,
+                )
+                != snapshot
+                or (
+                    path_info.st_dev,
+                    path_info.st_ino,
+                    path_info.st_nlink,
+                )
+                != snapshot
+            ):
+                return False
+        return True
+
+    def close(self) -> None:
+        if self._darwin_directory_watcher is not None:
+            self._darwin_directory_watcher.close()
+            self._darwin_directory_watcher = None
+        if self._darwin_guard is not None:
+            self._darwin_guard.close()
+            self._darwin_guard = None
+        if self._inotify_descriptor >= 0:
+            os.close(self._inotify_descriptor)
+            self._inotify_descriptor = -1
+        for binding in self._sidecar_bindings.values():
+            if binding is not None:
+                os.close(binding[0])
+        self._sidecar_bindings.clear()
+
 
 @dataclass(frozen=True, slots=True)
 class _RuntimePathNamespace:
@@ -987,6 +1420,38 @@ def _legacy_sqlite_source_snapshot(
     )
 
 
+def _legacy_sqlite_connection_path_for_directory_descriptor(
+        directory_descriptor: int,
+        *,
+        directory_info: os.stat_result,
+        filename: str,
+) -> Path:
+    if sys.platform == "darwin":
+        pinned_directory = (
+            Path("/.vol")
+            / str(directory_info.st_dev)
+            / str(directory_info.st_ino)
+        )
+    elif sys.platform.startswith("linux") and Path("/proc/self/fd").is_dir():
+        pinned_directory = Path("/proc/self/fd") / str(directory_descriptor)
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "legacy SQLite pinned connection paths are unavailable",
+        )
+    pinned_parent_info = pinned_directory.stat()
+    if (
+        not stat.S_ISDIR(pinned_parent_info.st_mode)
+        or (pinned_parent_info.st_dev, pinned_parent_info.st_ino)
+        != (directory_info.st_dev, directory_info.st_ino)
+    ):
+        raise OSError(
+            errno.ESTALE,
+            "legacy SQLite pinned directory identity changed",
+        )
+    return pinned_directory / filename
+
+
 @contextmanager
 def exclusive_legacy_sqlite_migration_source(
         config: MediaforceConfig,
@@ -1012,6 +1477,7 @@ def exclusive_legacy_sqlite_migration_source(
         )
     descriptor = -1
     directory_descriptor = -1
+    mutation_guard: _LegacySQLiteMutationGuard | None = None
     try:
         descriptor, directory_descriptor = _open_runtime_direct_file_lock_with_parent(
             _RuntimeDirectFileLock(
@@ -1024,6 +1490,16 @@ def exclusive_legacy_sqlite_migration_source(
             ),
             lock_path=mediaforce_runtime_lock_path(config),
         )
+        try:
+            mutation_guard = _LegacySQLiteMutationGuard(
+                path=source,
+                file_descriptor=descriptor,
+                directory_descriptor=directory_descriptor,
+            )
+        except FileIntegrityError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source identity monitoring is unavailable"
+            ) from exc
         locked_source = LegacySQLiteMigrationSource(
             path=source,
             _file_descriptor=descriptor,
@@ -1033,10 +1509,13 @@ def exclusive_legacy_sqlite_migration_source(
                 source_parent_info.st_dev,
                 source_parent_info.st_ino,
             ),
+            _mutation_guard=mutation_guard,
         )
         locked_source.assert_stable()
         yield locked_source
     finally:
+        if mutation_guard is not None:
+            mutation_guard.close()
         if descriptor >= 0:
             os.close(descriptor)
         if directory_descriptor >= 0:

@@ -51,6 +51,12 @@ class _LegacySQLiteMigrationSource(Protocol):
 
     def assert_stable(self) -> None: ...
 
+    def sqlite_uri(self) -> str: ...
+
+    def bind_sqlite_sidecars(self) -> None: ...
+
+    def assert_connection_bound(self, connection: object) -> None: ...
+
     def discard_after_publish(self) -> None: ...
 
 
@@ -537,7 +543,7 @@ def _copied_legacy_sqlite_database(
     source_connection: sqlite3.Connection | None = None
     write_gate_connection: sqlite3.Connection | None = None
     staging_connection: sqlite3.Connection | None = None
-    source_uri = f"{locked_source.path.as_uri()}?mode=rw"
+    source_uri = locked_source.sqlite_uri()
     try:
         write_gate_connection = sqlite3.connect(
             source_uri,
@@ -546,7 +552,8 @@ def _copied_legacy_sqlite_database(
             isolation_level=None,
         )
         write_gate_connection.execute("BEGIN IMMEDIATE")
-        locked_source.assert_stable()
+        locked_source.bind_sqlite_sidecars()
+        locked_source.assert_connection_bound(write_gate_connection)
         source_connection = sqlite3.connect(
             source_uri,
             uri=True,
@@ -555,13 +562,14 @@ def _copied_legacy_sqlite_database(
         )
         source_connection.execute("BEGIN")
         source_connection.execute("PRAGMA schema_version").fetchone()
-        locked_source.assert_stable()
+        locked_source.assert_connection_bound(source_connection)
         staging_connection = sqlite3.connect(
             staging_path,
             timeout=0,
             isolation_level=None,
         )
         source_connection.backup(staging_connection)
+        locked_source.assert_connection_bound(source_connection)
         staging_connection.close()
         staging_connection = None
         staging_connection = sqlite3.connect(
@@ -574,7 +582,7 @@ def _copied_legacy_sqlite_database(
             raise sqlite3.DatabaseError("Legacy SQLite backup did not pass quick_check")
         staging_connection.close()
         staging_connection = None
-        locked_source.assert_stable()
+        locked_source.assert_connection_bound(source_connection)
         yield
     except sqlite3.OperationalError as exc:
         from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
