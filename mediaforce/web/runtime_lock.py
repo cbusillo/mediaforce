@@ -440,6 +440,76 @@ class _RuntimeDirectFileLock:
 
 
 @dataclass(frozen=True, slots=True)
+class LegacySQLiteMigrationSource:
+    path: Path
+    _file_descriptor: int
+    _directory_descriptor: int
+    _file_snapshot: tuple[int, int, int, int, int, int]
+    _directory_identity: tuple[int, int]
+
+    def assert_stable(self) -> None:
+        try:
+            descriptor_info = os.fstat(self._file_descriptor)
+            directory_descriptor_info = os.fstat(self._directory_descriptor)
+            relative_info = os.stat(
+                self.path.name,
+                dir_fd=self._directory_descriptor,
+                follow_symlinks=False,
+            )
+            path_info = self.path.lstat()
+            parent_info = self.path.parent.lstat()
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source identity changed during migration"
+            ) from exc
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or not stat.S_ISREG(relative_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or not stat.S_ISDIR(directory_descriptor_info.st_mode)
+            or not stat.S_ISDIR(parent_info.st_mode)
+            or stat.S_ISLNK(relative_info.st_mode)
+            or stat.S_ISLNK(path_info.st_mode)
+            or stat.S_ISLNK(parent_info.st_mode)
+            or _legacy_sqlite_source_snapshot(descriptor_info) != self._file_snapshot
+            or _legacy_sqlite_source_snapshot(relative_info) != self._file_snapshot
+            or _legacy_sqlite_source_snapshot(path_info) != self._file_snapshot
+            or (directory_descriptor_info.st_dev, directory_descriptor_info.st_ino)
+            != self._directory_identity
+            or (parent_info.st_dev, parent_info.st_ino) != self._directory_identity
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source identity changed during migration"
+            )
+
+    def discard_after_publish(self) -> None:
+        self.assert_stable()
+        try:
+            os.unlink(self.path.name, dir_fd=self._directory_descriptor)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source cleanup failed after publication"
+            ) from exc
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.unlink(
+                    f"{self.path.name}{suffix}",
+                    dir_fd=self._directory_descriptor,
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise MediaforceRuntimeBusyError(
+                    "Legacy SQLite source cleanup failed after publication"
+                ) from exc
+        try:
+            os.fsync(self._directory_descriptor)
+        except OSError as exc:
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite source cleanup could not be synchronized"
+            ) from exc
+
+@dataclass(frozen=True, slots=True)
 class _RuntimePathNamespace:
     key: str
     path: Path
@@ -799,6 +869,23 @@ def _open_runtime_direct_file_lock(
         *,
         lock_path: Path,
 ) -> int:
+    descriptor, directory_descriptor = _open_runtime_direct_file_lock_with_parent(
+        file_lock,
+        lock_path=lock_path,
+    )
+    try:
+        os.close(directory_descriptor)
+    except OSError:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_runtime_direct_file_lock_with_parent(
+        file_lock: _RuntimeDirectFileLock,
+        *,
+        lock_path: Path,
+) -> tuple[int, int]:
     if file_lock.create_if_missing:
         try:
             file_lock.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -872,19 +959,88 @@ def _open_runtime_direct_file_lock(
                 descriptor,
                 lock_path=lock_path,
             )
-        return descriptor
+        return descriptor, directory_descriptor
     except OSError as exc:
         if descriptor >= 0:
             os.close(descriptor)
+        os.close(directory_descriptor)
         raise MediaforceRuntimeBusyError(
             f"Mediaforce runtime {file_lock.label} identity is unavailable"
         ) from exc
     except BaseException:
         if descriptor >= 0:
             os.close(descriptor)
-        raise
-    finally:
         os.close(directory_descriptor)
+        raise
+
+
+def _legacy_sqlite_source_snapshot(
+        source_info: os.stat_result,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        source_info.st_dev,
+        source_info.st_ino,
+        source_info.st_size,
+        source_info.st_mtime_ns,
+        source_info.st_ctime_ns,
+        source_info.st_nlink,
+    )
+
+
+@contextmanager
+def exclusive_legacy_sqlite_migration_source(
+        config: MediaforceConfig,
+        source_path: Path,
+) -> Iterator[LegacySQLiteMigrationSource]:
+    assert_mediaforce_runtime_lock_held()
+    source = Path(os.path.abspath(os.fspath(source_path.expanduser())))
+    try:
+        source_info = source.lstat()
+        source_parent_info = source.parent.lstat()
+    except OSError as exc:
+        raise MediaforceRuntimeBusyError(
+            "Legacy SQLite source identity is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISREG(source_info.st_mode)
+        or source_info.st_nlink != 1
+        or not stat.S_ISDIR(source_parent_info.st_mode)
+        or stat.S_ISLNK(source_parent_info.st_mode)
+    ):
+        raise MediaforceRuntimeBusyError(
+            "Legacy SQLite source identity is unsafe"
+        )
+    descriptor = -1
+    directory_descriptor = -1
+    try:
+        descriptor, directory_descriptor = _open_runtime_direct_file_lock_with_parent(
+            _RuntimeDirectFileLock(
+                label="legacy SQLite source",
+                path=source,
+                device=source_info.st_dev,
+                inode=source_info.st_ino,
+                create_if_missing=False,
+                database_identity_lock=True,
+            ),
+            lock_path=mediaforce_runtime_lock_path(config),
+        )
+        locked_source = LegacySQLiteMigrationSource(
+            path=source,
+            _file_descriptor=descriptor,
+            _directory_descriptor=directory_descriptor,
+            _file_snapshot=_legacy_sqlite_source_snapshot(source_info),
+            _directory_identity=(
+                source_parent_info.st_dev,
+                source_parent_info.st_ino,
+            ),
+        )
+        locked_source.assert_stable()
+        yield locked_source
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
 
 
 def _acquire_runtime_namespace_locks(

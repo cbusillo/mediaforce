@@ -66,6 +66,17 @@ Mediaforce's SQLite schema.
   until the SQLite connection closes. This prevents a substituted directory or
   a hardlink to the same database inode from redirecting SQLite's WAL/SHM
   namespace to another parent.
+- The one-time legacy `state/library.sqlite3` relocation is a separate,
+  runtime-locked transfer rather than a file move. It fails closed unless the
+  legacy source is a stable, single-link regular file protected by the same OFD
+  database-identity primitive used by active runtimes. The source is copied
+  through a verified SQLite snapshot while a no-wait source write gate excludes
+  new commits, preserving committed WAL state without moving WAL or SHM files.
+  The staged database is fsynced, atomically linked into an absent configured
+  destination, and its directory is fsynced before the legacy main, WAL, and
+  SHM files are removed. A failed transfer leaves the legacy source in place and
+  removes the staging file; startup reserves the published destination only
+  after the migration returns.
 - SQLite URLs use URI modes explicitly: `rwc` for first-use creation, `rw` for
   guarded existing databases, and `ro` for read-only opens. Path components are
   percent-quoted so spaces, `#`, `?`, `%`, and legal colons remain part of the

@@ -7270,7 +7270,13 @@ raise SystemExit(0)
             root = Path(directory)
             legacy_database_path = root / "state" / "library.sqlite3"
             legacy_database_path.parent.mkdir()
-            legacy_database_path.write_bytes(b"legacy-database")
+            with sqlite3.connect(legacy_database_path) as legacy_connection:
+                legacy_connection.execute(
+                    "CREATE TABLE migration_probe (value TEXT NOT NULL)"
+                )
+                legacy_connection.execute(
+                    "INSERT INTO migration_probe VALUES ('legacy-database')"
+                )
             paths = ConfigPaths(
                 project_root=root,
                 config_path=root / "config" / "defaults.toml",
@@ -7292,10 +7298,13 @@ raise SystemExit(0)
                 self.assertFalse(paths.db_path.exists())
                 config_runtime.migrate_config_state(config)
                 runtime_lock_module.reserve_mediaforce_database_identity(config)
-                self.assertEqual(
-                    paths.db_path.read_bytes(),
-                    b"legacy-database",
-                )
+                with sqlite3.connect(paths.db_path) as migrated_connection:
+                    self.assertEqual(
+                        migrated_connection.execute(
+                            "SELECT value FROM migration_probe"
+                        ).fetchall(),
+                        [("legacy-database",)],
+                    )
                 self.assertFalse(legacy_database_path.exists())
 
     def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:

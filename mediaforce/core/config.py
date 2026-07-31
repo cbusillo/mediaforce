@@ -5,11 +5,12 @@ from importlib import resources
 import json
 import os
 import shutil
+import sqlite3
 import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from mediaforce.library.library_settings import configured_library_definitions, library_definition_map, \
     library_production_supported
@@ -43,6 +44,14 @@ def _default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = _default_config_path()
 FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
 BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
+
+
+class _LegacySQLiteMigrationSource(Protocol):
+    path: Path
+
+    def assert_stable(self) -> None: ...
+
+    def discard_after_publish(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -329,7 +338,7 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
 
 
 def migrate_config_state(config: MediaforceConfig) -> None:
-    _migrate_project_state(config.paths.project_root, config.paths)
+    _migrate_project_state(config)
 
 
 def load_runtime_settings(path: Path) -> dict[str, Any]:
@@ -431,13 +440,19 @@ def update_runtime_folder_policy_values(
     update_runtime_settings(path, _apply)
 
 
-def _migrate_project_state(project_root: Path, paths: ConfigPaths) -> None:
+def _migrate_project_state(config: MediaforceConfig) -> None:
+    project_root = config.paths.project_root
+    paths = config.paths
     state_root = project_root / "state"
     if not state_root.exists():
         return
 
+    _migrate_legacy_sqlite_database(
+        config,
+        state_root / "library.sqlite3",
+        paths.db_path,
+    )
     migrations = (
-        (state_root / "library.sqlite3", paths.db_path),
         (state_root / "runs", paths.run_manifest_dir),
         (state_root / "web", paths.web_state_dir),
         (state_root / "review", paths.review_dir),
@@ -454,6 +469,194 @@ def _migrate_project_state(project_root: Path, paths: ConfigPaths) -> None:
             leftover.unlink()
 
     _remove_empty_dirs(state_root)
+
+
+def _migrate_legacy_sqlite_database(
+        config: MediaforceConfig,
+        source: Path,
+        destination: Path,
+) -> None:
+    if (
+            not _path_entry_exists(source)
+            or _path_without_resolution(source) == _path_without_resolution(destination)
+            or _path_entry_exists(destination)
+    ):
+        return
+    from mediaforce.web.runtime_lock import exclusive_legacy_sqlite_migration_source
+
+    with exclusive_legacy_sqlite_migration_source(config, source) as locked_source:
+        if _path_entry_exists(destination):
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging_path = _create_legacy_sqlite_staging_path(destination)
+        try:
+            with _copied_legacy_sqlite_database(locked_source, staging_path):
+                _fsync_file(staging_path)
+                locked_source.assert_stable()
+                _publish_legacy_sqlite_database(staging_path, destination)
+                locked_source.discard_after_publish()
+        except BaseException as exc:
+            try:
+                _discard_legacy_sqlite_staging_path(staging_path)
+            except OSError as cleanup_error:
+                exc.add_note(
+                    "Legacy SQLite staging cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise
+        _discard_legacy_sqlite_staging_path(staging_path)
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def _path_without_resolution(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path.expanduser())))
+
+
+def _create_legacy_sqlite_staging_path(destination: Path) -> Path:
+    descriptor, staging_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.migration-",
+        suffix=".sqlite3",
+    )
+    os.close(descriptor)
+    return Path(staging_name)
+
+
+@contextmanager
+def _copied_legacy_sqlite_database(
+        locked_source: _LegacySQLiteMigrationSource,
+        staging_path: Path,
+) -> Iterator[None]:
+    source_connection: sqlite3.Connection | None = None
+    write_gate_connection: sqlite3.Connection | None = None
+    staging_connection: sqlite3.Connection | None = None
+    source_uri = f"{locked_source.path.as_uri()}?mode=rw"
+    try:
+        source_connection = sqlite3.connect(
+            source_uri,
+            uri=True,
+            timeout=0,
+            isolation_level=None,
+        )
+        source_connection.execute("BEGIN")
+        source_connection.execute("PRAGMA schema_version").fetchone()
+        locked_source.assert_stable()
+        write_gate_connection = sqlite3.connect(
+            source_uri,
+            uri=True,
+            timeout=0,
+            isolation_level=None,
+        )
+        write_gate_connection.execute("BEGIN IMMEDIATE")
+        locked_source.assert_stable()
+        staging_connection = sqlite3.connect(
+            staging_path,
+            timeout=0,
+            isolation_level=None,
+        )
+        source_connection.backup(staging_connection)
+        staging_connection.close()
+        staging_connection = None
+        staging_connection = sqlite3.connect(
+            staging_path,
+            timeout=0,
+            isolation_level=None,
+        )
+        quick_check = staging_connection.execute("PRAGMA quick_check").fetchone()
+        if quick_check != ("ok",):
+            raise sqlite3.DatabaseError("Legacy SQLite backup did not pass quick_check")
+        staging_connection.close()
+        staging_connection = None
+        locked_source.assert_stable()
+        yield
+    except sqlite3.OperationalError as exc:
+        from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+        raise MediaforceRuntimeBusyError(
+            "Legacy SQLite source is active or unavailable for migration"
+        ) from exc
+    except sqlite3.DatabaseError as exc:
+        raise RuntimeError(
+            "Legacy SQLite source could not be migrated safely"
+        ) from exc
+    finally:
+        if staging_connection is not None:
+            staging_connection.close()
+        if write_gate_connection is not None:
+            try:
+                if write_gate_connection.in_transaction:
+                    write_gate_connection.rollback()
+            finally:
+                write_gate_connection.close()
+        if source_connection is not None:
+            try:
+                if source_connection.in_transaction:
+                    source_connection.rollback()
+            finally:
+                source_connection.close()
+
+
+def _fsync_file(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_legacy_sqlite_database(staging_path: Path, destination: Path) -> None:
+    try:
+        os.link(staging_path, destination, follow_symlinks=False)
+    except FileExistsError as exc:
+        from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+        raise MediaforceRuntimeBusyError(
+            "Configured SQLite destination appeared during legacy migration"
+        ) from exc
+    _fsync_directory(destination.parent)
+
+
+def _discard_legacy_sqlite_staging_path(staging_path: Path) -> None:
+    removed = False
+    for candidate in (
+            staging_path,
+            Path(f"{staging_path}-wal"),
+            Path(f"{staging_path}-shm"),
+    ):
+        try:
+            candidate.unlink()
+            removed = True
+        except FileNotFoundError:
+            continue
+    if removed:
+        _fsync_directory(staging_path.parent)
 
 
 def _move_if_needed(source: Path, destination: Path) -> None:
