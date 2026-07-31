@@ -27,6 +27,10 @@ class ProcessDeadlineEnforcementError(RuntimeError):
     pass
 
 
+class _ContainmentReportedUnavailableError(RuntimeError):
+    pass
+
+
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
 _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
@@ -280,7 +284,7 @@ def _read_deadline_status(status_descriptor: int) -> bytes:
             "Managed process containment status is unavailable."
         ) from exc
     status = b"".join(chunks)
-    if status not in {b"C", b"E"}:
+    if status not in {b"C", b"E", b"U"}:
         raise ProcessDeadlineEnforcementError(
             "Managed process containment failed closed."
         )
@@ -303,7 +307,6 @@ class _ContainmentStatusMonitor:
         self._status: bytes | None = None
         self._error: BaseException | None = None
         self._cleanup_errors: list[BaseException] = []
-        self._termination_succeeded = False
         self._thread = threading.Thread(
             target=self._run,
             name="mediaforce-process-deadline-status",
@@ -333,17 +336,19 @@ class _ContainmentStatusMonitor:
         for cleanup_error in self._cleanup_errors:
             _add_managed_process_cleanup_note(error, cleanup_error)
 
-    @property
-    def termination_succeeded(self) -> bool:
-        return self._termination_succeeded
-
     def _run(self) -> None:
         try:
             self._status = _read_deadline_status(self._status_descriptor)
+            if self._status == b"U":
+                self._error = _ContainmentReportedUnavailableError(
+                    "Managed process containment reported unavailable."
+                )
+                self._failure_detected.set()
+                self._terminate_target()
         except BaseException as exc:
             self._error = exc
             self._failure_detected.set()
-            self._termination_succeeded = self._terminate_target()
+            self._terminate_target()
         finally:
             try:
                 os.close(self._status_descriptor)
@@ -355,25 +360,24 @@ class _ContainmentStatusMonitor:
                     self._cleanup_errors.append(cleanup_error)
                     self._status = None
                     self._failure_detected.set()
-                    self._termination_succeeded = self._terminate_target()
+                    self._terminate_target()
                 else:
                     self._cleanup_errors.append(cleanup_error)
             self._completed.set()
 
-    def _terminate_target(self) -> bool:
+    def _terminate_target(self) -> None:
         try:
             self._process_controller.terminate()
         except BaseException as cleanup_error:
             self._cleanup_errors.append(cleanup_error)
-            try:
-                _terminate_process(
-                    self._process,
-                    terminate_process_group=False,
-                )
-            except BaseException as fallback_error:
-                self._cleanup_errors.append(fallback_error)
-                return False
-        return True
+        try:
+            _terminate_process(
+                self._process,
+                terminate_process_group=True,
+                process_group_id=self._process.pid,
+            )
+        except BaseException as fallback_error:
+            self._cleanup_errors.append(fallback_error)
 
 
 def _communicate_with_containment_monitor(
@@ -431,6 +435,7 @@ def _terminate_and_reap_managed_process(
         *,
         process_controller: ManagedProcessController,
         process: subprocess.Popen[str],
+        monitor: _ContainmentStatusMonitor,
         attached: bool,
         error: BaseException,
 ) -> bool:
@@ -441,7 +446,8 @@ def _terminate_and_reap_managed_process(
         else:
             _terminate_process(
                 process,
-                terminate_process_group=False,
+                terminate_process_group=True,
+                process_group_id=process.pid,
             )
         termination_succeeded = True
     except BaseException as cleanup_error:
@@ -450,14 +456,47 @@ def _terminate_and_reap_managed_process(
             try:
                 _terminate_process(
                     process,
-                    terminate_process_group=False,
+                    terminate_process_group=True,
+                    process_group_id=process.pid,
                 )
                 termination_succeeded = True
             except BaseException as fallback_error:
                 _add_managed_process_cleanup_note(error, fallback_error)
     if not termination_succeeded:
         return False
-    return _reap_terminated_process(process, error)
+    if not _reap_terminated_process(process, error):
+        return False
+    return _containment_status_proves_cleanup(
+        monitor=monitor,
+        error=error,
+    )
+
+
+def _containment_status_proves_cleanup(
+        *,
+        monitor: _ContainmentStatusMonitor,
+        error: BaseException,
+) -> bool:
+    if not monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
+        _add_managed_process_cleanup_note(
+            error,
+            TimeoutError("containment status cleanup did not finish"),
+        )
+        return False
+    monitor.add_cleanup_notes(error)
+    status_error = monitor.error()
+    if status_error is not None:
+        if (
+            status_error is not error
+            and not isinstance(status_error, _ContainmentReportedUnavailableError)
+        ):
+            _add_managed_process_cleanup_note(error, status_error)
+        return False
+    try:
+        return monitor.status() in {b"C", b"E"}
+    except BaseException as status_exception:
+        _add_managed_process_cleanup_note(error, status_exception)
+        return False
 
 
 def _finish_containment_status_failure(
@@ -471,11 +510,41 @@ def _finish_containment_status_failure(
             error,
             TimeoutError("containment status cleanup did not finish"),
         )
-        return False
-    monitor.add_cleanup_notes(error)
-    if not monitor.termination_succeeded:
-        return False
-    return _reap_terminated_process(process, error)
+    else:
+        monitor.add_cleanup_notes(error)
+    _reap_terminated_process(process, error)
+    return False
+
+
+def _reported_containment_error(
+        *,
+        error: BaseException,
+        process_controller: ManagedProcessController,
+        process: subprocess.Popen[str],
+) -> BaseException:
+    if not isinstance(error, _ContainmentReportedUnavailableError):
+        return error
+    mapped_error: BaseException
+    if process_controller.cancelled is True:
+        try:
+            process_controller.throw_if_cancelled()
+        except ProcessCancelledError as cancellation_error:
+            mapped_error = cancellation_error
+        else:
+            mapped_error = ProcessDeadlineEnforcementError(
+                "Managed process containment failed closed."
+            )
+    elif process.returncode == 124:
+        mapped_error = ProcessDeadlineExpiredError(
+            "Process authorization deadline expired."
+        )
+    else:
+        mapped_error = ProcessDeadlineEnforcementError(
+            "Managed process containment failed closed."
+        )
+    for note in getattr(error, "__notes__", ()):
+        mapped_error.add_note(note)
+    return mapped_error
 
 
 def run_command(
@@ -547,7 +616,7 @@ def run_command(
     )
     status_monitor.start()
     try:
-        process_controller.attach(process)
+        process_controller.attach(process, terminate_process_group=True)
         attached = True
         stdout, stderr = _communicate_with_containment_monitor(
             process,
@@ -595,6 +664,7 @@ def run_command(
                 cleanup_succeeded = _terminate_and_reap_managed_process(
                     process_controller=process_controller,
                     process=process,
+                    monitor=status_monitor,
                     attached=attached,
                     error=exc,
                 )
@@ -607,6 +677,13 @@ def run_command(
             process_controller.clear(process)
         except BaseException as cleanup_error:
             _add_managed_process_cleanup_note(exc, cleanup_error)
+        raised_error = _reported_containment_error(
+            error=exc,
+            process_controller=process_controller,
+            process=process,
+        )
+        if raised_error is not exc:
+            raise raised_error from None
         raise
     process_controller.clear(process)
     return completed

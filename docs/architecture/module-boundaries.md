@@ -48,8 +48,21 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `_process_deadline.py`
   - private per-command supervisor that keeps ownership until every observed
     descendant exits
-  - Linux uses a scoped child subreaper plus pidfds; macOS uses Darwin unique
-    parent identities plus audit-token signaling
+  - Linux uses a scoped child subreaper plus pidfds; procfs disappearance is an
+    exit race only when the pinned pidfd independently proves exit
+  - macOS uses Darwin unique parent identities plus audit-token signaling; a
+    uniquely live process that cannot provide a signal token remains live and
+    makes cleanup unprovable rather than being classified as exited
+  - the parent retains the supervisor's private process group for best-effort
+    cleanup if the supervisor or status pipe is lost, but status loss can never
+    claim descendant cleanup was proven
+  - Darwin `EVFILT_PROC` fork notifications are aggregated, and the local SDK
+    documents kernel child tracking (`NOTE_TRACK`) as unsupported since macOS
+    10.5. Every fork event therefore triggers global identity reconciliation
+    and permanently marks ownership unproven. Compatibility consequence: a
+    managed command that forks cannot report successful completion on macOS;
+    deadline and cancellation outcomes remain primary but include unproven
+    cleanup diagnostics when applicable
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
     back to same-user process scans or signals

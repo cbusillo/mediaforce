@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 from collections.abc import Callable
+from enum import Enum
 
 
 _STATUS_EXPIRED = b"E"
@@ -55,13 +56,23 @@ def _linux_parent_pid(pid: int) -> int:
     return int(fields[1])
 
 
-def _linux_child_pids(pid: int) -> set[int]:
+def _linux_child_pids(
+        pid: int,
+        process_descriptor: int | None = None,
+) -> set[int]:
     child_pids: set[int] = set()
     task_path = f"/proc/{pid}/task"
     try:
         tasks = list(os.scandir(task_path))
-    except FileNotFoundError:
-        return child_pids
+    except FileNotFoundError as exc:
+        if (
+            process_descriptor is not None
+            and _pidfd_exited(process_descriptor)
+        ):
+            return child_pids
+        raise _ContainmentUnavailableError(
+            f"cannot inspect descendants of live process {pid}"
+        ) from exc
     except OSError as exc:
         raise _ContainmentUnavailableError(
             f"cannot inspect descendants of process {pid}"
@@ -73,8 +84,38 @@ def _linux_child_pids(pid: int) -> set[int]:
                 encoding="utf-8",
             ) as children_file:
                 children = children_file.read()
-        except FileNotFoundError:
-            continue
+        except FileNotFoundError as exc:
+            if (
+                process_descriptor is not None
+                and _pidfd_exited(process_descriptor)
+            ):
+                return child_pids
+            try:
+                os.stat(task_path)
+            except FileNotFoundError as task_root_error:
+                if (
+                    process_descriptor is not None
+                    and _pidfd_exited(process_descriptor)
+                ):
+                    return child_pids
+                raise _ContainmentUnavailableError(
+                    f"cannot inspect descendants of live process {pid}"
+                ) from task_root_error
+            except OSError as task_root_error:
+                raise _ContainmentUnavailableError(
+                    f"cannot inspect descendants of process {pid}"
+                ) from task_root_error
+            try:
+                os.stat(task.path)
+            except FileNotFoundError:
+                continue
+            except OSError as task_error:
+                raise _ContainmentUnavailableError(
+                    f"cannot inspect descendants of process {pid}"
+                ) from task_error
+            raise _ContainmentUnavailableError(
+                f"cannot inspect descendants of live process {pid}"
+            ) from exc
         except OSError as exc:
             raise _ContainmentUnavailableError(
                 f"cannot inspect descendants of process {pid}"
@@ -138,7 +179,10 @@ class _LinuxProcessTree:
                 identity = self._processes.get(parent_pid)
                 if identity is not None and _pidfd_exited(identity.process_descriptor):
                     continue
-                for child_pid in _linux_child_pids(parent_pid):
+                for child_pid in _linux_child_pids(
+                    parent_pid,
+                    identity.process_descriptor if identity is not None else None,
+                ):
                     if child_pid == os.getpid() or child_pid in self._processes:
                         continue
                     if self._register(child_pid, parent_pid):
@@ -192,9 +236,14 @@ class _LinuxProcessTree:
             return False
         try:
             observed_parent_pid = _linux_parent_pid(pid)
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            exited = _pidfd_exited(process_descriptor)
             os.close(process_descriptor)
-            return False
+            if exited:
+                return False
+            raise _ContainmentUnavailableError(
+                f"cannot inspect live process {pid}"
+            ) from exc
         except BaseException:
             os.close(process_descriptor)
             raise
@@ -244,6 +293,12 @@ class _UniqueProcessInfo(ctypes.Structure):
     ]
 
 
+class _DarwinSignalState(Enum):
+    EXITED = "exited"
+    SIGNALABLE = "signalable"
+    UNSIGNALABLE = "unsignalable"
+
+
 class _DarwinProcessIdentity:
     def __init__(
             self,
@@ -275,7 +330,6 @@ class _DarwinProcessTree:
         self._processes: dict[int, _DarwinProcessIdentity] = {}
         self._current_by_pid: dict[int, int] = {}
         self._serial_by_unique_id: dict[int, int] = {}
-        self._unmatched_children: dict[int, set[int]] = {}
         self._compromised = False
         if self._unique_process_info(os.getpid()) is None:
             raise _ContainmentUnavailableError(
@@ -296,21 +350,11 @@ class _DarwinProcessTree:
         self._discover_until_stable()
         events = self._read_events(timeout)
         self._discover_until_stable()
-        fork_serials = [
-            int(event.udata)
-            for event in events
-            if event.fflags & select.KQ_NOTE_FORK
-        ]
-        if any(
-            not self._unmatched_children.get(serial)
-            for serial in fork_serials
-        ):
-            self._discover_reparented_descendants()
         for event in events:
-            if event.fflags & select.KQ_NOTE_FORK:
-                serial = int(event.udata)
-                if not self._unmatched_children.pop(serial, set()):
-                    self._compromised = True
+            if not event.fflags & select.KQ_NOTE_FORK:
+                continue
+            self._compromised = True
+            self._discover_reparented_descendants()
         for event in events:
             if event.fflags & select.KQ_NOTE_EXIT:
                 identity = self._processes.get(int(event.udata))
@@ -335,20 +379,34 @@ class _DarwinProcessTree:
             reverse=True,
         )
         for identity in identities:
-            if not self._refresh_signal_token(identity):
+            token_state = self._refresh_signal_token(identity)
+            if token_state is _DarwinSignalState.EXITED:
                 self._mark_exited(identity)
+                continue
+            if token_state is _DarwinSignalState.UNSIGNALABLE:
+                succeeded = False
                 continue
             result = self._libc.proc_signal_with_audittoken(
                 ctypes.byref(identity.token),
                 signal_number,
             )
-            if result == errno.ESRCH and self._refresh_signal_token(identity):
+            if result == errno.ESRCH:
+                token_state = self._refresh_signal_token(identity)
+                if token_state is _DarwinSignalState.EXITED:
+                    self._mark_exited(identity)
+                    continue
+                if token_state is _DarwinSignalState.UNSIGNALABLE:
+                    succeeded = False
+                    continue
                 result = self._libc.proc_signal_with_audittoken(
                     ctypes.byref(identity.token),
                     signal_number,
                 )
             if result == errno.ESRCH:
-                self._mark_exited(identity)
+                if self._same_identity_alive(identity):
+                    succeeded = False
+                else:
+                    self._mark_exited(identity)
             elif result != 0:
                 succeeded = False
         return succeeded
@@ -358,7 +416,6 @@ class _DarwinProcessTree:
         self._processes.clear()
         self._current_by_pid.clear()
         self._serial_by_unique_id.clear()
-        self._unmatched_children.clear()
 
     def _configure_functions(self) -> None:
         self._libc.mach_task_self.argtypes = []
@@ -578,8 +635,6 @@ class _DarwinProcessTree:
         self._processes[serial] = identity
         self._current_by_pid[pid] = serial
         self._serial_by_unique_id[identity.unique_id] = serial
-        if parent_serial is not None:
-            self._unmatched_children.setdefault(parent_serial, set()).add(serial)
         return serial
 
     def _discover_until_stable(self) -> None:
@@ -639,13 +694,16 @@ class _DarwinProcessTree:
             return False
         return int(info.unique_id) == identity.unique_id
 
-    def _refresh_signal_token(self, identity: _DarwinProcessIdentity) -> bool:
+    def _refresh_signal_token(
+            self,
+            identity: _DarwinProcessIdentity,
+    ) -> _DarwinSignalState:
         info = self._unique_process_info(identity.pid)
         if info is None or int(info.unique_id) != identity.unique_id:
-            return False
+            return _DarwinSignalState.EXITED
         task_identity = self._task_identity(identity.pid)
         if task_identity is None:
-            return False
+            return _DarwinSignalState.UNSIGNALABLE
         task_port, token = task_identity
         try:
             confirmed_info = self._unique_process_info(identity.pid)
@@ -655,10 +713,10 @@ class _DarwinProcessTree:
                 task_port,
             )
         if confirmed_info is None or int(confirmed_info.unique_id) != identity.unique_id:
-            return False
+            return _DarwinSignalState.EXITED
         identity.token = token
         identity.pid_version = int(token.values[7])
-        return True
+        return _DarwinSignalState.SIGNALABLE
 
     def _refresh_liveness(self) -> None:
         for identity in self._processes.values():
@@ -747,7 +805,6 @@ def _target_child(
     for signal_number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signal_number, signal.SIG_DFL)
     try:
-        os.setsid()
         os.execvpe(command[0], command, os.environ)
     except OSError as exc:
         os.write(2, f"Mediaforce process launch failed: {exc}\n".encode())
@@ -759,7 +816,8 @@ def _exit_like_target(wait_status: int) -> int:
     if exit_code >= 0:
         return exit_code
     signal_number = -exit_code
-    signal.signal(signal_number, signal.SIG_DFL)
+    if signal_number not in {signal.SIGKILL, signal.SIGSTOP}:
+        signal.signal(signal_number, signal.SIG_DFL)
     os.kill(os.getpid(), signal_number)
     return 128 + signal_number
 
@@ -825,7 +883,7 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
                 status_descriptor,
                 _STATUS_EXPIRED if cleanup_succeeded else _STATUS_UNAVAILABLE,
             )
-            return 124 if cleanup_succeeded else 125
+            return 124
         os.write(gate_write_descriptor, _TARGET_READY)
         os.close(gate_write_descriptor)
 
@@ -847,15 +905,14 @@ def _run(deadline_ns: int, status_descriptor: int, command: list[str]) -> int:
                     status_descriptor,
                     _STATUS_EXPIRED if cleanup_succeeded else _STATUS_UNAVAILABLE,
                 )
-                return 124 if cleanup_succeeded else 125
-            if tree.compromised:
-                _terminate_tree(tree, reap)
-                _notify(status_descriptor, _STATUS_UNAVAILABLE)
-                return 125
+                return 124
             if target_status is not None and not tree.live():
                 if empty_since is None:
                     empty_since = time.monotonic()
                 elif time.monotonic() - empty_since >= _TREE_SETTLE_SECONDS:
+                    if tree.compromised:
+                        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+                        return 125
                     _notify(status_descriptor, _STATUS_COMPLETE)
                     return _exit_like_target(target_status)
             else:
