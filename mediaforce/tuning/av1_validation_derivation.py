@@ -3904,6 +3904,8 @@ def load_av1_validation_derivation_assignment_claims(
 
 def load_av1_validation_derivation_terminal_records(
         directory: Path,
+        *,
+        observed_published_before: str | None = None,
 ) -> tuple[AV1ValidationDerivationTerminalRecord, ...]:
     binding = _load_owner_only_directory_binding(
         directory,
@@ -3912,6 +3914,15 @@ def load_av1_validation_derivation_terminal_records(
     records_list: list[AV1ValidationDerivationTerminalRecord] = []
     for path in sorted(directory.glob("*.json")):
         payload, raw = _load_owner_only_json(path, "derivation terminal record")
+        if (
+            observed_published_before is not None
+            and payload.get("status") == "observed"
+        ):
+            payload, raw = _load_owner_only_json(
+                path,
+                "derivation terminal record",
+                published_before=observed_published_before,
+            )
         records_list.append(
             av1_validation_derivation_terminal_record_from_payload(payload, raw=raw)
         )
@@ -3930,6 +3941,8 @@ def load_av1_validation_derivation_terminal_records(
 
 def load_av1_validation_derivation_terminal_intents(
         directory: Path,
+        *,
+        observed_published_before: str | None = None,
 ) -> tuple[AV1ValidationDerivationTerminalRecord, ...]:
     binding = _load_owner_only_directory_binding(
         directory,
@@ -3938,6 +3951,15 @@ def load_av1_validation_derivation_terminal_intents(
     intents_list: list[AV1ValidationDerivationTerminalRecord] = []
     for path in sorted(directory.glob("*.json")):
         payload, raw = _load_owner_only_json(path, "derivation terminal intent")
+        if (
+            observed_published_before is not None
+            and payload.get("status") == "observed"
+        ):
+            payload, raw = _load_owner_only_json(
+                path,
+                "derivation terminal intent",
+                published_before=observed_published_before,
+            )
         intents_list.append(
             av1_validation_derivation_terminal_record_from_payload(payload, raw=raw)
         )

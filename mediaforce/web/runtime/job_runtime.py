@@ -676,6 +676,7 @@ def run_scan_job(
                 config,
                 prefixes=[prefix] if prefix else None,
                 process_controller=process_controller,
+                scan_id=job_id,
             )
             process_controller.throw_if_cancelled()
             if prefix is None:
@@ -1036,6 +1037,7 @@ def repair_stale_scan_runs(
             scan_runs.c.scope,
             scan_runs.c.prefixes_json,
             scan_runs.c.owner_pid,
+            scan_runs.c.last_progress_at,
             scan_runs.c.status,
             scan_runs.c.error,
         )
@@ -1055,7 +1057,18 @@ def repair_stale_scan_runs(
         for job_prefix in job_prefixes:
             job = deps.load_scan_job_state(config, job_prefix)
             if job and str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
-                deps.save_scan_job_state(config, job_prefix, _interrupted_scan_job(job, deps, finished_at=deps.now_iso()))
+                deps.save_scan_job_state(
+                    config,
+                    job_prefix,
+                    _interrupted_scan_job(
+                        job,
+                        deps,
+                        finished_at=(
+                            row["last_progress_at"]
+                            or row["started_at"]
+                        ),
+                    ),
+                )
         _expire_scan_run(connection, str(row["scan_id"]), deps.scan_interrupted_error)
         repaired += 1
     if deps.list_scan_job_files is None:
@@ -1065,8 +1078,40 @@ def repair_stale_scan_runs(
         job, malformed = _load_scan_job_file(path)
         if job is None:
             continue
-        if malformed or str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
-            _save_scan_job_file(path, _interrupted_scan_job(job, deps, finished_at=deps.now_iso()))
+        if malformed:
+            _save_scan_job_file(
+                path,
+                _interrupted_scan_job(job, deps, finished_at=deps.now_iso()),
+            )
+            repaired += 1
+            continue
+        if str(job.get("status") or "") in ACTIVE_SCAN_JOB_STATUSES:
+            job_prefix = (
+                None
+                if str(job.get("scope") or "") in {"full", "unknown"}
+                else str(job.get("prefix") or "").strip("/") or None
+            )
+            terminal_run = _latest_scan_terminal_job(
+                connection,
+                job_prefix,
+                job_id=str(job.get("job_id") or "") or None,
+            )
+            replacement = (
+                terminal_run
+                if terminal_run is not None
+                and _scan_run_supersedes_job(terminal_run, job, deps)
+                else _interrupted_scan_job(
+                    job,
+                    deps,
+                    finished_at=(
+                        job.get("finished_at")
+                        or job.get("started_at")
+                        or job.get("created_at")
+                        or deps.now_iso()
+                    ),
+                )
+            )
+            _save_scan_job_file(path, replacement)
             repaired += 1
     return repaired
 
@@ -1246,7 +1291,32 @@ def _current_scan_job_snapshot(
         deps: JobRuntimeDeps,
 ) -> dict[str, Any] | None:
     job = _scan_job_snapshot(config, prefix, deps)
-    if not job or job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
+    if not job:
+        return job
+    if (
+        job.get("status") in ACTIVE_SCAN_JOB_STATUSES
+        and scan_job_belongs_to_current_process(
+            job,
+            deps.scan_process_is_alive,
+        )
+    ):
+        return job
+    terminal_run = _latest_scan_terminal_job(
+        connection,
+        prefix,
+        job_id=str(job.get("job_id") or "") or None,
+    )
+    if (
+        terminal_run is not None
+        and _scan_run_supersedes_job(terminal_run, job, deps)
+    ):
+        if (
+            terminal_run.get("status") != SUCCESSFUL_SCAN_RUN_STATUS
+            or job.get("status") in ACTIVE_SCAN_JOB_STATUSES
+            or str(job.get("error") or "") == deps.scan_interrupted_error
+        ):
+            return terminal_run
+    if job.get("status") in ACTIVE_SCAN_JOB_STATUSES:
         return job
     latest_completed = latest_scan_completed_at(connection, prefix)
     if latest_completed is None:
@@ -1259,6 +1329,94 @@ def _current_scan_job_snapshot(
     if job_timestamp is None or job_timestamp < latest_completed:
         return None
     return job
+
+
+def _latest_scan_terminal_job(
+        connection: DBClient,
+        prefix: str | None,
+        *,
+        job_id: str | None = None,
+) -> dict[str, Any] | None:
+    terminal_selection = select(
+        scan_runs.c.scan_id,
+        scan_runs.c.started_at,
+        scan_runs.c.completed_at,
+        scan_runs.c.scope,
+        scan_runs.c.prefixes_json,
+        scan_runs.c.last_progress_at,
+        scan_runs.c.file_count,
+        scan_runs.c.reprobed_count,
+        scan_runs.c.unchanged_count,
+        scan_runs.c.status,
+        scan_runs.c.error,
+    ).where(scan_runs.c.status.in_(tuple(TERMINAL_SCAN_JOB_STATUSES)))
+    if job_id is not None:
+        exact_row = connection.execute(
+            terminal_selection
+            .where(scan_runs.c.scan_id == job_id)
+            .limit(1)
+        ).mappings().first()
+        if exact_row is not None:
+            exact_job = _scan_run_terminal_job_for_prefix(
+                exact_row,
+                prefix=prefix,
+            )
+            if exact_job is not None:
+                return exact_job
+    rows = connection.execute(
+        terminal_selection
+        .order_by(
+            func.coalesce(
+                scan_runs.c.completed_at,
+                scan_runs.c.last_progress_at,
+                scan_runs.c.started_at,
+            ).desc()
+        )
+        .limit(250)
+    ).mappings().fetchall()
+    for row in rows:
+        terminal_job = _scan_run_terminal_job_for_prefix(
+            row,
+            prefix=prefix,
+        )
+        if terminal_job is not None:
+            return terminal_job
+    return None
+
+
+def _scan_run_terminal_job_for_prefix(
+        row: DBRow,
+        *,
+        prefix: str | None,
+) -> dict[str, Any] | None:
+    matched_prefix = _scan_run_matches_prefix(row, prefix)
+    if matched_prefix is _MISSING:
+        return None
+    scope = str(row["scope"] or "unknown")
+    job_prefix = None if scope in {"full", "unknown"} else str(matched_prefix)
+    return _scan_run_terminal_job(
+        row,
+        prefix=prefix,
+        job_prefix=job_prefix,
+    )
+
+
+def _scan_run_supersedes_job(
+        scan_run: dict[str, Any],
+        job: dict[str, Any],
+        deps: JobRuntimeDeps,
+) -> bool:
+    if str(scan_run.get("job_id") or "") == str(job.get("job_id") or ""):
+        return True
+    scan_started_at = deps.parse_iso(scan_run.get("started_at"))
+    job_created_at = deps.parse_iso(
+        job.get("created_at") or job.get("started_at")
+    )
+    return (
+        scan_started_at is not None
+        and job_created_at is not None
+        and scan_started_at >= job_created_at
+    )
 
 
 def _interrupted_scan_job(

@@ -1415,7 +1415,8 @@ def _run_av1_validation_derivation_assignment_locked(
             )
         terminal_records = (
             load_av1_validation_derivation_terminal_records(
-                terminal_records_directory
+                terminal_records_directory,
+                observed_published_before=plan.authorization.valid_until,
             )
             if terminal_records_directory.exists()
             else ()
@@ -1949,7 +1950,8 @@ def finalize_av1_validation_derivation_candidate_lock(
                 artifact_root / "attempts"
             )
             records = load_av1_validation_derivation_terminal_records(
-                artifact_root / "terminal-records"
+                artifact_root / "terminal-records",
+                observed_published_before=plan.authorization.valid_until,
             )
             review_claims = load_av1_validation_derivation_review_claims(
                 artifact_root,
@@ -2144,7 +2146,8 @@ def load_verified_av1_validation_derivation_candidate_lock(
                 artifact_root / "attempts"
             )
             records = load_av1_validation_derivation_terminal_records(
-                artifact_root / "terminal-records"
+                artifact_root / "terminal-records",
+                observed_published_before=plan.authorization.valid_until,
             )
             review_claims = load_av1_validation_derivation_review_claims(
                 artifact_root,
@@ -2836,7 +2839,10 @@ def _assert_next_assignment(
             )
         attempts_by_id[attempt.assignment_id] = attempt
     records = (
-        load_av1_validation_derivation_terminal_records(terminal_records_directory)
+        load_av1_validation_derivation_terminal_records(
+            terminal_records_directory,
+            observed_published_before=plan.authorization.valid_until,
+        )
         if terminal_records_directory.exists()
         else ()
     )
@@ -2942,7 +2948,8 @@ def _recover_interrupted_derivation_state(
     )
     records = (
         load_av1_validation_derivation_terminal_records(
-            terminal_records_directory
+            terminal_records_directory,
+            observed_published_before=plan.authorization.valid_until,
         )
         if terminal_records_directory.exists()
         else ()
@@ -2958,7 +2965,8 @@ def _recover_interrupted_derivation_state(
     terminal_intents_directory = artifact_root / "terminal-intents"
     terminal_intents = (
         load_av1_validation_derivation_terminal_intents(
-            terminal_intents_directory
+            terminal_intents_directory,
+            observed_published_before=plan.authorization.valid_until,
         )
         if terminal_intents_directory.exists()
         else ()

@@ -474,7 +474,7 @@ class ProcessControlTests(TestCase):
             "\n".join(getattr(raised.exception, "__notes__", ())),
         )
         self.assertTrue(controller.cleanup_unproven)
-        self.assertEqual(controller._process_group_id, process.pid)
+        self.assertIsNone(controller._process_group_id)
 
     def test_parent_liveness_eof_terminates_observed_detached_descendant(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -639,7 +639,7 @@ class ProcessControlTests(TestCase):
                     "\n".join(getattr(errors[0], "__notes__", ())),
                 )
                 self.assertTrue(controller.cleanup_unproven)
-                self.assertEqual(controller._process_group_id, helper_pid)
+                self.assertIsNone(controller._process_group_id)
                 self.assertTrue(_pid_is_alive(descendant_pid))
                 with self.assertRaisesRegex(
                     ProcessDeadlineEnforcementError,
@@ -664,7 +664,7 @@ class ProcessControlTests(TestCase):
                 worker.join(timeout=5)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
-    def test_deadline_status_unavailable_poison_retains_group_authority(
+    def test_deadline_status_unavailable_poison_discards_numeric_group_authority(
             self,
             popen_mock: Mock,
     ) -> None:
@@ -700,9 +700,9 @@ class ProcessControlTests(TestCase):
             run_command(["echo", "ok"], process_controller=controller)
 
         self.assertNotIsInstance(raised.exception, ProcessDeadlineExpiredError)
-        clear.assert_called_once_with(process, retain_process_group=True)
+        clear.assert_called_once_with(process, cleanup_unproven=True)
         self.assertTrue(controller.cleanup_unproven)
-        self.assertEqual(controller._process_group_id, process.pid)
+        self.assertIsNone(controller._process_group_id)
 
     @patch("mediaforce.core.process_control.subprocess.Popen")
     def test_deadline_status_read_base_exceptions_cleanup_before_reraise(
@@ -722,9 +722,23 @@ class ProcessControlTests(TestCase):
                 )
                 events: list[str] = []
                 controller.clear.side_effect = (
-                    lambda *_args, **_kwargs: events.append("retain")
+                    lambda *_args, **_kwargs: events.append("poison")
                 )
                 controller.terminate.side_effect = lambda: events.append("terminate")
+                add_cleanup_note = (
+                    process_control_module._add_managed_process_cleanup_note
+                )
+
+                def record_cleanup_note(
+                        error: BaseException,
+                        cleanup_error: BaseException,
+                ) -> None:
+                    events.append("note")
+                    add_cleanup_note(
+                        error,
+                        cleanup_error,
+                    )
+
                 with (
                     patch.object(
                         process_control_module.os,
@@ -743,18 +757,24 @@ class ProcessControlTests(TestCase):
                             lambda descriptor: events.append(f"close:{descriptor}")
                         ),
                     ),
+                    patch.object(
+                        process_control_module,
+                        "_add_managed_process_cleanup_note",
+                        side_effect=record_cleanup_note,
+                    ),
                     self.assertRaises(type(interruption)) as raised,
                 ):
                     run_command(["echo", "ok"], process_controller=controller)
 
                 self.assertIs(raised.exception, interruption)
                 self.assertEqual(events[0], "close:102")
-                self.assertIn("retain", events)
+                self.assertIn("poison", events)
                 self.assertIn("terminate", events)
+                self.assertLess(events.index("poison"), events.index("note"))
                 self.assertIn("close:101", events)
                 controller.clear.assert_called_once_with(
                     process,
-                    retain_process_group=True,
+                    cleanup_unproven=True,
                 )
 
     @patch(
@@ -1247,7 +1267,7 @@ class ProcessControlTests(TestCase):
         self.assertEqual(process.communicate.call_count, 2)
         controller.clear.assert_called_once_with(
             process,
-            retain_process_group=False,
+            cleanup_unproven=False,
         )
 
     @patch("mediaforce.core.process_control._terminate_process")
@@ -1282,7 +1302,7 @@ class ProcessControlTests(TestCase):
         process.communicate.assert_called_once_with(timeout=2.0)
         controller.clear.assert_called_once_with(
             process,
-            retain_process_group=False,
+            cleanup_unproven=False,
         )
 
     @patch(

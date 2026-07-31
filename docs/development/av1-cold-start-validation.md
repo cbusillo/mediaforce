@@ -243,8 +243,12 @@ external diff, text conversion, and submodule ignoring disabled; the clean-state
 check explicitly includes all untracked files and submodules. Git aliases,
 remotes, hooks, and ordinary branch settings are not invoked by these direct
 built-in read commands, and remaining local configuration cannot alter the raw
-commit, tree, or blob object IDs they consume.
-runtime rechecks the plan's exact
+commit, tree, or blob object IDs they consume. Before any clean-tree decision,
+the verifier also requires every tracked index entry to have Git's ordinary
+`H` state; `assume-unchanged`, `skip-worktree`, unmerged, and other exceptional
+index states fail closed instead of allowing live implementation bytes to
+diverge from the reviewed commit.
+The runtime rechecks the plan's exact
 commit/tree pair before claim publication, immediately before and after media
 execution, and inside every attempt or terminal publication callback. A checkout
 that drifts mid-run therefore stops closed and cannot publish favorable evidence
@@ -301,8 +305,10 @@ directory-sync error cannot be downgraded to an unsynced idempotent success. A
 fresh candidate proposal rechecks the live authorization immediately before its
 exclusive rename, then verifies that the renamed inode's kernel change time is
 strictly earlier than the immutable authorization expiration. Loaders repeat
-that publication-time check, so a process paused across expiration cannot make
-a late artifact acceptable by retaining an earlier payload timestamp. A
+that publication-time check, including bulk recovery loads of already matching
+observed terminal intents and records, so a process paused across expiration
+cannot make a late artifact acceptable by retaining an earlier payload
+timestamp. A
 candidate-proposal retry first loads the canonical existing proposal and reuses
 its original `proposed_at`; it never samples a replacement timestamp. A review
 retry accepts only a complete matching immutable lane claim and envelope,
@@ -566,8 +572,10 @@ waiting for target output EOF. Parent communication and reap attempts remain
 bounded even when cleanup cannot kill the target. Non-`ESRCH` `SIGTERM` and
 `SIGKILL` failures propagate explicitly and remain cleanup notes on the original
 deadline or cancellation exception. A group is released only after cleanup can
-prove success; otherwise the controller retains both the possibly live target
-and its process-group identity for a later explicit cleanup attempt. Ordinary
+prove success. If cleanup remains unproven after the immediate bounded attempts,
+the controller is permanently poisoned but discards the bare numeric PGID so a
+later cancellation cannot signal an unrelated process group after ID reuse.
+Ordinary
 cancellation, deadline-expired, and deadline-enforcement classifications remain
 distinct. Toolchain and quality-metric capability probes use
 that same controller and deadline; the assignment's already-frozen quality

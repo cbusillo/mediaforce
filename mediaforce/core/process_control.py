@@ -66,20 +66,17 @@ class ManagedProcessController:
             self,
             process: subprocess.Popen[str],
             *,
-            retain_process_group: bool = False,
+            cleanup_unproven: bool = False,
     ) -> None:
         with self._lock:
             if self._process is not None and self._process is not process:
                 return
             if self._process is process:
                 self._process = None
-            if retain_process_group:
-                self._terminate_process_group = True
-                self._process_group_id = process.pid
+            self._terminate_process_group = False
+            self._process_group_id = None
+            if cleanup_unproven:
                 self._cleanup_unproven = True
-            elif not self._cleanup_unproven:
-                self._terminate_process_group = False
-                self._process_group_id = None
 
     def cancel(self, error: ProcessCancelledError | None = None) -> None:
         with self._lock:
@@ -659,6 +656,7 @@ def run_command(
                 )
         except BaseException as exc:
             cleanup_succeeded = containment_finalized
+            controller_cleared = False
             if not containment_finalized:
                 if status_monitor.error() is exc:
                     cleanup_succeeded = _finish_containment_status_failure(
@@ -675,21 +673,30 @@ def run_command(
                         error=exc,
                     )
                 if not cleanup_succeeded:
+                    try:
+                        process_controller.clear(
+                            process,
+                            cleanup_unproven=True,
+                        )
+                        controller_cleared = True
+                    except BaseException as cleanup_error:
+                        _add_managed_process_cleanup_note(exc, cleanup_error)
                     _add_managed_process_cleanup_note(
                         exc,
                         RuntimeError(
                             "managed process containment cleanup did not complete"
                         ),
                     )
-            try:
-                process_controller.clear(
-                    process,
-                    retain_process_group=not cleanup_succeeded,
-                )
-            except BaseException as cleanup_error:
-                _add_managed_process_cleanup_note(exc, cleanup_error)
+            if not controller_cleared:
+                try:
+                    process_controller.clear(
+                        process,
+                        cleanup_unproven=not cleanup_succeeded,
+                    )
+                except BaseException as cleanup_error:
+                    _add_managed_process_cleanup_note(exc, cleanup_error)
             raise
-        process_controller.clear(process, retain_process_group=False)
+        process_controller.clear(process, cleanup_unproven=False)
         return completed
     finally:
         os.close(parent_liveness_write_descriptor)

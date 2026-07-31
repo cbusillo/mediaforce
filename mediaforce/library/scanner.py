@@ -65,9 +65,10 @@ def scan_library(
         limit: int | None = None,
         *,
         process_controller: ManagedProcessController | None = None,
+        scan_id: str | None = None,
 ) -> ScanStats:
     _throw_if_scan_cancelled(process_controller)
-    scan_id = uuid.uuid4().hex
+    scan_id = scan_id or uuid.uuid4().hex
     started_at = timestamp()
     normalized_prefixes = sorted({prefix.strip("/") for prefix in object_list(prefixes) if str(prefix).strip("/")})
     scan_source_roots = _scan_roots_for_prefixes(

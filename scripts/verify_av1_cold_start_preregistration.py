@@ -670,7 +670,10 @@ def _run_derivation_action_body(
             else ()
         )
         records = (
-            load_av1_validation_derivation_terminal_records(records_directory)
+            load_av1_validation_derivation_terminal_records(
+                records_directory,
+                observed_published_before=plan.authorization.valid_until,
+            )
             if records_directory.exists()
             else ()
         )
@@ -1080,7 +1083,8 @@ def _run_derivation_proposal_action(
             artifact_root / "attempts"
         )
         records = load_av1_validation_derivation_terminal_records(
-            artifact_root / "terminal-records"
+            artifact_root / "terminal-records",
+            observed_published_before=plan.authorization.valid_until,
         )
         current_observations = load_current_av1_validation_derivation_observations(
             config_path=args.config,
@@ -1421,6 +1425,26 @@ def _repository_review_identity(
         return object_ids[0], object_ids[1]
 
     object_ids = resolve_identity()
+    index_state = run_command(
+        _review_git_command("ls-files", "-v", "-z"),
+        process_controller=process_controller,
+        cwd=root,
+        env=_review_git_environment(repository_root=root),
+        timeout=15,
+        check=False,
+    )
+    if index_state.returncode != 0:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository index state is unavailable"
+        )
+    if any(
+        not record.startswith("H ")
+        for record in index_state.stdout.split("\0")
+        if record
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository has unsafe index state"
+        )
     for tracked_state_command in (
         _review_git_diff_command(
             "diff-index",

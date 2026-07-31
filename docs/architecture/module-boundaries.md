@@ -61,9 +61,11 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     descendants cannot delay parent-death detection
   - if the supervisor or containment status is lost before a complete/expired
     proof, the parent immediately performs best-effort private-process-group
-    cleanup, retains that group authority, and permanently poisons the managed
-    controller; reset and reuse fail closed, and cancellation, deadline, or
-    command success cannot replace the primary containment-enforcement error
+    cleanup, then discards the bare numeric process-group ID and permanently
+    poisons the managed controller; reset and reuse fail closed, future calls
+    cannot signal an unrelated group after PGID reuse, and cancellation,
+    deadline, or command success cannot replace the primary
+    containment-enforcement error
   - arbitrary supervisor `SIGKILL` remains a deliberate residual-risk boundary:
     a descendant that already created a new session can outlive the private
     process group because the supervisor's pidfds or Darwin identity tokens die
@@ -106,6 +108,11 @@ Guidance:
   - `encode_scheduler.py`
   - `queue_actions.py`
   - `job_runtime.py`
+    - startup reconciliation binds new scan sidecars and `scan_runs` rows to the
+      same scan ID, resolves that exact ID before any scope/time fallback,
+      restores a completed database result over a stale active sidecar, and lets
+      a matching or later database failure override contradictory legacy
+      sidecar state
   - `calibration_runtime.py`
   - `av1_validation_derivation.py`
     - isolated derivation-only execution adapter over sampled calibration

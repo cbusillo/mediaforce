@@ -214,6 +214,135 @@ class OperatorWorkTests(unittest.TestCase):
 
         self.assertIsNone(status)
 
+    def test_scan_status_prefers_database_failure_over_completed_sidecar(self) -> None:
+        completed_job = {
+            "job_id": "legacy-sidecar",
+            "status": "completed",
+            "scope": "full",
+            "prefix": None,
+            "created_at": "2026-07-19T11:59:00+00:00",
+            "started_at": "2026-07-19T12:00:00+00:00",
+            "finished_at": "2026-07-19T12:05:00+00:00",
+            "error": None,
+            "stats": None,
+        }
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: completed_job,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="authoritative-failure",
+                    started_at="2026-07-19T12:00:01+00:00",
+                    completed_at="2026-07-19T12:01:00+00:00",
+                    status="failed",
+                    error="interrupted",
+                    owner_pid=None,
+                    last_progress_at="2026-07-19T12:01:00+00:00",
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=1,
+                    reprobed_count=0,
+                    unchanged_count=1,
+                )
+            )
+            status = load_scan_status(connection, self.config, None, deps)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["job_id"], "authoritative-failure")
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["error"], "interrupted")
+
+    def test_scan_status_prefers_completed_database_run_over_live_pid_sidecar(
+            self,
+    ) -> None:
+        active_job = {
+            "job_id": "linked-scan",
+            "status": "running",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": 1,
+            "created_at": "2026-07-19T11:59:00+00:00",
+            "started_at": "2026-07-19T12:00:00+00:00",
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: active_job,
+        )
+        deps.scan_process_is_alive = lambda _pid: True
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="linked-scan",
+                    started_at="2026-07-19T12:00:01+00:00",
+                    completed_at="2026-07-19T12:05:00+00:00",
+                    status="completed",
+                    error=None,
+                    owner_pid=None,
+                    last_progress_at="2026-07-19T12:05:00+00:00",
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=1,
+                    reprobed_count=0,
+                    unchanged_count=1,
+                )
+            )
+            status = load_scan_status(connection, self.config, None, deps)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["job_id"], "linked-scan")
+        self.assertEqual(status["status"], "completed")
+
+    def test_scan_status_keeps_current_process_job_active_after_scan_commit(
+            self,
+    ) -> None:
+        active_job = {
+            "job_id": "linked-scan",
+            "status": "running",
+            "scope": "full",
+            "prefix": None,
+            "owner_pid": os.getpid(),
+            "created_at": "2026-07-19T11:59:00+00:00",
+            "started_at": "2026-07-19T12:00:00+00:00",
+            "finished_at": None,
+            "error": None,
+            "stats": None,
+        }
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: active_job,
+        )
+        deps.scan_process_is_alive = lambda _pid: True
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="linked-scan",
+                    started_at="2026-07-19T12:00:01+00:00",
+                    completed_at="2026-07-19T12:05:00+00:00",
+                    status="completed",
+                    error=None,
+                    owner_pid=os.getpid(),
+                    last_progress_at="2026-07-19T12:05:00+00:00",
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=1,
+                    reprobed_count=0,
+                    unchanged_count=1,
+                )
+            )
+            status = load_scan_status(connection, self.config, None, deps)
+
+        self.assertIsNotNone(status)
+        assert status is not None
+        self.assertEqual(status["job_id"], "linked-scan")
+        self.assertEqual(status["status"], "running")
+
     def test_failed_scan_run_does_not_refresh_catalog(self) -> None:
         deps = self._job_runtime_deps(load_scan_job_state=lambda _config, _prefix: None)
         now = "2026-07-19T12:00:00+00:00"
@@ -421,6 +550,75 @@ class OperatorWorkTests(unittest.TestCase):
         self.assertEqual(stored["error"], "interrupted")
         self.assertEqual(stored["finished_at"], "2026-07-19T12:00:00+00:00")
 
+    def test_startup_repair_restores_completed_database_state_to_active_sidecar(
+            self,
+    ) -> None:
+        path = self.config.paths.web_state_dir / "scan-full-catalog.job.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "job_id": "linked-scan",
+                    "status": "running",
+                    "scope": "full",
+                    "prefix": None,
+                    "owner_pid": 999999,
+                    "created_at": "2026-07-19T11:59:00+00:00",
+                    "started_at": "2026-07-19T12:00:00+00:00",
+                    "finished_at": None,
+                    "error": None,
+                    "stats": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: None,
+        )
+        deps.list_scan_job_files = lambda _config: (path,)
+        with open_db(self.config.paths.db_path) as connection:
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="linked-scan",
+                    started_at="2026-07-19T12:00:01+00:00",
+                    completed_at="2026-07-19T12:05:00+00:00",
+                    status="completed",
+                    error=None,
+                    owner_pid=None,
+                    last_progress_at="2026-07-19T12:05:00+00:00",
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=1,
+                    reprobed_count=0,
+                    unchanged_count=1,
+                )
+            )
+            connection.execute(
+                scan_runs.insert().values(
+                    scan_id="unrelated-newer-scan",
+                    started_at="2026-07-19T13:00:00+00:00",
+                    completed_at="2026-07-19T13:05:00+00:00",
+                    status="failed",
+                    error="unrelated failure",
+                    owner_pid=None,
+                    last_progress_at="2026-07-19T13:05:00+00:00",
+                    roots_json='["tv"]',
+                    scope="full",
+                    prefixes_json=None,
+                    file_count=0,
+                    reprobed_count=0,
+                    unchanged_count=0,
+                )
+            )
+            repaired = repair_stale_scan_runs(connection, self.config, deps)
+
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(repaired, 1)
+        self.assertEqual(stored["job_id"], "linked-scan")
+        self.assertEqual(stored["status"], "completed")
+        self.assertIsNone(stored["error"])
+
     def test_malformed_scan_sidecar_fails_closed_for_status_reads(self) -> None:
         path = self.config.paths.web_state_dir / "scan-full-catalog.job.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -574,6 +772,7 @@ class OperatorWorkTests(unittest.TestCase):
                 **kwargs: object,
         ) -> ScanStats:
             self.assertIs(kwargs["process_controller"], process_controller)
+            self.assertEqual(kwargs["scan_id"], "queued-job")
             raise ProcessCancelledError("shutdown")
 
         with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch(

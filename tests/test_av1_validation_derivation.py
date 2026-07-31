@@ -2905,6 +2905,42 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(expected_bundle["files"][0]["blob_id"], authoritative_blob)
             self.assertEqual(expected_bundle["files"][0]["text"], "authoritative review text\n")
 
+    def test_review_git_identity_rejects_index_trust_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            tracked_path = repository / "tracked.txt"
+            tracked_path.write_text("authoritative\n", encoding="utf-8")
+            _run_test_git(repository, "add", "tracked.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "authoritative")
+
+            for flag in ("--assume-unchanged", "--skip-worktree"):
+                with self.subTest(flag=flag):
+                    _run_test_git(repository, "update-index", flag, "tracked.txt")
+                    tracked_path.write_text("unreviewed\n", encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        AV1ValidationDerivationError,
+                        "unsafe index state",
+                    ):
+                        verify_av1_cold_start_preregistration._repository_review_identity(
+                            process_controller=ManagedProcessController(),
+                            repository_root=repository,
+                        )
+                    _run_test_git(
+                        repository,
+                        "update-index",
+                        "--no-skip-worktree",
+                        "tracked.txt",
+                    )
+                    _run_test_git(
+                        repository,
+                        "update-index",
+                        "--no-assume-unchanged",
+                        "tracked.txt",
+                    )
+                    _run_test_git(repository, "checkout", "--", "tracked.txt")
+
     def test_review_git_probes_reject_dirty_state_despite_local_diff_drivers(
             self,
     ) -> None:
@@ -6035,6 +6071,55 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 before_observed_publish=lambda: None,
             )
         self.assertFalse(records_dir.exists())
+
+    def test_recovery_rejects_existing_observed_terminal_pair_published_after_expiry(
+            self,
+    ) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = self._review_pending_attempt()
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+            observation=_observation(
+                assignment=assignment,
+                source_identity=_source_identity(self.partition, assignment),
+                crf=28.0,
+                bitrate=1_000_000,
+                verdict="acceptable",
+            ),
+        )
+        attempts_dir = self.runtime_artifact_root / "attempts"
+        records_dir = self.runtime_artifact_root / "terminal-records"
+        write_av1_validation_derivation_attempt(attempts_dir, attempt)
+        ensure_av1_validation_derivation_terminal_intent(
+            self.runtime_artifact_root / "terminal-intents",
+            terminal,
+        )
+        ensure_av1_validation_derivation_terminal_record(
+            records_dir,
+            terminal,
+        )
+
+        with (
+            patch(
+                "mediaforce.tuning.av1_validation_derivation._owner_only_publication_time_ns",
+                return_value=10**30,
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "published after authorization expired",
+            ),
+        ):
+            _recover_interrupted_derivation_state(
+                plan=self.plan,
+                partition=self.partition,
+                artifact_root=self.runtime_artifact_root,
+                attempts_directory=attempts_dir,
+                terminal_records_directory=records_dir,
+                completed_at="2026-07-28T01:07:00Z",
+                before_observed_publish=lambda: None,
+            )
 
     def test_recovered_observed_terminal_allows_frozen_verdict_retry(self) -> None:
         assignment = self.plan.assignments[0]
