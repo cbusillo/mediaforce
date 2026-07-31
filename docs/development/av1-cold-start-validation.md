@@ -248,13 +248,21 @@ so every read probe is non-writing. The verifier validates the checkout's main
 or linked-worktree metadata, pins `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` to that one authority tuple, disables system and configured
 attribute files, and disables repository-configured fsmonitor hooks for these
-probes. Every Git child runs while retained descriptors for the worktree, Git
-directory, and common directory are watched with kqueue on macOS or inotify on
-Linux. Any rename, replacement, relink, attribute change, or namespace write is
-a permanent authority failure even if the original path is restored before the
-child exits. The same frozen tuple is reused across each multi-command identity
-or review-bundle proof and revalidated immediately before and after every Git
-child and monitor drain. It does not
+probes. Each repository-identity or review-bundle transaction creates one
+retained-descriptor authority monitor before its first Git child and keeps that
+same monitor through every command and the final fail-closed drain. The monitor
+recursively covers the checkout's Git directory and common directory, including
+their regular metadata files and a linked worktree's `.git` pointer, so an
+in-place loose-ref, index, config, object, or packed-metadata rewrite is detected
+even when the original bytes and pathname are restored. Repository-identity and
+review-bundle transactions also derive their worktree watch set from Git's
+tracked-file listing, retain the tracked files and their ancestor directories,
+and deliberately do not recurse into ignored dependency trees. macOS uses
+kqueue and raises the process soft file-descriptor limit only when the complete
+watch set requires it; Linux uses inotify. Other platforms fail closed. Any
+write, rename, replacement, relink, attribute change, or namespace mutation is
+a permanent authority failure. The same frozen authority tuple is revalidated
+immediately before and after every Git child and monitor drain. It does not
 blanket-disable repository-local configuration, because ordinary linked-worktree
 and core/remote/branch behavior must remain intact. Instead, the only local
 configuration vectors that could reinterpret authority are neutralized at the
@@ -275,9 +283,13 @@ fixed `/usr/bin/git` through a
 sanitized environment with validated `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` values pinned to the canonical checkout, so repo-local
 `core.worktree` or a foreign `.git` pointer cannot redirect the proof. The
-stdlib-only bootstrap establishes the same retained-descriptor directory
-monitor before forking `/usr/bin/git`, so a transient replace-and-restore of the
-checkout or either metadata directory fails closed. It refuses modified,
+stdlib-only bootstrap establishes one recursive metadata and import-tree monitor
+before its first fixed Git probe. That monitor remains active across every
+bootstrap probe, canonical `mediaforce` package binding, all repository-local
+imports, and the complete command execution, then performs a final fail-closed
+drain before process exit. Transient directory swaps, in-place Git metadata
+rewrites, and package replace-and-restore attempts therefore remain observable
+after the last bootstrap probe. It refuses modified,
 exceptional-index, untracked, or ignored state anywhere under `mediaforce/` or
 `scripts/`; it also rejects
 repository bytecode caches and disables bytecode writes. The bootstrap removes

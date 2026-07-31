@@ -1,6 +1,519 @@
+class _RepositoryAuthorityMonitor:
+    _IN_MODIFY = 0x00000002
+    _IN_ATTRIB = 0x00000004
+    _IN_CLOSE_WRITE = 0x00000008
+    _IN_MOVED_FROM = 0x00000040
+    _IN_MOVED_TO = 0x00000080
+    _IN_CREATE = 0x00000100
+    _IN_DELETE = 0x00000200
+    _IN_DELETE_SELF = 0x00000400
+    _IN_MOVE_SELF = 0x00000800
+
+    def __init__(
+            self,
+            *,
+            root: str,
+            authority_directories: tuple[
+                tuple[str, tuple[int, int], bool],
+                ...,
+            ],
+            metadata_roots: tuple[str, ...],
+            metadata_files: tuple[str, ...],
+            failure_type: type[BaseException],
+            changed_message: str,
+            unavailable_message: str,
+    ) -> None:
+        self._os = __import__("os")
+        self._stat = __import__("stat")
+        self._sys = __import__("sys")
+        self._root = self._os.path.realpath(root)
+        self._authority_directories = authority_directories
+        self._metadata_roots = tuple(dict.fromkeys(metadata_roots))
+        self._metadata_files = tuple(dict.fromkeys(metadata_files))
+        self._failure_type = failure_type
+        self._changed_message = changed_message
+        self._unavailable_message = unavailable_message
+        self._descriptors: list[int] = []
+        self._watched_paths: set[str] = set()
+        self._path_states: dict[str, tuple[int, ...]] = {}
+        self._missing_paths: set[str] = set()
+        self._darwin_watcher = None
+        self._inotify_descriptor = -1
+        self._inotify_add_watch = None
+        try:
+            self._metadata_states = self._collect_metadata_states()
+            descriptor_count = sum(
+                self._is_watchable_state(state)
+                for state in self._metadata_states.values()
+            ) + len(authority_directories)
+            self._ensure_descriptor_capacity(descriptor_count)
+            self._start_monitoring()
+            for path, expected_identity, require_safe_permissions in (
+                    authority_directories
+            ):
+                self._add_authority_directory(
+                    path,
+                    expected_identity,
+                    require_safe_permissions=require_safe_permissions,
+                )
+            for path, expected_state in self._metadata_states.items():
+                self._add_existing_path(path, expected_state)
+            if self._collect_metadata_states() != self._metadata_states:
+                self._fail_changed()
+            self.assert_quiet()
+        except BaseException:
+            self.close()
+            raise
+
+    def _fail_changed(self, cause: BaseException | None = None) -> None:
+        error = self._failure_type(self._changed_message)
+        if cause is None:
+            raise error
+        raise error from cause
+
+    def _fail_unavailable(self, cause: BaseException | None = None) -> None:
+        error = self._failure_type(self._unavailable_message)
+        if cause is None:
+            raise error
+        raise error from cause
+
+    @staticmethod
+    def _state(info: object) -> tuple[int, ...]:
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_mode,
+            info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
+
+    def _is_watchable_state(self, state: tuple[int, ...]) -> bool:
+        return self._stat.S_ISDIR(state[2]) or self._stat.S_ISREG(state[2])
+
+    def _lstat_state(self, path: str) -> tuple[int, ...]:
+        return self._state(self._os.stat(path, follow_symlinks=False))
+
+    def _collect_tree_states(self, root: str) -> dict[str, tuple[int, ...]]:
+        states: dict[str, tuple[int, ...]] = {}
+        pending = [root]
+        while pending:
+            current = pending.pop()
+            try:
+                state = self._lstat_state(current)
+                states[current] = state
+                if not self._stat.S_ISDIR(state[2]):
+                    continue
+                with self._os.scandir(current) as entries:
+                    children = sorted(
+                        (entry.path for entry in entries),
+                        reverse=True,
+                    )
+            except OSError as exc:
+                self._fail_unavailable(exc)
+            pending.extend(children)
+        return states
+
+    def _collect_metadata_states(self) -> dict[str, tuple[int, ...]]:
+        states: dict[str, tuple[int, ...]] = {}
+        for root in self._metadata_roots:
+            states.update(self._collect_tree_states(root))
+        for path in self._metadata_files:
+            try:
+                states[path] = self._lstat_state(path)
+            except OSError as exc:
+                self._fail_unavailable(exc)
+        return dict(sorted(states.items()))
+
+    def _ensure_descriptor_capacity(self, additional: int) -> None:
+        required = len(self._descriptors) + additional + 128
+        try:
+            resource = __import__("resource")
+            soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if soft_limit == resource.RLIM_INFINITY or soft_limit >= required:
+                return
+            if hard_limit != resource.RLIM_INFINITY and hard_limit < required:
+                self._fail_unavailable()
+            resource.setrlimit(
+                resource.RLIMIT_NOFILE,
+                (required, hard_limit),
+            )
+            raised_soft_limit, _raised_hard_limit = resource.getrlimit(
+                resource.RLIMIT_NOFILE
+            )
+            if (
+                raised_soft_limit != resource.RLIM_INFINITY
+                and raised_soft_limit < required
+            ):
+                self._fail_unavailable()
+        except (OSError, ValueError) as exc:
+            self._fail_unavailable(exc)
+
+    def _start_monitoring(self) -> None:
+        if self._sys.platform == "darwin":
+            try:
+                self._darwin_watcher = __import__("select").kqueue()
+            except (AttributeError, OSError) as exc:
+                self._fail_unavailable(exc)
+            return
+        if (
+            not self._sys.platform.startswith("linux")
+            or not self._os.path.isdir("/proc/self/fd")
+        ):
+            self._fail_unavailable()
+        ctypes = __import__("ctypes")
+        libc = ctypes.CDLL(None, use_errno=True)
+        inotify_init1 = getattr(libc, "inotify_init1", None)
+        inotify_add_watch = getattr(libc, "inotify_add_watch", None)
+        if inotify_init1 is None or inotify_add_watch is None:
+            self._fail_unavailable()
+        inotify_init1.argtypes = (ctypes.c_int,)
+        inotify_init1.restype = ctypes.c_int
+        inotify_add_watch.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+        )
+        inotify_add_watch.restype = ctypes.c_int
+        descriptor = inotify_init1(
+            self._os.O_NONBLOCK | getattr(self._os, "O_CLOEXEC", 0)
+        )
+        if descriptor < 0:
+            error_number = ctypes.get_errno()
+            self._fail_unavailable(
+                OSError(error_number, self._os.strerror(error_number))
+            )
+        self._inotify_descriptor = descriptor
+        self._inotify_add_watch = inotify_add_watch
+
+    def _watch_descriptor(self, descriptor: int) -> None:
+        descriptor_info = self._os.fstat(descriptor)
+        if self._darwin_watcher is not None:
+            select_module = __import__("select")
+            flags = (
+                select_module.KQ_NOTE_WRITE
+                | getattr(select_module, "KQ_NOTE_EXTEND", 0)
+                | select_module.KQ_NOTE_DELETE
+                | select_module.KQ_NOTE_RENAME
+                | select_module.KQ_NOTE_LINK
+                | select_module.KQ_NOTE_REVOKE
+            )
+            if self._stat.S_ISDIR(descriptor_info.st_mode):
+                flags |= select_module.KQ_NOTE_ATTRIB
+            try:
+                self._darwin_watcher.control(
+                    [
+                        select_module.kevent(
+                            descriptor,
+                            filter=select_module.KQ_FILTER_VNODE,
+                            flags=(
+                                select_module.KQ_EV_ADD
+                                | select_module.KQ_EV_CLEAR
+                            ),
+                            fflags=flags,
+                        )
+                    ],
+                    0,
+                    0,
+                )
+            except OSError as exc:
+                self._fail_unavailable(exc)
+            return
+        if self._inotify_descriptor < 0 or self._inotify_add_watch is None:
+            self._fail_unavailable()
+        mask = (
+            self._IN_MODIFY
+            | self._IN_CLOSE_WRITE
+            | self._IN_DELETE_SELF
+            | self._IN_MOVE_SELF
+        )
+        if self._stat.S_ISDIR(descriptor_info.st_mode):
+            mask |= (
+                self._IN_ATTRIB
+                | self._IN_MOVED_FROM
+                | self._IN_MOVED_TO
+                | self._IN_CREATE
+                | self._IN_DELETE
+            )
+        watch = self._inotify_add_watch(
+            self._inotify_descriptor,
+            self._os.fsencode(f"/proc/self/fd/{descriptor}"),
+            mask,
+        )
+        if watch < 0:
+            ctypes = __import__("ctypes")
+            error_number = ctypes.get_errno()
+            self._fail_unavailable(
+                OSError(error_number, self._os.strerror(error_number))
+            )
+
+    def _open_descriptor(self, path: str, state: tuple[int, ...]) -> int:
+        flags = getattr(
+            self._os,
+            "O_EVTONLY",
+            self._os.O_RDONLY,
+        ) | getattr(self._os, "O_CLOEXEC", 0)
+        if self._stat.S_ISDIR(state[2]):
+            flags |= getattr(self._os, "O_DIRECTORY", 0)
+        if hasattr(self._os, "O_NOFOLLOW"):
+            flags |= self._os.O_NOFOLLOW
+        descriptor = -1
+        try:
+            descriptor = self._os.open(path, flags)
+            descriptor_info = self._os.fstat(descriptor)
+            current_state = self._lstat_state(path)
+        except OSError as exc:
+            if descriptor >= 0:
+                self._os.close(descriptor)
+            self._fail_changed(exc)
+        if (
+            (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (state[0], state[1])
+            or current_state != state
+            or self._stat.S_IFMT(descriptor_info.st_mode)
+            != self._stat.S_IFMT(state[2])
+        ):
+            self._os.close(descriptor)
+            self._fail_changed()
+        return descriptor
+
+    def _add_existing_path(
+            self,
+            path: str,
+            expected_state: tuple[int, ...],
+    ) -> None:
+        if path in self._path_states:
+            if self._path_states[path] != expected_state:
+                self._fail_changed()
+            return
+        self._path_states[path] = expected_state
+        if not self._is_watchable_state(expected_state):
+            return
+        descriptor = self._open_descriptor(path, expected_state)
+        try:
+            self._watch_descriptor(descriptor)
+        except BaseException:
+            self._os.close(descriptor)
+            raise
+        self._descriptors.append(descriptor)
+        self._watched_paths.add(path)
+
+    def _add_authority_directory(
+            self,
+            path: str,
+            expected_identity: tuple[int, int],
+            *,
+            require_safe_permissions: bool,
+    ) -> None:
+        try:
+            state = self._lstat_state(path)
+        except OSError as exc:
+            self._fail_changed(exc)
+        if (
+            not self._stat.S_ISDIR(state[2])
+            or (state[0], state[1]) != expected_identity
+            or (
+                require_safe_permissions
+                and (
+                    self._os.stat(path, follow_symlinks=False).st_uid
+                    != self._os.getuid()
+                    or state[2] & 0o022
+                )
+            )
+        ):
+            self._fail_changed()
+        self._add_existing_path(path, state)
+
+    def _add_parent_directories(self, path: str) -> None:
+        parent = self._os.path.dirname(path)
+        try:
+            relative_parent = self._os.path.relpath(parent, self._root)
+        except ValueError as exc:
+            self._fail_changed(exc)
+        if relative_parent == self._os.pardir or relative_parent.startswith(
+                f"{self._os.pardir}{self._os.sep}"
+        ):
+            self._fail_changed()
+        current = self._root
+        if relative_parent != self._os.curdir:
+            for component in relative_parent.split(self._os.sep):
+                current = self._os.path.join(current, component)
+                try:
+                    state = self._lstat_state(current)
+                except OSError as exc:
+                    self._fail_changed(exc)
+                if not self._stat.S_ISDIR(state[2]):
+                    self._fail_changed()
+                if current not in self._path_states:
+                    self._ensure_descriptor_capacity(1)
+                    self._add_existing_path(current, state)
+
+    def add_worktree_paths(self, relative_paths: tuple[str, ...]) -> None:
+        unique_paths = tuple(dict.fromkeys(relative_paths))
+        self._ensure_descriptor_capacity(len(unique_paths))
+        for relative_path in unique_paths:
+            if (
+                not relative_path
+                or self._os.path.isabs(relative_path)
+                or any(
+                    component in {"", self._os.curdir, self._os.pardir}
+                    for component in relative_path.split(self._os.sep)
+                )
+            ):
+                self._fail_changed()
+            path = self._os.path.normpath(
+                self._os.path.join(self._root, relative_path)
+            )
+            try:
+                if self._os.path.commonpath((self._root, path)) != self._root:
+                    self._fail_changed()
+            except ValueError as exc:
+                self._fail_changed(exc)
+            self._add_parent_directories(path)
+            try:
+                state = self._lstat_state(path)
+            except FileNotFoundError:
+                self._missing_paths.add(path)
+                continue
+            except OSError as exc:
+                self._fail_changed(exc)
+            self._add_existing_path(path, state)
+        self.assert_quiet()
+
+    def add_worktree_tree(self, tree_root: str) -> None:
+        normalized_root = self._os.path.realpath(tree_root)
+        try:
+            if self._os.path.commonpath((self._root, normalized_root)) != self._root:
+                self._fail_changed()
+        except ValueError as exc:
+            self._fail_changed(exc)
+        if not self._os.path.isdir(normalized_root):
+            return
+        expected_states = self._collect_tree_states(normalized_root)
+        self._ensure_descriptor_capacity(
+            sum(
+                self._is_watchable_state(state)
+                for state in expected_states.values()
+            )
+        )
+        for path, expected_state in sorted(
+                expected_states.items(),
+                key=lambda entry: (entry[0].count(self._os.sep), entry[0]),
+        ):
+            self._add_existing_path(path, expected_state)
+        if self._collect_tree_states(normalized_root) != expected_states:
+            self._fail_changed()
+        self.assert_quiet()
+
+    def _events_changed(self) -> bool:
+        if self._darwin_watcher is not None:
+            try:
+                return bool(self._darwin_watcher.control(None, 64, 0))
+            except OSError as exc:
+                self._fail_unavailable(exc)
+        if self._inotify_descriptor < 0:
+            self._fail_unavailable()
+        changed = False
+        while True:
+            try:
+                data = self._os.read(self._inotify_descriptor, 64 * 1024)
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                self._fail_unavailable(exc)
+            if not data:
+                self._fail_unavailable()
+            changed = True
+        return changed
+
+    def assert_quiet(self) -> None:
+        changed = self._events_changed()
+        try:
+            try:
+                current_metadata_states = self._collect_metadata_states()
+            except self._failure_type:
+                changed = True
+            else:
+                if current_metadata_states != self._metadata_states:
+                    changed = True
+            for path, expected_state in self._path_states.items():
+                if self._lstat_state(path) != expected_state:
+                    changed = True
+            for path in self._missing_paths:
+                try:
+                    self._os.stat(path, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                changed = True
+        except OSError:
+            changed = True
+        if self._events_changed():
+            changed = True
+        if changed:
+            self._fail_changed()
+
+    def close(self) -> None:
+        if self._darwin_watcher is not None:
+            try:
+                self._darwin_watcher.close()
+            except OSError:
+                pass
+            self._darwin_watcher = None
+        if self._inotify_descriptor >= 0:
+            try:
+                self._os.close(self._inotify_descriptor)
+            except OSError:
+                pass
+            self._inotify_descriptor = -1
+        for descriptor in self._descriptors:
+            try:
+                self._os.close(descriptor)
+            except OSError:
+                pass
+        self._descriptors.clear()
+        self._watched_paths.clear()
+
+    def __del__(self) -> None:
+        self.close()
+
+
+_PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR: (
+    _RepositoryAuthorityMonitor | None
+) = None
+
+
+def _finalize_preregistration_bootstrap_authority() -> None:
+    global _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR
+    monitor = _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR
+    if monitor is None:
+        return
+    _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR = None
+    try:
+        monitor.assert_quiet()
+    finally:
+        monitor.close()
+
+
+def _fail_closed_preregistration_bootstrap_exit() -> None:
+    try:
+        _finalize_preregistration_bootstrap_authority()
+    except BaseException:
+        bootstrap_os = __import__("os")
+        try:
+            bootstrap_os.write(
+                2,
+                b"AV1 preregistration runner detected changed repository authority\n",
+            )
+        finally:
+            bootstrap_os._exit(1)
+
+
 def _assert_preregistration_import_tree_clean(
         repository_root: object = None,
-) -> None:
+        *,
+        retain_authority_monitor: bool = False,
+) -> object | None:
     bootstrap_sys = __import__("sys")
     bootstrap_os = __import__("os")
     bootstrap_stat = __import__("stat")
@@ -211,190 +724,46 @@ def _assert_preregistration_import_tree_clean(
             "AV1 preregistration runner refuses unsafe repository root"
         )
     root_identity = (root_info.st_dev, root_info.st_ino)
+    metadata_path = bootstrap_os.path.join(root, ".git")
+    metadata_info = bootstrap_os.stat(metadata_path, follow_symlinks=False)
+    metadata_files = (
+        (metadata_path,)
+        if bootstrap_stat.S_ISREG(metadata_info.st_mode)
+        else ()
+    )
+    authority_monitor = _RepositoryAuthorityMonitor(
+        root=root,
+        authority_directories=(
+            (root, root_identity, False),
+            (git_directory, git_directory_identity, True),
+            (git_common_directory, git_common_directory_identity, True),
+        ),
+        metadata_roots=(git_directory, git_common_directory),
+        metadata_files=metadata_files,
+        failure_type=RuntimeError,
+        changed_message=(
+            "AV1 preregistration runner detected changed Git metadata or import authority"
+        ),
+        unavailable_message=(
+            "AV1 preregistration Git authority monitoring is unavailable"
+        ),
+    )
+    for relative_root in ("mediaforce", "scripts"):
+        authority_monitor.add_worktree_tree(
+            bootstrap_os.path.join(root, relative_root)
+        )
 
     def git_output(*arguments: str) -> tuple[int, bytes]:
+        authority_monitor.assert_quiet()
         bootstrap_time = __import__("time")
-        git_descriptors: list[int] = []
-        darwin_watcher = None
-        inotify_descriptor = -1
-
-        def pinned_git_directory(
-                path: str,
-                expected_identity: tuple[int, int],
-                *,
-                require_metadata_permissions: bool,
-        ) -> str:
-            flags = bootstrap_os.O_RDONLY | getattr(bootstrap_os, "O_DIRECTORY", 0)
-            if hasattr(bootstrap_os, "O_NOFOLLOW"):
-                flags |= bootstrap_os.O_NOFOLLOW
-            descriptor = bootstrap_os.open(path, flags)
-            descriptor_info = bootstrap_os.fstat(descriptor)
-            if (
-                not bootstrap_stat.S_ISDIR(descriptor_info.st_mode)
-                or (descriptor_info.st_dev, descriptor_info.st_ino)
-                != expected_identity
-                or (
-                    require_metadata_permissions
-                    and (
-                        descriptor_info.st_uid != bootstrap_os.getuid()
-                        or descriptor_info.st_mode & 0o022
-                    )
-                )
-            ):
-                bootstrap_os.close(descriptor)
-                raise RuntimeError(
-                    "AV1 preregistration runner detected changed Git metadata"
-                )
-            bootstrap_os.set_inheritable(descriptor, True)
-            git_descriptors.append(descriptor)
-            return path
-
-        pinned_root = pinned_git_directory(
-            root,
-            root_identity,
-            require_metadata_permissions=False,
-        )
-        pinned_git_dir = pinned_git_directory(
-            git_directory,
-            git_directory_identity,
-            require_metadata_permissions=True,
-        )
-        pinned_git_common_dir = pinned_git_directory(
-            git_common_directory,
-            git_common_directory_identity,
-            require_metadata_permissions=True,
-        )
-
-        def start_authority_monitor() -> None:
-            nonlocal darwin_watcher, inotify_descriptor
-            if bootstrap_sys.platform == "darwin":
-                bootstrap_select = __import__("select")
-                watcher = bootstrap_select.kqueue()
-                flags = (
-                    bootstrap_select.KQ_NOTE_WRITE
-                    | bootstrap_select.KQ_NOTE_DELETE
-                    | bootstrap_select.KQ_NOTE_RENAME
-                    | bootstrap_select.KQ_NOTE_LINK
-                    | bootstrap_select.KQ_NOTE_REVOKE
-                    | bootstrap_select.KQ_NOTE_ATTRIB
-                )
-                watcher.control(
-                    [
-                        bootstrap_select.kevent(
-                            descriptor,
-                            filter=bootstrap_select.KQ_FILTER_VNODE,
-                            flags=(
-                                bootstrap_select.KQ_EV_ADD
-                                | bootstrap_select.KQ_EV_CLEAR
-                            ),
-                            fflags=flags,
-                        )
-                        for descriptor in git_descriptors
-                    ],
-                    0,
-                    0,
-                )
-                darwin_watcher = watcher
-                return
-            if (
-                not bootstrap_sys.platform.startswith("linux")
-                or not bootstrap_os.path.isdir("/proc/self/fd")
-            ):
-                raise RuntimeError(
-                    "AV1 preregistration Git authority monitoring is unavailable"
-                )
-            bootstrap_ctypes = __import__("ctypes")
-            libc = bootstrap_ctypes.CDLL(None, use_errno=True)
-            inotify_init1 = getattr(libc, "inotify_init1", None)
-            inotify_add_watch = getattr(libc, "inotify_add_watch", None)
-            if inotify_init1 is None or inotify_add_watch is None:
-                raise RuntimeError(
-                    "AV1 preregistration Git authority monitoring is unavailable"
-                )
-            inotify_init1.argtypes = (bootstrap_ctypes.c_int,)
-            inotify_init1.restype = bootstrap_ctypes.c_int
-            inotify_add_watch.argtypes = (
-                bootstrap_ctypes.c_int,
-                bootstrap_ctypes.c_char_p,
-                bootstrap_ctypes.c_uint32,
-            )
-            inotify_add_watch.restype = bootstrap_ctypes.c_int
-            descriptor = inotify_init1(
-                bootstrap_os.O_NONBLOCK
-                | getattr(bootstrap_os, "O_CLOEXEC", 0)
-            )
-            if descriptor < 0:
-                error_number = bootstrap_ctypes.get_errno()
-                raise RuntimeError(
-                    "AV1 preregistration Git authority monitoring is unavailable"
-                ) from OSError(
-                    error_number,
-                    bootstrap_os.strerror(error_number),
-                )
-            inotify_descriptor = descriptor
-            mask = (
-                0x00000004
-                | 0x00000040
-                | 0x00000080
-                | 0x00000100
-                | 0x00000200
-                | 0x00000400
-                | 0x00000800
-            )
-            for authority_descriptor in git_descriptors:
-                watch = inotify_add_watch(
-                    descriptor,
-                    bootstrap_os.fsencode(
-                        f"/proc/self/fd/{authority_descriptor}"
-                    ),
-                    mask,
-                )
-                if watch < 0:
-                    error_number = bootstrap_ctypes.get_errno()
-                    raise RuntimeError(
-                        "AV1 preregistration Git authority monitoring is unavailable"
-                    ) from OSError(
-                        error_number,
-                        bootstrap_os.strerror(error_number),
-                    )
-
-        def authority_monitor_changed() -> bool:
-            if darwin_watcher is not None:
-                try:
-                    return bool(darwin_watcher.control(None, 64, 0))
-                except OSError:
-                    return True
-            if inotify_descriptor < 0:
-                return True
-            changed = False
-            while True:
-                try:
-                    data = bootstrap_os.read(inotify_descriptor, 64 * 1024)
-                except BlockingIOError:
-                    break
-                except OSError:
-                    return True
-                if not data:
-                    return True
-                changed = True
-            return changed
-
-        try:
-            start_authority_monitor()
-            if authority_monitor_changed():
-                raise RuntimeError(
-                    "AV1 preregistration runner detected changed Git metadata"
-                )
-        except BaseException:
-            if darwin_watcher is not None:
-                darwin_watcher.close()
-            if inotify_descriptor >= 0:
-                bootstrap_os.close(inotify_descriptor)
-            for descriptor in git_descriptors:
-                bootstrap_os.close(descriptor)
-            raise
         read_descriptor, write_descriptor = bootstrap_os.pipe()
-        process_id = bootstrap_os.fork()
+        try:
+            process_id = bootstrap_os.fork()
+        except BaseException:
+            bootstrap_os.close(read_descriptor)
+            bootstrap_os.close(write_descriptor)
+            authority_monitor.assert_quiet()
+            raise
         if process_id == 0:
             try:
                 bootstrap_os.close(read_descriptor)
@@ -408,7 +777,7 @@ def _assert_preregistration_import_tree_clean(
                 bootstrap_os.close(write_descriptor)
                 if null_descriptor > 2:
                     bootstrap_os.close(null_descriptor)
-                bootstrap_os.chdir(pinned_root)
+                bootstrap_os.chdir(root)
                 bootstrap_os.execve(
                     "/usr/bin/git",
                     (
@@ -425,8 +794,8 @@ def _assert_preregistration_import_tree_clean(
                         "GIT_ATTR_NOSYSTEM": "1",
                         "GIT_CONFIG_GLOBAL": "/dev/null",
                         "GIT_CONFIG_NOSYSTEM": "1",
-                        "GIT_DIR": pinned_git_dir,
-                        "GIT_COMMON_DIR": pinned_git_common_dir,
+                        "GIT_DIR": git_directory,
+                        "GIT_COMMON_DIR": git_common_directory,
                         "GIT_NO_REPLACE_OBJECTS": "1",
                         "GIT_OPTIONAL_LOCKS": "0",
                         "GIT_WORK_TREE": root,
@@ -499,42 +868,7 @@ def _assert_preregistration_import_tree_clean(
             raise
         finally:
             bootstrap_os.close(read_descriptor)
-            metadata_changed = authority_monitor_changed()
-            for descriptor, path, expected_identity in zip(
-                    git_descriptors,
-                    (root, git_directory, git_common_directory),
-                    (
-                        root_identity,
-                        git_directory_identity,
-                        git_common_directory_identity,
-                    ),
-                    strict=True,
-            ):
-                try:
-                    descriptor_info = bootstrap_os.fstat(descriptor)
-                    path_info = bootstrap_os.stat(path, follow_symlinks=False)
-                    if (
-                        descriptor_info.st_dev,
-                        descriptor_info.st_ino,
-                    ) != expected_identity or (
-                        path_info.st_dev,
-                        path_info.st_ino,
-                    ) != expected_identity:
-                        metadata_changed = True
-                except OSError:
-                    metadata_changed = True
-                finally:
-                    bootstrap_os.close(descriptor)
-            if authority_monitor_changed():
-                metadata_changed = True
-            if darwin_watcher is not None:
-                darwin_watcher.close()
-            if inotify_descriptor >= 0:
-                bootstrap_os.close(inotify_descriptor)
-            if metadata_changed:
-                raise RuntimeError(
-                    "AV1 preregistration runner detected changed Git metadata"
-                )
+            authority_monitor.assert_quiet()
         if process_status is None:
             raise RuntimeError(
                 "AV1 preregistration repository inspection did not finish"
@@ -740,10 +1074,26 @@ def _assert_preregistration_import_tree_clean(
             raise RuntimeError(
                 "AV1 preregistration runner refuses preloaded mediaforce modules"
             )
+    authority_monitor.assert_quiet()
+    if retain_authority_monitor:
+        return authority_monitor
+    authority_monitor.close()
+    return None
 
 
 if __name__ == "__main__":
-    _assert_preregistration_import_tree_clean()
+    _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR = (
+        _assert_preregistration_import_tree_clean(
+            retain_authority_monitor=True,
+        )
+    )
+    if _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR is None:
+        raise RuntimeError(
+            "AV1 preregistration runner could not retain repository authority"
+        )
+    __import__("atexit").register(
+        _fail_closed_preregistration_bootstrap_exit
+    )
     import importlib.util as _bootstrap_importlib_util
 
     _bootstrap_package_path = (
@@ -783,7 +1133,6 @@ import json
 import os
 from pathlib import Path
 import pwd
-import select
 import shutil
 import stat
 import subprocess
@@ -2333,6 +2682,7 @@ def _repository_review_identity(
 ) -> tuple[str, str]:
     root = (REPOSITORY_ROOT if repository_root is None else repository_root).resolve()
     git_environment, git_authority = _review_git_context(repository_root=root)
+    git_monitor = _ReviewGitAuthorityMonitor(git_authority)
 
     def resolve_identity() -> tuple[str, str]:
         identity = _run_review_git_process(
@@ -2341,6 +2691,7 @@ def _repository_review_identity(
             repository_root=root,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
         )
         object_ids = tuple(identity.stdout.splitlines())
         if (
@@ -2353,21 +2704,13 @@ def _repository_review_identity(
             )
         return object_ids[0], object_ids[1]
 
-    def assert_clean_state(object_ids: tuple[str, str]) -> None:
-        index_state = _run_review_git_process(
-            _review_git_command("ls-files", "-v", "-z"),
-            process_controller=process_controller,
-            repository_root=root,
-            git_environment=git_environment,
-            git_authority=git_authority,
-        )
-        if index_state.returncode != 0:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review repository index state is unavailable"
-            )
+    def assert_clean_state(
+            object_ids: tuple[str, str],
+            index_output: str,
+    ) -> None:
         if any(
             not record.startswith("H ")
-            for record in index_state.stdout.split("\0")
+            for record in index_output.split("\0")
             if record
         ):
             raise AV1ValidationDerivationError(
@@ -2388,6 +2731,7 @@ def _repository_review_identity(
                 repository_root=root,
                 git_environment=git_environment,
                 git_authority=git_authority,
+                git_monitor=git_monitor,
             )
             if tracked_state.returncode == 1:
                 raise AV1ValidationDerivationError(
@@ -2408,6 +2752,7 @@ def _repository_review_identity(
             repository_root=root,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
         )
         if repository_state.returncode != 0:
             raise AV1ValidationDerivationError(
@@ -2432,6 +2777,7 @@ def _repository_review_identity(
             repository_root=root,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
         )
         if ignored_implementation_state.returncode != 0:
             raise AV1ValidationDerivationError(
@@ -2442,15 +2788,48 @@ def _repository_review_identity(
                 "AV1 derivation repository has ignored implementation artifacts"
             )
 
-    object_ids = resolve_identity()
-    assert_clean_state(object_ids)
-    verified_object_ids = resolve_identity()
-    if verified_object_ids != object_ids:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository identity changed during verification"
+    try:
+        _assert_review_git_authority(root, git_authority)
+        git_monitor.assert_quiet()
+        index_output = _prime_review_worktree_monitor(
+            repository_root=root,
+            process_controller=process_controller,
+            git_environment=git_environment,
+            git_authority=git_authority,
+            git_monitor=git_monitor,
+            verbose=True,
         )
-    assert_clean_state(verified_object_ids)
-    return verified_object_ids
+        object_ids = resolve_identity()
+        assert_clean_state(object_ids, index_output)
+        verified_object_ids = resolve_identity()
+        if verified_object_ids != object_ids:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository identity changed during verification"
+            )
+        verified_index_output = _prime_review_worktree_monitor(
+            repository_root=root,
+            process_controller=process_controller,
+            git_environment=git_environment,
+            git_authority=git_authority,
+            git_monitor=git_monitor,
+            verbose=True,
+        )
+        if verified_index_output != index_output:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository identity changed during verification"
+            )
+        assert_clean_state(verified_object_ids, verified_index_output)
+        git_monitor.assert_quiet()
+        _assert_review_git_authority(root, git_authority)
+        git_monitor.assert_quiet()
+        return verified_object_ids
+    finally:
+        try:
+            git_monitor.assert_quiet()
+            _assert_review_git_authority(root, git_authority)
+            git_monitor.assert_quiet()
+        finally:
+            git_monitor.close()
 
 
 def _live_repository_identity() -> tuple[str, str]:
@@ -2586,173 +2965,39 @@ _ReviewGitAuthoritySnapshot: TypeAlias = tuple[
 ]
 
 
-class _ReviewGitAuthorityMonitor:
-    _IN_ATTRIB = 0x00000004
-    _IN_MOVED_FROM = 0x00000040
-    _IN_MOVED_TO = 0x00000080
-    _IN_CREATE = 0x00000100
-    _IN_DELETE = 0x00000200
-    _IN_DELETE_SELF = 0x00000400
-    _IN_MOVE_SELF = 0x00000800
-
+class _ReviewGitAuthorityMonitor(_RepositoryAuthorityMonitor):
     def __init__(self, authority: _ReviewGitAuthoritySnapshot) -> None:
-        self._descriptors: list[int] = []
-        self._darwin_watcher = None
-        self._inotify_descriptor = -1
+        root_entry, git_entry, common_entry = authority
+        metadata_path = root_entry[0] / ".git"
         try:
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            for path, expected_identity in authority:
-                descriptor = os.open(path, flags)
-                self._descriptors.append(descriptor)
-                descriptor_info = os.fstat(descriptor)
-                path_info = path.lstat()
-                if (
-                    not stat.S_ISDIR(descriptor_info.st_mode)
-                    or not stat.S_ISDIR(path_info.st_mode)
-                    or stat.S_ISLNK(path_info.st_mode)
-                    or (descriptor_info.st_dev, descriptor_info.st_ino)
-                    != expected_identity
-                    or (path_info.st_dev, path_info.st_ino)
-                    != expected_identity
-                ):
-                    raise AV1ValidationDerivationError(
-                        "AV1 derivation review Git authority changed"
-                    )
-            self._start_monitoring()
-            self.assert_quiet()
-        except BaseException:
-            self.close()
-            raise
-
-    def _start_monitoring(self) -> None:
-        if sys.platform == "darwin":
-            watcher = select.kqueue()
-            flags = (
-                select.KQ_NOTE_WRITE
-                | select.KQ_NOTE_DELETE
-                | select.KQ_NOTE_RENAME
-                | select.KQ_NOTE_LINK
-                | select.KQ_NOTE_REVOKE
-                | select.KQ_NOTE_ATTRIB
-            )
-            watcher.control(
-                [
-                    select.kevent(
-                        descriptor,
-                        filter=select.KQ_FILTER_VNODE,
-                        flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
-                        fflags=flags,
-                    )
-                    for descriptor in self._descriptors
-                ],
-                0,
-                0,
-            )
-            self._darwin_watcher = watcher
-            return
-        if not sys.platform.startswith("linux") or not Path(
-                "/proc/self/fd"
-        ).is_dir():
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review Git authority monitoring is unavailable"
-            )
-        libc = ctypes.CDLL(None, use_errno=True)
-        inotify_init1 = getattr(libc, "inotify_init1", None)
-        inotify_add_watch = getattr(libc, "inotify_add_watch", None)
-        if inotify_init1 is None or inotify_add_watch is None:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review Git authority monitoring is unavailable"
-            )
-        inotify_init1.argtypes = (ctypes.c_int,)
-        inotify_init1.restype = ctypes.c_int
-        inotify_add_watch.argtypes = (
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint32,
-        )
-        inotify_add_watch.restype = ctypes.c_int
-        descriptor = inotify_init1(
-            os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
-        )
-        if descriptor < 0:
-            error_number = ctypes.get_errno()
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review Git authority monitoring is unavailable"
-            ) from OSError(error_number, os.strerror(error_number))
-        self._inotify_descriptor = descriptor
-        mask = (
-            self._IN_ATTRIB
-            | self._IN_MOVED_FROM
-            | self._IN_MOVED_TO
-            | self._IN_CREATE
-            | self._IN_DELETE
-            | self._IN_DELETE_SELF
-            | self._IN_MOVE_SELF
-        )
-        for authority_descriptor in self._descriptors:
-            watch = inotify_add_watch(
-                descriptor,
-                os.fsencode(f"/proc/self/fd/{authority_descriptor}"),
-                mask,
-            )
-            if watch < 0:
-                error_number = ctypes.get_errno()
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review Git authority monitoring is unavailable"
-                ) from OSError(error_number, os.strerror(error_number))
-
-    def assert_quiet(self) -> None:
-        try:
-            if self._darwin_watcher is not None:
-                if self._darwin_watcher.control(None, 64, 0):
-                    raise AV1ValidationDerivationError(
-                        "AV1 derivation review Git authority changed"
-                    )
-                return
-            if self._inotify_descriptor < 0:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review Git authority monitoring is unavailable"
-                )
-            changed = False
-            while True:
-                try:
-                    data = os.read(self._inotify_descriptor, 64 * 1024)
-                except BlockingIOError:
-                    break
-                if not data:
-                    changed = True
-                    break
-                changed = True
-            if changed:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review Git authority changed"
-                )
+            metadata_info = metadata_path.lstat()
         except OSError as exc:
             raise AV1ValidationDerivationError(
-                "AV1 derivation review Git authority monitoring is unavailable"
+                "AV1 derivation review Git authority is unavailable"
             ) from exc
-
-    def close(self) -> None:
-        if self._darwin_watcher is not None:
-            try:
-                self._darwin_watcher.close()
-            except OSError:
-                pass
-            self._darwin_watcher = None
-        if self._inotify_descriptor >= 0:
-            try:
-                os.close(self._inotify_descriptor)
-            except OSError:
-                pass
-            self._inotify_descriptor = -1
-        for descriptor in self._descriptors:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-        self._descriptors.clear()
+        metadata_files = (
+            (str(metadata_path),)
+            if stat.S_ISREG(metadata_info.st_mode)
+            else ()
+        )
+        super().__init__(
+            root=str(root_entry[0]),
+            authority_directories=tuple(
+                (
+                    str(path),
+                    expected_identity,
+                    path != root_entry[0],
+                )
+                for path, expected_identity in authority
+            ),
+            metadata_roots=(str(git_entry[0]), str(common_entry[0])),
+            metadata_files=metadata_files,
+            failure_type=AV1ValidationDerivationError,
+            changed_message="AV1 derivation review Git authority changed",
+            unavailable_message=(
+                "AV1 derivation review Git authority monitoring is unavailable"
+            ),
+        )
 
 
 def _review_git_authority_snapshot(
@@ -2841,6 +3086,49 @@ def _review_git_context(
     return environment, authority
 
 
+@contextmanager
+def _review_git_transaction(
+        *,
+        repository_root: Path,
+) -> Iterator[
+    tuple[
+        dict[str, str],
+        _ReviewGitAuthoritySnapshot,
+        _ReviewGitAuthorityMonitor,
+    ]
+]:
+    git_environment, git_authority = _review_git_context(
+        repository_root=repository_root
+    )
+    monitor = _ReviewGitAuthorityMonitor(git_authority)
+    try:
+        _assert_review_git_authority(repository_root, git_authority)
+        monitor.assert_quiet()
+        try:
+            yield git_environment, git_authority, monitor
+        except BaseException as exc:
+            for assertion in (
+                lambda: _assert_review_git_authority(
+                    repository_root,
+                    git_authority,
+                ),
+                monitor.assert_quiet,
+            ):
+                try:
+                    assertion()
+                except AV1ValidationDerivationError as authority_error:
+                    exc.add_note(
+                        "AV1 derivation review Git transaction authority also changed: "
+                        f"{authority_error}"
+                    )
+            raise
+        monitor.assert_quiet()
+        _assert_review_git_authority(repository_root, git_authority)
+        monitor.assert_quiet()
+    finally:
+        monitor.close()
+
+
 def _review_git_environment(*, repository_root: Path) -> dict[str, str]:
     environment, _authority = _review_git_context(
         repository_root=repository_root
@@ -2870,23 +3158,17 @@ def _run_review_git(
         *,
         repository_root: Path,
         process_controller: ManagedProcessController,
-        git_environment: dict[str, str] | None = None,
-        git_authority: _ReviewGitAuthoritySnapshot | None = None,
+        git_environment: dict[str, str],
+        git_authority: _ReviewGitAuthoritySnapshot,
+        git_monitor: _ReviewGitAuthorityMonitor,
         binary: bool = False,
 ) -> str | bytes:
-    current_environment, current_authority = _review_git_context(
-        repository_root=repository_root
-    )
-    if git_environment is None:
-        git_environment = current_environment
-    elif git_environment != current_environment:
+    if git_environment != _review_git_environment_for_authority(git_authority):
         raise AV1ValidationDerivationError(
             "AV1 derivation review Git environment drifted"
         )
-    if git_authority is None:
-        git_authority = current_authority
-    else:
-        _assert_review_git_authority(repository_root, git_authority)
+    _assert_review_git_authority(repository_root, git_authority)
+    git_monitor.assert_quiet()
     try:
         completed = _run_review_git_process(
             _review_git_command(*arguments),
@@ -2894,6 +3176,7 @@ def _run_review_git(
             repository_root=repository_root,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
             text=not binary,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -2925,44 +3208,113 @@ def _run_review_git_process(
         process_controller: ManagedProcessController,
         git_environment: dict[str, str],
         git_authority: _ReviewGitAuthoritySnapshot,
+        git_monitor: _ReviewGitAuthorityMonitor,
         text: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    monitor = _ReviewGitAuthorityMonitor(git_authority)
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    _assert_review_git_authority(repository_root, git_authority)
+    git_monitor.assert_quiet()
     try:
-        _assert_review_git_authority(repository_root, git_authority)
-        monitor.assert_quiet()
-        try:
-            completed = run_command(
-                command,
-                process_controller=process_controller,
-                cwd=repository_root,
-                env=git_environment,
-                text=text,
-                timeout=15,
-                check=False,
+        completed = run_command(
+            command,
+            process_controller=process_controller,
+            cwd=repository_root,
+            env=git_environment,
+            text=text,
+            timeout=15,
+            check=False,
+        )
+    except BaseException as exc:
+        for assertion in (
+            lambda: _assert_review_git_authority(
+                repository_root,
+                git_authority,
+            ),
+            git_monitor.assert_quiet,
+        ):
+            try:
+                assertion()
+            except AV1ValidationDerivationError as authority_error:
+                exc.add_note(
+                    "AV1 derivation review Git authority also changed: "
+                    f"{authority_error}"
+                )
+        raise
+    git_monitor.assert_quiet()
+    _assert_review_git_authority(repository_root, git_authority)
+    git_monitor.assert_quiet()
+    return completed
+
+
+def _review_git_tracked_paths(
+        output: str,
+        *,
+        verbose: bool,
+) -> tuple[str, ...]:
+    paths: list[str] = []
+    for record in output.split("\0"):
+        if not record:
+            continue
+        if verbose:
+            if len(record) < 3 or record[1] != " ":
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation review repository has unsafe index state"
+                )
+            path = record[2:]
+        else:
+            path = record
+        if not path:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository index state is unavailable"
             )
-        except BaseException as exc:
-            for assertion in (
-                lambda: _assert_review_git_authority(
-                    repository_root,
-                    git_authority,
-                ),
-                monitor.assert_quiet,
-            ):
-                try:
-                    assertion()
-                except AV1ValidationDerivationError as authority_error:
-                    exc.add_note(
-                        "AV1 derivation review Git authority also changed: "
-                        f"{authority_error}"
-                    )
-            raise
-        monitor.assert_quiet()
-        _assert_review_git_authority(repository_root, git_authority)
-        monitor.assert_quiet()
-        return completed
-    finally:
-        monitor.close()
+        paths.append(path)
+    return tuple(paths)
+
+
+def _prime_review_worktree_monitor(
+        *,
+        repository_root: Path,
+        process_controller: ManagedProcessController,
+        git_environment: dict[str, str],
+        git_authority: _ReviewGitAuthoritySnapshot,
+        git_monitor: _ReviewGitAuthorityMonitor,
+        verbose: bool,
+) -> str:
+    arguments = ["ls-files", "--cached", "-z"]
+    if verbose:
+        arguments.insert(2, "-v")
+    command = _review_git_command(*arguments)
+    initial = _run_review_git_process(
+        command,
+        process_controller=process_controller,
+        repository_root=repository_root,
+        git_environment=git_environment,
+        git_authority=git_authority,
+        git_monitor=git_monitor,
+    )
+    if initial.returncode != 0 or not isinstance(initial.stdout, str):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository index state is unavailable"
+        )
+    git_monitor.add_worktree_paths(
+        _review_git_tracked_paths(initial.stdout, verbose=verbose)
+    )
+    verified = _run_review_git_process(
+        command,
+        process_controller=process_controller,
+        repository_root=repository_root,
+        git_environment=git_environment,
+        git_authority=git_authority,
+        git_monitor=git_monitor,
+    )
+    if verified.returncode != 0 or not isinstance(verified.stdout, str):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository index state is unavailable"
+        )
+    if verified.stdout != initial.stdout:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review Git authority changed"
+        )
+    return verified.stdout
 
 
 def _review_git_commit_tree(
@@ -2972,6 +3324,7 @@ def _review_git_commit_tree(
         process_controller: ManagedProcessController,
         git_environment: dict[str, str],
         git_authority: _ReviewGitAuthoritySnapshot,
+        git_monitor: _ReviewGitAuthorityMonitor,
 ) -> str:
     payload = _run_review_git(
         ["cat-file", "commit", commit],
@@ -2979,6 +3332,7 @@ def _review_git_commit_tree(
         process_controller=process_controller,
         git_environment=git_environment,
         git_authority=git_authority,
+        git_monitor=git_monitor,
         binary=True,
     )
     if not isinstance(payload, bytes):
@@ -3014,15 +3368,46 @@ def _build_av1_validation_derivation_review_bundle(
         process_controller: ManagedProcessController,
         repository_root: Path = REPOSITORY_ROOT,
 ) -> dict[str, object]:
-    git_environment, git_authority = _review_git_context(
-        repository_root=repository_root
-    )
+    root = repository_root.resolve()
+    with _review_git_transaction(repository_root=root) as (
+        git_environment,
+        git_authority,
+        git_monitor,
+    ):
+        _prime_review_worktree_monitor(
+            repository_root=root,
+            process_controller=process_controller,
+            git_environment=git_environment,
+            git_authority=git_authority,
+            git_monitor=git_monitor,
+            verbose=False,
+        )
+        return _build_av1_validation_derivation_review_bundle_transaction(
+            claim=claim,
+            process_controller=process_controller,
+            repository_root=root,
+            git_environment=git_environment,
+            git_authority=git_authority,
+            git_monitor=git_monitor,
+        )
+
+
+def _build_av1_validation_derivation_review_bundle_transaction(
+        *,
+        claim: AV1ValidationDerivationReviewClaim,
+        process_controller: ManagedProcessController,
+        repository_root: Path,
+        git_environment: dict[str, str],
+        git_authority: _ReviewGitAuthoritySnapshot,
+        git_monitor: _ReviewGitAuthorityMonitor,
+) -> dict[str, object]:
     resolved_tree = _review_git_commit_tree(
         claim.repository_commit,
         repository_root=repository_root,
         process_controller=process_controller,
         git_environment=git_environment,
         git_authority=git_authority,
+        git_monitor=git_monitor,
     )
     if resolved_tree != claim.repository_tree:
         raise AV1ValidationDerivationError(
@@ -3047,6 +3432,7 @@ def _build_av1_validation_derivation_review_bundle(
             process_controller=process_controller,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
             binary=True,
         )
         records = [record for record in listing.split(b"\0") if record]
@@ -3078,6 +3464,7 @@ def _build_av1_validation_derivation_review_bundle(
             process_controller=process_controller,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
         )
         try:
             blob_size = int(raw_size.strip())
@@ -3098,6 +3485,7 @@ def _build_av1_validation_derivation_review_bundle(
             process_controller=process_controller,
             git_environment=git_environment,
             git_authority=git_authority,
+            git_monitor=git_monitor,
             binary=True,
         )
         if len(blob) != blob_size:
@@ -3714,4 +4102,7 @@ def _validation_payload(manifest: ValidationManifest) -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        _finalize_preregistration_bootstrap_authority()

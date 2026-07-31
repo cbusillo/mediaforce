@@ -2083,6 +2083,61 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     _stdout, stderr = swapper.communicate()
                 self.assertEqual(swapper.returncode, 0, stderr)
 
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires kqueue or inotify",
+    )
+    def test_preregistration_bootstrap_rejects_package_swap_after_last_probe(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            scripts_directory = repository / "scripts"
+            package_directory = repository / "mediaforce"
+            scripts_directory.mkdir(parents=True)
+            package_directory.mkdir()
+            (scripts_directory / "runner.py").write_text(
+                "VALUE = 'tracked'\n",
+                encoding="utf-8",
+            )
+            (package_directory / "__init__.py").write_text(
+                '"""fixture"""\n',
+                encoding="utf-8",
+            )
+            for arguments in (
+                ("init", "-q"),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "bootstrap package fixture"),
+            ):
+                _run_test_git(repository, *arguments)
+
+            monitor = verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                repository,
+                retain_authority_monitor=True,
+            )
+            self.assertIsInstance(
+                monitor,
+                verify_av1_cold_start_preregistration._RepositoryAuthorityMonitor,
+            )
+            assert isinstance(
+                monitor,
+                verify_av1_cold_start_preregistration._RepositoryAuthorityMonitor,
+            )
+            original_package = repository / "mediaforce-original"
+            try:
+                package_directory.rename(original_package)
+                package_directory.mkdir()
+                package_directory.rmdir()
+                original_package.rename(package_directory)
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "detected changed Git metadata",
+                ):
+                    monitor.assert_quiet()
+            finally:
+                monitor.close()
+
     def test_preregistration_bootstrap_rejects_foreign_git_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -4018,6 +4073,73 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
             self.assertTrue(replaced)
 
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires kqueue or inotify",
+    )
+    def test_review_git_identity_rejects_in_place_loose_ref_rewrite_and_restore(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            (repository / "tracked.txt").write_text(
+                "authoritative\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", "tracked.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "loose ref")
+            branch = _run_test_git(repository, "symbolic-ref", "--short", "HEAD")
+            loose_ref = repository / ".git" / "refs" / "heads" / branch
+            original = loose_ref.read_bytes()
+            original_identity = (loose_ref.stat().st_dev, loose_ref.stat().st_ino)
+            rewritten = False
+            real_run_command = verify_av1_cold_start_preregistration.run_command
+
+            def rewrite_and_restore_loose_ref(
+                    *args: object,
+                    **kwargs: object,
+            ) -> object:
+                nonlocal rewritten
+                completed = real_run_command(*args, **kwargs)
+                if not rewritten:
+                    replacement = b"0" * len(original.rstrip(b"\n")) + b"\n"
+                    with loose_ref.open("r+b", buffering=0) as handle:
+                        handle.seek(0)
+                        handle.write(replacement)
+                        handle.truncate()
+                        os.fsync(handle.fileno())
+                        handle.seek(0)
+                        handle.write(original)
+                        handle.truncate()
+                        os.fsync(handle.fileno())
+                    rewritten = True
+                return completed
+
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "run_command",
+                    side_effect=rewrite_and_restore_loose_ref,
+                ),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "Git authority changed",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
+            self.assertTrue(rewritten)
+            self.assertEqual(loose_ref.read_bytes(), original)
+            self.assertEqual(
+                (loose_ref.stat().st_dev, loose_ref.stat().st_ino),
+                original_identity,
+            )
+
     def test_review_git_probes_ignore_replace_refs_for_identity_and_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory) / "repository"
@@ -4359,6 +4481,97 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "untracked-secret",
                     canonical_json_bytes(bundle).decode("utf-8"),
                 )
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires kqueue or inotify",
+    )
+    def test_review_transactions_reuse_one_monitor_and_skip_ignored_dependencies(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            (repository / ".gitignore").write_text(
+                "node_modules/\n",
+                encoding="utf-8",
+            )
+            (repository / "allowed.txt").write_text(
+                "authoritative review text\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", ".gitignore", "allowed.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "transactions")
+            dependency_tree = repository / "node_modules" / "dependency"
+            dependency_tree.mkdir(parents=True)
+            for index in range(32):
+                (dependency_tree / f"artifact-{index}.js").write_text(
+                    "ignored dependency\n",
+                    encoding="utf-8",
+                )
+            commit = _run_test_git(repository, "rev-parse", "HEAD")
+            tree = _run_test_git(repository, "rev-parse", "HEAD^{tree}")
+            claim = SimpleNamespace(
+                lane="architecture",
+                repository_commit=commit,
+                repository_tree=tree,
+            )
+            real_monitor = (
+                verify_av1_cold_start_preregistration._ReviewGitAuthorityMonitor
+            )
+            instances: list[object] = []
+            watched_snapshots: list[tuple[str, ...]] = []
+
+            class TrackingMonitor(real_monitor):
+                def __init__(self, authority: object) -> None:
+                    self._recorded_for_test = False
+                    instances.append(self)
+                    super().__init__(authority)
+
+                def close(self) -> None:
+                    if not self._recorded_for_test:
+                        watched_snapshots.append(tuple(self._watched_paths))
+                        self._recorded_for_test = True
+                    super().close()
+
+            with (
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "_ReviewGitAuthorityMonitor",
+                    TrackingMonitor,
+                ),
+                patch.object(
+                    verify_av1_cold_start_preregistration,
+                    "AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST",
+                    {"architecture": ("allowed.txt",)},
+                ),
+            ):
+                self.assertEqual(
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    ),
+                    (commit, tree),
+                )
+                bundle = verify_av1_cold_start_preregistration._build_av1_validation_derivation_review_bundle(
+                    claim=claim,
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
+            self.assertEqual(bundle["repository_commit"], commit)
+            self.assertEqual(len(instances), 2)
+            self.assertEqual(len(watched_snapshots), 2)
+            dependency_prefix = f"{dependency_tree}{os.sep}"
+            self.assertTrue(all(
+                not any(
+                    path == str(dependency_tree)
+                    or path.startswith(dependency_prefix)
+                    for path in watched_paths
+                )
+                for watched_paths in watched_snapshots
+            ))
 
     def test_structured_response_and_evidence_reject_binding_decision_and_path_drift(
             self,
