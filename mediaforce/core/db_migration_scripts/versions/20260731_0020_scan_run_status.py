@@ -20,6 +20,10 @@ def upgrade() -> None:
         op.add_column("scan_runs", sa.Column("status", sa.Text(), nullable=False, server_default="running"))
     if not _has_column("scan_runs", "error"):
         op.add_column("scan_runs", sa.Column("error", sa.Text(), nullable=True))
+    op.execute(sa.text(
+        "UPDATE scan_runs SET status = 'completed' "
+        "WHERE completed_at IS NOT NULL AND status = 'running'"
+    ))
 
 
 def downgrade() -> None:

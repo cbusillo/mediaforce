@@ -1163,6 +1163,36 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 raw_connection.execute("ALTER TABLE scan_runs DROP COLUMN status")
                 raw_connection.execute("ALTER TABLE scan_runs DROP COLUMN error")
                 raw_connection.execute(
+                    """
+                    INSERT INTO scan_runs (
+                        scan_id,
+                        started_at,
+                        completed_at,
+                        owner_pid,
+                        last_progress_at,
+                        roots_json,
+                        scope,
+                        prefixes_json,
+                        file_count,
+                        reprobed_count,
+                        unchanged_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "historical-completed-scan",
+                        "2026-07-30T12:00:00+00:00",
+                        "2026-07-30T12:05:00+00:00",
+                        None,
+                        "2026-07-30T12:05:00+00:00",
+                        '["tv"]',
+                        "full",
+                        None,
+                        10,
+                        4,
+                        6,
+                    ),
+                )
+                raw_connection.execute(
                     "UPDATE alembic_version SET version_num = ?",
                     ("20260726_0019",),
                 )
@@ -1173,10 +1203,16 @@ class DatabaseRuntimeTests(unittest.TestCase):
             with open_db(db_path) as connection:
                 version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
                 columns = {str(column["name"]) for column in inspect(connection).get_columns("scan_runs")}
+                historical_status = connection.execute(
+                    select(scan_runs.c.status).where(
+                        scan_runs.c.scan_id == "historical-completed-scan"
+                    )
+                ).scalar_one()
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("status", columns)
             self.assertIn("error", columns)
+            self.assertEqual(historical_status, "completed")
 
     def test_open_db_adds_media_fingerprint_column_to_previous_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
