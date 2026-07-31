@@ -471,6 +471,154 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
         )
 
+    def _matching_repository_identity(self) -> tuple[str, str]:
+        return self.plan.repository_commit, self.plan.repository_tree
+
+    def _run_assignment_with_repository_drift(
+            self,
+            *,
+            drift_phase: Literal["before_media", "before_publication"],
+    ) -> bool:
+        assignment = self.plan.assignments[0]
+        source = next(
+            item
+            for item in self.partition.inventory_sources
+            if item.local_item_id == assignment.local_item_id
+        )
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        terminal_records_directory = self.runtime_artifact_root / "terminal-records"
+        source_commitment = av1_validation_derivation_plan_source_commitment(
+            self.plan,
+            assignment.assignment_id,
+        )
+        pinned_source = SimpleNamespace(
+            path=self.runtime_artifact_root / "source-snapshots" / "source.mkv",
+            content_sha256=source_commitment.source_sha256,
+            size_bytes=source_commitment.source_size_bytes,
+            content_version_fingerprint=source.source_identity,
+        )
+        sample_item = {
+            "library_item_id": assignment.local_item_id,
+            "source_size_bytes": SOURCE_SIZE_BYTES,
+            "resolved_policy": {},
+        }
+        calibration_payload = self._review_pending_attempt().calibration_payload()
+        live_identity = [self.plan.repository_commit, self.plan.repository_tree]
+        drifted_identity = ["b" * 40, "c" * 40]
+        calibration_ran = False
+
+        def repository_identity_resolver() -> tuple[str, str]:
+            return live_identity[0], live_identity[1]
+
+        @contextmanager
+        def pinned_source_context(**_kwargs: object) -> Iterator[object]:
+            if drift_phase == "before_media":
+                live_identity[:] = drifted_identity
+            yield pinned_source
+
+        def run_calibration(**_kwargs: object) -> tuple[dict[str, object], None]:
+            nonlocal calibration_ran
+            calibration_ran = True
+            return dict(calibration_payload), None
+
+        def build_attempt_with_drift(**kwargs: object) -> AV1ValidationDerivationAttempt:
+            attempt = build_av1_validation_derivation_attempt(**kwargs)
+            live_identity[:] = drifted_identity
+            return attempt
+
+        attempt_builder = (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.build_av1_validation_derivation_attempt",
+                side_effect=build_attempt_with_drift,
+            )
+            if drift_phase == "before_publication"
+            else nullcontext()
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_readonly_db",
+                return_value=nullcontext(object()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_partition_inventory",
+                return_value=SimpleNamespace(
+                    sources=self.sources,
+                    expectations=self.expectations,
+                ),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                return_value=SimpleNamespace(free=100 * 1024 ** 3),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.purge_transient_artifacts",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(SimpleNamespace()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_sample_item",
+                return_value=sample_item,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._bind_derivation_intent",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._validate_bound_sample_item",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.snapshot_staged_artifact",
+                return_value=None,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.restore_staged_artifact",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.resolve_item_source_path",
+                return_value=Path("/private/source.mkv"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._pinned_derivation_source",
+                side_effect=pinned_source_context,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.run_sampled_calibration",
+                side_effect=run_calibration,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=calibration_payload["review_artifact_fingerprint"],
+            ),
+            attempt_builder,
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "repository snapshot drifted",
+            ),
+        ):
+            _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                repository_identity_resolver=repository_identity_resolver,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_directory,
+                terminal_records_directory=terminal_records_directory,
+                now_iso=lambda: "2026-07-30T01:00:00Z",
+            )
+        self.assertEqual(list(attempts_directory.glob("*.json")), [])
+        self.assertFalse(terminal_records_directory.exists())
+        return calibration_ran
+
     def _cross_domain_artifact_alias(self) -> tuple[SimpleNamespace, Path]:
         alias_state_root = (
             self.runtime_config.paths.web_state_dir.parent
@@ -1101,6 +1249,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=relocated_artifact_root / "attempts",
                 terminal_records_directory=(
@@ -1135,6 +1284,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=aliased_artifact_root / "attempts",
                 terminal_records_directory=(
@@ -2702,7 +2852,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with patch.object(
             verify_av1_cold_start_preregistration,
             "run_command",
-            side_effect=(identity_result, clean_result),
+            side_effect=(identity_result, clean_result, identity_result),
         ) as run_git:
             identity = (
                 verify_av1_cold_start_preregistration._repository_review_identity(
@@ -2713,12 +2863,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             identity,
             (REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
         )
-        self.assertEqual(run_git.call_count, 2)
+        self.assertEqual(run_git.call_count, 3)
         self.assertEqual(run_git.call_args_list[0].args[0][:3], [
             "/usr/bin/git",
             "rev-parse",
             "HEAD",
         ])
+        self.assertEqual(
+            run_git.call_args_list[1].args[0][3],
+            REVIEW_REPOSITORY_COMMIT,
+        )
 
         dirty_result = SimpleNamespace(returncode=1, stdout="")
         with (
@@ -2735,6 +2889,110 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             verify_av1_cold_start_preregistration._repository_review_identity(
                 process_controller=controller,
             )
+
+    def test_repository_review_identity_rejects_mid_check_ref_drift(self) -> None:
+        controller = ManagedProcessController()
+        identity_result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                f"{REVIEW_REPOSITORY_COMMIT}\n"
+                f"{REVIEW_REPOSITORY_TREE}\n"
+            ),
+        )
+        drifted_result = SimpleNamespace(
+            returncode=0,
+            stdout=(f"{'b' * 40}\n{'c' * 40}\n"),
+        )
+        clean_result = SimpleNamespace(returncode=0, stdout="")
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_command",
+                side_effect=(identity_result, clean_result, drifted_result),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "changed during verification",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._repository_review_identity(
+                process_controller=controller,
+            )
+
+    def test_assignment_action_passes_live_repository_identity_resolver(self) -> None:
+        args = SimpleNamespace(
+            action="run-derivation-assignment",
+            config=Path("unused.toml"),
+            manifest=Path("manifest.json"),
+            partition=Path("partition.json"),
+            plan=Path("plan.json"),
+            key=Path("partition.key"),
+            assignment_id=self.plan.assignments[0].assignment_id,
+            json_output=True,
+        )
+        attempt = SimpleNamespace(
+            attempt_id="attempt-test",
+            payload_sha256="sha256:" + "d" * 64,
+            status="review_pending",
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_private_artifact_path",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_manifest_v2",
+                return_value=self.manifest,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_private_partition",
+                return_value=self.partition,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_recovery_capable_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_partition_key",
+                return_value=self.token_key,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=self._matching_repository_identity(),
+            ) as repository_identity,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_av1_validation_derivation_assignment",
+                return_value=attempt,
+            ) as run_assignment,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ),
+        ):
+            exit_code = verify_av1_cold_start_preregistration._run_derivation_action_body(
+                args,
+                locked_config=None,
+            )
+            process_controller = run_assignment.call_args.kwargs["process_controller"]
+            resolver = run_assignment.call_args.kwargs["repository_identity_resolver"]
+            first_identity = resolver()
+            second_identity = resolver()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsInstance(process_controller, ManagedProcessController)
+        self.assertEqual(first_identity, self._matching_repository_identity())
+        self.assertEqual(second_identity, self._matching_repository_identity())
+        self.assertEqual(repository_identity.call_count, 2)
+        repository_identity.assert_has_calls([
+            call(process_controller=process_controller),
+            call(process_controller=process_controller),
+        ])
 
     def test_isolated_review_repository_excludes_live_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4274,6 +4532,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -4321,6 +4580,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -4375,6 +4635,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -4484,6 +4745,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -4560,6 +4822,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -4578,6 +4841,20 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "terminal-record",
             "source-quiet",
         ])
+
+    def test_repository_snapshot_drift_before_media_fails_closed(self) -> None:
+        calibration_ran = self._run_assignment_with_repository_drift(
+            drift_phase="before_media",
+        )
+
+        self.assertFalse(calibration_ran)
+
+    def test_repository_snapshot_drift_after_media_blocks_attempt_publication(self) -> None:
+        calibration_ran = self._run_assignment_with_repository_drift(
+            drift_phase="before_publication",
+        )
+
+        self.assertTrue(calibration_ran)
 
     def test_assignment_review_identity_drift_is_safety_stop(self) -> None:
         assignment = self.plan.assignments[0]
@@ -4700,6 +4977,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -4747,6 +5025,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 partition=self.partition,
                 token_key=self.token_key,
                 plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
@@ -5981,6 +6260,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     partition=self.partition,
                     token_key=self.token_key,
                     plan=self.plan,
+                    repository_identity_resolver=self._matching_repository_identity,
                     assignment_id=self.plan.assignments[0].assignment_id,
                     attempts_directory=root / "alternate-attempts",
                     terminal_records_directory=root / "alternate-records",

@@ -335,6 +335,7 @@ ENCODE_QUEUE_PROCESSES_LOCK = threading.Lock()
 ENCODE_QUEUE_THREADS: dict[str, threading.Thread] = {}
 ENCODE_QUEUE_THREADS_CONDITION = threading.Condition()
 SCAN_JOB_THREADS: dict[str, threading.Thread] = {}
+SCAN_JOB_PROCESS_CONTROLLERS: dict[str, ManagedProcessController] = {}
 SCAN_JOB_THREADS_CONDITION = threading.Condition()
 PERIODIC_CLEANUP_THREADS: set[threading.Thread] = set()
 PERIODIC_CLEANUP_THREADS_CONDITION = threading.Condition()
@@ -566,12 +567,14 @@ def create_app(
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
                 _cancel_active_encode_processes()
+                _cancel_active_scan_processes()
                 if background_runtime is not None:
                     background_runtime.stop()
                     background_runtime.join()
                 for controller in _active_calibration_process_controllers():
                     controller.cancel()
                 _cancel_active_encode_processes()
+                _cancel_active_scan_processes()
                 _wait_for_calibration_submissions()
                 _wait_for_encode_queue_threads()
                 _wait_for_scan_job_threads()
@@ -4526,6 +4529,7 @@ def _start_scan_job_thread(
         config_path: Path,
         prefix: str | None,
         job_id: str,
+        process_controller: ManagedProcessController,
 ) -> None:
     thread = threading.Thread(
         target=_run_scan_job,
@@ -4533,6 +4537,7 @@ def _start_scan_job_thread(
             "config_path": config_path,
             "prefix": prefix,
             "job_id": job_id,
+            "process_controller": process_controller,
         },
         name=f"scan-job-{job_id}",
     )
@@ -4541,19 +4546,39 @@ def _start_scan_job_thread(
         if existing is not None and existing.is_alive():
             raise RuntimeError(f"Scan job {job_id} is already running")
         SCAN_JOB_THREADS[job_id] = thread
+        SCAN_JOB_PROCESS_CONTROLLERS[job_id] = process_controller
         try:
             thread.start()
         except BaseException:
             SCAN_JOB_THREADS.pop(job_id, None)
+            SCAN_JOB_PROCESS_CONTROLLERS.pop(job_id, None)
             SCAN_JOB_THREADS_CONDITION.notify_all()
             raise
 
 
-def _unregister_scan_job_thread(job_id: str, thread: threading.Thread) -> None:
+def _unregister_scan_job_thread(
+        job_id: str,
+        thread: threading.Thread,
+        process_controller: ManagedProcessController,
+) -> None:
     with SCAN_JOB_THREADS_CONDITION:
-        if SCAN_JOB_THREADS.get(job_id) is thread:
+        if (
+            SCAN_JOB_THREADS.get(job_id) is thread
+            and SCAN_JOB_PROCESS_CONTROLLERS.get(job_id) is process_controller
+        ):
             SCAN_JOB_THREADS.pop(job_id, None)
+            SCAN_JOB_PROCESS_CONTROLLERS.pop(job_id, None)
             SCAN_JOB_THREADS_CONDITION.notify_all()
+
+
+def _cancel_active_scan_processes() -> None:
+    with SCAN_JOB_THREADS_CONDITION:
+        controllers = tuple(SCAN_JOB_PROCESS_CONTROLLERS.items())
+    for job_id, controller in controllers:
+        try:
+            controller.cancel()
+        except Exception:
+            LOGGER.exception("Unable to cancel active scan job %s", job_id)
 
 
 def _wait_for_scan_job_threads() -> None:
@@ -4566,21 +4591,33 @@ def _wait_for_scan_job_threads() -> None:
             ]
             for job_id in finished_job_ids:
                 SCAN_JOB_THREADS.pop(job_id, None)
+                SCAN_JOB_PROCESS_CONTROLLERS.pop(job_id, None)
             if not SCAN_JOB_THREADS:
                 return
             SCAN_JOB_THREADS_CONDITION.wait()
 
 
-def _run_scan_job(*, config_path: Path, prefix: str | None, job_id: str) -> None:
+def _run_scan_job(
+        *,
+        config_path: Path,
+        prefix: str | None,
+        job_id: str,
+        process_controller: ManagedProcessController,
+) -> None:
     try:
         runtime_run_scan_job(
             config_path=config_path,
             prefix=prefix,
             job_id=job_id,
+            process_controller=process_controller,
             deps=_job_runtime_deps(),
         )
     finally:
-        _unregister_scan_job_thread(job_id, threading.current_thread())
+        _unregister_scan_job_thread(
+            job_id,
+            threading.current_thread(),
+            process_controller,
+        )
 
 
 def _run_calibration_job(

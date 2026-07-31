@@ -609,6 +609,13 @@ def _run_derivation_action_body(
             config_path=args.config,
         )
         token_key = load_av1_validation_partition_key(args.key)
+        process_controller = ManagedProcessController()
+
+        def repository_identity_resolver() -> tuple[str, str]:
+            return _repository_review_identity(
+                process_controller=process_controller,
+            )
+
         attempt = run_av1_validation_derivation_assignment(
             config_path=args.config,
             manifest=manifest,
@@ -618,6 +625,8 @@ def _run_derivation_action_body(
             assignment_id=args.assignment_id,
             attempts_directory=artifact_root / "attempts",
             terminal_records_directory=artifact_root / "terminal-records",
+            repository_identity_resolver=repository_identity_resolver,
+            process_controller=process_controller,
         )
         _print_partition_payload(
             {
@@ -1337,29 +1346,34 @@ def _repository_review_identity(
         require_clean: bool = False,
 ) -> tuple[str, str]:
     root = REPOSITORY_ROOT if repository_root is None else repository_root
-    identity = run_command(
-        ["/usr/bin/git", "rev-parse", "HEAD", "HEAD^{tree}"],
-        process_controller=process_controller,
-        cwd=root,
-        env=_review_runner_environment(),
-        timeout=15,
-        check=False,
-    )
-    object_ids = tuple(identity.stdout.splitlines())
-    if (
-        identity.returncode != 0
-        or len(object_ids) != 2
-        or any(
-            len(object_id) not in {40, 64}
-            or any(character not in "0123456789abcdef" for character in object_id)
-            for object_id in object_ids
+
+    def resolve_identity() -> tuple[str, str]:
+        identity = run_command(
+            ["/usr/bin/git", "rev-parse", "HEAD", "HEAD^{tree}"],
+            process_controller=process_controller,
+            cwd=root,
+            env=_review_runner_environment(),
+            timeout=15,
+            check=False,
         )
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review repository identity is unavailable"
-        )
+        object_ids = tuple(identity.stdout.splitlines())
+        if (
+            identity.returncode != 0
+            or len(object_ids) != 2
+            or any(
+                len(object_id) not in {40, 64}
+                or any(character not in "0123456789abcdef" for character in object_id)
+                for object_id in object_ids
+            )
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository identity is unavailable"
+            )
+        return object_ids[0], object_ids[1]
+
+    object_ids = resolve_identity()
     tracked_state = run_command(
-        ["/usr/bin/git", "diff", "--quiet", "HEAD", "--"],
+        ["/usr/bin/git", "diff", "--quiet", object_ids[0], "--"],
         process_controller=process_controller,
         cwd=root,
         env=_review_runner_environment(),
@@ -1396,7 +1410,12 @@ def _repository_review_identity(
             raise AV1ValidationDerivationError(
                 "AV1 derivation isolated review repository is not clean"
             )
-    return object_ids[0], object_ids[1]
+    verified_object_ids = resolve_identity()
+    if verified_object_ids != object_ids:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository identity changed during verification"
+        )
+    return verified_object_ids
 
 
 def _run_isolated_review_git(

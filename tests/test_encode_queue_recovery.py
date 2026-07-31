@@ -3932,12 +3932,76 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
     def test_scan_thread_waiter_discards_finished_registry_entries(self) -> None:
         finished_thread = Mock()
         finished_thread.is_alive.return_value = False
+        process_controller = ManagedProcessController()
         with web_app.SCAN_JOB_THREADS_CONDITION:
             web_app.SCAN_JOB_THREADS["finished-scan"] = finished_thread
+            web_app.SCAN_JOB_PROCESS_CONTROLLERS["finished-scan"] = process_controller
 
         web_app._wait_for_scan_job_threads()
 
         self.assertNotIn("finished-scan", web_app.SCAN_JOB_THREADS)
+        self.assertNotIn(
+            "finished-scan",
+            web_app.SCAN_JOB_PROCESS_CONTROLLERS,
+        )
+
+    def test_scan_cancellation_unblocks_waiter_and_unregisters_runtime(self) -> None:
+        job_id = "cancelled-scan"
+        process_controller = ManagedProcessController()
+        started = threading.Event()
+        waiter_finished = threading.Event()
+        poll = threading.Event()
+
+        def run_until_cancelled(
+                *,
+                process_controller: ManagedProcessController,
+                **_kwargs: object,
+        ) -> None:
+            started.set()
+            while True:
+                try:
+                    process_controller.throw_if_cancelled()
+                except ProcessCancelledError:
+                    return
+                poll.wait(0.01)
+
+        def wait_for_scan_threads() -> None:
+            web_app._wait_for_scan_job_threads()
+            waiter_finished.set()
+
+        with patch(
+            "mediaforce.web.app.runtime_run_scan_job",
+            side_effect=run_until_cancelled,
+        ):
+            try:
+                web_app._start_scan_job_thread(
+                    config_path=self.config.paths.config_path,
+                    prefix=None,
+                    job_id=job_id,
+                    process_controller=process_controller,
+                )
+                self.assertTrue(started.wait(timeout=1))
+                with web_app.SCAN_JOB_THREADS_CONDITION:
+                    scan_thread = web_app.SCAN_JOB_THREADS[job_id]
+                self.assertFalse(scan_thread.daemon)
+                waiter = threading.Thread(
+                    target=wait_for_scan_threads,
+                    name="scan-waiter-test",
+                )
+                waiter.start()
+                self.assertFalse(waiter_finished.wait(timeout=0.05))
+
+                web_app._cancel_active_scan_processes()
+
+                self.assertTrue(waiter_finished.wait(timeout=1))
+                waiter.join(timeout=1)
+                self.assertFalse(waiter.is_alive())
+            finally:
+                process_controller.cancel()
+                web_app._wait_for_scan_job_threads()
+
+        self.assertNotIn(job_id, web_app.SCAN_JOB_THREADS)
+        self.assertNotIn(job_id, web_app.SCAN_JOB_PROCESS_CONTROLLERS)
 
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -15392,6 +15456,9 @@ raise SystemExit(0)
                 "mediaforce.web.app._cancel_active_encode_processes",
                 side_effect=lambda: call_order.append("encode:cancel"),
         ), patch(
+                "mediaforce.web.app._cancel_active_scan_processes",
+                side_effect=lambda: call_order.append("scan:cancel"),
+        ), patch(
                 "mediaforce.web.app._wait_for_calibration_submissions",
                 side_effect=lambda: call_order.append("calibration:joined"),
         ), patch(
@@ -15432,9 +15499,15 @@ raise SystemExit(0)
         self.assertEqual(metric_thread.kwargs, {})
         self.assertIsNone(metric_thread.daemon)
         self.assertLess(call_order.index("calibration:cancel"), call_order.index("workers:stop"))
+        self.assertEqual(call_order.count("scan:cancel"), 2)
+        self.assertLess(call_order.index("scan:cancel"), call_order.index("workers:stop"))
         self.assertLess(call_order.index("workers:stop"), call_order.index("workers:join"))
         self.assertLess(call_order.index("workers:join"), call_order.index("calibration:joined"))
         self.assertLess(call_order.index("calibration:joined"), call_order.index("encode:joined"))
+        self.assertLess(
+            max(index for index, event in enumerate(call_order) if event == "scan:cancel"),
+            call_order.index("scan:joined"),
+        )
         self.assertLess(call_order.index("encode:joined"), call_order.index("scan:joined"))
         self.assertLess(call_order.index("scan:joined"), call_order.index("evidence:joined"))
         self.assertLess(call_order.index("evidence:joined"), call_order.index("cleanup:joined"))

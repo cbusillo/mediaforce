@@ -18,6 +18,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.models import ProbeSummary
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.evidence_state import sync_library_item_evidence_states
 from mediaforce.library.media_scopes import logical_library_rel_path, path_matches_scope
 from mediaforce.library.planner import recommend_item
@@ -57,8 +58,15 @@ class ScanStats:
     warnings: list[ScanWarning] = field(default_factory=list)
 
 
-def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[str] | None = None,
-                 limit: int | None = None) -> ScanStats:
+def scan_library(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefixes: list[str] | None = None,
+        limit: int | None = None,
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> ScanStats:
+    _throw_if_scan_cancelled(process_controller)
     scan_id = uuid.uuid4().hex
     started_at = timestamp()
     normalized_prefixes = sorted({prefix.strip("/") for prefix in object_list(prefixes) if str(prefix).strip("/")})
@@ -80,6 +88,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
         )
     )
     connection.commit()
+    _throw_if_scan_cancelled(process_controller)
 
     stats = ScanStats(scan_id=scan_id)
     seen_paths_by_root: dict[str, set[str]] = {}
@@ -88,7 +97,9 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
     full_scan = not normalized_prefixes and limit is None
 
     for root_name, root_path in scan_source_roots.items():
+        _throw_if_scan_cancelled(process_controller)
         previous_item_count = _active_item_count(connection, root_name) if full_scan else 0
+        _throw_if_scan_cancelled(process_controller)
         enumeration = _RootEnumeration()
         root_seen_paths = seen_paths_by_root.setdefault(root_name, set())
         for file_path in _iter_media_files(
@@ -98,7 +109,9 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 limit=limit,
                 seen=stats.total_seen,
                 enumeration=enumeration,
+                process_controller=process_controller,
         ):
+            _throw_if_scan_cancelled(process_controller)
             source_path = str(file_path)
             logical_path = logical_library_rel_path(root_name, root_path, file_path)
             rel_path = logical_path.as_posix()
@@ -108,6 +121,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             except OSError:
                 enumeration.issue_code = "source_scan_incomplete"
                 continue
+            _throw_if_scan_cancelled(process_controller)
             root_seen_paths.add(source_path)
             stats.total_seen += 1
             try:
@@ -117,6 +131,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
             row = connection.execute(
                 select(library_items).where(library_items.c.source_path == source_path)
             ).mappings().fetchone()
+            _throw_if_scan_cancelled(process_controller)
 
             if (
                     row
@@ -170,14 +185,36 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                         updated_at=started_at,
                     )
                 stats.unchanged += 1
-                pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
+                pending_writes = _flush_scan_progress(
+                    connection,
+                    scan_id,
+                    stats,
+                    pending_writes + 1,
+                    process_controller=process_controller,
+                )
                 continue
 
-            pending_writes = _commit_scan_progress_before_probe(connection, scan_id, stats, pending_writes)
+            pending_writes = _commit_scan_progress_before_probe(
+                connection,
+                scan_id,
+                stats,
+                pending_writes,
+                process_controller=process_controller,
+            )
             try:
-                probe = probe_media(file_path)
+                probe = (
+                    probe_media(file_path)
+                    if process_controller is None
+                    else probe_media(
+                        file_path,
+                        process_controller=process_controller,
+                    )
+                )
+            except ProcessCancelledError:
+                raise
             except (OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
                 probe = _failed_probe_summary(exc)
+            _throw_if_scan_cancelled(process_controller)
             fingerprint = file_fingerprint(file_path=file_path, stat_result=stat_result,
                                            duration_seconds=probe.duration_seconds)
             recommendation = recommend_item(
@@ -266,7 +303,13 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
                 reset_attempt_state=True,
                 updated_at=started_at,
             )
-            pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
+            pending_writes = _flush_scan_progress(
+                connection,
+                scan_id,
+                stats,
+                pending_writes + 1,
+                process_controller=process_controller,
+            )
 
             if limit is not None and stats.total_seen >= limit:
                 break
@@ -293,19 +336,36 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
 
         if limit is not None and stats.total_seen >= limit:
             break
+        _throw_if_scan_cancelled(process_controller)
 
     if full_scan:
+        _throw_if_scan_cancelled(process_controller)
         stats.missing = _reconcile_missing_items(
             connection,
             configured_roots=set(scan_source_roots),
             reconcilable_roots=reconcilable_roots,
             seen_paths_by_root=seen_paths_by_root,
             updated_at=started_at,
+            process_controller=process_controller,
         )
-        pending_writes = _flush_scan_progress(connection, scan_id, stats, pending_writes + 1)
+        pending_writes = _flush_scan_progress(
+            connection,
+            scan_id,
+            stats,
+            pending_writes + 1,
+            process_controller=process_controller,
+        )
 
-    _flush_scan_progress(connection, scan_id, stats, pending_writes, force=True)
+    _flush_scan_progress(
+        connection,
+        scan_id,
+        stats,
+        pending_writes,
+        force=True,
+        process_controller=process_controller,
+    )
 
+    _throw_if_scan_cancelled(process_controller)
     completed_at = timestamp()
     connection.execute(
         update(scan_runs)
@@ -319,6 +379,7 @@ def scan_library(connection: DBClient, config: MediaforceConfig, prefixes: list[
         )
     )
     connection.commit()
+    _throw_if_scan_cancelled(process_controller)
     return stats
 
 
@@ -327,10 +388,21 @@ def _commit_scan_progress_before_probe(
         scan_id: str,
         stats: ScanStats,
         pending_writes: int,
+        *,
+        process_controller: ManagedProcessController | None = None,
 ) -> int:
+    _throw_if_scan_cancelled(process_controller)
     if pending_writes:
-        return _flush_scan_progress(connection, scan_id, stats, pending_writes, force=True)
+        return _flush_scan_progress(
+            connection,
+            scan_id,
+            stats,
+            pending_writes,
+            force=True,
+            process_controller=process_controller,
+        )
     connection.commit()
+    _throw_if_scan_cancelled(process_controller)
     return 0
 
 
@@ -374,7 +446,9 @@ def _flush_scan_progress(
         pending_writes: int,
         *,
         force: bool = False,
+        process_controller: ManagedProcessController | None = None,
 ) -> int:
+    _throw_if_scan_cancelled(process_controller)
     if not force and pending_writes < SCAN_COMMIT_INTERVAL:
         return pending_writes
     connection.execute(
@@ -388,6 +462,7 @@ def _flush_scan_progress(
         )
     )
     connection.commit()
+    _throw_if_scan_cancelled(process_controller)
     return 0
 
 
@@ -489,7 +564,9 @@ def _reconcile_missing_items(
         reconcilable_roots: set[str],
         seen_paths_by_root: dict[str, set[str]],
         updated_at: str,
+        process_controller: ManagedProcessController | None = None,
 ) -> int:
+    _throw_if_scan_cancelled(process_controller)
     missing_count = 0
     removed_root_filter = library_items.c.status != "missing"
     if configured_roots:
@@ -497,9 +574,15 @@ def _reconcile_missing_items(
             removed_root_filter,
             not_(library_items.c.media_root.in_(tuple(sorted(configured_roots)))),
         )
-    missing_count += _mark_items_missing(connection, removed_root_filter, updated_at)
+    missing_count += _mark_items_missing(
+        connection,
+        removed_root_filter,
+        updated_at,
+        process_controller=process_controller,
+    )
 
     for root_name in sorted(reconcilable_roots):
+        _throw_if_scan_cancelled(process_controller)
         stale_filter = and_(
             library_items.c.status != "missing",
             library_items.c.media_root == root_name,
@@ -511,16 +594,29 @@ def _reconcile_missing_items(
             stale_filter,
             not_(library_items.c.source_path.in_(tuple(sorted(seen_paths)))),
         )
-        missing_count += _mark_items_missing(connection, stale_filter, updated_at)
+        missing_count += _mark_items_missing(
+            connection,
+            stale_filter,
+            updated_at,
+            process_controller=process_controller,
+        )
     return missing_count
 
 
-def _mark_items_missing(connection: DBClient, stale_filter: Any, updated_at: str) -> int:
+def _mark_items_missing(
+        connection: DBClient,
+        stale_filter: Any,
+        updated_at: str,
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> int:
+    _throw_if_scan_cancelled(process_controller)
     cursor = connection.execute(
         update(library_items)
         .where(stale_filter)
         .values(status="missing", updated_at=updated_at)
     )
+    _throw_if_scan_cancelled(process_controller)
     return int_value(cursor.rowcount) if cursor.rowcount != -1 else 0
 
 
@@ -531,7 +627,9 @@ def _iter_media_files(
         limit: int | None,
         seen: int,
         enumeration: _RootEnumeration | None = None,
+        process_controller: ManagedProcessController | None = None,
 ) -> Iterator[Path]:
+    _throw_if_scan_cancelled(process_controller)
     scan_state = enumeration or _RootEnumeration()
     if limit is not None and seen >= limit:
         return
@@ -550,7 +648,9 @@ def _iter_media_files(
 
     try:
         for dirpath, _, filenames in os.walk(root_path, onerror=_record_error):
+            _throw_if_scan_cancelled(process_controller)
             for name in sorted(filenames):
+                _throw_if_scan_cancelled(process_controller)
                 file_path = Path(dirpath, name)
                 if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
                     continue
@@ -564,3 +664,10 @@ def _iter_media_files(
                     return
     except OSError:
         scan_state.issue_code = "source_scan_incomplete"
+
+
+def _throw_if_scan_cancelled(
+        process_controller: ManagedProcessController | None,
+) -> None:
+    if process_controller is not None:
+        process_controller.throw_if_cancelled()

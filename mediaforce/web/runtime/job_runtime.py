@@ -25,7 +25,7 @@ from mediaforce.core.db import DBClient, DBRow, open_db
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
-from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.media_scopes import path_matches_scope, resolve_media_scope, scope_rel_path_filter
 from mediaforce.library.background_work import background_work_is_paused
 from mediaforce.library.metadata_sync import sync_external_metadata
@@ -564,6 +564,7 @@ def maybe_schedule_scan(
         "config_path": config.paths.config_path,
         "prefix": prefix,
         "job_id": str(job_payload["job_id"]),
+        "process_controller": ManagedProcessController(),
     }
     if deps.start_scan_job_thread is not None:
         deps.start_scan_job_thread(**thread_kwargs)
@@ -598,6 +599,7 @@ def run_scan_job(
         config_path: Any,
         prefix: str | None,
         job_id: str,
+        process_controller: ManagedProcessController,
         deps: JobRuntimeDeps,
 ) -> None:
     config = load_config(config_path)
@@ -633,23 +635,39 @@ def run_scan_job(
         except BaseException:
             connection.rollback()
             raise
-    purge_transient_artifacts(config, force=True)
-
+    cleanup_required = False
     try:
+        process_controller.throw_if_cancelled()
+        cleanup_required = True
+        purge_transient_artifacts(config, force=True)
+        process_controller.throw_if_cancelled()
         metadata_stats: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
-            stats = scan_library(connection, config, prefixes=[prefix] if prefix else None)
+            stats = scan_library(
+                connection,
+                config,
+                prefixes=[prefix] if prefix else None,
+                process_controller=process_controller,
+            )
+            process_controller.throw_if_cancelled()
             if prefix is None:
                 try:
+                    process_controller.throw_if_cancelled()
                     metadata_stats = sync_external_metadata(connection, config).to_payload()
+                    process_controller.throw_if_cancelled()
+                except ProcessCancelledError:
+                    raise
                 except Exception as exc:
                     metadata_stats = {
                         "status": "completed_with_warnings",
                         "message": f"External metadata refresh failed: {type(exc).__name__}",
                     }
+        process_controller.throw_if_cancelled()
         if prefix is None:
             deps.save_catalog_signature(config)
+        process_controller.throw_if_cancelled()
         deps.reset_folder_card_cache()
+        process_controller.throw_if_cancelled()
         deps.save_scan_job_state(
             config,
             prefix,
@@ -661,6 +679,19 @@ def run_scan_job(
                 "error": None,
                 "stats": _stats_payload(stats),
                 "metadata": metadata_stats,
+            },
+        )
+    except ProcessCancelledError:
+        deps.save_scan_job_state(
+            config,
+            prefix,
+            {
+                **job,
+                "job_id": job_id,
+                "status": "failed",
+                "finished_at": deps.now_iso(),
+                "error": deps.scan_interrupted_error,
+                "stats": None,
             },
         )
     except Exception as exc:
@@ -677,7 +708,8 @@ def run_scan_job(
             },
         )
     finally:
-        purge_transient_artifacts(config, force=True)
+        if cleanup_required:
+            purge_transient_artifacts(config, force=True)
 
 
 def dispatch_calibration_job(

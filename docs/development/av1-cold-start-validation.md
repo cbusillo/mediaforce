@@ -225,7 +225,13 @@ identity fail closed rather than being compatibility-filled. Plan retries,
 review claims, review envelopes, review-set verification, candidate-lock
 finalization, and verified-lock loading must all resolve to the plan's exact
 commit/tree pair; advancing the checkout requires a new derivation plan and
-review set rather than reusing approvals from the earlier snapshot. Every
+review set rather than reusing approvals from the earlier snapshot. Assignment
+execution keeps Git access at the repo-local verifier boundary and injects a
+live identity resolver into the runtime. The runtime rechecks the plan's exact
+commit/tree pair before claim publication, immediately before and after media
+execution, and inside every attempt or terminal publication callback. A checkout
+that drifts mid-run therefore stops closed and cannot publish favorable evidence
+for the earlier snapshot. Every
 execution, proposal, and finalization also re-compares the plan's complete
 twenty-four-assignment payload with the frozen partition rather than trusting
 top-level digests alone, and every write-capable source session revalidates the
@@ -701,7 +707,8 @@ cannot silently reinterpret an approval against another repository snapshot.
 All five immutable claims must name exactly that same repository commit and
 tree; both review-set validation and candidate finalization reject a divergent
 lane, and the review-set digest includes the plan ID, plan digest, unanimous
-commit, and unanimous tree explicitly. The exact PATH-selected runner must match the authorization
+commit, and unanimous tree explicitly. The exact PATH-selected runner must
+match the authorization
 before launch and again after completion. The already-verified authorized bytes
 must be a native Mach-O executable, so a shebang wrapper cannot delegate to an
 unbound interpreter. Its canonical path must also match the active ancestor Code

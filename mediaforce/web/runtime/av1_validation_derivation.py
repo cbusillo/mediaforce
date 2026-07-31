@@ -941,6 +941,26 @@ def _live_av1_validation_derivation_source_commitments(
         yield source_sha256_resolver
 
 
+def _assert_live_av1_validation_derivation_repository_identity(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        repository_identity_resolver: Callable[[], tuple[str, str]],
+) -> None:
+    try:
+        repository_commit, repository_tree = repository_identity_resolver()
+    except (AV1ValidationDerivationError, ProcessCancelledError):
+        raise
+    except Exception as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation repository snapshot identity is unavailable"
+        ) from exc
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=repository_commit,
+        repository_tree=repository_tree,
+    )
+
+
 def run_av1_validation_derivation_assignment(
         *,
         config_path: Path,
@@ -951,6 +971,7 @@ def run_av1_validation_derivation_assignment(
         assignment_id: str,
         attempts_directory: Path,
         terminal_records_directory: Path,
+        repository_identity_resolver: Callable[[], tuple[str, str]],
         process_controller: ManagedProcessController | None = None,
         deps: CalibrationRunDeps | None = None,
         now_iso: Callable[[], str] | None = None,
@@ -983,6 +1004,7 @@ def run_av1_validation_derivation_assignment(
                     assignment_id=assignment_id,
                     attempts_directory=attempts_directory,
                     terminal_records_directory=terminal_records_directory,
+                    repository_identity_resolver=repository_identity_resolver,
                     process_controller=controller,
                     deps=deps,
                     now_iso=now_iso,
@@ -1003,12 +1025,19 @@ def _run_av1_validation_derivation_assignment_locked(
         assignment_id: str,
         attempts_directory: Path,
         terminal_records_directory: Path,
+        repository_identity_resolver: Callable[[], tuple[str, str]],
         process_controller: ManagedProcessController | None = None,
         deps: CalibrationRunDeps | None = None,
         now_iso: Callable[[], str] | None = None,
         _preflight: _AV1ValidationDerivationAssignmentPreflight | None = None,
         _source_commitment_guard: Callable[[], None] | None = None,
 ) -> AV1ValidationDerivationAttempt:
+    def assert_live_repository_identity() -> None:
+        _assert_live_av1_validation_derivation_repository_identity(
+            plan=plan,
+            repository_identity_resolver=repository_identity_resolver,
+        )
+
     if _preflight is None:
         assert_preregistered_av1_validation_manifest_v2(manifest)
         assignment = next(
@@ -1058,6 +1087,7 @@ def _run_av1_validation_derivation_assignment_locked(
             attempts_directory=attempts_directory,
             terminal_records_directory=terminal_records_directory,
             completed_at=recovery_completed_at,
+            before_publish=assert_live_repository_identity,
         )
         if interrupted_state_recovered:
             raise AV1ValidationDerivationError(
@@ -1107,6 +1137,7 @@ def _run_av1_validation_derivation_assignment_locked(
                 assignment_id=assignment_id,
                 attempts_directory=attempts_directory,
                 terminal_records_directory=terminal_records_directory,
+                repository_identity_resolver=repository_identity_resolver,
                 process_controller=process_controller,
                 deps=deps,
                 now_iso=now_iso,
@@ -1130,6 +1161,7 @@ def _run_av1_validation_derivation_assignment_locked(
         plan,
         assignment.assignment_id,
     )
+    assert_live_repository_identity()
     try:
         probe_macos_file_integrity(artifact_root)
     except FileIntegrityError as exc:
@@ -1161,6 +1193,10 @@ def _run_av1_validation_derivation_assignment_locked(
         assert_fresh_authorization()
         assert_av1_validation_derivation_runtime_context(config, plan)
 
+    def assert_assignment_claim_publishable() -> None:
+        assert_fresh_authorization()
+        assert_live_repository_identity()
+
     _source_commitment_guard()
     write_av1_validation_derivation_assignment_claim(
         attempts_directory,
@@ -1168,7 +1204,7 @@ def _run_av1_validation_derivation_assignment_locked(
         plan_id=plan.plan_id,
         authorization_id=plan.authorization.authorization_id,
         claimed_at=started_at,
-        before_publish=assert_fresh_authorization,
+        before_publish=assert_assignment_claim_publishable,
         published_before=plan.authorization.valid_until,
     )
     controller = process_controller or ManagedProcessController()
@@ -1298,6 +1334,7 @@ def _run_av1_validation_derivation_assignment_locked(
             )
             with _owner_only_umask():
                 assert_fresh_execution_context()
+                assert_live_repository_identity()
                 payload, _ = run_sampled_calibration(
                     config=calibration_config,
                     prefix=prefix,
@@ -1315,6 +1352,7 @@ def _run_av1_validation_derivation_assignment_locked(
                         lambda *_args, **_kwargs: assert_fresh_execution_context()
                     ),
                 )
+                assert_live_repository_identity()
         assert_fresh_execution_context()
         assert_av1_validation_derivation_execution_contract(
             manifest,
@@ -1481,7 +1519,11 @@ def _run_av1_validation_derivation_assignment_locked(
     if attempt is None:
         raise AV1ValidationDerivationError("AV1 derivation attempt did not reach a terminal state")
     _source_commitment_guard()
-    write_av1_validation_derivation_attempt(attempts_directory, attempt)
+    write_av1_validation_derivation_attempt(
+        attempts_directory,
+        attempt,
+        before_publish=assert_live_repository_identity,
+    )
     if attempt.status != "review_pending":
         terminal = build_av1_validation_derivation_terminal_record(
             plan=plan,
@@ -1492,6 +1534,7 @@ def _run_av1_validation_derivation_assignment_locked(
         write_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
+            before_publish=assert_live_repository_identity,
         )
     return attempt
 
@@ -2501,6 +2544,7 @@ def _recover_interrupted_derivation_state(
         attempts_directory: Path,
         terminal_records_directory: Path,
         completed_at: str,
+        before_publish: Callable[[], None] | None = None,
 ) -> bool:
     attempts = (
         load_av1_validation_derivation_attempts(attempts_directory)
@@ -2566,6 +2610,7 @@ def _recover_interrupted_derivation_state(
         ensure_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             interrupted_terminal_publications[0],
+            before_publish=before_publish,
         )
         return True
     terminal_attempt_ids = {record.attempt_id for record in records}
@@ -2588,6 +2633,7 @@ def _recover_interrupted_derivation_state(
         write_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
+            before_publish=before_publish,
         )
         return True
     interrupted_verdicts: list[AV1ValidationDerivationAttempt] = []
@@ -2624,10 +2670,12 @@ def _recover_interrupted_derivation_state(
         ensure_av1_validation_derivation_terminal_intent(
             artifact_root / "terminal-intents",
             terminal,
+            before_publish=before_publish,
         )
         ensure_av1_validation_derivation_terminal_record(
             terminal_records_directory,
             terminal,
+            before_publish=before_publish,
         )
         return True
     attempted_ids = {attempt.assignment_id for attempt in attempts}
@@ -2666,7 +2714,11 @@ def _recover_interrupted_derivation_state(
             else "interrupted_claim"
         ),
     )
-    write_av1_validation_derivation_attempt(attempts_directory, attempt)
+    write_av1_validation_derivation_attempt(
+        attempts_directory,
+        attempt,
+        before_publish=before_publish,
+    )
     terminal = build_av1_validation_derivation_terminal_record(
         plan=plan,
         partition=partition,
@@ -2675,6 +2727,7 @@ def _recover_interrupted_derivation_state(
     write_av1_validation_derivation_terminal_record(
         terminal_records_directory,
         terminal,
+        before_publish=before_publish,
     )
     return True
 

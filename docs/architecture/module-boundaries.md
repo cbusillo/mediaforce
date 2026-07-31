@@ -175,6 +175,9 @@ Guidance:
 - `scanner.py`
   - library inventory orchestration and catalog updates
   - all inventory rows preserve canonical evidence without launching deep analysis
+  - managed web scans cooperatively honor cancellation across enumeration,
+    database progress, and ffprobe so shutdown can join them before releasing
+    the runtime lease
 - `evidence_state.py`
   - rebuildable per-item/per-kind projection of canonical cadence and
     fingerprint JSON

@@ -13,6 +13,7 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_item_evidence_state, library_items, scan_runs
 from mediaforce.core.models import ProbeSummary
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.library.evidence_state import EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_SOURCE_CHANGED, \
@@ -197,6 +198,57 @@ class ScannerRuntimeTests(unittest.TestCase):
 
         self.assertEqual(stats.discovered, 2)
         self.assertEqual(writer_errors, [])
+
+    def test_managed_scan_passes_controller_to_probe_without_changing_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_root = Path(temp_dir)
+            media_root = project_root / "movies"
+            media_root.mkdir()
+            movie = media_root / "Feature.mkv"
+            movie.write_bytes(b"movie")
+            config = self._config(project_root, {"movies": media_root})
+            process_controller = ManagedProcessController()
+            observed_controllers: list[ManagedProcessController | None] = []
+
+            def probe(
+                    _path: Path,
+                    *,
+                    process_controller: ManagedProcessController | None = None,
+            ) -> ProbeSummary:
+                observed_controllers.append(process_controller)
+                return _failed_probe_summary(RuntimeError("fixture probe"))
+
+            try:
+                with open_db(config.paths.db_path) as connection, patch(
+                    "mediaforce.library.scanner.probe_media",
+                    side_effect=probe,
+                ):
+                    stats = scan_library(
+                        connection,
+                        config,
+                        process_controller=process_controller,
+                    )
+            finally:
+                reset_engine_cache()
+
+        self.assertEqual(stats.discovered, 1)
+        self.assertEqual(stats.total_seen, 1)
+        self.assertEqual(observed_controllers, [process_controller])
+
+    def test_cancelled_scan_stops_before_catalog_progress(self) -> None:
+        process_controller = ManagedProcessController()
+        process_controller.cancel()
+        connection = _FakeConnection()
+
+        with self.assertRaises(ProcessCancelledError):
+            scan_library(
+                cast(Any, connection),
+                cast(Any, _FakeConfig()),
+                process_controller=process_controller,
+            )
+
+        self.assertEqual(connection.statements, [])
+        self.assertEqual(connection.commit_count, 0)
 
     def test_unchanged_inventory_preserves_noncurrent_evidence_without_probing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

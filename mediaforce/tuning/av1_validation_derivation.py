@@ -2890,6 +2890,8 @@ def load_av1_validation_derivation_plan(path: Path) -> AV1ValidationDerivationPl
 def write_av1_validation_derivation_attempt(
         directory: Path,
         attempt: AV1ValidationDerivationAttempt,
+        *,
+        before_publish: Callable[[], None] | None = None,
 ) -> Path:
     _bind_owner_only_directory(
         directory,
@@ -2899,7 +2901,11 @@ def write_av1_validation_derivation_attempt(
     )
     path = directory / f"{attempt.assignment_id}.json"
     try:
-        _write_owner_only(path, canonical_json_bytes(attempt.to_payload()))
+        _write_owner_only(
+            path,
+            canonical_json_bytes(attempt.to_payload()),
+            before_publish=before_publish,
+        )
     except _AV1ValidationDerivationArtifactAlreadyExists:
         payload, raw = _load_owner_only_json(path, "derivation attempt")
         existing = av1_validation_derivation_attempt_from_payload(

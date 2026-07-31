@@ -8,10 +8,12 @@ from unittest.mock import Mock, patch
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, scan_runs
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.library.background_work import set_background_work_paused
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, claim_next_evidence_work, resume_evidence_queue, \
     start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
+from mediaforce.library.scanner import ScanStats
 from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, load_scan_status, maybe_schedule_scan, run_scan_job
 from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload
 
@@ -224,6 +226,7 @@ class OperatorWorkTests(unittest.TestCase):
                 config_path=self.config.paths.config_path,
                 prefix=None,
                 job_id="queued-job",
+                process_controller=ManagedProcessController(),
                 deps=deps,
             )
 
@@ -232,6 +235,73 @@ class OperatorWorkTests(unittest.TestCase):
         self.assertIsNone(saved["started_at"])
         purge.assert_not_called()
         scan.assert_not_called()
+
+    def test_cancelled_scan_persists_interrupted_state(self) -> None:
+        queued_job = {
+            "job_id": "queued-job",
+            "status": "queued",
+            "created_at": "2026-07-19T12:00:00+00:00",
+        }
+        save_scan_job_state = Mock()
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: queued_job,
+            save_scan_job_state=save_scan_job_state,
+        )
+        process_controller = ManagedProcessController()
+
+        def cancel_scan(
+                _connection: object,
+                _config: object,
+                **kwargs: object,
+        ) -> ScanStats:
+            self.assertIs(kwargs["process_controller"], process_controller)
+            raise ProcessCancelledError("shutdown")
+
+        with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch(
+            "mediaforce.web.runtime.job_runtime.purge_transient_artifacts"
+        ) as purge, patch(
+            "mediaforce.web.runtime.job_runtime.scan_library",
+            side_effect=cancel_scan,
+        ):
+            run_scan_job(
+                config_path=self.config.paths.config_path,
+                prefix=None,
+                job_id="queued-job",
+                process_controller=process_controller,
+                deps=deps,
+            )
+
+        saved = save_scan_job_state.call_args_list[-1].args[2]
+        self.assertEqual(saved["status"], "failed")
+        self.assertEqual(saved["error"], "interrupted")
+        self.assertIsNone(saved["stats"])
+        self.assertEqual(purge.call_count, 2)
+
+    def test_fallback_scan_thread_receives_process_controller(self) -> None:
+        deps = self._job_runtime_deps(
+            load_scan_job_state=lambda _config, _prefix: None,
+        )
+        fallback_thread = Mock()
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.job_runtime.threading.Thread",
+            return_value=fallback_thread,
+        ) as thread_factory:
+            job = maybe_schedule_scan(
+                connection,
+                self.config,
+                None,
+                deps,
+                force=True,
+            )
+
+        self.assertIsNotNone(job)
+        thread_kwargs = thread_factory.call_args.kwargs["kwargs"]
+        self.assertIs(thread_factory.call_args.kwargs["target"], deps.run_scan_job)
+        self.assertIsInstance(
+            thread_kwargs["process_controller"],
+            ManagedProcessController,
+        )
+        fallback_thread.start.assert_called_once_with()
 
     def test_bounded_runner_rejects_duplicate_process_local_start(self) -> None:
         started = threading.Event()
