@@ -712,6 +712,9 @@ from the claimed Git commit instead. Every entry must be an exact allowlisted
 regular tracked blob with its Git blob ID, path, byte size, SHA-256 digest, and
 UTF-8 text. Per-blob and total-bundle bounds apply. Code receives no repository
 directory, so an untracked live-worktree file cannot affect the review. The
+lane allowlists include the relevant implementation, runtime, verifier, and
+protocol files while remaining bounded to 384 KiB per blob and 512 KiB per
+request bundle. The
 canonical request binds the proposal, immutable claim, and exact safe bundle to
 that same commit and tree, so later validation cannot reinterpret an approval
 against another repository snapshot.
@@ -729,16 +732,23 @@ authorized runner directly as `code llm request` from an owner-only temporary
 request directory. The request file is owner-read-only after a durable write,
 is verified before launch, and is unlinked with its empty directory immediately
 after use. No ephemeral shell home, repository checkout, agent shell, or tool
-permission is created for the model. The request supplies deterministic developer
+permission is created for the model. The runner receives a minimal allowlisted
+environment and the real account home only so the trusted Code process can use
+its existing authentication; endpoint overrides, caller secrets, and unrelated
+environment variables are not inherited. The request supplies deterministic developer
 text plus a strict dynamic JSON Schema whose constants bind the lane, proposal,
-claim, run, repository commit, and tree. The model must return one canonical
-structured JSON response. Its decision must agree with its finding severities:
+claim, run, repository commit, and tree. Before publishing the immutable claim,
+the verifier checks the installed `code llm request --help` contract for the
+required no-tool options. The model must return one structured JSON response;
+the verifier rejects duplicate keys or extra output and canonicalizes the parsed
+object for evidence. Its decision must agree with its finding severities:
 approval has no blocking finding, while rejection has at least one. Each
 attestation binds the claim plus the SHA-256 digest of canonical
 immutable owner-only completion evidence. That evidence contains the exact safe
 bundle; proposal, claim, request, developer-text, and response-schema bindings;
 the exact parsed model response; and the necessary SHA-256 commitments. It stores
-no shell/tool transcript, raw command output, or parent stderr. The loader
+no shell/tool transcript, raw command output, or parent stderr text; it retains
+only the zero return code and a stderr SHA-256 digest. The loader
 recomputes the canonical evidence digest before trusting it. The attestation and
 completion evidence are written together as one immutable atomic lane envelope.
 Duplicate run IDs, evidence digests, and normalized analysis digests are rejected.

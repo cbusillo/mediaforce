@@ -39,6 +39,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
+    AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
     AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
     AV1ValidationDerivationAttempt,
@@ -2317,14 +2318,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertEqual(command[:3], [str(trusted_runner), "llm", "request"])
             self.assertNotIn("exec", command)
             self.assertFalse(any(item in {"--tools", "--sandbox", "-a"} for item in command))
-            request_path = Path(command[command.index("--request-file") + 1])
+            self.assertIn("--format-strict", command)
+            request_path = Path(command[command.index("--message-file") + 1])
             self.assertEqual(stat.S_IMODE(request_path.stat().st_mode), 0o400)
             request_payload = json.loads(request_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 command[command.index("--developer") + 1],
                 av1_validation_derivation_review_developer_text("architecture"),
             )
-            response_schema = json.loads(command[command.index("--schema") + 1])
+            response_schema = json.loads(command[command.index("--schema-json") + 1])
             for field in (
                 "lane",
                 "proposal_id",
@@ -2342,7 +2344,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             response = _structured_review_response_from_request(request_payload)
             return SimpleNamespace(
                 returncode=0,
-                stdout=canonical_json_bytes(response).decode("utf-8") + "\n",
+                stdout=json.dumps(response, separators=(",", ":")) + "\n",
                 stderr="parent stderr must not become review evidence",
             )
 
@@ -2364,6 +2366,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration,
                 "_repository_review_identity",
                 return_value=(REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_assert_code_llm_request_contract",
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
@@ -2404,6 +2410,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         self.assertEqual(evidence_payload["request"], request_payload)
         self.assertEqual(evidence_payload["safe_bundle"], request_payload["safe_bundle"])
+        self.assertEqual(evidence_payload["returncode"], 0)
+        self.assertEqual(
+            evidence_payload["stderr_sha256"],
+            f"sha256:{hashlib.sha256(b'parent stderr must not become review evidence').hexdigest()}",
+        )
         self.assertNotIn("stderr", evidence_payload)
         self.assertNotIn("transcript", evidence_payload)
         review = build_av1_validation_derivation_review_attestation(
@@ -2415,13 +2426,70 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         validate_av1_validation_derivation_review_run_evidence(evidence, review=review)
 
+    def test_code_llm_request_contract_and_environment_are_allowlisted(self) -> None:
+        runner = Path("/private/trusted-code")
+        help_output = " ".join((
+            "--developer",
+            "--message-file",
+            "--format-name",
+            "--format-strict",
+            "--schema-json",
+        ))
+        with patch.object(
+            verify_av1_cold_start_preregistration,
+            "run_command",
+            return_value=SimpleNamespace(
+                returncode=0,
+                stdout=help_output,
+                stderr="",
+            ),
+        ) as run_help:
+            verify_av1_cold_start_preregistration._assert_code_llm_request_contract(
+                runner,
+                process_controller=ManagedProcessController(),
+            )
+        self.assertEqual(
+            run_help.call_args.args[0],
+            [str(runner), "llm", "request", "--help"],
+        )
+        environment = run_help.call_args.kwargs["env"]
+        self.assertEqual(environment["PWD"], str(Path("/tmp").resolve()))
+        self.assertNotIn("GITHUB_TOKEN", environment)
+        self.assertNotIn("OPENAI_BASE_URL", environment)
+
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_command",
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout="--developer --message-file",
+                    stderr="",
+                ),
+            ),
+            self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "contract is incompatible",
+            ),
+        ):
+            verify_av1_cold_start_preregistration._assert_code_llm_request_contract(
+                runner,
+                process_controller=ManagedProcessController(),
+            )
+
     def test_review_bundle_uses_tracked_utf8_allowlist_and_rejects_unsafe_blobs(
             self,
     ) -> None:
         cases = (
             ("valid", "allowed.txt", b"tracked review text\n", False, None),
             ("symlink", "allowed-link", b"target\n", True, "allowlisted blob"),
-            ("oversize", "oversized.txt", b"x" * (96 * 1024 + 1), False, "oversized"),
+            (
+                "oversize",
+                "oversized.txt",
+                b"x" * (AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES + 1),
+                False,
+                "oversized",
+            ),
             ("utf8", "invalid.txt", b"\xff", False, "not UTF-8"),
         )
         for label, path, payload, symlink, error in cases:
@@ -9302,6 +9370,8 @@ def _review_run_evidence(
         "analysis_sha256": av1_validation_derivation_review_analysis_sha256(
             model_response
         ),
+        "returncode": 0,
+        "stderr_sha256": f"sha256:{hashlib.sha256(b'').hexdigest()}",
     })
 
 

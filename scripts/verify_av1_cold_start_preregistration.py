@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import shutil
 import stat
 import subprocess
@@ -54,6 +55,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
+    AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_NAME,
     AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
@@ -142,6 +144,7 @@ _CANONICAL_PREREGISTRATION_RUNNER = (
 _AGENT_REVIEW_MAX_SECONDS = 1800
 _AGENT_REVIEW_SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _AGENT_REVIEW_GENERIC_IDENTITY = "mediaforce-review"
+_LLM_REVIEW_MAXIMUM_RESPONSE_BYTES = 64 * 1024
 _MACH_O_MAGICS = frozenset({
     b"\xce\xfa\xed\xfe",
     b"\xfe\xed\xfa\xce",
@@ -1445,6 +1448,23 @@ def _review_git_environment() -> dict[str, str]:
     }
 
 
+def _review_runner_environment(*, working_directory: Path) -> dict[str, str]:
+    return {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "HOME": pwd.getpwuid(os.getuid()).pw_dir,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "LOGNAME": _AGENT_REVIEW_GENERIC_IDENTITY,
+        "PATH": _AGENT_REVIEW_SAFE_PATH,
+        "PWD": str(working_directory),
+        "SHELL": "/bin/zsh",
+        "TMPDIR": "/tmp",
+        "USER": _AGENT_REVIEW_GENERIC_IDENTITY,
+        "ZDOTDIR": "/var/empty",
+    }
+
+
 def _run_review_git(
         command: list[str],
         *,
@@ -1710,8 +1730,8 @@ def _structured_review_response(
         proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
 ) -> tuple[dict[str, object], AV1ValidationDerivationReviewDecision]:
-    response_text = stdout.removesuffix("\n")
-    if not response_text or response_text != response_text.strip():
+    response_text = stdout.strip()
+    if not response_text:
         raise AV1ValidationDerivationError(
             "AV1 derivation structured review did not return one JSON response"
         )
@@ -1725,10 +1745,6 @@ def _structured_review_response(
         raise AV1ValidationDerivationError(
             "AV1 derivation structured review response is invalid"
         ) from exc
-    if canonical_json_bytes(response_payload).decode("utf-8") != response_text:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation structured review response is not canonical"
-        )
     decision = validate_av1_validation_derivation_review_response(
         response_payload,
         proposal=proposal,
@@ -1845,6 +1861,73 @@ def _load_existing_derivation_review(
     return claim, envelope
 
 
+def _assert_code_llm_request_contract(
+        code_binary: Path,
+        *,
+        process_controller: ManagedProcessController,
+) -> None:
+    working_directory = Path("/tmp").resolve()
+    try:
+        completed = run_command(
+            [str(code_binary), "llm", "request", "--help"],
+            process_controller=process_controller,
+            cwd=working_directory,
+            env=_review_runner_environment(
+                working_directory=working_directory,
+            ),
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code LLM request contract is unavailable"
+        ) from exc
+    required_options = (
+        "--developer",
+        "--message-file",
+        "--format-name",
+        "--format-strict",
+        "--schema-json",
+    )
+    if (
+        completed.returncode != 0
+        or any(option not in completed.stdout for option in required_options)
+        or "--request-file" in completed.stdout
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code LLM request contract is incompatible"
+        )
+
+
+def _assert_no_tool_llm_review_command(command: Sequence[str]) -> None:
+    required_options = {
+        "--developer",
+        "--format-name",
+        "--format-strict",
+        "--message-file",
+        "--schema-json",
+    }
+    disallowed_arguments = {
+        "exec",
+        "--auto",
+        "--json",
+        "--message",
+        "--request-file",
+        "--sandbox",
+        "--schema",
+        "-s",
+    }
+    if (
+        len(command) < 3
+        or tuple(command[1:3]) != ("llm", "request")
+        or not required_options.issubset(command)
+        or any(argument in disallowed_arguments for argument in command[1:])
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review must use Every Code LLM request with no tools"
+        )
+
+
 def _run_code_llm_review(
         *,
         artifact_root: Path,
@@ -1904,6 +1987,10 @@ def _run_code_llm_review_before_deadline(
         process_controller=process_controller,
     )
     before_identity = _authorized_review_runner_identity(plan)
+    _assert_code_llm_request_contract(
+        before_identity[0],
+        process_controller=process_controller,
+    )
     before_repository_identity = _repository_review_identity(
         process_controller=process_controller,
     )
@@ -1950,16 +2037,25 @@ def _run_code_llm_review_before_deadline(
                 "request",
                 "--developer",
                 developer_text,
-                "--schema",
-                response_schema_text,
-                "--request-file",
+                "--message-file",
                 str(request_path),
+                "--format-type",
+                "json_schema",
+                "--format-name",
+                AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_NAME,
+                "--format-strict",
+                "--schema-json",
+                response_schema_text,
             ]
+            _assert_no_tool_llm_review_command(command)
             try:
                 completed = run_command(
                     command,
                     process_controller=process_controller,
                     cwd=request_path.parent,
+                    env=_review_runner_environment(
+                        working_directory=request_path.parent,
+                    ),
                     timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
                     check=False,
                 )
@@ -1999,6 +2095,10 @@ def _run_code_llm_review_before_deadline(
         raise AV1ValidationDerivationError(
             "AV1 derivation Every Code structured review failed"
         )
+    if len(completed.stdout.encode("utf-8")) > _LLM_REVIEW_MAXIMUM_RESPONSE_BYTES:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation Every Code structured review response is oversized"
+        )
     model_response, decision = _structured_review_response(
         completed.stdout,
         proposal=proposal,
@@ -2031,6 +2131,10 @@ def _run_code_llm_review_before_deadline(
         "response_schema": response_schema,
         "response_schema_sha256": (
             f"sha256:{hashlib.sha256(canonical_json_bytes(response_schema)).hexdigest()}"
+        ),
+        "returncode": completed.returncode,
+        "stderr_sha256": (
+            f"sha256:{hashlib.sha256(completed.stderr.encode('utf-8')).hexdigest()}"
         ),
         "model_response": model_response,
         "model_response_sha256": (
