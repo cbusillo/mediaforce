@@ -479,14 +479,20 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             destination_inode = destination_path.stat().st_ino
             with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute("PRAGMA journal_mode=WAL").fetchone(),
+                    ("wal",),
+                )
                 connection.execute("INSERT INTO migration_rows VALUES ('runtime-row')")
-
-            self.assertEqual(destination_path.stat().st_ino, destination_inode)
-            with exclusive_mediaforce_runtime_lock(
-                config,
-                owner_payload={"purpose": "legacy-complete-mutable-restart"},
-            ):
-                migrate_config_state(config)
+                connection.commit()
+                self.assertTrue(Path(f"{destination_path}-wal").is_file())
+                self.assertTrue(Path(f"{destination_path}-shm").is_file())
+                self.assertEqual(destination_path.stat().st_ino, destination_inode)
+                with exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-complete-mutable-restart"},
+                ):
+                    migrate_config_state(config)
 
             self.assertEqual(destination_path.stat().st_ino, destination_inode)
             with sqlite3.connect(destination_path) as connection:
@@ -536,6 +542,304 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertTrue(displaced_path.is_file())
             self.assertTrue(destination_path.is_file())
+
+    def test_migrate_config_state_completed_intent_rejects_unsafe_sidecars(self) -> None:
+        for sidecar_kind in ("symlink", "hardlink", "fifo", "directory"):
+            with self.subTest(kind=sidecar_kind), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                source_path = root / "state" / "library.sqlite3"
+                destination_path = root / "configured-state" / "library.sqlite3"
+                sidecar_path = Path(f"{destination_path}-wal")
+                target_path = root / f"{sidecar_kind}-target"
+                config = self._legacy_migration_config(
+                    root,
+                    database_path=destination_path,
+                    name=f"target-{sidecar_kind}",
+                )
+                source_path.parent.mkdir()
+                with sqlite3.connect(source_path) as connection:
+                    connection.execute("CREATE TABLE migration_rows (value TEXT)")
+
+                with exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-unsafe-sidecar-setup"},
+                ):
+                    migrate_config_state(config)
+
+                if sidecar_kind == "symlink":
+                    target_path.write_bytes(b"symlink-target")
+                    sidecar_path.symlink_to(target_path)
+                elif sidecar_kind == "hardlink":
+                    target_path.write_bytes(b"hardlink-target")
+                    os.link(target_path, sidecar_path)
+                elif sidecar_kind == "fifo":
+                    os.mkfifo(sidecar_path, 0o600)
+                else:
+                    sidecar_path.mkdir()
+
+                with (
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-unsafe-sidecar-restart"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "could not be resumed safely",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertTrue(os.path.lexists(sidecar_path))
+                if target_path.exists():
+                    self.assertEqual(
+                        target_path.read_bytes(),
+                        f"{sidecar_kind}-target".encode("utf-8"),
+                    )
+
+    def test_migrate_config_state_sealing_intent_rejects_destination_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute("INSERT INTO migration_rows VALUES ('migrated-row')")
+
+            with (
+                patch.object(
+                    config_module,
+                    "_legacy_sqlite_migration_sealed_payload",
+                    side_effect=OSError("simulated sealing interruption"),
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-sealing-interruption"},
+                ),
+                self.assertRaisesRegex(OSError, "simulated sealing interruption"),
+            ):
+                migrate_config_state(config)
+
+            payload = json.loads(intent_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["phase"], "sealing")
+            self.assertFalse(source_path.exists())
+            destination_inode = destination_path.stat().st_ino
+            with sqlite3.connect(destination_path) as connection:
+                connection.execute("INSERT INTO migration_rows VALUES ('pre-seal-write')")
+            self.assertEqual(destination_path.stat().st_ino, destination_inode)
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-sealing-retry"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "could not be resumed safely",
+                ),
+            ):
+                migrate_config_state(config)
+
+            payload = json.loads(intent_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["phase"], "sealing")
+
+    def test_migrate_config_state_rechecks_prepared_completion_transition(
+            self,
+    ) -> None:
+        for mutate_destination in (False, True):
+            with (
+                self.subTest(mutate_destination=mutate_destination),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                source_path = root / "state" / "library.sqlite3"
+                destination_path = root / "configured-state" / "library.sqlite3"
+                intent_path = config_module._legacy_sqlite_migration_intent_path(
+                    destination_path
+                )
+                config = self._legacy_migration_config(
+                    root,
+                    database_path=destination_path,
+                    name=f"target-{mutate_destination}",
+                )
+                source_path.parent.mkdir()
+                with sqlite3.connect(source_path) as connection:
+                    connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                    connection.execute(
+                        "INSERT INTO migration_rows VALUES ('migrated-row')"
+                    )
+
+                real_exchange = config_module.rename_exchange
+                exchange_count = 0
+
+                def interrupt_prepared_completion(**kwargs: object) -> None:
+                    nonlocal exchange_count
+                    exchange_count += 1
+                    if exchange_count == 4:
+                        raise OSError("simulated prepared completion interruption")
+                    real_exchange(**kwargs)
+
+                with (
+                    patch.object(
+                        config_module,
+                        "rename_exchange",
+                        side_effect=interrupt_prepared_completion,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-prepared-completion"},
+                    ),
+                    self.assertRaisesRegex(
+                        OSError,
+                        "simulated prepared completion interruption",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertEqual(exchange_count, 4)
+                payload = json.loads(intent_path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["phase"], "sealing")
+                prepared_completions = [
+                    path
+                    for path in intent_path.parent.glob(
+                        f"{intent_path.name}.transition-*.json"
+                    )
+                    if json.loads(path.read_text(encoding="utf-8")).get("phase")
+                    == "complete"
+                ]
+                self.assertEqual(len(prepared_completions), 1)
+                if mutate_destination:
+                    with sqlite3.connect(destination_path) as connection:
+                        connection.execute(
+                            "INSERT INTO migration_rows VALUES ('pre-handoff-write')"
+                        )
+
+                retry = exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-prepared-completion-retry"},
+                )
+                if mutate_destination:
+                    with (
+                        retry,
+                        self.assertRaisesRegex(
+                            MediaforceRuntimeBusyError,
+                            "could not be resumed safely",
+                        ),
+                    ):
+                        migrate_config_state(config)
+                    payload = json.loads(intent_path.read_text(encoding="utf-8"))
+                    self.assertEqual(payload["phase"], "sealing")
+                else:
+                    with retry:
+                        migrate_config_state(config)
+                    self._assert_completed_v5_intent(intent_path)
+
+    def test_migrate_config_state_rechecks_legacy_prepared_completion_transition(
+            self,
+    ) -> None:
+        for mutate_destination in (False, True):
+            with (
+                self.subTest(mutate_destination=mutate_destination),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
+                root = Path(temp_dir)
+                source_path = root / "state" / "library.sqlite3"
+                destination_path = root / "configured-state" / "library.sqlite3"
+                intent_path = config_module._legacy_sqlite_migration_intent_path(
+                    destination_path
+                )
+                config = self._legacy_migration_config(
+                    root,
+                    database_path=destination_path,
+                    name=f"legacy-target-{mutate_destination}",
+                )
+                source_path.parent.mkdir()
+                with sqlite3.connect(source_path) as connection:
+                    connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                    connection.execute(
+                        "INSERT INTO migration_rows VALUES ('legacy-migrated-row')"
+                    )
+
+                with (
+                    patch.object(
+                        config_module,
+                        "_legacy_sqlite_migration_completion_payload",
+                        side_effect=OSError(
+                            "simulated pre-seal completion interruption"
+                        ),
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-prepared-completion"},
+                    ),
+                    self.assertRaisesRegex(
+                        OSError,
+                        "simulated pre-seal completion interruption",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                cleaning_payload = json.loads(
+                    intent_path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(cleaning_payload["phase"], "cleaning")
+                legacy_completion = (
+                    config_module._legacy_sqlite_migration_legacy_completion_payload(
+                        cleaning_payload
+                    )
+                )
+                transition_path = (
+                    config_module._legacy_sqlite_migration_intent_transition_path(
+                        intent_path,
+                        expected=cleaning_payload,
+                        payload=legacy_completion,
+                    )
+                )
+                config_module._write_legacy_sqlite_migration_intent(
+                    transition_path,
+                    legacy_completion,
+                )
+                if mutate_destination:
+                    with sqlite3.connect(destination_path) as connection:
+                        connection.execute(
+                            "INSERT INTO migration_rows VALUES ('legacy-pre-handoff-write')"
+                        )
+
+                retry = exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-prepared-completion-retry"},
+                )
+                if mutate_destination:
+                    with (
+                        retry,
+                        self.assertRaisesRegex(
+                            MediaforceRuntimeBusyError,
+                            "could not be resumed safely",
+                        ),
+                    ):
+                        migrate_config_state(config)
+                    payload = json.loads(intent_path.read_text(encoding="utf-8"))
+                    self.assertEqual(payload["phase"], "cleaning")
+                    self.assertEqual(
+                        json.loads(transition_path.read_text(encoding="utf-8")),
+                        legacy_completion,
+                    )
+                else:
+                    with retry:
+                        migrate_config_state(config)
+                    self._assert_completed_v5_intent(intent_path)
+                    self.assertEqual(
+                        json.loads(transition_path.read_text(encoding="utf-8")),
+                        cleaning_payload,
+                    )
 
     def test_migrate_config_state_rejects_replaced_staging_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -606,6 +910,66 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertTrue(trusted_staging_path.is_file())
             self.assertTrue(source_path.is_file())
             self.assertFalse(destination_path.exists())
+
+    def test_migrate_config_state_rejects_destination_parent_rebind_during_copy(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            displaced_parent = root / "configured-state.displaced"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute("INSERT INTO migration_rows VALUES ('trusted-row')")
+
+            real_intent_payload = (
+                config_module._legacy_sqlite_migration_intent_payload
+            )
+            payload_count = 0
+            parent_rebound = False
+
+            def rebind_destination_parent_before_ready(
+                    **kwargs: object,
+            ) -> dict[str, object]:
+                nonlocal parent_rebound, payload_count
+                payload_count += 1
+                if payload_count == 2:
+                    destination_path.parent.rename(displaced_parent)
+                    destination_path.parent.mkdir()
+                    for path in tuple(displaced_parent.iterdir()):
+                        path.rename(destination_path.parent / path.name)
+                    parent_rebound = True
+                return real_intent_payload(**kwargs)
+
+            with (
+                patch.object(
+                    config_module,
+                    "_legacy_sqlite_migration_intent_payload",
+                    side_effect=rebind_destination_parent_before_ready,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-copy-parent-rebind"},
+                ),
+                self.assertRaisesRegex(OSError, "destination parent changed"),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(parent_rebound)
+            self.assertEqual(payload_count, 2)
+            self.assertTrue(source_path.is_file())
+            self.assertFalse(destination_path.exists())
+            self.assertTrue(intent_path.is_file())
 
     def test_migrate_config_state_rejects_preexisting_destination_sidecars(self) -> None:
         for suffix in ("-wal", "-shm", "-journal"):
@@ -2470,8 +2834,8 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertEqual(transition_path.read_bytes(), replacement_bytes)
             trusted_payload = json.loads(trusted_path.read_text(encoding="utf-8"))
             self.assertEqual(trusted_payload["phase"], "cleaning")
-            completed_payload = json.loads(intent_path.read_text(encoding="utf-8"))
-            self.assertEqual(completed_payload["phase"], "complete")
+            sealing_payload = json.loads(intent_path.read_text(encoding="utf-8"))
+            self.assertEqual(sealing_payload["phase"], "sealing")
             self.assertFalse(source_path.exists())
             with (
                 exclusive_mediaforce_runtime_lock(

@@ -666,19 +666,13 @@ def _finish_legacy_sqlite_cleanup_with_locked_source(
             )
         ),
     )
-    locked_source.assert_cleanup_complete()
-    assert_destination_authoritative()
-    destination_binding.assert_database_valid()
-    locked_source.assert_parent_stable()
-    completed_intent = _legacy_sqlite_migration_completion_payload(payload)
-    _replace_legacy_sqlite_migration_intent(
-        intent_path,
-        expected=payload,
-        payload=completed_intent,
+    _finalize_legacy_sqlite_migration(
+        destination_binding=destination_binding,
+        intent_path=intent_path,
+        payload=payload,
+        staging_snapshot=staging_snapshot,
+        assert_source_cleanup_complete=locked_source.assert_cleanup_complete,
     )
-    locked_source.assert_cleanup_complete()
-    assert_destination_authoritative()
-    destination_binding.assert_database_valid()
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -805,6 +799,74 @@ class _LegacySQLiteMigrationDestination:
                 raise OSError(
                     "legacy SQLite migration destination sidecar already exists"
                 )
+        self.assert_parent_stable()
+
+    def assert_database_sidecars_safe(self) -> None:
+        self.assert_parent_stable()
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise OSError(
+                errno.ENOTSUP,
+                "legacy SQLite migration destination sidecar checks are unavailable",
+            )
+        for suffix in ("-wal", "-shm", "-journal"):
+            name = f"{self.path.name}{suffix}"
+            flags = (
+                os.O_RDONLY
+                | os.O_NONBLOCK
+                | os.O_NOFOLLOW
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                descriptor = os.open(
+                    name,
+                    flags,
+                    dir_fd=self.directory_descriptor,
+                )
+            except FileNotFoundError:
+                try:
+                    os.stat(
+                        name,
+                        dir_fd=self.directory_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise OSError(
+                        "legacy SQLite migration destination sidecar is unavailable"
+                    ) from exc
+                raise OSError(
+                    "legacy SQLite migration destination sidecar identity changed"
+                )
+            except OSError as exc:
+                raise OSError(
+                    "legacy SQLite migration destination sidecar is unsafe"
+                ) from exc
+            try:
+                descriptor_info = os.fstat(descriptor)
+                path_info = os.stat(
+                    name,
+                    dir_fd=self.directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(descriptor_info.st_mode)
+                    or not stat.S_ISREG(path_info.st_mode)
+                    or descriptor_info.st_uid != os.getuid()
+                    or path_info.st_uid != os.getuid()
+                    or descriptor_info.st_nlink != 1
+                    or path_info.st_nlink != 1
+                    or (
+                        descriptor_info.st_dev,
+                        descriptor_info.st_ino,
+                    )
+                    != (path_info.st_dev, path_info.st_ino)
+                ):
+                    raise OSError(
+                        "legacy SQLite migration destination sidecar is unsafe"
+                    )
+            finally:
+                os.close(descriptor)
         self.assert_parent_stable()
 
     def assert_database_valid(self) -> None:
@@ -1304,6 +1366,7 @@ def _replace_legacy_sqlite_migration_intent(
         *,
         expected: dict[str, object],
         payload: dict[str, object],
+        before_exchange: Callable[[], None] | None = None,
 ) -> None:
     directory_descriptor = -1
     expected_descriptor = -1
@@ -1317,6 +1380,18 @@ def _replace_legacy_sqlite_migration_intent(
         _, directory_descriptor = open_stable_directory(
             intent_path.parent
         )
+        directory_info = os.fstat(directory_descriptor)
+        expected_parent_identity = expected.get("destination_parent_identity")
+        if (
+            not isinstance(expected_parent_identity, list)
+            or len(expected_parent_identity) != 2
+            or any(type(value) is not int for value in expected_parent_identity)
+            or payload.get("destination_parent_identity")
+            != expected_parent_identity
+            or expected_parent_identity
+            != [directory_info.st_dev, directory_info.st_ino]
+        ):
+            raise OSError("legacy SQLite migration destination parent changed")
         _write_legacy_sqlite_migration_intent_at(
             directory_descriptor=directory_descriptor,
             intent_name=transition_path.name,
@@ -1362,6 +1437,31 @@ def _replace_legacy_sqlite_migration_intent(
             transition_path.name,
             payload_descriptor,
         )
+        if before_exchange is not None:
+            before_exchange()
+            _assert_legacy_sqlite_migration_intent_descriptor_at(
+                directory_descriptor,
+                intent_path.name,
+                expected_descriptor,
+            )
+            _assert_legacy_sqlite_migration_intent_descriptor_at(
+                directory_descriptor,
+                transition_path.name,
+                payload_descriptor,
+            )
+            if (
+                _load_legacy_sqlite_migration_intent_at(
+                    directory_descriptor,
+                    intent_path.name,
+                ) != expected
+                or _load_legacy_sqlite_migration_intent_at(
+                    directory_descriptor,
+                    transition_path.name,
+                ) != payload
+            ):
+                raise OSError(
+                    "legacy SQLite migration intent changed before finalization"
+                )
         rename_exchange(
             first_directory_descriptor=directory_descriptor,
             first_name=intent_path.name,
@@ -1519,7 +1619,7 @@ def _recover_legacy_sqlite_migration_intent_transitions(
         *,
         source: Path,
         destination: Path,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, object] | None]:
     for _attempt in range(64):
         current = _load_legacy_sqlite_migration_intent(intent_path)
         _validated_legacy_sqlite_migration_intent(
@@ -1601,7 +1701,24 @@ def _recover_legacy_sqlite_migration_intent_transitions(
             if directory_descriptor >= 0:
                 os.close(directory_descriptor)
         if not pending:
-            return current
+            return current, None
+        if (
+            current.get("phase") in {"cleaning", "sealing"}
+            and pending[0].get("phase") == "complete"
+        ):
+            if current.get("phase") == "sealing":
+                expected_completion = _legacy_sqlite_migration_sealed_payload(
+                    current
+                )
+            else:
+                expected_completion = (
+                    _legacy_sqlite_migration_legacy_completion_payload(current)
+                )
+            if pending[0] != expected_completion:
+                raise OSError(
+                    "legacy SQLite migration completion transition is invalid"
+                )
+            return current, pending[0]
         _replace_legacy_sqlite_migration_intent(
             intent_path,
             expected=current,
@@ -1622,10 +1739,12 @@ def _resume_legacy_sqlite_migration_intent(
     )
 
     try:
-        payload = _recover_legacy_sqlite_migration_intent_transitions(
-            intent_path,
-            source=source,
-            destination=destination,
+        payload, prepared_completion_payload = (
+            _recover_legacy_sqlite_migration_intent_transitions(
+                intent_path,
+                source=source,
+                destination=destination,
+            )
         )
         staging_path = _validated_legacy_sqlite_migration_intent(
             payload,
@@ -1719,31 +1838,50 @@ def _resume_legacy_sqlite_migration_intent(
             destination_exists = destination_binding.entry_exists(
                 destination.name
             )
-            if payload.get("phase") == "complete":
+            phase = payload.get("phase")
+            if (
+                prepared_completion_payload is not None
+                or phase in {"sealing", "complete"}
+            ):
                 if not destination_exists:
                     raise OSError(
                         "completed legacy SQLite migration destination is missing"
                     )
-                _assert_legacy_sqlite_v5_publication_state(
-                    destination_binding,
-                    staging_name=staging_path.name,
-                    staging_snapshot=staging_snapshot,
-                    publication_policy=payload.get("publication_policy"),
-                    require_exact_bytes=False,
-                    require_sidecars_absent=False,
+                retained_artifacts = _legacy_sqlite_retained_cleanup_artifacts(
+                    payload.get("retained_cleanup_artifacts")
                 )
-                destination_binding.assert_database_valid()
-                _assert_legacy_sqlite_source_cleanup_complete(
-                    source,
-                    expected_parent_identity=payload.get(
-                        "source_parent_identity"
-                    ),
-                    allowed_cleanup_artifacts=(
-                        _legacy_sqlite_retained_cleanup_artifacts(
-                            payload.get("retained_cleanup_artifacts")
-                        )
-                    ),
-                )
+
+                def assert_source_cleanup_complete() -> None:
+                    _assert_legacy_sqlite_source_cleanup_complete(
+                        source,
+                        expected_parent_identity=payload.get(
+                            "source_parent_identity"
+                        ),
+                        allowed_cleanup_artifacts=retained_artifacts,
+                    )
+
+                if phase in {"cleaning", "sealing"}:
+                    _finalize_legacy_sqlite_migration(
+                        destination_binding=destination_binding,
+                        intent_path=intent_path,
+                        payload=payload,
+                        staging_snapshot=staging_snapshot,
+                        assert_source_cleanup_complete=(
+                            assert_source_cleanup_complete
+                        ),
+                        prepared_completion_payload=(
+                            prepared_completion_payload
+                        ),
+                    )
+                else:
+                    _assert_completed_legacy_sqlite_migration(
+                        destination_binding=destination_binding,
+                        payload=payload,
+                        staging_snapshot=staging_snapshot,
+                        assert_source_cleanup_complete=(
+                            assert_source_cleanup_complete
+                        ),
+                    )
                 return True
             if not destination_exists:
                 if (
@@ -1966,10 +2104,9 @@ def _resume_legacy_sqlite_migration_intent(
         ) from exc
 
 
-def _complete_legacy_sqlite_migration_without_live_source(
+def _assert_completed_legacy_sqlite_migration(
         *,
         destination_binding: _LegacySQLiteMigrationDestination,
-        intent_path: Path,
         payload: dict[str, object],
         staging_snapshot: dict[str, object],
         assert_source_cleanup_complete: Callable[[], None],
@@ -1980,22 +2117,127 @@ def _complete_legacy_sqlite_migration_without_live_source(
         staging_name=str(payload["staging_name"]),
         staging_snapshot=staging_snapshot,
         publication_policy=payload.get("publication_policy"),
+        require_exact_bytes=False,
+        require_sidecars_absent=False,
     )
+    destination_binding.assert_database_sidecars_safe()
     destination_binding.assert_database_valid()
-    completed_payload = _legacy_sqlite_migration_completion_payload(payload)
-    _replace_legacy_sqlite_migration_intent(
-        intent_path,
-        expected=payload,
-        payload=completed_payload,
-    )
     assert_source_cleanup_complete()
     _assert_legacy_sqlite_v5_publication_state(
         destination_binding,
         staging_name=str(payload["staging_name"]),
         staging_snapshot=staging_snapshot,
         publication_policy=payload.get("publication_policy"),
+        require_exact_bytes=False,
+        require_sidecars_absent=False,
     )
-    destination_binding.assert_database_valid()
+    destination_binding.assert_database_sidecars_safe()
+
+
+def _finalize_legacy_sqlite_migration(
+        *,
+        destination_binding: _LegacySQLiteMigrationDestination,
+        intent_path: Path,
+        payload: dict[str, object],
+        staging_snapshot: dict[str, object],
+        assert_source_cleanup_complete: Callable[[], None],
+        prepared_completion_payload: dict[str, object] | None = None,
+) -> None:
+    def assert_sealable() -> None:
+        assert_source_cleanup_complete()
+        _assert_legacy_sqlite_v5_publication_state(
+            destination_binding,
+            staging_name=str(payload["staging_name"]),
+            staging_snapshot=staging_snapshot,
+            publication_policy=payload.get("publication_policy"),
+        )
+        destination_binding.assert_database_valid()
+        assert_source_cleanup_complete()
+        _assert_legacy_sqlite_v5_publication_state(
+            destination_binding,
+            staging_name=str(payload["staging_name"]),
+            staging_snapshot=staging_snapshot,
+            publication_policy=payload.get("publication_policy"),
+        )
+
+    phase = payload.get("phase")
+    if prepared_completion_payload is not None:
+        if phase == "cleaning":
+            expected_completion = (
+                _legacy_sqlite_migration_legacy_completion_payload(payload)
+            )
+        elif phase == "sealing":
+            expected_completion = _legacy_sqlite_migration_sealed_payload(
+                payload
+            )
+        else:
+            raise OSError(
+                "legacy SQLite migration prepared completion state is invalid"
+            )
+        if prepared_completion_payload != expected_completion:
+            raise OSError(
+                "legacy SQLite migration completion transition is invalid"
+            )
+        if phase == "cleaning":
+            assert_sealable()
+            _replace_legacy_sqlite_migration_intent(
+                intent_path,
+                expected=payload,
+                payload=prepared_completion_payload,
+                before_exchange=assert_sealable,
+            )
+            _assert_completed_legacy_sqlite_migration(
+                destination_binding=destination_binding,
+                payload=prepared_completion_payload,
+                staging_snapshot=staging_snapshot,
+                assert_source_cleanup_complete=assert_source_cleanup_complete,
+            )
+            return
+    if phase == "cleaning":
+        assert_sealable()
+        sealing_payload = _legacy_sqlite_migration_completion_payload(payload)
+        _replace_legacy_sqlite_migration_intent(
+            intent_path,
+            expected=payload,
+            payload=sealing_payload,
+            before_exchange=assert_sealable,
+        )
+    elif phase == "sealing":
+        sealing_payload = payload
+    else:
+        raise OSError("legacy SQLite migration intent cannot be finalized")
+
+    assert_sealable()
+    completed_payload = _legacy_sqlite_migration_sealed_payload(sealing_payload)
+    _replace_legacy_sqlite_migration_intent(
+        intent_path,
+        expected=sealing_payload,
+        payload=completed_payload,
+        before_exchange=assert_sealable,
+    )
+    _assert_completed_legacy_sqlite_migration(
+        destination_binding=destination_binding,
+        payload=completed_payload,
+        staging_snapshot=staging_snapshot,
+        assert_source_cleanup_complete=assert_source_cleanup_complete,
+    )
+
+
+def _complete_legacy_sqlite_migration_without_live_source(
+        *,
+        destination_binding: _LegacySQLiteMigrationDestination,
+        intent_path: Path,
+        payload: dict[str, object],
+        staging_snapshot: dict[str, object],
+        assert_source_cleanup_complete: Callable[[], None],
+) -> None:
+    _finalize_legacy_sqlite_migration(
+        destination_binding=destination_binding,
+        intent_path=intent_path,
+        payload=payload,
+        staging_snapshot=staging_snapshot,
+        assert_source_cleanup_complete=assert_source_cleanup_complete,
+    )
 
 
 def _validated_legacy_sqlite_migration_intent(
@@ -2040,7 +2282,13 @@ def _validated_legacy_sqlite_migration_intent(
             "legacy_cleanup_absent_prefix",
             "retained_cleanup_artifacts",
         }
-        allowed_phases = {"copying", "ready", "cleaning", "complete"}
+        allowed_phases = {
+            "copying",
+            "ready",
+            "cleaning",
+            "sealing",
+            "complete",
+        }
     else:
         raise OSError("legacy SQLite migration intent schema is unsupported")
     if (
@@ -2081,7 +2329,7 @@ def _validated_legacy_sqlite_migration_intent(
     ):
         raise OSError("legacy SQLite copying intent is invalid")
     if (
-        payload.get("phase") in {"ready", "cleaning", "complete"}
+        payload.get("phase") in {"ready", "cleaning", "sealing", "complete"}
         and not isinstance(payload.get("staging_snapshot"), dict)
     ):
         raise OSError("legacy SQLite ready intent is invalid")
@@ -2683,6 +2931,32 @@ def _legacy_sqlite_migration_completion_payload(
         or payload.get("phase") != "cleaning"
     ):
         raise OSError("legacy SQLite migration intent cannot be completed")
+    sealing = dict(payload)
+    sealing["phase"] = "sealing"
+    return sealing
+
+
+def _legacy_sqlite_migration_legacy_completion_payload(
+        payload: dict[str, object],
+) -> dict[str, object]:
+    if (
+        payload.get("schema_version") != _LEGACY_SQLITE_INTENT_VERSION
+        or payload.get("phase") != "cleaning"
+    ):
+        raise OSError("legacy SQLite migration intent cannot be completed")
+    completed = dict(payload)
+    completed["phase"] = "complete"
+    return completed
+
+
+def _legacy_sqlite_migration_sealed_payload(
+        payload: dict[str, object],
+) -> dict[str, object]:
+    if (
+        payload.get("schema_version") != _LEGACY_SQLITE_INTENT_VERSION
+        or payload.get("phase") != "sealing"
+    ):
+        raise OSError("legacy SQLite migration intent cannot be sealed")
     completed = dict(payload)
     completed["phase"] = "complete"
     return completed

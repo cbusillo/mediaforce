@@ -100,13 +100,20 @@ Mediaforce's SQLite schema.
   `RENAME_EXCHANGE` atomically exchanges them. The canonical name receives the
   successor while the transition name retains the exact predecessor as a
   tombstone. Recovery validates the transition graph and resumes either the
-  prepared pre-exchange or claimed post-exchange state. If either pathname is
-  replaced at the exchange boundary, descriptor/inode checks fail while the
-  trusted and replacement artifacts remain present. Finalization is another
-  exchange to a durable schema-v5 `complete` intent; the canonical completion
-  record is retained instead of being removed. Later startups revalidate the
-  published inode and legacy cleanup namespace while allowing ordinary in-place
-  database writes and runtime SQLite sidecars after the migration handoff.
+  prepared pre-exchange or claimed post-exchange state. Prepared completion
+  edges re-enter the checked finalizer instead of being replayed generically,
+  including the legacy direct `cleaning`-to-`complete` edge that pre-seal builds
+  could leave behind. If either pathname is replaced at the exchange boundary,
+  descriptor/inode checks fail while the trusted and replacement artifacts
+  remain present. Finalization first exchanges
+  to a durable schema-v5 `sealing` intent. Recovery keeps requiring the exact
+  published bytes, an empty destination sidecar namespace, valid SQLite content,
+  and complete legacy cleanup until a second checked exchange linearizes the
+  runtime handoff as `complete`. The canonical completion record is retained
+  instead of being removed. Later startups revalidate the published inode, the
+  legacy cleanup namespace, and any WAL/SHM/journal entries as owner-controlled,
+  single-link regular files while allowing ordinary in-place database writes and
+  runtime SQLite sidecar content after the migration handoff.
   Scratch preparation files and interrupted copy files are inert residue: they
   are never deleted by pathname, never become authoritative without an
   exclusive publication step, and a later attempt uses a fresh reserved name.
@@ -119,8 +126,11 @@ Mediaforce's SQLite schema.
   is no validation-then-unlink rollback. Older v2-v4 hardlink publications are
   still recognized. A surviving legacy staging alias remains linked to the
   destination and is recorded by the publication policy rather than removed.
-  The configured parent is rechecked before every source retirement, so a
-  destination-parent swap stops cleanup before the legacy main is retired.
+  Every intent transition preserves the destination-parent identity captured by
+  its predecessor and verifies that identity against the retained transition
+  directory descriptor. The configured parent is also rechecked before every
+  source retirement, so a destination-parent swap or copying-to-ready rebind
+  stops cleanup before the legacy main is retired.
   Cleanup claims the exact legacy main first with an exclusive rename to an
   identity-derived quarantine name, syncs that namespace transition, and
   validates the claimed inode. It retains that exact quarantine as authorized
