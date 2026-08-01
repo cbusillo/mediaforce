@@ -302,7 +302,9 @@ implementation bytes to diverge from the reviewed commit. The canonical runner
 must be launched with
 CPython isolated/no-site startup before importing `argparse`, dependencies, or
 `mediaforce`; non-`-I -S` startup fails closed. A stdlib-only bootstrap invokes
-fixed `/usr/bin/git` through a
+the root-owned direct system Git binary
+(`/Library/Developer/CommandLineTools/usr/bin/git` on macOS and `/usr/bin/git`
+on Linux) rather than the macOS Xcode-selection shim, through a
 sanitized environment with validated `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` values pinned to the canonical checkout, so repo-local
 `core.worktree` or a foreign `.git` pointer cannot redirect the proof. The
@@ -334,9 +336,11 @@ disables bytecode writes. The bootstrap removes the repository and script
 directories from normal module search, adds only trusted interpreter paths plus
 the canonical checkout's `.venv` site-packages, requires the running interpreter
 to use an approved `.venv/bin/python*` launcher whose opened binary is the same
-inode as canonical `.venv/bin/python` and the interpreter's base executable,
-requires any `VIRTUAL_ENV` declaration to match that environment, and explicitly
-binds the canonical `mediaforce` source snapshot. Under the owner-local threat
+inode as canonical `.venv/bin/python` and the interpreter's base executable.
+That executable must be owned by the invoking account or root, must not be
+group/world-writable, and must not carry set-ID bits. The bootstrap requires any
+`VIRTUAL_ENV` declaration to match that environment and explicitly binds the
+canonical `mediaforce` source snapshot. Under the owner-local threat
 model, that canonical `.venv`/site-packages installation and the external Every
 Code binary remain trusted; the verifier does not broaden its scope by hashing
 dependencies or copying the Code runner. An ignored `scripts/argparse.py`,

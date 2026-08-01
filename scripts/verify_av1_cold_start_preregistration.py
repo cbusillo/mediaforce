@@ -1680,6 +1680,55 @@ def _fail_closed_preregistration_bootstrap_exit() -> None:
             bootstrap_os._exit(1)
 
 
+def _canonical_system_git_binary(platform: str) -> str:
+    if platform == "darwin":
+        return "/Library/Developer/CommandLineTools/usr/bin/git"
+    return "/usr/bin/git"
+
+
+def _preregistration_executable_is_trusted(
+        *,
+        owner_uid: int,
+        mode: int,
+        current_uid: int,
+) -> bool:
+    bootstrap_stat = __import__("stat")
+    return (
+        bootstrap_stat.S_ISREG(mode)
+        and owner_uid in {0, current_uid}
+        and not mode & (
+            0o022 | bootstrap_stat.S_ISUID | bootstrap_stat.S_ISGID
+        )
+    )
+
+
+def _system_git_binary_is_trusted(path: str) -> bool:
+    bootstrap_os = __import__("os")
+    bootstrap_stat = __import__("stat")
+    descriptor = -1
+    try:
+        flags = bootstrap_os.O_RDONLY | getattr(bootstrap_os, "O_CLOEXEC", 0)
+        if hasattr(bootstrap_os, "O_NOFOLLOW"):
+            flags |= bootstrap_os.O_NOFOLLOW
+        descriptor = bootstrap_os.open(path, flags)
+        descriptor_info = bootstrap_os.fstat(descriptor)
+        path_info = bootstrap_os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    finally:
+        if descriptor >= 0:
+            bootstrap_os.close(descriptor)
+    return (
+        bootstrap_stat.S_ISREG(descriptor_info.st_mode)
+        and descriptor_info.st_uid == 0
+        and not descriptor_info.st_mode & (
+            0o022 | bootstrap_stat.S_ISUID | bootstrap_stat.S_ISGID
+        )
+        and (descriptor_info.st_dev, descriptor_info.st_ino)
+        == (path_info.st_dev, path_info.st_ino)
+    )
+
+
 def _assert_preregistration_import_tree_clean(
         repository_root: object = None,
         *,
@@ -1963,6 +2012,11 @@ def _assert_preregistration_import_tree_clean(
     )
     if source_default_authority_paths:
         authority_monitor.add_worktree_paths(source_default_authority_paths)
+    git_binary = _canonical_system_git_binary(bootstrap_sys.platform)
+    if not _system_git_binary_is_trusted(git_binary):
+        raise RuntimeError(
+            "AV1 preregistration runner requires trusted direct system Git"
+        )
 
     def git_output(*arguments: str) -> tuple[int, bytes]:
         authority_monitor.assert_quiet()
@@ -1990,9 +2044,9 @@ def _assert_preregistration_import_tree_clean(
                     bootstrap_os.close(null_descriptor)
                 bootstrap_os.chdir(root)
                 bootstrap_os.execve(
-                    "/usr/bin/git",
+                    git_binary,
                     (
-                        "/usr/bin/git",
+                        git_binary,
                         "-c",
                         "core.attributesFile=/dev/null",
                         "-c",
@@ -2262,8 +2316,11 @@ def _assert_preregistration_import_tree_clean(
                 )
                 executable_is_canonical = (
                     bootstrap_os.path.isfile(executable_realpath)
-                    and descriptor_info.st_uid == bootstrap_os.getuid()
-                    and not descriptor_info.st_mode & 0o022
+                    and _preregistration_executable_is_trusted(
+                        owner_uid=descriptor_info.st_uid,
+                        mode=descriptor_info.st_mode,
+                        current_uid=bootstrap_os.getuid(),
+                    )
                     and (
                         descriptor_info.st_dev,
                         descriptor_info.st_ino,
@@ -2497,7 +2554,7 @@ _AGENT_REVIEW_MAX_SECONDS = 1800
 _AGENT_REVIEW_SAFE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 _AGENT_REVIEW_GENERIC_IDENTITY = "mediaforce-review"
 _REVIEW_GIT_COMMAND_PREFIX = (
-    "/usr/bin/git",
+    _canonical_system_git_binary(sys.platform),
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
@@ -3962,6 +4019,10 @@ def _is_raw_git_object_id(value: str) -> bool:
 
 
 def _review_git_command(*arguments: str) -> list[str]:
+    if not _system_git_binary_is_trusted(_REVIEW_GIT_COMMAND_PREFIX[0]):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review requires trusted direct system Git"
+        )
     return [*_REVIEW_GIT_COMMAND_PREFIX, *arguments]
 
 

@@ -248,7 +248,9 @@ def _context_value(value: object) -> Iterator[object]:
 def _run_test_git(repository: Path, *arguments: str) -> str:
     completed = subprocess.run(
         [
-            "/usr/bin/git",
+            verify_av1_cold_start_preregistration._canonical_system_git_binary(
+                sys.platform
+            ),
             "-C",
             str(repository),
             "-c",
@@ -2637,6 +2639,54 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "requires the canonical repository virtual environment",
                 completed.stderr,
             )
+
+    def test_preregistration_executable_trusts_only_safe_current_or_root_owner(
+            self,
+    ) -> None:
+        current_uid = 501
+        regular_mode = stat.S_IFREG | 0o755
+        cases = (
+            ("current owner", current_uid, regular_mode, True),
+            ("root owner", 0, regular_mode, True),
+            ("foreign owner", current_uid + 1, regular_mode, False),
+            ("group writable", current_uid, stat.S_IFREG | 0o775, False),
+            ("world writable", current_uid, stat.S_IFREG | 0o757, False),
+            ("setuid", 0, stat.S_IFREG | 0o4755, False),
+            ("setgid", 0, stat.S_IFREG | 0o2755, False),
+            ("not regular", current_uid, stat.S_IFDIR | 0o755, False),
+        )
+        for label, owner_uid, mode, expected in cases:
+            with self.subTest(label=label):
+                self.assertEqual(
+                    verify_av1_cold_start_preregistration
+                    ._preregistration_executable_is_trusted(
+                        owner_uid=owner_uid,
+                        mode=mode,
+                        current_uid=current_uid,
+                    ),
+                    expected,
+                )
+
+    def test_review_git_uses_root_owned_direct_system_binary(self) -> None:
+        expected = (
+            "/Library/Developer/CommandLineTools/usr/bin/git"
+            if sys.platform == "darwin"
+            else "/usr/bin/git"
+        )
+        command = verify_av1_cold_start_preregistration._review_git_command(
+            "--version"
+        )
+        self.assertEqual(command[0], expected)
+        binary_info = Path(expected).lstat()
+        self.assertTrue(stat.S_ISREG(binary_info.st_mode))
+        self.assertEqual(binary_info.st_uid, 0)
+        self.assertFalse(
+            binary_info.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+        )
+        self.assertTrue(
+            verify_av1_cold_start_preregistration
+            ._system_git_binary_is_trusted(expected)
+        )
 
     def test_preregistration_bootstrap_rejects_hostile_virtual_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -5513,7 +5563,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(
             verify_av1_cold_start_preregistration._review_git_command("cat-file", "blob", "a" * 40),
             [
-                "/usr/bin/git",
+                verify_av1_cold_start_preregistration
+                ._canonical_system_git_binary(sys.platform),
                 "-c",
                 "core.attributesFile=/dev/null",
                 "-c",
@@ -6008,9 +6059,17 @@ class AV1ValidationDerivationTests(unittest.TestCase):
     def test_review_git_raw_bytes_support_sha256_repositories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory) / "repository"
+            git_binary = (
+                verify_av1_cold_start_preregistration
+                ._canonical_system_git_binary(sys.platform)
+            )
+            self.assertTrue(
+                verify_av1_cold_start_preregistration
+                ._system_git_binary_is_trusted(git_binary)
+            )
             completed = subprocess.run(
                 [
-                    "/usr/bin/git",
+                    git_binary,
                     "init",
                     "--quiet",
                     "--object-format=sha256",
