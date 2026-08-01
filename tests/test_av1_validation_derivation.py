@@ -2650,6 +2650,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ("root owner", 0, 0, regular_mode, True),
             ("root wheel group writable", 0, 0, stat.S_IFREG | 0o775, True),
             (
+                "current owner wheel group writable",
+                current_uid,
+                0,
+                stat.S_IFREG | 0o775,
+                True,
+            ),
+            (
                 "root foreign group writable",
                 0,
                 20,

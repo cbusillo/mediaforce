@@ -1704,7 +1704,7 @@ def _preregistration_executable_is_trusted(
         )
         and (
             not mode & bootstrap_stat.S_IWGRP
-            or (owner_uid == 0 and owner_gid == 0)
+            or owner_gid == 0
         )
     )
 
