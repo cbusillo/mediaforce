@@ -6406,7 +6406,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 current_head.write_bytes(current_payload)
                 monitor.close()
 
-    def test_repository_monitor_restores_owned_nofile_limit_only(self) -> None:
+    def test_repository_monitor_reserves_runtime_descriptors_and_restores_owned_limit(
+            self,
+    ) -> None:
         resource = __import__("resource")
 
         def monitor_fixture() -> object:
@@ -6422,6 +6424,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             monitor._darwin_watcher = None
             monitor._inotify_descriptor = -1
             monitor._nofile_resource = None
+            monitor._nofile_baseline_soft_limit = None
             monitor._original_nofile_soft_limit = None
             monitor._raised_nofile_soft_limit = None
             return monitor
@@ -6444,19 +6447,60 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     patch.object(resource, "setrlimit", side_effect=setrlimit),
                 ):
                     monitor._ensure_descriptor_capacity(300)
+                    self.assertEqual(state[0], 557)
+                    monitor._ensure_descriptor_capacity(350)
                     raised_limit = state[0]
-                    self.assertGreaterEqual(raised_limit, 428)
+                    self.assertEqual(raised_limit, 607)
                     if external_change:
                         state[0] = raised_limit + 1
                     monitor.close()
 
-                self.assertEqual(set_calls[0], (428, 4096))
+                self.assertEqual(set_calls[:2], [(557, 4096), (607, 4096)])
                 if external_change:
-                    self.assertEqual(set_calls, [(428, 4096)])
+                    self.assertEqual(set_calls, [(557, 4096), (607, 4096)])
                     self.assertEqual(state[0], raised_limit + 1)
                 else:
                     self.assertEqual(set_calls[-1], (256, 4096))
                     self.assertEqual(state[0], 256)
+
+        state = [256, 4096]
+        set_calls = []
+
+        def nested_getrlimit(_resource: int) -> tuple[int, int]:
+            return state[0], state[1]
+
+        def nested_setrlimit(_resource: int, limits: tuple[int, int]) -> None:
+            set_calls.append(limits)
+            state[:] = limits
+
+        with (
+            patch.object(resource, "getrlimit", side_effect=nested_getrlimit),
+            patch.object(resource, "setrlimit", side_effect=nested_setrlimit),
+        ):
+            outer = monitor_fixture()
+            outer._ensure_descriptor_capacity(300)
+            inner = monitor_fixture()
+            inner._ensure_descriptor_capacity(200)
+            inner.close()
+            outer.close()
+
+        self.assertEqual(
+            set_calls,
+            [(557, 4096), (758, 4096), (557, 4096), (256, 4096)],
+        )
+        self.assertEqual(state[0], 256)
+
+        state = [256, 400]
+        set_calls = []
+        monitor = monitor_fixture()
+        with (
+            patch.object(resource, "getrlimit", side_effect=nested_getrlimit),
+            patch.object(resource, "setrlimit", side_effect=nested_setrlimit),
+            self.assertRaisesRegex(RuntimeError, "unavailable"),
+        ):
+            monitor._ensure_descriptor_capacity(300)
+        monitor.close()
+        self.assertEqual(set_calls, [])
 
     def test_structured_response_and_evidence_reject_binding_decision_and_path_drift(
             self,
