@@ -1382,9 +1382,11 @@ class _LegacySQLiteMutationGuard:
             raise FileIntegrityError(
                 "legacy SQLite sidecar mutation monitoring is unavailable"
             )
-        mask = self._IN_ATTRIB | self._IN_DELETE_SELF | self._IN_MOVE_SELF
-        if name.endswith("-wal") and watch_writes:
-            mask |= self._IN_MODIFY
+        mask = self._IN_DELETE_SELF | self._IN_MOVE_SELF
+        if watch_writes:
+            mask |= self._IN_ATTRIB
+            if name.endswith("-wal"):
+                mask |= self._IN_MODIFY
         watch = inotify_add_watch(
             self._inotify_descriptor,
             os.fsencode(f"/proc/self/fd/{descriptor}"),

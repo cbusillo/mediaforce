@@ -278,6 +278,42 @@ def _run_test_git(repository: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _create_preregistration_fixture_virtual_environment(
+        repository: Path,
+) -> Path:
+    virtual_environment = repository / ".venv"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "venv",
+            "--without-pip",
+            str(virtual_environment),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    site_packages = next(
+        Path(entry).resolve()
+        for entry in sys.path
+        if Path(entry).name == "site-packages"
+        and (Path(entry) / "sqlalchemy").is_dir()
+    )
+    fixture_site_packages = (
+        virtual_environment
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    if fixture_site_packages.is_symlink():
+        fixture_site_packages.unlink()
+    else:
+        shutil.rmtree(fixture_site_packages)
+    fixture_site_packages.symlink_to(site_packages, target_is_directory=True)
+    return virtual_environment / "bin" / "python"
+
+
 def _initialize_preregistration_test_repository(repository: Path) -> None:
     (repository / "scripts").mkdir(parents=True)
     (repository / "mediaforce").mkdir()
@@ -2708,24 +2744,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 _run_test_git(repository, *arguments)
 
-            canonical_python = repository / ".venv" / "bin" / "python"
-            canonical_python.parent.mkdir(parents=True)
-            canonical_python.symlink_to(Path(sys.executable).resolve())
-            site_packages = next(
-                Path(entry).resolve()
-                for entry in sys.path
-                if Path(entry).name == "site-packages"
-                and (Path(entry) / "sqlalchemy").is_dir()
+            canonical_python = (
+                _create_preregistration_fixture_virtual_environment(repository)
             )
-            fixture_site_packages = (
-                repository
-                / ".venv"
-                / "lib"
-                / f"python{sys.version_info.major}.{sys.version_info.minor}"
-                / "site-packages"
-            )
-            fixture_site_packages.parent.mkdir(parents=True)
-            fixture_site_packages.symlink_to(site_packages, target_is_directory=True)
             malicious_executed = root / "substituted-module-executed"
             target_module = repository / "mediaforce" / "core" / "config.py"
             original_source = target_module.read_bytes()
@@ -2824,24 +2845,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 _run_test_git(repository, *arguments)
 
             canonical_repository = repository.resolve()
-            canonical_python = canonical_repository / ".venv" / "bin" / "python"
-            canonical_python.parent.mkdir(parents=True)
-            canonical_python.symlink_to(Path(sys.executable).resolve())
-            site_packages = next(
-                Path(entry).resolve()
-                for entry in sys.path
-                if Path(entry).name == "site-packages"
-                and (Path(entry) / "sqlalchemy").is_dir()
+            canonical_python = (
+                _create_preregistration_fixture_virtual_environment(
+                    canonical_repository
+                )
             )
-            fixture_site_packages = (
-                canonical_repository
-                / ".venv"
-                / "lib"
-                / f"python{sys.version_info.major}.{sys.version_info.minor}"
-                / "site-packages"
-            )
-            fixture_site_packages.parent.mkdir(parents=True)
-            fixture_site_packages.symlink_to(site_packages, target_is_directory=True)
             child_environment = dict(os.environ)
             child_environment.pop("PYTHONPATH", None)
             child_environment["VIRTUAL_ENV"] = str(

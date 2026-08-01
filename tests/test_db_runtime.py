@@ -1646,6 +1646,45 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         ):
                             locked_source.sqlite_uri()
 
+    def test_legacy_migration_source_allows_journal_initialization_before_binding(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            sqlite3.connect(source_path).close()
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-journal-initialization"},
+            ):
+                with exclusive_legacy_sqlite_migration_source(
+                    config,
+                    source_path,
+                ) as locked_source:
+                    locked_source.prepare_sqlite_sidecars_for_write_gate()
+                    gate_connection = sqlite3.connect(
+                        locked_source.sqlite_uri(),
+                        uri=True,
+                        timeout=0,
+                        isolation_level=None,
+                    )
+                    try:
+                        gate_connection.execute("BEGIN IMMEDIATE")
+                        locked_source.bind_sqlite_sidecars()
+                        locked_source.assert_connection_bound(gate_connection)
+                    finally:
+                        if gate_connection.in_transaction:
+                            gate_connection.rollback()
+                        gate_connection.close()
+
     def test_legacy_migration_source_rejects_connection_to_other_database(
             self,
     ) -> None:
