@@ -2398,7 +2398,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_RESPONSE_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_NAME,
-    AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
+    AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RUN_SCHEMA,
     AV1ValidationDerivationCandidateProposal,
     AV1ValidationDerivationError,
     AV1ValidationDerivationPlan,
@@ -2440,7 +2440,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_verdict_claims,
     load_av1_validation_derivation_verdict_intent,
     retain_av1_validation_derivation_publication_directories,
-    validate_av1_validation_derivation_review_response,
+    parse_av1_validation_derivation_review_response,
     validate_av1_validation_derivation_artifact_root_binding,
     write_av1_validation_derivation_candidate_proposal,
     write_av1_validation_derivation_plan,
@@ -3256,7 +3256,6 @@ def _run_derivation_action_body(
             config_path=args.config,
             config=locked_config,
         )
-        assert_av1_validation_derivation_execution_environment(plan)
         proposal = load_av1_validation_derivation_candidate_proposal(
             artifact_root,
             plan=plan,
@@ -3291,6 +3290,26 @@ def _run_derivation_action_body(
                 proposal=proposal,
                 lane=args.lane,
             )
+            checkpoint_recovery = False
+            if existing_review is not None and existing_review[1] is None:
+                checkpoint_recovery = (
+                    load_av1_validation_derivation_review_response_checkpoint(
+                        artifact_root,
+                        plan=plan,
+                        proposal=proposal,
+                        claim=existing_review[0],
+                    )
+                    is not None
+                )
+            requires_live_review_environment = (
+                existing_review is None
+                or (
+                    existing_review[1] is None
+                    and not checkpoint_recovery
+                )
+            )
+            if requires_live_review_environment:
+                assert_av1_validation_derivation_execution_environment(plan)
             repository_commit, repository_tree = _repository_review_identity(
                 process_controller=ManagedProcessController(),
             )
@@ -3336,7 +3355,8 @@ def _run_derivation_action_body(
                 claim, envelope = existing_review
                 assert envelope is not None
                 review = envelope.review
-            assert_av1_validation_derivation_execution_environment(plan)
+            if requires_live_review_environment:
+                assert_av1_validation_derivation_execution_environment(plan)
             write_av1_validation_derivation_review_envelope(
                 artifact_root,
                 plan=plan,
@@ -4960,40 +4980,11 @@ def _structured_review_response(
         proposal: AV1ValidationDerivationCandidateProposal,
         claim: AV1ValidationDerivationReviewClaim,
 ) -> tuple[dict[str, object], AV1ValidationDerivationReviewDecision]:
-    response_text = stdout.strip()
-    if not response_text:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation structured review did not return one JSON response"
-        )
-    try:
-        response = json.loads(
-            response_text,
-            object_pairs_hook=_review_response_json_object,
-        )
-        response_payload = dict(response)
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation structured review response is invalid"
-        ) from exc
-    decision = validate_av1_validation_derivation_review_response(
-        response_payload,
+    return parse_av1_validation_derivation_review_response(
+        stdout,
         proposal=proposal,
         claim=claim,
     )
-    return response_payload, decision
-
-
-def _review_response_json_object(
-        pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    response: dict[str, object] = {}
-    for key, value in pairs:
-        if key in response:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation structured review response has duplicate JSON keys"
-            )
-        response[key] = value
-    return response
 
 
 def _assert_native_review_runner(binary_bytes: bytes) -> None:
@@ -5060,12 +5051,19 @@ def _load_existing_derivation_review(
         / proposal.proposal_id
         / f"{lane}.json"
     )
+    checkpoint_path = (
+        artifact_root
+        / "review-responses"
+        / proposal.proposal_id
+        / f"{lane}.json"
+    )
     claim_exists = claim_path.exists() or claim_path.is_symlink()
     envelope_exists = envelope_path.exists() or envelope_path.is_symlink()
+    checkpoint_exists = checkpoint_path.exists() or checkpoint_path.is_symlink()
     if not claim_exists:
-        if envelope_exists:
+        if envelope_exists or checkpoint_exists:
             raise AV1ValidationDerivationError(
-                "AV1 derivation review envelope has no immutable lane claim"
+                "AV1 derivation review state has no immutable lane claim"
             )
         return None
     claims = load_av1_validation_derivation_review_claims(
@@ -5213,6 +5211,216 @@ def _assert_no_tool_llm_review_command(command: Sequence[str]) -> None:
         )
 
 
+def _build_code_llm_review_materials(
+        *,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+        process_controller: ManagedProcessController,
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    str,
+    str,
+    dict[str, object],
+    str,
+]:
+    safe_bundle = _build_av1_validation_derivation_review_bundle(
+        claim=claim,
+        process_controller=process_controller,
+    )
+    request = build_av1_validation_derivation_review_request(
+        proposal=proposal,
+        claim=claim,
+        safe_bundle=safe_bundle,
+    )
+    developer_text = av1_validation_derivation_review_developer_text(claim.lane)
+    response_schema = build_av1_validation_derivation_review_response_schema(
+        proposal=proposal,
+        claim=claim,
+    )
+    request_sha256 = (
+        f"sha256:{hashlib.sha256(canonical_json_bytes(request)).hexdigest()}"
+    )
+    response_schema_text = canonical_json_bytes(response_schema).decode("utf-8")
+    return (
+        safe_bundle,
+        request,
+        request_sha256,
+        developer_text,
+        response_schema,
+        response_schema_text,
+    )
+
+
+def _assert_existing_code_llm_review_claim_bindings(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        lane: AV1ValidationDerivationReviewLane,
+        claim: AV1ValidationDerivationReviewClaim,
+        repository_identity: tuple[str, str],
+) -> None:
+    if (
+        claim.plan_id != plan.plan_id
+        or claim.authorization_id != plan.authorization.authorization_id
+        or claim.proposal_id != proposal.proposal_id
+        or claim.proposal_payload_sha256 != proposal.payload_sha256
+        or claim.lane != lane
+        or (claim.repository_commit, claim.repository_tree)
+        != repository_identity
+        or claim.review_runner_canonical_path_sha256
+        != plan.review_runner_canonical_path_sha256
+        or claim.review_runner_binary_sha256
+        != plan.review_runner_binary_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation interrupted review claim is no longer authorized"
+        )
+
+
+def _code_llm_review_result_from_checkpoint(
+        *,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+        checkpoint: dict[str, object],
+        safe_bundle: dict[str, object],
+        request: dict[str, object],
+        request_sha256: str,
+        developer_text: str,
+        response_schema: dict[str, object],
+) -> tuple[bytes, AV1ValidationDerivationReviewDecision, str]:
+    if checkpoint.get("request_sha256") != request_sha256:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint request changed"
+        )
+    response_text = checkpoint.get("response")
+    stderr_sha256 = checkpoint.get("stderr_sha256")
+    reviewed_at = checkpoint.get("completed_at")
+    checkpoint_payload_sha256 = checkpoint.get("payload_sha256")
+    if (
+        not isinstance(response_text, str)
+        or not isinstance(stderr_sha256, str)
+        or not isinstance(reviewed_at, str)
+        or not isinstance(checkpoint_payload_sha256, str)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is invalid"
+        )
+    try:
+        model_response, decision = _structured_review_response(
+            response_text,
+            proposal=proposal,
+            claim=claim,
+        )
+    except AV1ValidationDerivationError:
+        evidence = build_av1_validation_derivation_review_recovery_evidence(
+            proposal=proposal,
+            claim=claim,
+            reason_code="invalid_durable_response",
+            recovered_at=reviewed_at,
+            response_checkpoint_payload_sha256=checkpoint_payload_sha256,
+        )
+        _assert_preregistration_bootstrap_authority()
+        return evidence, "rejected", reviewed_at
+    evidence_payload: dict[str, object] = {
+        "schema": AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RUN_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
+        "review_run_id": claim.review_run_id,
+        "reviewer_token": f"agent:{claim.review_run_id}",
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "lane": claim.lane,
+        "decision": decision,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "review_runner_canonical_path_sha256": (
+            claim.review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
+        "proposal": proposal.to_payload(),
+        "review_claim": claim.to_payload(),
+        "safe_bundle": safe_bundle,
+        "request": request,
+        "request_sha256": request_sha256,
+        "developer_text": developer_text,
+        "developer_text_sha256": (
+            f"sha256:{hashlib.sha256(developer_text.encode('utf-8')).hexdigest()}"
+        ),
+        "response_schema": response_schema,
+        "response_schema_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(response_schema)).hexdigest()}"
+        ),
+        "returncode": 0,
+        "stderr_sha256": stderr_sha256,
+        "model_response": model_response,
+        "model_response_sha256": (
+            f"sha256:{hashlib.sha256(canonical_json_bytes(model_response)).hexdigest()}"
+        ),
+        "analysis_sha256": av1_validation_derivation_review_analysis_sha256(
+            model_response
+        ),
+        "response_checkpoint_payload_sha256": checkpoint_payload_sha256,
+        "completed_at": reviewed_at,
+    }
+    evidence = canonical_json_bytes(evidence_payload)
+    _assert_preregistration_bootstrap_authority()
+    return evidence, decision, reviewed_at
+
+
+def _recover_checkpointed_code_llm_review(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        lane: AV1ValidationDerivationReviewLane,
+        claim: AV1ValidationDerivationReviewClaim,
+        checkpoint: dict[str, object],
+        before_publish: Callable[[], None] | None,
+) -> tuple[
+    AV1ValidationDerivationReviewClaim,
+    bytes,
+    AV1ValidationDerivationReviewDecision,
+    str,
+]:
+    _assert_preregistration_bootstrap_authority()
+    process_controller = ManagedProcessController()
+    repository_identity = _repository_review_identity(
+        process_controller=process_controller,
+    )
+    _assert_existing_code_llm_review_claim_bindings(
+        plan=plan,
+        proposal=proposal,
+        lane=lane,
+        claim=claim,
+        repository_identity=repository_identity,
+    )
+    _call_preregistration_publication_guard(before_publish)
+    (
+        safe_bundle,
+        request,
+        request_sha256,
+        developer_text,
+        response_schema,
+        _response_schema_text,
+    ) = _build_code_llm_review_materials(
+        proposal=proposal,
+        claim=claim,
+        process_controller=process_controller,
+    )
+    evidence, decision, reviewed_at = _code_llm_review_result_from_checkpoint(
+        proposal=proposal,
+        claim=claim,
+        checkpoint=checkpoint,
+        safe_bundle=safe_bundle,
+        request=request,
+        request_sha256=request_sha256,
+        developer_text=developer_text,
+        response_schema=response_schema,
+    )
+    return claim, evidence, decision, reviewed_at
+
+
 def _run_code_llm_review(
         *,
         artifact_root: Path,
@@ -5227,6 +5435,22 @@ def _run_code_llm_review(
     AV1ValidationDerivationReviewDecision,
     str,
 ]:
+    if claim is not None:
+        checkpoint = load_av1_validation_derivation_review_response_checkpoint(
+            artifact_root,
+            plan=plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        if checkpoint is not None:
+            return _recover_checkpointed_code_llm_review(
+                plan=plan,
+                proposal=proposal,
+                lane=lane,
+                claim=claim,
+                checkpoint=checkpoint,
+                before_publish=before_publish,
+            )
     try:
         deadline = datetime.fromisoformat(
             plan.authorization.valid_until.replace("Z", "+00:00")
@@ -5312,23 +5536,13 @@ def _run_code_llm_review_before_deadline(
             before_publish=guarded_before_publish,
         )
     else:
-        if (
-            claim.plan_id != plan.plan_id
-            or claim.authorization_id != plan.authorization.authorization_id
-            or claim.proposal_id != proposal.proposal_id
-            or claim.proposal_payload_sha256 != proposal.payload_sha256
-            or claim.lane != lane
-            or (claim.repository_commit, claim.repository_tree)
-            != before_repository_identity
-            or claim.review_runner_canonical_path_sha256
-            != plan.review_runner_canonical_path_sha256
-            or claim.review_runner_binary_sha256
-            != plan.review_runner_binary_sha256
-        ):
-            raise AV1ValidationDerivationError(
-                "AV1 derivation interrupted review claim is no longer authorized"
-            )
-        review_run_id = claim.review_run_id
+        _assert_existing_code_llm_review_claim_bindings(
+            plan=plan,
+            proposal=proposal,
+            lane=lane,
+            claim=claim,
+            repository_identity=before_repository_identity,
+        )
         guarded_before_publish()
     checkpoint = load_av1_validation_derivation_review_response_checkpoint(
         artifact_root,
@@ -5346,23 +5560,19 @@ def _run_code_llm_review_before_deadline(
         )
         _assert_preregistration_bootstrap_authority()
         return claim, evidence, "rejected", reviewed_at
-    safe_bundle = _build_av1_validation_derivation_review_bundle(
+    (
+        safe_bundle,
+        request,
+        request_sha256,
+        developer_text,
+        response_schema,
+        response_schema_text,
+    ) = _build_code_llm_review_materials(
+        proposal=proposal,
         claim=claim,
         process_controller=process_controller,
     )
-    request = build_av1_validation_derivation_review_request(
-        proposal=proposal,
-        claim=claim,
-        safe_bundle=safe_bundle,
-    )
-    developer_text = av1_validation_derivation_review_developer_text(claim.lane)
-    response_schema = build_av1_validation_derivation_review_response_schema(
-        proposal=proposal,
-        claim=claim,
-    )
     request_bytes = canonical_json_bytes(request)
-    request_sha256 = f"sha256:{hashlib.sha256(request_bytes).hexdigest()}"
-    response_schema_text = canonical_json_bytes(response_schema).decode("utf-8")
     if checkpoint is None:
         if before_identity is None:
             raise AV1ValidationDerivationError(
@@ -5467,84 +5677,16 @@ def _run_code_llm_review_before_deadline(
             raise AV1ValidationDerivationError(
                 "AV1 derivation review response checkpoint was not published"
             )
-    if checkpoint.get("request_sha256") != request_sha256:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review response checkpoint request changed"
-        )
-    response_text = checkpoint.get("response")
-    stderr_sha256 = checkpoint.get("stderr_sha256")
-    reviewed_at = checkpoint.get("completed_at")
-    if (
-        not isinstance(response_text, str)
-        or not isinstance(stderr_sha256, str)
-        or not isinstance(reviewed_at, str)
-    ):
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review response checkpoint is invalid"
-        )
-    try:
-        model_response, decision = _structured_review_response(
-            response_text,
-            proposal=proposal,
-            claim=claim,
-        )
-    except AV1ValidationDerivationError:
-        checkpoint_payload_sha256 = checkpoint.get("payload_sha256")
-        if not isinstance(checkpoint_payload_sha256, str):
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review response checkpoint is invalid"
-            ) from None
-        recovered_at = _now_iso()
-        evidence = build_av1_validation_derivation_review_recovery_evidence(
-            proposal=proposal,
-            claim=claim,
-            reason_code="invalid_durable_response",
-            recovered_at=recovered_at,
-            response_checkpoint_payload_sha256=checkpoint_payload_sha256,
-        )
-        _assert_preregistration_bootstrap_authority()
-        return claim, evidence, "rejected", recovered_at
-    evidence = canonical_json_bytes({
-        "schema": AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
-        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
-        "review_run_id": review_run_id,
-        "reviewer_token": f"agent:{review_run_id}",
-        "proposal_id": proposal.proposal_id,
-        "proposal_payload_sha256": proposal.payload_sha256,
-        "review_claim_id": claim.claim_id,
-        "review_claim_payload_sha256": claim.payload_sha256,
-        "lane": claim.lane,
-        "decision": decision,
-        "repository_commit": claim.repository_commit,
-        "repository_tree": claim.repository_tree,
-        "review_runner_canonical_path_sha256": (
-            claim.review_runner_canonical_path_sha256
-        ),
-        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
-        "proposal": proposal.to_payload(),
-        "review_claim": claim.to_payload(),
-        "safe_bundle": safe_bundle,
-        "request": request,
-        "request_sha256": request_sha256,
-        "developer_text": developer_text,
-        "developer_text_sha256": (
-            f"sha256:{hashlib.sha256(developer_text.encode('utf-8')).hexdigest()}"
-        ),
-        "response_schema": response_schema,
-        "response_schema_sha256": (
-            f"sha256:{hashlib.sha256(canonical_json_bytes(response_schema)).hexdigest()}"
-        ),
-        "returncode": 0,
-        "stderr_sha256": stderr_sha256,
-        "model_response": model_response,
-        "model_response_sha256": (
-            f"sha256:{hashlib.sha256(canonical_json_bytes(model_response)).hexdigest()}"
-        ),
-        "analysis_sha256": av1_validation_derivation_review_analysis_sha256(
-            model_response
-        ),
-    })
-    _assert_preregistration_bootstrap_authority()
+    evidence, decision, reviewed_at = _code_llm_review_result_from_checkpoint(
+        proposal=proposal,
+        claim=claim,
+        checkpoint=checkpoint,
+        safe_bundle=safe_bundle,
+        request=request,
+        request_sha256=request_sha256,
+        developer_text=developer_text,
+        response_schema=response_schema,
+    )
     return claim, evidence, decision, reviewed_at
 
 

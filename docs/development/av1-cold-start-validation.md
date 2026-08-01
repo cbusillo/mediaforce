@@ -440,8 +440,10 @@ reuses the envelope's original `reviewed_at`, re-fsyncs the review parent, and
 returns without launching another agent. If only the claim is complete, retry
 uses its exact durable response checkpoint or publishes a rejected
 `interrupted_before_durable_response` recovery; neither path probes the live
-runner or launches another agent. Review recovery remains deadline-bound, and
-any conflicting final artifact is rejected. A
+runner or launches another agent. Claim-only recovery remains deadline-bound;
+a predeadline checkpoint may be sealed later only through its retained physical
+artifact and exact digest, request, response, decision, and completion-time
+bindings. Any conflicting final artifact is rejected. A
 normal pre-publication failure durably removes its temporary and surfaces any
 unlink, close, or cleanup-sync failure. A hard interruption before the rename
 leaves only an ignored temporary; after the rename, the canonical name contains
@@ -893,23 +895,27 @@ repository identity, and runner identity. A crash before a complete lane
 envelope exists
 leaves recovery state that `derivation-status` reports. If the checkpoint is
 present, retry parses that exact response and reuses its original completion
-time without launching Code again. If only the claim is present, retry
-terminalizes the lane as a rejected
+time without launching Code again. The recovered evidence binds the exact
+checkpoint digest, request digest, response, stderr digest, and completion time.
+If the checkpoint was durably published before `valid_until`, that deterministic
+checkpoint-to-envelope sealing may finish after the deadline; every later
+envelope load requires the same retained checkpoint and revalidates those
+bindings. If only the claim is present, retry terminalizes the lane as a rejected
 `interrupted_before_durable_response` recovery without launching Code. An
 invalid checkpointed response is likewise terminalized as a rejected
-`invalid_durable_response` recovery bound to the checkpoint digest. Therefore a
-completed or interrupted request can never be rerolled under the same claim.
+`invalid_durable_response` recovery bound to the checkpoint digest and original
+completion time. Therefore a completed or interrupted request can never be
+rerolled under the same claim.
 Recovery validates the runner digests already sealed by the plan, claim, and
 checkpoint; it does not require or probe the live runner executable.
 The first valid envelope remains immutable. A retry after the complete matching
 claim and envelope are visible validates both, re-fsyncs the envelope parent,
 returns the original decision and `reviewed_at`, and does not launch a second
 request.
-A review recovery envelope is non-authorizing and remains subject to the same
-strict publication deadline as a normal review. If authorization expires before
-the checkpoint or envelope becomes durable, the unresolved claim remains a
-visible fail-closed status and cannot be converted into an approval under that
-plan.
+A claim-only review recovery envelope remains subject to the same strict
+publication deadline as a normal review. If authorization expires before a
+response checkpoint becomes durable, the unresolved claim remains a visible
+fail-closed status and cannot be converted into an approval under that plan.
 A rejected review remains terminal. The review command and its
 repository/toolchain probes remain under the plan's absolute authorization
 deadline. Before claim publication, the verifier checks that the live Git commit

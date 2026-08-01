@@ -2086,6 +2086,42 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     [("replacement",)],
                 )
 
+    def test_migrate_config_state_rejects_unsafe_receipt_layout_before_database_creation(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+                runtime_reservation_dir=(
+                    destination_path.parent / "reservations"
+                ),
+            )
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-unsafe-fresh-layout"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "receipt storage must be outside",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertFalse(source_path.exists())
+            self.assertFalse(destination_path.exists())
+            self.assertFalse(
+                config_module._legacy_sqlite_migration_intent_path(
+                    destination_path
+                ).exists()
+            )
+
     def test_migrate_config_state_rejects_symlinked_receipt_discovery_through_destination_parent(
             self,
     ) -> None:

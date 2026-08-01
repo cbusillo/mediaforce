@@ -536,6 +536,11 @@ def _migrate_legacy_sqlite_database(
         config,
         source=source,
     )
+    _assert_legacy_sqlite_migration_receipt_outside_destination(
+        config,
+        receipt_path,
+        destination=destination,
+    )
     intent_exists = _path_entry_exists(intent_path)
     receipt_exists = _path_entry_exists(receipt_path)
     source_exists = _path_entry_exists(source)
@@ -544,19 +549,6 @@ def _migrate_legacy_sqlite_database(
     retired_source_residue_exists = (
         _legacy_sqlite_retired_source_residue_exists(source)
     )
-    if (
-        intent_exists
-        or receipt_exists
-        or source_exists
-        or destination_exists
-        or live_source_sidecar_exists
-        or retired_source_residue_exists
-    ):
-        _assert_legacy_sqlite_migration_receipt_outside_destination(
-            config,
-            receipt_path,
-            destination=destination,
-        )
     if intent_exists and _resume_legacy_sqlite_migration_intent(
             config,
             source,

@@ -44,6 +44,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
+    AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RUN_SCHEMA,
     AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
     AV1ValidationDerivationAttempt,
@@ -3002,6 +3003,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
 
     def test_derivation_review_checks_environment_before_claim(self) -> None:
+        proposal = self._candidate_proposal()
         args = SimpleNamespace(
             action="record-derivation-review",
             config=Path("unused.toml"),
@@ -3025,7 +3027,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "load_av1_validation_derivation_candidate_proposal",
+                return_value=proposal,
             ) as load_proposal,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_existing_derivation_review",
+                return_value=None,
+            ),
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_run_code_llm_review",
@@ -3039,7 +3047,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 args,
                 locked_config=self.runtime_config,
             )
-        load_proposal.assert_not_called()
+        load_proposal.assert_called_once()
         run_review.assert_not_called()
 
     def test_derivation_status_reports_recovery_required_for_orphan_claim(self) -> None:
@@ -4639,7 +4647,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         evidence_payload = json.loads(evidence)
         self.assertEqual(
             evidence_payload["schema"],
-            AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
+            AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RUN_SCHEMA,
         )
         self.assertEqual(evidence_payload["request"], request_payload)
         self.assertEqual(evidence_payload["safe_bundle"], request_payload["safe_bundle"])
@@ -4744,6 +4752,212 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertIsNotNone(checkpoint)
         self.assertEqual(checkpoint["returncode"], 0)
         self.assertTrue(parent_refsynced)
+
+    def test_predeadline_review_checkpoint_seals_after_deadline_without_runner_probe(
+            self,
+    ) -> None:
+        proposal = self._candidate_proposal()
+        write_av1_validation_derivation_candidate_proposal(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+        )
+        claims: dict[str, AV1ValidationDerivationReviewClaim] = {}
+        for lane, decision, run_id in (
+            (
+                "architecture",
+                "approved",
+                "90000000-0000-0000-0000-000000000005",
+            ),
+            (
+                "adversarial",
+                "rejected",
+                "90000000-0000-0000-0000-000000000006",
+            ),
+        ):
+            claim = build_av1_validation_derivation_review_claim(
+                plan=self.plan,
+                proposal=proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
+                lane=lane,
+                review_run_id=run_id,
+                review_runner_canonical_path_sha256=(
+                    self.plan.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.plan.review_runner_binary_sha256
+                ),
+                claimed_at="2026-07-28T03:00:01Z",
+            )
+            claims[lane] = claim
+            write_av1_validation_derivation_review_claim(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+            )
+            bundle = _review_bundle_for_claim(claim)
+            request = build_av1_validation_derivation_review_request(
+                proposal=proposal,
+                claim=claim,
+                safe_bundle=bundle,
+            )
+            response = _structured_review_response(
+                proposal,
+                claim,
+                decision=decision,
+            )
+            write_av1_validation_derivation_review_response_checkpoint(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                request_sha256=(
+                    f"sha256:{hashlib.sha256(canonical_json_bytes(request)).hexdigest()}"
+                ),
+                response=json.dumps(response, separators=(",", ":")) + "\n",
+                stderr_sha256=f"sha256:{hashlib.sha256(b'').hexdigest()}",
+                completed_at="2026-07-28T03:00:02Z",
+            )
+
+        derivation_module = import_module(
+            "mediaforce.tuning.av1_validation_derivation"
+        )
+        real_publication_check = (
+            derivation_module._assert_owner_only_publication_before
+        )
+
+        def reject_late_uncheckpointed_envelope(
+                path: Path,
+                label: str,
+                *,
+                info: os.stat_result,
+                published_before: str,
+        ) -> None:
+            if label in {
+                "private derivation artifact",
+                "derivation review envelope",
+            }:
+                raise AV1ValidationDerivationPublicationDeadlineError(
+                    path,
+                    label,
+                )
+            real_publication_check(
+                path,
+                label,
+                info=info,
+                published_before=published_before,
+            )
+
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_av1_validation_derivation_execution_environment",
+                side_effect=AssertionError("checkpoint recovery probed environment"),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=(REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_build_av1_validation_derivation_review_bundle",
+                side_effect=lambda *, claim, **_kwargs: _review_bundle_for_claim(
+                    claim
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_authorized_review_runner_identity",
+                side_effect=AssertionError("checkpoint recovery probed runner"),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_assert_code_llm_request_contract",
+                side_effect=AssertionError("checkpoint recovery probed contract"),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_command",
+                side_effect=AssertionError("checkpoint recovery relaunched review"),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_now_iso",
+                side_effect=AssertionError("checkpoint recovery changed review time"),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ),
+            patch.object(
+                derivation_module,
+                "_assert_owner_only_publication_before",
+                side_effect=reject_late_uncheckpointed_envelope,
+            ),
+        ):
+            for lane, expected_exit_code in (
+                ("architecture", 0),
+                ("adversarial", 2),
+            ):
+                with self.subTest(lane=lane):
+                    args = SimpleNamespace(
+                        action="record-derivation-review",
+                        config=Path("unused.toml"),
+                        plan=self.runtime_artifact_root / "plan.json",
+                        cell_plan_id=proposal.cell_plan_id,
+                        lane=lane,
+                        json_output=True,
+                    )
+                    exit_code = (
+                        verify_av1_cold_start_preregistration._run_derivation_action_body(
+                            args,
+                            locked_config=self.runtime_config,
+                        )
+                    )
+                    self.assertEqual(exit_code, expected_exit_code)
+                    envelope = load_av1_validation_derivation_review_envelope(
+                        self.runtime_artifact_root,
+                        plan=self.plan,
+                        proposal=proposal,
+                        claim=claims[lane],
+                    )
+                    evidence = json.loads(envelope.review_run_payload_json)
+                    self.assertEqual(
+                        evidence["schema"],
+                        AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RUN_SCHEMA,
+                    )
+                    self.assertEqual(
+                        envelope.review.reviewed_at,
+                        "2026-07-28T03:00:02Z",
+                    )
+
+            architecture_checkpoint = (
+                self.runtime_artifact_root
+                / "review-responses"
+                / proposal.proposal_id
+                / "architecture.json"
+            )
+            architecture_checkpoint.rename(
+                architecture_checkpoint.with_suffix(".missing")
+            )
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "checkpoint authority is unavailable",
+            ):
+                load_av1_validation_derivation_review_envelope(
+                    self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    claim=claims["architecture"],
+                )
 
     def test_interrupted_review_claim_terminalizes_without_relaunch(self) -> None:
         proposal = self._candidate_proposal()
@@ -5963,6 +6177,23 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             "approved",
         )
+        response_pairs = list(response.items())
+        for invalid_response in (
+            response_pairs,
+            [*response_pairs, ["decision", "rejected"]],
+        ):
+            with (
+                self.subTest(invalid_response=invalid_response[-1]),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "response is invalid",
+                ),
+            ):
+                verify_av1_cold_start_preregistration._structured_review_response(
+                    json.dumps(invalid_response),
+                    proposal=proposal,
+                    claim=claim,
+                )
         binding_drift = dict(response)
         binding_drift["lane"] = "adversarial"
         with self.assertRaisesRegex(AV1ValidationDerivationError, "bindings"):
