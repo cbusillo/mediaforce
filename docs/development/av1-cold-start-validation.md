@@ -320,7 +320,8 @@ execution, then performs a final fail-closed drain before process exit. After
 the raw exact-object proof, the bootstrap retains all tracked `mediaforce`
 bytes, including package resources, Alembic environment and version scripts,
 SQL, and `_process_deadline.py`, plus `config/defaults.toml` and the
-source-default resolver markers. It materializes those exact bytes into an
+source-default resolver markers, canonical preregistration runner, and
+`uv.lock`. It materializes those exact bytes into an
 owner-only private snapshot outside the repository, monitors that snapshot
 through command completion, and removes it only after the monitor closes. The
 in-memory finder and loader compile from those bound bytes; module `__file__`,

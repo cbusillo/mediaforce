@@ -121,6 +121,7 @@ from mediaforce.tuning.av1_validation_derivation import (
 )
 from mediaforce.web.runtime.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES,
+    _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FIXED_FILES,
     _AV1ValidationDerivationVerdictSafetyStop,
     _assert_next_assignment,
     _assert_derivation_terminal_observations_current,
@@ -1388,6 +1389,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "scripts/verify_av1_cold_start_preregistration.py",
             "uv.lock",
         }.issubset(relative_paths))
+        self.assertTrue(
+            set(_AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FIXED_FILES).issubset({
+                os.fsdecode(path)
+                for path in (
+                    verify_av1_cold_start_preregistration._BOUND_MEDIAFORCE_SNAPSHOT_AUXILIARY_PATHS
+                )
+            })
+        )
         self.assertFalse(any("__pycache__" in path for path in relative_paths))
         self.assertFalse(any(path.endswith((".pyc", ".pyo")) for path in relative_paths))
 
@@ -2898,7 +2907,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 source_root / "config" / "defaults.toml",
                 repository / "config" / "defaults.toml",
             )
-            for filename in ("hatch_build.py", "pyproject.toml"):
+            for filename in ("hatch_build.py", "pyproject.toml", "uv.lock"):
                 shutil.copyfile(source_root / filename, repository / filename)
             for arguments in (
                 ("init", "-q"),
@@ -2909,6 +2918,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     "mediaforce",
                     "pyproject.toml",
                     "scripts",
+                    "uv.lock",
                 ),
                 ("commit", "-qm", "bound snapshot fixture"),
             ):
@@ -2974,6 +2984,9 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 Path("mediaforce/core/db_migration_scripts/env.py"),
                 Path("mediaforce/core/sql/schema.sql"),
                 Path("mediaforce/package_defaults/defaults.toml"),
+                Path("pyproject.toml"),
+                Path("scripts/verify_av1_cold_start_preregistration.py"),
+                Path("uv.lock"),
             )
             original_payloads = {
                 relative_path: (repository / relative_path).read_bytes()
@@ -3043,6 +3056,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     (snapshot / "config" / "defaults.toml").read_bytes(),
                     original_payloads[Path("config/defaults.toml")],
                 )
+                for relative_path in (
+                    _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FIXED_FILES
+                ):
+                    self.assertEqual(
+                        (snapshot / relative_path).read_bytes(),
+                        original_payloads[Path(relative_path)],
+                    )
                 with self.assertRaisesRegex(
                     RuntimeError,
                     "detected changed Git metadata",
