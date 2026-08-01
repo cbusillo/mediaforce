@@ -746,6 +746,8 @@ _BOUND_MEDIAFORCE_SNAPSHOT_AUXILIARY_PATHS = (
     b"config/defaults.toml",
     b"hatch_build.py",
     b"pyproject.toml",
+    b"scripts/verify_av1_cold_start_preregistration.py",
+    b"uv.lock",
 )
 
 
@@ -2186,6 +2188,7 @@ def _assert_preregistration_import_tree_clean(
         "config/defaults.toml",
         "hatch_build.py",
         "pyproject.toml",
+        "uv.lock",
     )
     for ignored in (False, True):
         arguments = ["ls-files", "-z", "--others"]
