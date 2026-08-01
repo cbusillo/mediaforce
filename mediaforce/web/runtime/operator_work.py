@@ -43,11 +43,25 @@ class BoundedEvidenceRunner:
                 target=self._run,
                 kwargs={"max_work_items": max_work_items},
                 name="bounded-evidence-runner",
-                daemon=True,
             )
             self._thread = thread
-            thread.start()
+            try:
+                thread.start()
+            except BaseException:
+                self._thread = None
+                raise
         return True
+
+    def join(self) -> None:
+        while True:
+            with self._lock:
+                thread = self._thread
+            if thread is None:
+                return
+            thread.join()
+            with self._lock:
+                if self._thread is thread and not thread.is_alive():
+                    self._thread = None
 
     def _run(self, *, max_work_items: int) -> None:
         current_thread = threading.current_thread()

@@ -402,12 +402,18 @@ def _host_hwaccel_context(host: dict[str, object] | None) -> tuple[str | None, b
     return platform_name, videotoolbox_available
 
 
-def select_quality_metric(preferred: str) -> tuple[str, float]:
+def select_quality_metric(
+        preferred: str,
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> tuple[str, float]:
     preferred_value = preferred.lower()
-    if preferred_value == "vmaf" and has_libvmaf():
+    if preferred_value == "vmaf" and has_libvmaf(
+        process_controller=process_controller
+    ):
         return "vmaf", 95.0
     if preferred_value == "auto":
-        if has_libvmaf():
+        if has_libvmaf(process_controller=process_controller):
             return "vmaf", 95.0
         return "xpsnr", 41.0
     return preferred_value, 41.0
@@ -433,7 +439,10 @@ def run_crf_search(
         host: dict[str, object] | None = None,
         quality_temp_dir: Path | None = None,
 ) -> QualitySearchResult:
-    metric, _ = select_quality_metric(preferred_metric)
+    metric, _ = select_quality_metric(
+        preferred_metric,
+        process_controller=process_controller,
+    )
     platform_name, videotoolbox_available = _host_hwaccel_context(host)
     cmd = [
         "ab-av1",
@@ -537,7 +546,10 @@ def run_sample_encode(
         host: dict[str, object] | None = None,
         quality_temp_dir: Path | None = None,
 ) -> SampleEncodeResult:
-    metric, _ = select_quality_metric(preferred_metric)
+    metric, _ = select_quality_metric(
+        preferred_metric,
+        process_controller=process_controller,
+    )
     platform_name, videotoolbox_available = _host_hwaccel_context(host)
     cmd = [
         "ab-av1",
@@ -890,13 +902,30 @@ def _mediaforce_binary_override_dirs(env: dict[str, str]) -> list[str]:
     return directories
 
 
+def has_libvmaf(
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> bool:
+    if process_controller is None:
+        return _has_libvmaf_cached()
+    return _probe_libvmaf(process_controller=process_controller)
+
+
 @lru_cache(maxsize=1)
-def has_libvmaf() -> bool:
-    result = subprocess.run(
+def _has_libvmaf_cached() -> bool:
+    return _probe_libvmaf()
+
+
+def _probe_libvmaf(
+        *,
+        process_controller: ManagedProcessController | None = None,
+) -> bool:
+    result = run_command(
         ["sh", "-lc", "ffmpeg -hide_banner -filters"],
         check=True,
         capture_output=True,
         text=True,
         env=_local_quality_environment(),
+        process_controller=process_controller,
     )
     return "libvmaf" in result.stdout

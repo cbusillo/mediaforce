@@ -1,22 +1,27 @@
 import asyncio
 import copy
 import errno
+import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import tomllib
 import unittest
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from concurrent.futures import Future
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, cast
 from unittest.mock import Mock, patch
 
@@ -69,6 +74,7 @@ from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
+from mediaforce.web import runtime_lock as runtime_lock_module
 from mediaforce.web import settings_runtime
 from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode_runtime, \
     folder_actions as folder_actions_runtime, \
@@ -3853,6 +3859,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             )
 
             fake_thread = Mock()
+            fake_thread.is_alive.return_value = False
             with patch.object(web_app, "_scan_process_is_alive", return_value=False):
                 with patch.object(web_app.threading, "Thread", return_value=fake_thread):
                     job = web_app._maybe_schedule_scan(connection, self.config, prefix=None)
@@ -3877,6 +3884,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     def test_forced_scan_schedules_even_when_catalog_is_fresh(self) -> None:
         fake_thread = Mock()
+        fake_thread.is_alive.return_value = False
         with open_db(self.config.paths.db_path) as connection, patch(
             "mediaforce.web.runtime.job_runtime.scan_is_stale",
             return_value=False,
@@ -3907,6 +3915,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             },
         )
         fake_thread = Mock()
+        fake_thread.is_alive.return_value = False
         with open_db(self.config.paths.db_path) as connection, patch.object(
             web_app.threading,
             "Thread",
@@ -3919,6 +3928,80 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(job["status"], "queued")
         self.assertNotEqual(job["job_id"], "recent-failure")
         fake_thread.start.assert_called_once()
+
+    def test_scan_thread_waiter_discards_finished_registry_entries(self) -> None:
+        finished_thread = Mock()
+        finished_thread.is_alive.return_value = False
+        process_controller = ManagedProcessController()
+        with web_app.SCAN_JOB_THREADS_CONDITION:
+            web_app.SCAN_JOB_THREADS["finished-scan"] = finished_thread
+            web_app.SCAN_JOB_PROCESS_CONTROLLERS["finished-scan"] = process_controller
+
+        web_app._wait_for_scan_job_threads()
+
+        self.assertNotIn("finished-scan", web_app.SCAN_JOB_THREADS)
+        self.assertNotIn(
+            "finished-scan",
+            web_app.SCAN_JOB_PROCESS_CONTROLLERS,
+        )
+
+    def test_scan_cancellation_unblocks_waiter_and_unregisters_runtime(self) -> None:
+        job_id = "cancelled-scan"
+        process_controller = ManagedProcessController()
+        started = threading.Event()
+        waiter_finished = threading.Event()
+        poll = threading.Event()
+
+        def run_until_cancelled(
+                *,
+                process_controller: ManagedProcessController,
+                **_kwargs: object,
+        ) -> None:
+            started.set()
+            while True:
+                try:
+                    process_controller.throw_if_cancelled()
+                except ProcessCancelledError:
+                    return
+                poll.wait(0.01)
+
+        def wait_for_scan_threads() -> None:
+            web_app._wait_for_scan_job_threads()
+            waiter_finished.set()
+
+        with patch(
+            "mediaforce.web.app.runtime_run_scan_job",
+            side_effect=run_until_cancelled,
+        ):
+            try:
+                web_app._start_scan_job_thread(
+                    config_path=self.config.paths.config_path,
+                    prefix=None,
+                    job_id=job_id,
+                    process_controller=process_controller,
+                )
+                self.assertTrue(started.wait(timeout=1))
+                with web_app.SCAN_JOB_THREADS_CONDITION:
+                    scan_thread = web_app.SCAN_JOB_THREADS[job_id]
+                self.assertFalse(scan_thread.daemon)
+                waiter = threading.Thread(
+                    target=wait_for_scan_threads,
+                    name="scan-waiter-test",
+                )
+                waiter.start()
+                self.assertFalse(waiter_finished.wait(timeout=0.05))
+
+                web_app._cancel_active_scan_processes()
+
+                self.assertTrue(waiter_finished.wait(timeout=1))
+                waiter.join(timeout=1)
+                self.assertFalse(waiter.is_alive())
+            finally:
+                process_controller.cancel()
+                web_app._wait_for_scan_job_threads()
+
+        self.assertNotIn(job_id, web_app.SCAN_JOB_THREADS)
+        self.assertNotIn(job_id, web_app.SCAN_JOB_PROCESS_CONTROLLERS)
 
     def test_scheduler_uses_host_local_time_for_windows(self) -> None:
         policy = web_app._normalize_encode_queue_scheduler(
@@ -6339,9 +6422,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 clear=True,
         ), patch("mediaforce.web.app.load_config", return_value=config), patch(
                 "mediaforce.web.app.create_app", return_value=object()
-        ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+        ) as create_app_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
             web_app.main(["--host", "127.0.0.9", "--port", "8777", "--no-reload"])
 
+        create_app_mock.assert_called_once_with(
+            config.paths.config_path,
+            runtime_host="127.0.0.9",
+            runtime_port=8777,
+        )
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["host"], "127.0.0.9")
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
@@ -6352,9 +6440,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         config_path = self.root / "custom.toml"
         with patch.dict(os.environ, {"MEDIAFORCE_WEB_RELOAD": "false"}, clear=True), patch(
                 "mediaforce.web.app.load_config", return_value=config
-        ) as load_config_mock, patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
+        ) as load_config_mock, patch(
+                "mediaforce.web.app._load_project_env_file"
+        ), patch("mediaforce.web.app.uvicorn.run") as uvicorn_run_mock:
             web_app.main(["--config", str(config_path), "--reload"])
             self.assertEqual(os.environ["MEDIAFORCE_CONFIG_PATH"], str(config.paths.config_path))
+            self.assertEqual(os.environ["MEDIAFORCE_WEB_HOST"], "127.0.0.1")
+            self.assertEqual(os.environ["MEDIAFORCE_WEB_PORT"], "8777")
 
         load_config_mock.assert_called_once_with(config_path)
         uvicorn_run_mock.assert_called_once()
@@ -6372,23 +6464,857 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         uvicorn_run_mock.assert_called_once()
         self.assertEqual(uvicorn_run_mock.call_args.kwargs["port"], 8777)
 
-    def test_web_server_lock_rejects_second_backend_instance(self) -> None:
-        settings = web_app.WebStartupSettings(
-            config_path=self.config.paths.config_path,
-            host="127.0.0.1",
-            port=8777,
-            reload_enabled=False,
-        )
-        lock_path = web_app._web_server_lock_path(self.config)
+    def test_runtime_lock_rejects_second_backend_instance(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({"pid": 123, "host": "127.0.0.1", "port": 8777}))
 
-        with patch("mediaforce.web.app.fcntl.flock", side_effect=BlockingIOError):
-            with self.assertRaises(SystemExit) as raised:
-                with web_app._exclusive_web_server_lock(self.config, settings):
+        with patch(
+            "mediaforce.web.runtime_lock.fcntl.flock",
+            side_effect=BlockingIOError,
+        ):
+            with self.assertRaises(
+                runtime_lock_module.MediaforceRuntimeBusyError
+            ) as raised:
+                with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                    self.config,
+                    owner_payload={"purpose": "second-backend-probe"},
+                ):
                     pass
 
         self.assertIn("pid 123 on 127.0.0.1:8777", str(raised.exception))
+
+    def test_runtime_namespace_lock_ignores_legacy_tcp_port_collisions(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
+        namespace_keys = runtime_lock_module._runtime_namespace_keys(
+            self.config,
+            lock_path,
+        )
+        listener: socket.socket | None = None
+        for key in namespace_keys:
+            payload = f"{os.getuid()}:{key}".encode("utf-8")
+            digest = hashlib.sha256(payload).digest()
+            legacy_port = 20_000 + int.from_bytes(digest[:4], "big") % 29_000
+            candidate = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                candidate.bind(("127.0.0.1", legacy_port))
+            except OSError:
+                candidate.close()
+                continue
+            listener = candidate
+            break
+        if listener is None:
+            self.skipTest("No legacy namespace port was available for the regression probe")
+
+        with listener:
+            listener.listen(1)
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                self.config,
+                owner_payload={"purpose": "legacy-port-collision-probe"},
+            ):
+                pass
+
+    def test_runtime_namespace_lock_files_are_owner_only(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
+        namespace_state = runtime_lock_module._runtime_namespace_state(
+            self.config,
+            lock_path,
+        )
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            self.config,
+            owner_payload={"purpose": "namespace-permission-probe"},
+        ):
+            locations = runtime_lock_module._runtime_namespace_reservation_locations(
+                self.config,
+                namespace_state,
+            )
+            for location in locations:
+                self.assertRegex(location.name, r"^[0-9a-f]{64}$")
+                self.assertNotIn(self.root.name, location.name)
+                directory_info = location.directory.stat()
+                self.assertEqual(directory_info.st_uid, os.getuid())
+                self.assertEqual(directory_info.st_mode & 0o777, 0o700)
+                namespace_directory = location.directory / location.name
+                namespace_directory_info = namespace_directory.stat()
+                self.assertEqual(namespace_directory_info.st_uid, os.getuid())
+                self.assertEqual(namespace_directory_info.st_mode & 0o777, 0o700)
+                namespace_path = namespace_directory / "lock"
+                namespace_info = namespace_path.stat()
+                self.assertEqual(namespace_info.st_uid, os.getuid())
+                self.assertEqual(namespace_info.st_mode & 0o777, 0o600)
+                self.assertEqual(namespace_info.st_size, 0)
+
+    def test_runtime_namespace_lock_rejects_symlink_files(self) -> None:
+        directory = runtime_lock_module.mediaforce_runtime_reservation_dir(
+            self.config
+        )
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)
+        namespace_key = f"symlink-regression:{self.root}"
+        namespace_path = runtime_lock_module._runtime_namespace_lock_path(
+            directory,
+            namespace_key,
+        )
+        namespace_path.parent.mkdir(mode=0o700)
+        target = self.root / "namespace-target"
+        target.write_text("unchanged", encoding="utf-8")
+        if namespace_path.exists() or namespace_path.is_symlink():
+            self.skipTest("The unique namespace regression path already exists")
+        namespace_path.symlink_to(target)
+        try:
+            with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
+                runtime_lock_module._acquire_runtime_namespace_locks(
+                    self.config,
+                    runtime_lock_module._RuntimeNamespaceState(
+                        keys=(namespace_key,),
+                        paths=(),
+                        direct_file_locks=(),
+                    ),
+                    runtime_lock_module.mediaforce_runtime_lock_path(self.config),
+                )
+        finally:
+            namespace_path.unlink()
+        self.assertEqual(target.read_text(encoding="utf-8"), "unchanged")
+
+    def test_runtime_reservation_survives_lock_path_removal_and_recreation(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        web_state_dir=Path(sys.argv[1]),
+        runtime_reservation_dir=Path(sys.argv[2]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-reservation-recreation-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        alias_root = self.root / "alias"
+        alias_root.symlink_to(self.root, target_is_directory=True)
+        reservation_dir = self.root / ".mediaforce-runtime-reservations"
+        config = SimpleNamespace(
+            paths=SimpleNamespace(
+                web_state_dir=self.root / "web",
+                runtime_reservation_dir=reservation_dir,
+            ),
+        )
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(config)
+        lock_key = next(
+            key
+            for key in runtime_lock_module._runtime_namespace_keys(
+                config,
+                lock_path,
+            )
+            if key.startswith("lock:")
+        )
+        reservation_path = runtime_lock_module._runtime_namespace_lock_path(
+            reservation_dir,
+            lock_key,
+        )
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload={"purpose": "parent-reservation-recreation-probe"},
+        ):
+            reservation_path.unlink()
+            reservation_path.write_text("", encoding="utf-8")
+            reservation_path.chmod(0o600)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(alias_root / "web"),
+                    str(alias_root / ".mediaforce-runtime-reservations"),
+                ],
+                cwd=Path.cwd(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 23, completed.stderr)
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload={"purpose": "post-reservation-recreation-probe"},
+        ):
+            pass
+
+    def test_runtime_lock_survives_lock_file_unlink_and_recreation(self) -> None:
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(self.config)
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        web_state_dir=Path(sys.argv[1]),
+        runtime_reservation_dir=Path(sys.argv[2]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-lock-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            self.config,
+            owner_payload={"purpose": "parent-lock-probe"},
+        ):
+            lock_path.unlink()
+            lock_path.write_text(
+                json.dumps({"pid": 999, "purpose": "replacement"}),
+                encoding="utf-8",
+            )
+            lock_path.chmod(0o600)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    child,
+                    str(self.config.paths.web_state_dir),
+                    str(self.config.paths.runtime_reservation_dir),
+                ],
+                cwd=Path.cwd(),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 23, completed.stderr)
+
+        with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+            self.config,
+            owner_payload={"purpose": "post-recreation-probe"},
+        ):
+            self.assertIn("post-recreation-probe", lock_path.read_text())
+
+    def test_runtime_lock_survives_parent_directory_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active_parent = root / "active-runtime"
+            web_state_dir = active_parent / "state"
+            web_state_dir.mkdir(parents=True)
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    web_state_dir=web_state_dir,
+                    runtime_reservation_dir=root / "runtime-reservations",
+                ),
+            )
+            retired_parent = root / "retired-runtime"
+            child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        web_state_dir=Path(sys.argv[1]),
+        runtime_reservation_dir=Path(sys.argv[2]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-parent-replacement-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "parent-replacement-probe"},
+            ):
+                active_parent.rename(retired_parent)
+                web_state_dir.mkdir(parents=True)
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(web_state_dir),
+                        str(root / "runtime-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+                shutil.rmtree(active_parent)
+                retired_parent.rename(active_parent)
+
+    def test_runtime_lock_reserves_config_and_database_namespaces(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-namespace-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cases = (
+                (
+                    "shared-config",
+                    root / "shared.toml",
+                    root / "parent.sqlite3",
+                    root / "parent" / "state",
+                    root / "shared.toml",
+                    root / "child.sqlite3",
+                    root / "child" / "state",
+                ),
+                (
+                    "shared-database",
+                    root / "parent.toml",
+                    root / "shared.sqlite3",
+                    root / "parent-db" / "state",
+                    root / "child.toml",
+                    root / "shared.sqlite3",
+                    root / "child-db" / "state",
+                ),
+            )
+            for (
+                name,
+                parent_config_path,
+                parent_db_path,
+                parent_web_state_dir,
+                child_config_path,
+                child_db_path,
+                child_web_state_dir,
+            ) in cases:
+                with self.subTest(name=name):
+                    parent_config = SimpleNamespace(
+                        paths=SimpleNamespace(
+                            config_path=parent_config_path,
+                            db_path=parent_db_path,
+                            web_state_dir=parent_web_state_dir,
+                            runtime_reservation_dir=root / "runtime-reservations",
+                        ),
+                    )
+                    with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                        parent_config,
+                        owner_payload={"purpose": f"parent-{name}-probe"},
+                    ):
+                        completed = subprocess.run(
+                            [
+                                sys.executable,
+                                "-c",
+                                child,
+                                str(child_config_path),
+                                str(child_db_path),
+                                str(child_web_state_dir),
+                                str(root / "runtime-reservations"),
+                            ],
+                            cwd=Path.cwd(),
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_reserves_replaced_config_path(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-replaced-config-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text("original", encoding="utf-8")
+            parent_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=root / "parent.sqlite3",
+                    web_state_dir=root / "parent-state",
+                    runtime_reservation_dir=root / "shared-reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                parent_config,
+                owner_payload={"purpose": "parent-replaced-config-probe"},
+            ):
+                replacement_path = root / "replacement.toml"
+                replacement_path.write_text("replacement", encoding="utf-8")
+                os.replace(replacement_path, config_path)
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(config_path),
+                        str(root / "child.sqlite3"),
+                        str(root / "child-state"),
+                        str(root / "shared-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_reserves_hardlinked_config_and_database_namespaces(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-hardlink-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_config_path = root / "parent.toml"
+            parent_db_path = root / "parent.sqlite3"
+            parent_config_path.write_text("parent", encoding="utf-8")
+            parent_db_path.write_bytes(b"database")
+            cases = (
+                (
+                    "hardlinked-config",
+                    parent_config_path,
+                    root / "child.toml",
+                    parent_db_path,
+                    root / "child-config.sqlite3",
+                ),
+                (
+                    "hardlinked-database",
+                    parent_db_path,
+                    root / "child.sqlite3",
+                    parent_config_path,
+                    root / "child-db.toml",
+                ),
+            )
+            for (
+                name,
+                parent_shared_path,
+                child_shared_path,
+                parent_other_path,
+                child_other_path,
+            ) in cases:
+                with self.subTest(name=name):
+                    os.link(parent_shared_path, child_shared_path)
+                    if name == "hardlinked-config":
+                        parent_paths = SimpleNamespace(
+                            config_path=parent_shared_path,
+                            db_path=parent_other_path,
+                            web_state_dir=root / "parent-config-state",
+                            runtime_reservation_dir=root / "parent-config-reservations",
+                        )
+                        child_args = (
+                            child_shared_path,
+                            child_other_path,
+                            root / "child-config-state",
+                            root / "child-config-reservations",
+                        )
+                    else:
+                        parent_paths = SimpleNamespace(
+                            config_path=parent_other_path,
+                            db_path=parent_shared_path,
+                            web_state_dir=root / "parent-db-state",
+                            runtime_reservation_dir=root / "shared-db-reservations",
+                        )
+                        child_args = (
+                            child_other_path,
+                            child_shared_path,
+                            root / "child-db-state",
+                            root / "shared-db-reservations",
+                        )
+                    parent_config = SimpleNamespace(paths=parent_paths)
+                    with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                        parent_config,
+                        owner_payload={"purpose": f"parent-{name}-probe"},
+                    ):
+                        completed = subprocess.run(
+                            [
+                                sys.executable,
+                                "-c",
+                                child,
+                                *(str(value) for value in child_args),
+                            ],
+                            cwd=Path.cwd(),
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_reserves_hardlinked_database_with_different_reservation_dirs(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-hardlink-diffroot-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_root = root / "parent"
+            child_root = root / "child"
+            parent_root.mkdir()
+            child_root.mkdir()
+            parent_db_path = parent_root / "database.sqlite3"
+            child_db_path = child_root / "database.sqlite3"
+            parent_config_path = root / "parent.toml"
+            child_config_path = root / "child.toml"
+            parent_db_path.write_bytes(b"database")
+            parent_config_path.write_text("parent", encoding="utf-8")
+            child_config_path.write_text("child", encoding="utf-8")
+            os.link(parent_db_path, child_db_path)
+            parent_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=parent_config_path,
+                    db_path=parent_db_path,
+                    web_state_dir=root / "parent-state",
+                    runtime_reservation_dir=root / "parent-reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                parent_config,
+                owner_payload={"purpose": "parent-hardlink-diffroot-probe"},
+            ):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(child_config_path),
+                        str(child_db_path),
+                        str(root / "child-state"),
+                        str(root / "child-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_runtime_lock_acquires_db_inode_reservation_after_late_db_creation(self) -> None:
+        child = """
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+)
+
+config = SimpleNamespace(
+    paths=SimpleNamespace(
+        config_path=Path(sys.argv[1]),
+        db_path=Path(sys.argv[2]),
+        web_state_dir=Path(sys.argv[3]),
+        runtime_reservation_dir=Path(sys.argv[4]),
+    ),
+)
+try:
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={"purpose": "child-late-db-probe"},
+    ):
+        pass
+except MediaforceRuntimeBusyError:
+    raise SystemExit(23)
+raise SystemExit(0)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            parent_root = root / "parent"
+            child_root = root / "child"
+            parent_root.mkdir()
+            child_root.mkdir()
+            parent_db_path = parent_root / "database.sqlite3"
+            child_db_path = child_root / "database.sqlite3"
+            parent_config_path = root / "parent.toml"
+            child_config_path = root / "child.toml"
+            parent_config_path.write_text("parent", encoding="utf-8")
+            child_config_path.write_text("child", encoding="utf-8")
+            parent_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=parent_config_path,
+                    db_path=parent_db_path,
+                    web_state_dir=root / "parent-state",
+                    runtime_reservation_dir=root / "parent-reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                parent_config,
+                owner_payload={"purpose": "parent-late-db-probe"},
+            ):
+                self.assertFalse(parent_db_path.exists())
+                runtime_lock_module.reserve_mediaforce_database_identity(
+                    parent_config,
+                    create_if_missing=True,
+                )
+                self.assertTrue(parent_db_path.exists())
+                os.link(parent_db_path, child_db_path)
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        child,
+                        str(child_config_path),
+                        str(child_db_path),
+                        str(root / "child-state"),
+                        str(root / "child-reservations"),
+                    ],
+                    cwd=Path.cwd(),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 23, completed.stderr)
+
+    def test_database_identity_lock_does_not_block_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db_path = root / "db.sqlite3"
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "sqlite-compatibility-probe"},
+            ):
+                runtime_lock_module.reserve_mediaforce_database_identity(
+                    config,
+                    create_if_missing=True,
+                )
+                with sqlite3.connect(db_path) as connection:
+                    connection.execute("CREATE TABLE probe (value INTEGER NOT NULL)")
+                    connection.execute("INSERT INTO probe VALUES (1)")
+                    connection.commit()
+                    self.assertEqual(
+                        connection.execute("SELECT value FROM probe").fetchone(),
+                        (1,),
+                    )
+
+    def test_database_identity_lock_fails_closed_when_ofd_locks_are_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=root / "absent.sqlite3",
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+            with patch.object(runtime_lock_module.fcntl, "F_OFD_SETLK", None):
+                with self.assertRaisesRegex(
+                    runtime_lock_module.MediaforceRuntimeBusyError,
+                    "database identity locking is unavailable",
+                ):
+                    with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "missing-ofd-lock-probe"},
+                    ):
+                        runtime_lock_module.reserve_mediaforce_database_identity(
+                            config,
+                            create_if_missing=True,
+                        )
+
+    def test_database_identity_reservation_does_not_create_optional_database(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.toml"
+            config_path.write_text("config", encoding="utf-8")
+            db_path = root / "absent.sqlite3"
+            config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=config_path,
+                    db_path=db_path,
+                    web_state_dir=root / "state",
+                    runtime_reservation_dir=root / "reservations",
+                ),
+            )
+
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "optional-db-reservation-probe"},
+            ):
+                runtime_lock_module.reserve_mediaforce_database_identity(config)
+                self.assertFalse(db_path.exists())
+
+    def test_database_identity_reservation_preserves_legacy_database_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legacy_database_path = root / "state" / "library.sqlite3"
+            legacy_database_path.parent.mkdir()
+            with sqlite3.connect(legacy_database_path) as legacy_connection:
+                legacy_connection.execute(
+                    "CREATE TABLE migration_probe (value TEXT NOT NULL)"
+                )
+                legacy_connection.execute(
+                    "INSERT INTO migration_probe VALUES ('legacy-database')"
+                )
+            paths = ConfigPaths(
+                project_root=root,
+                config_path=root / "config" / "defaults.toml",
+                db_path=root / "runtime" / "library.sqlite3",
+                run_manifest_dir=root / "runtime" / "runs",
+                web_state_dir=root / "runtime" / "web",
+                review_dir=root / "runtime" / "review",
+                runtime_settings_path=root / "runtime" / "runtime-settings.json",
+                runtime_reservation_dir=root / "runtime-reservations",
+            )
+            paths.config_path.parent.mkdir()
+            paths.config_path.write_text("config", encoding="utf-8")
+            config = MediaforceConfig(raw={}, paths=paths)
+
+            with runtime_lock_module.exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-database-migration-probe"},
+            ):
+                self.assertFalse(paths.db_path.exists())
+                config_runtime.migrate_config_state(config)
+                runtime_lock_module.reserve_mediaforce_database_identity(config)
+                with sqlite3.connect(paths.db_path) as migrated_connection:
+                    self.assertEqual(
+                        migrated_connection.execute(
+                            "SELECT value FROM migration_probe"
+                        ).fetchall(),
+                        [("legacy-database",)],
+                    )
+                self.assertFalse(legacy_database_path.exists())
+
+    def test_dev_stop_never_deletes_the_shared_runtime_lock(self) -> None:
+        script = Path("scripts/mediaforce-dev.sh").read_text(encoding="utf-8")
+        lock_deletions = [
+            line
+            for line in script.splitlines()
+            if "rm -f" in line and "BACKEND_LOCK_FILE" in line
+        ]
+        self.assertEqual(lock_deletions, [])
 
     @staticmethod
     def test_create_reloadable_app_uses_default_config_when_env_path_is_blank() -> None:
@@ -8154,6 +9080,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(compare_preview_mock.call_args.kwargs["previews"], [encode_preview_mock.return_value[0]])
         self.assertEqual(payload["host"], host)
         self.assertEqual(payload["compare_clips"][0]["path"], "/review-media/remote-run/item-00/compare-01-12m-00s.mkv")
+
+        pinned_source_path = self._create_source_file("pinned-source.mkv")
+        for mocked_operation in (
+            search_quality_mock,
+            sample_encode_mock,
+            recommend_timestamps_mock,
+            encode_preview_mock,
+            source_review_mock,
+            compare_preview_mock,
+        ):
+            mocked_operation.reset_mock()
+        web_app._run_sampled_calibration(
+            config=self.config,
+            prefix="tv/show",
+            action="baseline",
+            host_data=host,
+            notes="Use the pinned source snapshot.",
+            policy=policy,
+            seed_metadata=None,
+            sample_item=sample_item,
+            calibration_run_id="pinned-run",
+            process_controller=web_app.ManagedProcessController(),
+            source_path_override=pinned_source_path,
+        )
+        self.assertEqual(search_quality_mock.call_args.args[0], pinned_source_path)
+        self.assertEqual(sample_encode_mock.call_args.args[0], pinned_source_path)
+        self.assertEqual(
+            encode_preview_mock.call_args.kwargs["source_path"],
+            pinned_source_path,
+        )
+        self.assertEqual(
+            source_review_mock.call_args.kwargs["source_path"],
+            pinned_source_path,
+        )
 
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
@@ -14108,24 +15068,224 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         second.release()
 
     def test_start_background_workers_skips_startup_without_leadership(self) -> None:
-        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=False), patch(
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=None), patch(
                 "mediaforce.web.app._start_calibration_queue_worker"
         ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
-            started = web_app._start_background_workers(self.config)
+            runtime = web_app._start_background_workers(self.config)
 
-        self.assertFalse(started)
+        self.assertIsNone(runtime)
         start_calibration.assert_not_called()
         start_encode.assert_not_called()
 
     def test_start_background_workers_starts_both_workers_when_leader(self) -> None:
-        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=True), patch(
-                "mediaforce.web.app._start_calibration_queue_worker"
-        ) as start_calibration, patch("mediaforce.web.app._start_encode_queue_worker") as start_encode:
-            started = web_app._start_background_workers(self.config)
+        lease = Mock(spec=WorkerLeadershipLease)
+        calibration_handle = Mock()
+        encode_handle = Mock()
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=lease), patch(
+                "mediaforce.web.app._start_calibration_queue_worker",
+                return_value=calibration_handle,
+        ) as start_calibration, patch(
+                "mediaforce.web.app._start_encode_queue_worker",
+                return_value=encode_handle,
+        ) as start_encode:
+            runtime = web_app._start_background_workers(self.config)
 
-        self.assertTrue(started)
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertIs(runtime.lease, lease)
+        self.assertEqual(runtime.handles, (calibration_handle, encode_handle))
         start_calibration.assert_called_once_with(self.config)
         start_encode.assert_called_once_with(self.config)
+
+    def test_queue_worker_handles_are_stoppable_non_daemon_threads(self) -> None:
+        def wait_for_stop(
+                *,
+                config_path: Path,
+                stop_event: threading.Event,
+        ) -> None:
+            self.assertEqual(config_path, self.config.paths.config_path)
+            stop_event.wait()
+
+        cases = (
+            (
+                "calibration",
+                web_app._start_calibration_queue_worker,
+                "mediaforce.web.app._calibration_queue_worker_loop",
+            ),
+            (
+                "encode",
+                web_app._start_encode_queue_worker,
+                "mediaforce.web.app._encode_queue_worker_loop",
+            ),
+        )
+        for name, start_worker, target_path in cases:
+            with self.subTest(name=name), patch(
+                target_path,
+                side_effect=wait_for_stop,
+            ):
+                handle = start_worker(self.config)
+                self.assertFalse(handle.thread.daemon)
+                self.assertTrue(handle.thread.is_alive())
+                handle.stop()
+                handle.join()
+                self.assertFalse(handle.thread.is_alive())
+
+    def test_concurrent_duplicate_encode_dispatch_preserves_owner_and_shutdown_drain(self) -> None:
+        job_id = "duplicate-dispatch"
+        started = threading.Event()
+        cancellation_observed = threading.Event()
+        cleanup_requested = threading.Event()
+        dispatch_gate = threading.Barrier(3)
+        outcomes: list[BaseException | None] = []
+        outcomes_lock = threading.Lock()
+        worker_controllers: list[ManagedProcessController] = []
+
+        def wait_for_cancellation(
+                *,
+                config_path: Path,
+                job_id: str,
+                process_controller: ManagedProcessController,
+                deps: encode_runtime.EncodeQueueRuntimeDeps,
+        ) -> None:
+            self.assertEqual(config_path, self.config.paths.config_path)
+            self.assertEqual(job_id, "duplicate-dispatch")
+            self.assertIsNotNone(deps)
+            worker_controllers.append(process_controller)
+            started.set()
+            while not process_controller.cancelled:
+                if cleanup_requested.wait(0.01):
+                    return
+            cancellation_observed.set()
+
+        def dispatch() -> None:
+            dispatch_gate.wait()
+            try:
+                web_app._dispatch_encode_job(
+                    config_path=self.config.paths.config_path,
+                    job_id=job_id,
+                )
+            except BaseException as exc:
+                outcome: BaseException | None = exc
+            else:
+                outcome = None
+            with outcomes_lock:
+                outcomes.append(outcome)
+
+        controller: ManagedProcessController | None = None
+        with patch(
+            "mediaforce.web.app.runtime_run_encode_job",
+            side_effect=wait_for_cancellation,
+        ), patch.object(web_app.ENCODE_QUEUE_PROCESS, "cancel"):
+            try:
+                dispatch_threads = [
+                    threading.Thread(
+                        target=dispatch,
+                        name=f"duplicate-dispatch-caller-{index}",
+                    )
+                    for index in range(2)
+                ]
+                for dispatch_thread in dispatch_threads:
+                    dispatch_thread.start()
+                dispatch_gate.wait()
+                for dispatch_thread in dispatch_threads:
+                    dispatch_thread.join()
+
+                self.assertEqual(len(outcomes), 2)
+                self.assertEqual(sum(outcome is None for outcome in outcomes), 1)
+                rejected = [
+                    outcome
+                    for outcome in outcomes
+                    if outcome is not None
+                ]
+                self.assertEqual(len(rejected), 1)
+                self.assertIsInstance(rejected[0], RuntimeError)
+                self.assertIn("already running", str(rejected[0]))
+                self.assertTrue(started.wait(1))
+                with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+                    controller = web_app.ENCODE_QUEUE_PROCESSES[job_id]
+                with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+                    thread = web_app.ENCODE_QUEUE_THREADS[job_id]
+                self.assertTrue(thread.is_alive())
+                with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+                    self.assertIs(web_app.ENCODE_QUEUE_PROCESSES[job_id], controller)
+                with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+                    self.assertIs(web_app.ENCODE_QUEUE_THREADS[job_id], thread)
+
+                web_app._cancel_active_encode_processes()
+                self.assertTrue(controller.cancelled)
+                self.assertTrue(cancellation_observed.wait(1))
+                web_app._wait_for_encode_queue_threads()
+            finally:
+                cleanup_requested.set()
+                for worker_controller in worker_controllers:
+                    worker_controller.cancel()
+                web_app._wait_for_encode_queue_threads()
+
+        with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+            self.assertNotIn(job_id, web_app.ENCODE_QUEUE_PROCESSES)
+        with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+            self.assertNotIn(job_id, web_app.ENCODE_QUEUE_THREADS)
+
+    def test_encode_dispatch_start_failure_clears_matching_registration(self) -> None:
+        failing_thread = Mock(spec=threading.Thread)
+        failing_thread.start.side_effect = RuntimeError("thread start failed")
+        failing_thread.is_alive.return_value = False
+
+        with patch(
+            "mediaforce.web.app.threading.Thread",
+            return_value=failing_thread,
+        ) as thread_factory:
+            with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                web_app._dispatch_encode_job(
+                    config_path=self.config.paths.config_path,
+                    job_id="start-failure",
+                )
+
+        controller = thread_factory.call_args.kwargs["kwargs"]["process_controller"]
+        self.assertIsInstance(controller, ManagedProcessController)
+        with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+            self.assertNotIn("start-failure", web_app.ENCODE_QUEUE_PROCESSES)
+        with web_app.ENCODE_QUEUE_THREADS_CONDITION:
+            self.assertNotIn("start-failure", web_app.ENCODE_QUEUE_THREADS)
+
+    def test_encode_controller_unregistration_keeps_replacement_owner(self) -> None:
+        job_id = "controller-replacement"
+        stale_controller = ManagedProcessController()
+        replacement_controller = ManagedProcessController()
+        with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+            web_app.ENCODE_QUEUE_PROCESSES[job_id] = replacement_controller
+        try:
+            web_app._unregister_encode_process_controller(job_id, stale_controller)
+            with web_app.ENCODE_QUEUE_PROCESSES_LOCK:
+                self.assertIs(
+                    web_app.ENCODE_QUEUE_PROCESSES[job_id],
+                    replacement_controller,
+                )
+        finally:
+            web_app._unregister_encode_process_controller(
+                job_id,
+                replacement_controller,
+            )
+
+    def test_background_worker_start_failure_stops_workers_and_releases_lease(self) -> None:
+        lease = Mock(spec=WorkerLeadershipLease)
+        calibration_handle = Mock()
+        with patch(
+            "mediaforce.web.app._acquire_background_worker_leadership",
+            return_value=lease,
+        ), patch(
+            "mediaforce.web.app._start_calibration_queue_worker",
+            return_value=calibration_handle,
+        ), patch(
+            "mediaforce.web.app._start_encode_queue_worker",
+            side_effect=RuntimeError("worker start failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "worker start failed"):
+                web_app._start_background_workers(self.config)
+
+        calibration_handle.stop.assert_called_once_with()
+        calibration_handle.join.assert_called_once_with()
+        lease.release.assert_called_once_with()
 
     def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:
         cancel_queue_process = Mock()
@@ -14230,10 +15390,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             folder_route_paths.index("/api/folders/{prefix:path}"),
         )
 
-    def test_app_lifespan_does_not_wait_for_transient_cleanup(self) -> None:
+    def test_app_lifespan_joins_writers_and_releases_leadership_before_runtime_lock(self) -> None:
         startup_threads: list[Any] = []
+        call_order: list[str] = []
 
-        class FakeCleanupThread:
+        class FakeLifecycleThread:
             def __init__(
                     self,
                     *,
@@ -14251,22 +15412,76 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             def start(self) -> None:
                 startup_threads.append(self)
+                call_order.append(f"start:{self.name}")
+
+            def join(self) -> None:
+                call_order.append(f"join:{self.name}")
+
+        class FakeBackgroundRuntime:
+            def stop(self) -> None:
+                call_order.append("workers:stop")
+
+            def join(self) -> None:
+                call_order.append("workers:join")
+
+            def release(self) -> None:
+                call_order.append("leadership:release")
 
         cleanup_mock = Mock(side_effect=AssertionError("cleanup should not run synchronously"))
         metric_refresh_mock = Mock(side_effect=AssertionError("metric refresh should not run synchronously"))
         safe_collect_mock = Mock(return_value=[])
         observation_backfill_mock = Mock(return_value=Mock(inserted=0))
+        calibration_controller = Mock()
+        calibration_controller.cancel.side_effect = lambda: call_order.append("calibration:cancel")
+
+        @contextmanager
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+            call_order.append("runtime-lock:acquire")
+            try:
+                yield
+            finally:
+                call_order.append("runtime-lock:release")
+
         with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _tracking_runtime_lock
+        ), patch("mediaforce.web.app.migrate_config_state"), patch(
+                "mediaforce.web.app.reserve_mediaforce_database_identity"
+        ), patch(
                 "mediaforce.web.app.purge_transient_artifacts", cleanup_mock
         ), patch(
                 "mediaforce.web.app._refresh_metric_support", metric_refresh_mock
-        ), patch("mediaforce.web.app.threading.Thread", FakeCleanupThread), patch(
-                "mediaforce.web.app._start_calibration_queue_worker"
-        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+        ), patch("mediaforce.web.app.threading.Thread", FakeLifecycleThread), patch(
+                "mediaforce.web.app._start_background_workers",
+                return_value=FakeBackgroundRuntime(),
+        ), patch(
                 "mediaforce.web.app._safe_collect_host_statuses", safe_collect_mock
         ), patch(
                 "mediaforce.web.app.backfill_quality_search_observations",
                 observation_backfill_mock,
+        ), patch(
+                "mediaforce.web.app._active_calibration_process_controllers",
+                return_value=[calibration_controller],
+        ), patch(
+                "mediaforce.web.app._cancel_active_encode_processes",
+                side_effect=lambda: call_order.append("encode:cancel"),
+        ), patch(
+                "mediaforce.web.app._cancel_active_scan_processes",
+                side_effect=lambda: call_order.append("scan:cancel"),
+        ), patch(
+                "mediaforce.web.app._wait_for_calibration_submissions",
+                side_effect=lambda: call_order.append("calibration:joined"),
+        ), patch(
+                "mediaforce.web.app._wait_for_encode_queue_threads",
+                side_effect=lambda: call_order.append("encode:joined"),
+        ), patch(
+                "mediaforce.web.app._wait_for_scan_job_threads",
+                side_effect=lambda: call_order.append("scan:joined"),
+        ), patch(
+                "mediaforce.web.app.BoundedEvidenceRunner.join",
+                side_effect=lambda: call_order.append("evidence:joined"),
+        ), patch(
+                "mediaforce.web.app._wait_for_periodic_cleanup_threads",
+                side_effect=lambda: call_order.append("cleanup:joined"),
         ):
             app = web_app.create_app(self.config.paths.config_path)
 
@@ -14286,12 +15501,253 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIs(cleanup_thread.target, cleanup_mock)
         self.assertEqual(cleanup_thread.args, (self.config,))
         self.assertEqual(cleanup_thread.kwargs, {"force": True})
-        self.assertTrue(cleanup_thread.daemon)
+        self.assertIsNone(cleanup_thread.daemon)
         metric_thread = threads_by_name["metric-support-refresh"]
         self.assertIs(metric_thread.target, metric_refresh_mock)
         self.assertEqual(metric_thread.args, ())
         self.assertEqual(metric_thread.kwargs, {})
-        self.assertTrue(metric_thread.daemon)
+        self.assertIsNone(metric_thread.daemon)
+        self.assertLess(call_order.index("calibration:cancel"), call_order.index("workers:stop"))
+        self.assertEqual(call_order.count("scan:cancel"), 2)
+        self.assertLess(call_order.index("scan:cancel"), call_order.index("workers:stop"))
+        self.assertLess(call_order.index("workers:stop"), call_order.index("workers:join"))
+        self.assertLess(call_order.index("workers:join"), call_order.index("calibration:joined"))
+        self.assertLess(call_order.index("calibration:joined"), call_order.index("encode:joined"))
+        self.assertLess(
+            max(index for index, event in enumerate(call_order) if event == "scan:cancel"),
+            call_order.index("scan:joined"),
+        )
+        self.assertLess(call_order.index("encode:joined"), call_order.index("scan:joined"))
+        self.assertLess(call_order.index("scan:joined"), call_order.index("evidence:joined"))
+        self.assertLess(call_order.index("evidence:joined"), call_order.index("cleanup:joined"))
+        self.assertLess(call_order.index("cleanup:joined"), call_order.index("join:transient-cleanup"))
+        self.assertLess(call_order.index("join:metric-support-refresh"), call_order.index("leadership:release"))
+        self.assertLess(call_order.index("leadership:release"), call_order.index("runtime-lock:release"))
+
+    def test_app_lifespan_acquires_runtime_lock_before_db_operations(self) -> None:
+        call_order: list[str] = []
+
+        @contextmanager
+        def _tracking_runtime_lock(config: object, *, owner_payload: object) -> Iterator[None]:
+            call_order.append("lock_acquired")
+            yield
+            call_order.append("lock_released")
+
+        def _tracking_migrate(config: object) -> None:
+            call_order.append("migrate_config_state")
+
+        def _tracking_reserve(
+                config: object,
+                *,
+                create_if_missing: bool,
+        ) -> None:
+            self.assertTrue(create_if_missing)
+            call_order.append("reserve_database_identity")
+
+        def _tracking_backfill(connection: object, *, as_of: object) -> object:
+            call_order.append("backfill_quality_search_observations")
+            return Mock(inserted=0)
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock", _tracking_runtime_lock
+        ), patch(
+                "mediaforce.web.app.migrate_config_state", _tracking_migrate
+        ), patch(
+                "mediaforce.web.app.reserve_mediaforce_database_identity",
+                _tracking_reserve,
+        ), patch(
+                "mediaforce.web.app.purge_transient_artifacts"
+        ), patch("mediaforce.web.app._refresh_metric_support"), patch(
+                "mediaforce.web.app._start_calibration_queue_worker"
+        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._safe_collect_host_statuses", Mock(return_value=[])
+        ), patch(
+                "mediaforce.web.app.backfill_quality_search_observations",
+                _tracking_backfill,
+        ):
+            app = web_app.create_app(self.config.paths.config_path)
+
+            async def exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            asyncio.run(exercise_lifespan())
+
+        lock_idx = call_order.index("lock_acquired")
+        migrate_idx = call_order.index("migrate_config_state")
+        reserve_idx = call_order.index("reserve_database_identity")
+        backfill_idx = call_order.index("backfill_quality_search_observations")
+        release_idx = call_order.index("lock_released")
+        self.assertLess(lock_idx, migrate_idx, "lock must be acquired before migrate_config_state")
+        self.assertLess(migrate_idx, reserve_idx, "migration must run before database identity reservation")
+        self.assertLess(reserve_idx, backfill_idx, "database identity must be reserved before DB operations")
+        self.assertLess(backfill_idx, release_idx, "lock must be held during DB operations")
+
+    def test_app_lifespan_logs_busy_runtime_owner_without_reacquiring(self) -> None:
+        busy_error = runtime_lock_module.MediaforceRuntimeBusyError(
+            "Mediaforce runtime is already active (pid 4321 on 127.0.0.1:8777)"
+        )
+
+        @contextmanager
+        def busy_runtime_lock(
+                _config: object,
+                *,
+                owner_payload: object,
+        ) -> Iterator[None]:
+            self.assertIsNotNone(owner_payload)
+            raise busy_error
+            yield
+
+        with patch("mediaforce.web.app.load_config", return_value=self.config), patch(
+                "mediaforce.web.app.exclusive_mediaforce_runtime_lock",
+                side_effect=busy_runtime_lock,
+        ) as runtime_lock_mock:
+            app = web_app.create_app(self.config.paths.config_path)
+
+            async def exercise_lifespan() -> None:
+                async with app.router.lifespan_context(app):
+                    return None
+
+            with self.assertLogs(web_app.LOGGER.name, level="ERROR") as captured:
+                with self.assertRaisesRegex(
+                    runtime_lock_module.MediaforceRuntimeBusyError,
+                    "pid 4321 on 127.0.0.1:8777",
+                ):
+                    asyncio.run(exercise_lifespan())
+
+        runtime_lock_mock.assert_called_once()
+        self.assertEqual(
+            captured.output,
+            [
+                "ERROR:mediaforce.web.app:Mediaforce web startup blocked: "
+                "Mediaforce runtime is already active (pid 4321 on 127.0.0.1:8777)"
+            ],
+        )
+
+    def test_lifespan_owner_payload_does_not_persist_private_paths(self) -> None:
+        payload = web_app._lifespan_owner_payload(
+            host="127.0.0.9",
+            port=9888,
+        )
+
+        self.assertNotIn("config_path", payload)
+        self.assertNotIn(str(self.config.paths.config_path), json.dumps(payload))
+        self.assertEqual(payload["host"], "127.0.0.9")
+        self.assertEqual(payload["port"], 9888)
+
+    def test_runtime_namespace_keys_normalize_case_equivalent_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            web_state_dir = root / "web"
+            web_state_dir.mkdir()
+            config_lower = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / "config.toml",
+                    db_path=root / "library.sqlite3",
+                    web_state_dir=web_state_dir,
+                ),
+            )
+            lock_path = runtime_lock_module.mediaforce_runtime_lock_path_for_web_state_dir(web_state_dir)
+            keys_lower = runtime_lock_module._runtime_namespace_keys(config_lower, lock_path)
+
+            upper_root = Path(str(root).upper()) if str(root)[0].isalpha() else root
+            config_upper = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=upper_root / "CONFIG.TOML",
+                    db_path=upper_root / "LIBRARY.SQLITE3",
+                    web_state_dir=upper_root / "WEB",
+                ),
+            )
+            lock_path_upper = runtime_lock_module.mediaforce_runtime_lock_path_for_web_state_dir(
+                upper_root / "WEB"
+            )
+            keys_upper = runtime_lock_module._runtime_namespace_keys(config_upper, lock_path_upper)
+
+            self.assertEqual(
+                keys_lower,
+                keys_upper,
+                "case-equivalent paths must produce identical namespace keys",
+            )
+
+    def test_runtime_namespace_keys_are_stable_across_equivalent_unicode_forms(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            web_state_dir = root / "web"
+            web_state_dir.mkdir()
+            import unicodedata
+            nfc_name = unicodedata.normalize("NFC", "café")
+            nfd_name = unicodedata.normalize("NFD", "café")
+            config_nfc = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / f"{nfc_name}.toml",
+                    web_state_dir=web_state_dir,
+                ),
+            )
+            config_nfd = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=root / f"{nfd_name}.toml",
+                    web_state_dir=web_state_dir,
+                ),
+            )
+            lock_path = runtime_lock_module.mediaforce_runtime_lock_path_for_web_state_dir(web_state_dir)
+            keys_nfc = runtime_lock_module._runtime_namespace_keys(config_nfc, lock_path)
+            keys_nfd = runtime_lock_module._runtime_namespace_keys(config_nfd, lock_path)
+            self.assertEqual(
+                keys_nfc,
+                keys_nfd,
+                "NFC and NFD Unicode paths must produce identical namespace keys",
+            )
+
+    def test_runtime_namespace_keys_include_existing_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = root / "config.toml"
+            alias = root / "config-alias.toml"
+            original.write_text("config", encoding="utf-8")
+            os.link(original, alias)
+            first_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=original,
+                    web_state_dir=root / "first-state",
+                )
+            )
+            second_config = SimpleNamespace(
+                paths=SimpleNamespace(
+                    config_path=alias,
+                    web_state_dir=root / "second-state",
+                )
+            )
+
+            first_keys = runtime_lock_module._runtime_namespace_keys(
+                first_config,
+                runtime_lock_module.mediaforce_runtime_lock_path(first_config),
+            )
+            second_keys = runtime_lock_module._runtime_namespace_keys(
+                second_config,
+                runtime_lock_module.mediaforce_runtime_lock_path(second_config),
+            )
+
+            first_identity_keys = {key for key in first_keys if key.startswith("file:")}
+            second_identity_keys = {key for key in second_keys if key.startswith("file:")}
+            self.assertEqual(first_identity_keys, second_identity_keys)
+            self.assertEqual(len(first_identity_keys), 1)
+
+    def test_runtime_namespace_identity_stat_errors_fail_closed(self) -> None:
+        config = SimpleNamespace(
+            paths=SimpleNamespace(
+                config_path=self.root / "config.toml",
+                web_state_dir=self.root / "state",
+            )
+        )
+        lock_path = runtime_lock_module.mediaforce_runtime_lock_path(config)
+
+        with patch.object(
+            Path,
+            "stat",
+            side_effect=PermissionError("identity denied"),
+        ):
+            with self.assertRaises(runtime_lock_module.MediaforceRuntimeBusyError):
+                runtime_lock_module._runtime_namespace_keys(config, lock_path)
 
     def test_folder_api_route_returns_payload_for_seeded_prefix(self) -> None:
         source_path = self._create_source_file("episode-folder.mkv")
@@ -14545,15 +16001,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         deps.logger = Mock()
         deps.encode_queue_poll_seconds = 1.0
 
-        wait_gate = Mock()
-        wait_gate.wait.side_effect = KeyboardInterrupt()
+        stop_event = Mock(spec=threading.Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.side_effect = KeyboardInterrupt()
 
         with patch(
                 "mediaforce.web.runtime.encode_runtime.process_encode_queue_once",
                 side_effect=RuntimeError("boom"),
-        ), patch("mediaforce.web.runtime.worker_supervision.threading.Event", return_value=wait_gate):
+        ):
             with self.assertRaises(KeyboardInterrupt):
-                encode_runtime.encode_queue_worker_loop(config_path=self.config.paths.config_path, deps=deps)
+                encode_runtime.encode_queue_worker_loop(
+                    config_path=self.config.paths.config_path,
+                    deps=deps,
+                    stop_event=stop_event,
+                )
 
         deps.logger.exception.assert_called_once_with("Encode queue worker pass failed")
 
@@ -14562,18 +16023,20 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         deps.calibration_queue_poll_seconds = 1.0
         logger = Mock()
 
-        wait_gate = Mock()
-        wait_gate.wait.side_effect = KeyboardInterrupt()
+        stop_event = Mock(spec=threading.Event)
+        stop_event.is_set.return_value = False
+        stop_event.wait.side_effect = KeyboardInterrupt()
 
         with patch(
                 "mediaforce.web.runtime.job_runtime.process_calibration_queue_once",
                 side_effect=RuntimeError("boom"),
-        ), patch("mediaforce.web.runtime.worker_supervision.threading.Event", return_value=wait_gate):
+        ):
             with self.assertRaises(KeyboardInterrupt):
                 job_runtime.calibration_queue_worker_loop(
                     config_path=self.config.paths.config_path,
                     deps=deps,
                     logger=logger,
+                    stop_event=stop_event,
                 )
 
         logger.exception.assert_called_once_with("Calibration queue worker pass failed")
@@ -20664,6 +22127,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_state_dir=self.root / "web",
             review_dir=self.root / "review",
             runtime_settings_path=self.root / "runtime.json",
+            runtime_reservation_dir=self.root / "runtime-reservations",
         )
         raw = {
             "state": {"cleanup": {"transient_artifact_retention_days": 14}},
@@ -20837,6 +22301,8 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
     @staticmethod
     def _insert_scan_run(connection: DBClient, **values: object) -> None:
+        values.setdefault("status", "completed" if values.get("completed_at") else "running")
+        values.setdefault("error", None)
         connection.execute(scan_runs.insert().values(**values))
 
     @staticmethod

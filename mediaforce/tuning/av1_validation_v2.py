@@ -15,7 +15,12 @@ from mediaforce.tuning.av1_cold_start import (
     AV1_COLD_START_TRAITS,
     assert_av1_cold_start_public_payload_safe,
 )
-from mediaforce.tuning.av1_cold_start_evaluation import AV1ColdStartValidationCriteriaV1
+from mediaforce.tuning.av1_cold_start_evaluation import (
+    AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN,
+    AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS,
+    AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT,
+    AV1ColdStartValidationCriteriaV1,
+)
 from mediaforce.tuning.av1_trait_feasibility import AV1_COLD_START_TRAIT_FEASIBILITY_CONTRACT_VERSION
 from mediaforce.tuning.av1_trait_projection import AV1_COLD_START_TRAIT_PROJECTION_CONTRACT_VERSION
 from mediaforce.tuning.av1_validation_harness import AV1_VALIDATION_HARNESS_CONTRACT_VERSION
@@ -796,11 +801,17 @@ def _v2_execution_semantics() -> dict[str, Any]:
 def _v2_criteria() -> AV1ColdStartValidationCriteriaV1:
     return AV1ColdStartValidationCriteriaV1(
         minimum_derivation_evidence_count=12,
-        minimum_derivation_source_count=6,
+        minimum_derivation_source_count=(
+            AV1_COLD_START_VALIDATION_MINIMUM_DERIVATION_SOURCE_COUNT
+        ),
         minimum_holdout_count=16,
         minimum_holdout_source_count=6,
-        maximum_derivation_age_days=180,
-        maximum_candidate_crf_span=6.0,
+        maximum_derivation_age_days=(
+            AV1_COLD_START_VALIDATION_MAXIMUM_DERIVATION_AGE_DAYS
+        ),
+        maximum_candidate_crf_span=(
+            AV1_COLD_START_VALIDATION_MAXIMUM_CANDIDATE_CRF_SPAN
+        ),
         range_hit_null_rate=0.5,
         maximum_one_sided_p_value=0.025,
         maximum_safety_regression_count=0,

@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy import pool
 
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
+from mediaforce.core.db_migrations import register_database_identity_guards
 from mediaforce.core.db_tables import metadata
 
 config = context.config
@@ -32,17 +33,31 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    identity_guard = config.attributes.get("database_identity_guard")
+    connection_factory = config.attributes.get(
+        "database_identity_connection_factory"
+    )
+    if identity_guard is not None:
+        identity_guard()
+    connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000}
+    if connection_factory is not None:
+        connect_args["factory"] = connection_factory
     connectable = create_engine(
         migration_url(),
-        connect_args={"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000},
+        connect_args=connect_args,
         poolclass=pool.NullPool,
     )
+    register_database_identity_guards(connectable, identity_guard)
 
     with connectable.connect() as connection:
+        if identity_guard is not None:
+            identity_guard()
         context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()
+        if identity_guard is not None:
+            identity_guard()
 
 
 if context.is_offline_mode():

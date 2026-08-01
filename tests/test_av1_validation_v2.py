@@ -6,7 +6,9 @@ from typing import cast
 import unittest
 
 from mediaforce.tuning.av1_cold_start_evaluation import (
+    AV1ColdStartValidationCandidateLockV1,
     AV1ColdStartValidationCellPlanV1,
+    AV1ColdStartValidationError,
     AV1ColdStartValidationManifestV1,
     build_av1_cold_start_validation_candidate_lock,
     build_av1_cold_start_validation_execution_authorization,
@@ -23,7 +25,6 @@ from mediaforce.tuning.av1_validation_harness import (
 from mediaforce.tuning.av1_validation_v2 import (
     AV1_VALIDATION_V1_MANIFEST_ID,
     AV1_VALIDATION_V1_MANIFEST_PAYLOAD_SHA256,
-    AV1ValidationManifestV2,
     AV1ValidationV2EligibilityCell,
     AV1ValidationV2Error,
     assert_preregistered_av1_validation_manifest_v2,
@@ -38,6 +39,7 @@ from mediaforce.tuning.av1_validation_v2 import (
 
 V1_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v1.json")
 V2_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v2.json")
+V2_SELECTION_LOCK_SHA256 = f"sha256:{'c' * 64}"
 
 
 class AV1ValidationV2Tests(unittest.TestCase):
@@ -48,6 +50,10 @@ class AV1ValidationV2Tests(unittest.TestCase):
         expected = build_preregistered_av1_validation_manifest_v2()
         self.assertEqual(self.manifest, expected)
         self.assertEqual(V2_MANIFEST_PATH.read_bytes(), serialize_av1_validation_manifest_v2(expected))
+        self.assertEqual(
+            self.manifest.payload_sha256,
+            "sha256:5a24bbfdfe699aa2c6f037b9473ce06607aee20af743f57266f38bf7eb08d268",
+        )
         assert_preregistered_av1_validation_manifest_v2(self.manifest)
 
         v1 = load_av1_cold_start_validation_manifest(V1_MANIFEST_PATH)
@@ -134,6 +140,32 @@ class AV1ValidationV2Tests(unittest.TestCase):
         self.assertFalse(payload["guided_probe_allowed"])
         self.assertFalse(payload["holdout_case_execution_allowed"])
         self.assertFalse(payload["public_bundle_activation_allowed"])
+        self.assertEqual(
+            set(payload),
+            {
+                "authorization_id",
+                "schema",
+                "schema_version",
+                "contract_version",
+                "authority",
+                "runtime_execution_authorized",
+                "execution_scope",
+                "search_mode",
+                "validation_harness_allowed",
+                "validation_candidate_allowed",
+                "guided_probe_allowed",
+                "holdout_case_execution_allowed",
+                "public_bundle_activation_allowed",
+                "manifest_id",
+                "manifest_payload_sha256",
+                "selection_lock_sha256",
+                "derivation_partition_sha256",
+                "authorized_at",
+                "valid_until",
+                "review_state",
+                "payload_sha256",
+            },
+        )
 
         payload["guided_probe_allowed"] = True
         with self.assertRaises(AV1ValidationV2Error):
@@ -157,40 +189,20 @@ class AV1ValidationV2Tests(unittest.TestCase):
         plan = next(
             plan for plan in self.manifest.cell_plans if plan.name == "motion_balanced_candidate"
         )
-        selection_lock = f"sha256:{'c' * 64}"
-        candidate_lock = build_av1_cold_start_validation_candidate_lock(
-            manifest_id=self.manifest.manifest_id,
-            cell_plan_id=plan.cell_plan_id,
-            exact_traits=("motion",),
-            crf_lower=20.0,
-            crf_center=22.0,
-            crf_upper=24.0,
-            compatibility_signature="compatibility_v2",
-            policy_signature="policy_v2",
-            target_video_bitrate_min_bps=999_000,
-            target_video_bitrate_max_bps=1_001_000,
-            minimum_quality_score=80.0,
-            confidence_level="moderate",
-            confidence_score=0.8,
-            derivation_evidence_count=12,
-            derivation_source_count=6,
-            derivation_source_tokens=tuple(f"source_{index}" for index in range(6)),
-            derivation_series_tokens=tuple(f"series_{index}" for index in range(12)),
-            derivation_source_group_tokens=tuple(f"group_{index:03d}" for index in range(6)),
-            derivation_oldest_recorded_at="2026-07-01T00:00:00Z",
-            derivation_newest_recorded_at="2026-07-10T00:00:00Z",
-            derivation_conflict_count=0,
-            derivation_snapshot_sha256=f"sha256:{'d' * 64}",
-            selection_lock_sha256=selection_lock,
-            locked_at="2026-07-20T00:00:00Z",
-            reviewed_at="2026-07-21T00:00:00Z",
+        candidate_locks = self._candidate_locks()
+        candidate_lock = next(
+            lock for lock in candidate_locks if lock.cell_plan_id == plan.cell_plan_id
         )
         execution_authorization = build_av1_cold_start_validation_execution_authorization(
-            manifest_id=self.manifest.manifest_id,
-            selection_lock_sha256=selection_lock,
-            candidate_lock_ids=(candidate_lock.candidate_lock_id,),
+            manifest=cast(AV1ColdStartValidationManifestV1, self.manifest),
+            selection_lock_sha256=V2_SELECTION_LOCK_SHA256,
+            candidate_locks=candidate_locks,
             review_environment_token="review_environment_v2",
             authorized_at="2026-07-22T00:00:00Z",
+        )
+        self.assertEqual(
+            execution_authorization.candidate_lock_ids,
+            tuple(sorted(lock.candidate_lock_id for lock in candidate_locks)),
         )
         machine = build_av1_validation_harness_machine_binding(
             compatibility_signature="compatibility_v2",
@@ -212,13 +224,25 @@ class AV1ValidationV2Tests(unittest.TestCase):
         context = build_av1_validation_candidate_context(
             manifest=cast(AV1ColdStartValidationManifestV1, self.manifest),
             plan=cast(AV1ColdStartValidationCellPlanV1, plan),
-            candidate_lock=candidate_lock,
+            candidate_locks=candidate_locks,
             authorization=execution_authorization,
             machine_binding=machine,
             configured_min_crf=18,
             configured_max_crf=38,
         )
         self.assertEqual(context.manifest_id, self.manifest.manifest_id)
+        self.assertEqual(context.candidate_lock_id, candidate_lock.candidate_lock_id)
+
+        with self.assertRaises(AV1ValidationHarnessError):
+            build_av1_validation_candidate_context(
+                manifest=cast(AV1ColdStartValidationManifestV1, self.manifest),
+                plan=cast(AV1ColdStartValidationCellPlanV1, plan),
+                candidate_locks=(candidate_lock,),
+                authorization=execution_authorization,
+                machine_binding=machine,
+                configured_min_crf=18,
+                configured_max_crf=38,
+            )
 
         baseline = plan_av1_validation_harness_case(
             manifest=cast(AV1ColdStartValidationManifestV1, self.manifest),
@@ -265,6 +289,53 @@ class AV1ValidationV2Tests(unittest.TestCase):
                 fallback_reason="private_title_or_path",
                 local_evidence_present=False,
             )
+
+    def test_holdout_authorization_requires_both_v2_candidate_locks(self) -> None:
+        candidate_locks = self._candidate_locks()
+        self.assertEqual(len(candidate_locks), 2)
+
+        for locks in (candidate_locks[:1], candidate_locks[1:], (candidate_locks[0], candidate_locks[0])):
+            with self.subTest(count=len(locks)), self.assertRaises(AV1ColdStartValidationError):
+                build_av1_cold_start_validation_execution_authorization(
+                    manifest=cast(AV1ColdStartValidationManifestV1, self.manifest),
+                    selection_lock_sha256=V2_SELECTION_LOCK_SHA256,
+                    candidate_locks=locks,
+                    review_environment_token="review_environment_v2",
+                    authorized_at="2026-07-22T00:00:00Z",
+                )
+
+    def _candidate_locks(self) -> tuple[AV1ColdStartValidationCandidateLockV1, ...]:
+        return tuple(
+            build_av1_cold_start_validation_candidate_lock(
+                manifest_id=self.manifest.manifest_id,
+                cell_plan_id=plan.cell_plan_id,
+                exact_traits=plan.trait_selector.traits,
+                crf_lower=20.0,
+                crf_center=22.0,
+                crf_upper=24.0,
+                compatibility_signature="compatibility_v2",
+                policy_signature="policy_v2",
+                target_video_bitrate_min_bps=999_000,
+                target_video_bitrate_max_bps=1_001_000,
+                minimum_quality_score=80.0,
+                confidence_level="moderate",
+                confidence_score=0.8,
+                derivation_evidence_count=12,
+                derivation_source_count=6,
+                derivation_source_tokens=tuple(f"source_{index}" for index in range(6)),
+                derivation_series_tokens=tuple(f"series_{index}" for index in range(12)),
+                derivation_source_group_tokens=tuple(f"group_{index:03d}" for index in range(6)),
+                derivation_oldest_recorded_at="2026-07-01T00:00:00Z",
+                derivation_newest_recorded_at="2026-07-10T00:00:00Z",
+                derivation_conflict_count=0,
+                derivation_snapshot_sha256=f"sha256:{'d' * 64}",
+                selection_lock_sha256=V2_SELECTION_LOCK_SHA256,
+                locked_at="2026-07-20T00:00:00Z",
+                reviewed_at="2026-07-21T00:00:00Z",
+            )
+            for plan in self.manifest.cell_plans
+            if plan.mode == "publication_candidate"
+        )
 
     def test_loader_rejects_noncanonical_bytes(self) -> None:
         payload = json.loads(V2_MANIFEST_PATH.read_bytes())

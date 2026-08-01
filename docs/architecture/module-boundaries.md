@@ -43,7 +43,45 @@ after the package consolidation pass. Avoid growing them with new helper logic.
 - `binaries.py`
   - ffmpeg/ffprobe binary discovery
 - `process_control.py`
-  - managed subprocess cancellation and command helpers
+  - managed subprocess cancellation, absolute deadlines, containment status,
+    and command helpers
+- `_process_deadline.py`
+  - private per-command supervisor that keeps ownership until every observed
+    descendant exits
+  - Linux uses a scoped child subreaper plus pidfds; procfs disappearance is an
+    exit race only when the pinned pidfd independently proves exit
+  - macOS uses Darwin unique parent identities plus audit-token signaling; a
+    uniquely live process that cannot provide a signal token remains live and
+    makes cleanup unprovable rather than being classified as exited
+  - each supervisor receives the read side of a parent-liveness pipe whose write
+    side exists only in the Mediaforce parent; parent exit therefore produces
+    EOF even when the target forks or detaches, and a surviving supervisor must
+    terminate and reap its entire observed tree before exiting
+  - the target closes the liveness descriptor before `exec`, so target
+    descendants cannot delay parent-death detection
+  - if the supervisor or containment status is lost before a complete/expired
+    proof, the parent immediately performs best-effort private-process-group
+    cleanup, then discards the bare numeric process-group ID and permanently
+    poisons the managed controller; reset and reuse fail closed, future calls
+    cannot signal an unrelated group after PGID reuse, and cancellation,
+    deadline, or command success cannot replace the primary
+    containment-enforcement error
+  - arbitrary supervisor `SIGKILL` remains a deliberate residual-risk boundary:
+    a descendant that already created a new session can outlive the private
+    process group because the supervisor's pidfds or Darwin identity tokens die
+    with it. Without a kernel-owned job container established before launch,
+    the parent cannot safely rediscover ownership after reparenting and PID
+    reuse, so Mediaforce reports cleanup as unproven instead of claiming it
+  - Darwin `EVFILT_PROC` fork notifications are aggregated, and the local SDK
+    documents kernel child tracking (`NOTE_TRACK`) as unsupported since macOS
+    10.5. Every fork event therefore triggers global identity reconciliation
+    and permanently marks ownership unproven. Compatibility consequence: a
+    managed command that forks cannot report successful completion on macOS;
+    unproven cleanup remains the primary enforcement failure even when a
+    deadline or cancellation also occurred
+  - containment fails closed before command success when required host
+    primitives or descendant ownership proof are unavailable; it never falls
+    back to same-user process scans or signals
 
 Guidance:
 
@@ -70,7 +108,25 @@ Guidance:
   - `encode_scheduler.py`
   - `queue_actions.py`
   - `job_runtime.py`
+    - new scan sidecars persist an explicit `scan_id` identical to the
+      `scan_runs` primary key; startup reconciliation resolves that exact ID
+      before any fallback, while legacy sidecars without an ID may use
+      scope/time only to inherit a conservative non-success result,
+    - workers revalidate sidecar ownership under the process-wide state lock
+      before startup and every terminal save, so an older worker cannot overwrite
+      a newer scan's sidecar; dead database rows are committed terminal before
+      sidecar repair, so they remain terminalized even when sidecar persistence
+      fails or the sidecar belongs to another scan,
+      restores a completed database result over a stale active sidecar, and lets
+      a matching or later database failure override contradictory legacy
+      sidecar state
   - `calibration_runtime.py`
+  - `av1_validation_derivation.py`
+    - isolated derivation-only execution adapter over sampled calibration
+    - shared-lock verdict/finalization transactions and current-input rechecks
+  - `runtime_lock.py`
+    - shared process exclusivity for web and bounded operator runtimes
+    - stable parent-directory guard against lock-file unlink/recreate splits
   - `encode_runtime.py`
   - `folder_state.py`
   - `folder_actions.py`
@@ -167,6 +223,11 @@ Guidance:
 - `scanner.py`
   - library inventory orchestration and catalog updates
   - all inventory rows preserve canonical evidence without launching deep analysis
+  - managed web scans cooperatively honor cancellation across enumeration,
+    database progress, and ffprobe; web shutdown waits only for a bounded grace
+    period before forcing process exit while the runtime lease is still held,
+    because Python cannot kill a thread blocked inside filesystem calls on an
+    unavailable media mount
 - `evidence_state.py`
   - rebuildable per-item/per-kind projection of canonical cadence and
     fingerprint JSON
@@ -258,6 +319,11 @@ Guidance:
 - `av1_validation_v2.py`
   - immutable v2 preregistration, digest-bound aggregate eligibility,
     explicit excluded-cell records, and fail-closed derivation-only authority
+- `av1_validation_derivation.py`
+  - immutable partition-global plan, attempt, terminal, proposal, review-claim,
+    review-evidence, and candidate-lock contracts
+  - preregistered candidate statistics, affected-cell stop semantics, and
+    authorization-bound Every Code runner identity
 - `av1_validation_partition.py`
   - pure private v2 partition schema, domain-separated HMAC selection/tokens,
     canonical selection-lock digests, and fail-closed identity constraints

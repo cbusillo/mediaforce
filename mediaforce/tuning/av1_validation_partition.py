@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import errno
 import hashlib
 import hmac
 import json
@@ -12,9 +13,16 @@ from pathlib import Path
 import re
 import secrets
 import stat
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
+from mediaforce.core.file_integrity import (
+    FileIntegrityError,
+    ensure_owner_only_directory,
+    fsync_durable_file,
+    open_stable_directory,
+    rename_exclusive,
+)
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_validation_v2 import (
@@ -22,6 +30,7 @@ from mediaforce.tuning.av1_validation_v2 import (
     AV1ValidationV2CellPlan,
     assert_preregistered_av1_validation_manifest_v2,
 )
+from mediaforce.web.runtime_lock import assert_mediaforce_runtime_lock_held
 
 
 AV1_VALIDATION_PARTITION_SCHEMA = "mediaforce.av1_cold_start_private_source_partition"
@@ -47,6 +56,12 @@ _MAXIMUM_SEARCH_NODES = 1_000_000
 
 
 class AV1ValidationPartitionError(ValueError):
+    pass
+
+
+class _AV1ValidationPartitionArtifactAlreadyExists(
+    AV1ValidationPartitionError
+):
     pass
 
 
@@ -607,7 +622,9 @@ def build_av1_validation_private_partition(
         sorted(
             (
                 _assignment_for_source(
-                    slot, selected[slot.assignment_id], token_key=token_key
+                    slot,
+                    selected[slot.assignment_id],
+                    token_key=token_key,
                 )
                 for slot in slots
             ),
@@ -727,8 +744,7 @@ def serialize_av1_validation_private_partition(
 
 
 def load_av1_validation_private_partition(path: Path) -> AV1ValidationPrivatePartition:
-    _assert_owner_only_regular_file(path, label="private partition")
-    raw = path.read_bytes()
+    raw = _read_owner_only_regular_file(path, label="private partition")
     try:
         payload = object_dict(json.loads(raw.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
@@ -903,26 +919,34 @@ def av1_validation_private_partition_from_payload(
 
 
 def create_av1_validation_partition_key(path: Path) -> str:
-    if path.exists():
-        raise AV1ValidationPartitionError("AV1 partition key already exists")
+    token_key_id, _created = ensure_av1_validation_partition_key(path)
+    return token_key_id
+
+
+def ensure_av1_validation_partition_key(path: Path) -> tuple[str, bool]:
+    assert_mediaforce_runtime_lock_held()
+    existing_key_id = _existing_av1_validation_partition_key_id(path)
+    if existing_key_id is not None:
+        return existing_key_id, False
     key = secrets.token_bytes(32)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _assert_owner_only_directory(path.parent)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(key)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
-    return _token_key_id(key)
+        _write_owner_only_partition_artifact(
+            path,
+            key,
+            label="partition key",
+        )
+    except _AV1ValidationPartitionArtifactAlreadyExists:
+        existing_key_id = _existing_av1_validation_partition_key_id(path)
+        if existing_key_id is None:
+            raise AV1ValidationPartitionError(
+                "AV1 partition key appeared during atomic publication"
+            )
+        return existing_key_id, False
+    return _token_key_id(key), True
 
 
 def load_av1_validation_partition_key(path: Path) -> bytes:
-    _assert_owner_only_regular_file(path, label="partition key")
-    key = path.read_bytes()
+    key = _read_owner_only_regular_file(path, label="partition key")
     _validate_key(key)
     return key
 
@@ -935,20 +959,220 @@ def av1_validation_partition_key_id(token_key: bytes) -> str:
 def write_av1_validation_private_partition(
     path: Path,
     partition: AV1ValidationPrivatePartition,
+    *,
+    before_publish: Callable[[], None] | None = None,
 ) -> None:
-    if path.exists():
-        raise AV1ValidationPartitionError("AV1 private partition already exists")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _assert_owner_only_directory(path.parent)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    assert_mediaforce_runtime_lock_held()
+    if _existing_private_partition_matches(path, partition):
+        return
+    data = serialize_av1_validation_private_partition(partition)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(serialize_av1_validation_private_partition(partition))
-            handle.flush()
-            os.fsync(handle.fileno())
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
+        _write_owner_only_partition_artifact(
+            path,
+            data,
+            label="private partition",
+            before_publish=before_publish,
+        )
+    except _AV1ValidationPartitionArtifactAlreadyExists:
+        if _existing_private_partition_matches(path, partition):
+            return
+        raise AV1ValidationPartitionError(
+            "AV1 private partition conflicts with an existing artifact"
+        )
+
+
+def _existing_av1_validation_partition_key_id(path: Path) -> str | None:
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        key = load_av1_validation_partition_key(path)
+    except FileNotFoundError:
+        return None
+    _fsync_partition_artifact_parent(path, label="partition key")
+    return _token_key_id(key)
+
+
+def _existing_private_partition_matches(
+        path: Path,
+        partition: AV1ValidationPrivatePartition,
+) -> bool:
+    if not path.exists() and not path.is_symlink():
+        return False
+    try:
+        existing = load_av1_validation_private_partition(path)
+    except FileNotFoundError:
+        return False
+    if existing != partition:
+        raise AV1ValidationPartitionError(
+            "AV1 private partition conflicts with an existing artifact"
+        )
+    _fsync_partition_artifact_parent(path, label="private partition")
+    return True
+
+
+def _write_owner_only_partition_artifact(
+        path: Path,
+        data: bytes,
+        *,
+        label: str,
+        before_publish: Callable[[], None] | None = None,
+) -> None:
+    assert_mediaforce_runtime_lock_held()
+    if not path.name or path.name in {".", ".."}:
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} name is invalid"
+        )
+    parent_descriptor = -1
+    descriptor = -1
+    temporary_name = f".{path.name}.{secrets.token_hex(12)}.tmp"
+    temporary_created = False
+    published = False
+    try:
+        _, parent_descriptor = ensure_owner_only_directory(path.parent)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(
+            temporary_name,
+            flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        temporary_created = True
+        initial_info = os.fstat(descriptor)
+        initial_path_info = os.stat(
+            temporary_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(initial_info.st_mode)
+            or initial_info.st_uid != os.getuid()
+            or stat.S_IMODE(initial_info.st_mode) != 0o600
+            or initial_info.st_nlink != 1
+            or (initial_info.st_dev, initial_info.st_ino)
+            != (initial_path_info.st_dev, initial_path_info.st_ino)
+        ):
+            raise AV1ValidationPartitionError(
+                "AV1 private partition could not be created safely"
+            )
+        offset = 0
+        while offset < len(data):
+            count = os.write(descriptor, data[offset:])
+            if count <= 0:
+                raise OSError(f"AV1 {label} write did not progress")
+            offset += count
+        fsync_durable_file(descriptor)
+        completed_info = os.fstat(descriptor)
+        completed_path_info = os.stat(
+            temporary_name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            completed_info.st_uid != os.getuid()
+            or stat.S_IMODE(completed_info.st_mode) != 0o600
+            or completed_info.st_nlink != 1
+            or completed_info.st_size != len(data)
+            or (completed_info.st_dev, completed_info.st_ino)
+            != (initial_info.st_dev, initial_info.st_ino)
+            or (completed_path_info.st_dev, completed_path_info.st_ino)
+            != (completed_info.st_dev, completed_info.st_ino)
+        ):
+            raise AV1ValidationPartitionError(
+                f"AV1 {label} changed before publication"
+            )
+        if before_publish is not None:
+            before_publish()
+        try:
+            rename_exclusive(
+                source_directory_descriptor=parent_descriptor,
+                source_name=temporary_name,
+                destination_directory_descriptor=parent_descriptor,
+                destination_name=path.name,
+            )
+        except FileExistsError as exc:
+            raise _AV1ValidationPartitionArtifactAlreadyExists(
+                f"AV1 {label} already exists"
+            ) from exc
+        published = True
+        final_info = os.fstat(descriptor)
+        final_path_info = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            final_info.st_uid != os.getuid()
+            or stat.S_IMODE(final_info.st_mode) != 0o600
+            or final_info.st_nlink != 1
+            or final_info.st_size != len(data)
+            or (final_info.st_dev, final_info.st_ino)
+            != (completed_info.st_dev, completed_info.st_ino)
+            or (final_path_info.st_dev, final_path_info.st_ino)
+            != (final_info.st_dev, final_info.st_ino)
+        ):
+            raise AV1ValidationPartitionError(
+                f"AV1 {label} changed during publication"
+            )
+        os.fsync(parent_descriptor)
+    except FileIntegrityError as exc:
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} could not be written safely"
+        ) from exc
+    finally:
+        cleanup_error: OSError | None = None
+        temporary_unlinked = False
+        if parent_descriptor >= 0 and temporary_created and not published:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_descriptor)
+                temporary_unlinked = True
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_error = exc
+        if parent_descriptor >= 0 and temporary_unlinked:
+            try:
+                os.fsync(parent_descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if parent_descriptor >= 0:
+            try:
+                os.close(parent_descriptor)
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+        if cleanup_error is not None:
+            raise AV1ValidationPartitionError(
+                f"AV1 {label} cleanup failed"
+            ) from cleanup_error
+
+
+def _fsync_partition_artifact_parent(path: Path, *, label: str) -> None:
+    assert_mediaforce_runtime_lock_held()
+    parent_descriptor = -1
+    try:
+        _, parent_descriptor = ensure_owner_only_directory(path.parent)
+        os.fsync(parent_descriptor)
+    except FileIntegrityError as exc:
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} directory could not be synchronized"
+        ) from exc
+    finally:
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
 def av1_validation_partition_public_summary(
@@ -1732,28 +1956,117 @@ def _required_text(value: object, label: str) -> str:
     return text
 
 
-def _assert_owner_only_directory(path: Path) -> None:
-    if os.name != "posix":
-        return
-    directory_stat = path.stat()
-    if not stat.S_ISDIR(directory_stat.st_mode):
-        raise AV1ValidationPartitionError(
-            "AV1 private artifact parent is not a directory"
+def _read_owner_only_regular_file(path: Path, *, label: str) -> bytes:
+    if not path.name or path.name in {".", ".."}:
+        raise AV1ValidationPartitionError(f"AV1 {label} name is invalid")
+    parent_descriptor = -1
+    descriptor = -1
+    try:
+        _, parent_descriptor = open_stable_directory(
+            path.parent,
+            require_owner_only=False,
         )
-    if directory_stat.st_uid != os.getuid() or directory_stat.st_mode & 0o077:
-        raise AV1ValidationPartitionError(
-            "AV1 private artifact directory must be owner-only"
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_descriptor,
         )
+        initial_descriptor_info = os.fstat(descriptor)
+        initial_path_info = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _validate_owner_only_artifact_binding(
+            initial_descriptor_info,
+            initial_path_info,
+            label=label,
+        )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        final_descriptor_info = os.fstat(descriptor)
+        final_path_info = os.stat(
+            path.name,
+            dir_fd=parent_descriptor,
+            follow_symlinks=False,
+        )
+        _validate_owner_only_artifact_binding(
+            final_descriptor_info,
+            final_path_info,
+            label=label,
+        )
+        if (
+            _owner_only_artifact_signature(initial_descriptor_info)
+            != _owner_only_artifact_signature(final_descriptor_info)
+            or _owner_only_artifact_signature(initial_path_info)
+            != _owner_only_artifact_signature(final_path_info)
+        ):
+            raise AV1ValidationPartitionError(
+                f"AV1 {label} changed while it was read"
+            )
+        return b"".join(chunks)
+    except FileNotFoundError:
+        raise
+    except FileIntegrityError as exc:
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} directory is unsafe"
+        ) from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise AV1ValidationPartitionError(
+                f"AV1 {label} is not a stable regular file"
+            ) from exc
+        raise AV1ValidationPartitionError(f"AV1 {label} could not be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
 
 
-def _assert_owner_only_regular_file(path: Path, *, label: str) -> None:
-    file_stat = path.stat()
-    if not stat.S_ISREG(file_stat.st_mode):
-        raise AV1ValidationPartitionError(f"AV1 {label} is not a regular file")
-    if os.name == "posix" and (
-        file_stat.st_uid != os.getuid() or file_stat.st_mode & 0o077
+def _validate_owner_only_artifact_binding(
+        descriptor_info: os.stat_result,
+        path_info: os.stat_result,
+        *,
+        label: str,
+) -> None:
+    if (
+        not stat.S_ISREG(descriptor_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or (descriptor_info.st_dev, descriptor_info.st_ino)
+        != (path_info.st_dev, path_info.st_ino)
     ):
-        raise AV1ValidationPartitionError(f"AV1 {label} permissions must be owner-only")
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} is not a stable regular file"
+        )
+    if os.name == "posix" and (
+        descriptor_info.st_uid != os.getuid()
+        or path_info.st_uid != os.getuid()
+        or descriptor_info.st_mode & 0o077
+        or path_info.st_mode & 0o077
+    ):
+        raise AV1ValidationPartitionError(
+            f"AV1 {label} permissions must be owner-only"
+        )
+
+
+def _owner_only_artifact_signature(
+        file_info: os.stat_result,
+) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        int(file_info.st_dev),
+        int(file_info.st_ino),
+        int(file_info.st_size),
+        int(file_info.st_mtime_ns),
+        int(file_info.st_ctime_ns),
+        int(file_info.st_mode),
+        int(file_info.st_uid),
+        int(file_info.st_nlink),
+    )
 
 
 def _expectations_from_payload(

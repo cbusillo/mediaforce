@@ -464,8 +464,9 @@ one side, for example `scripts/mediaforce-dev.sh restart backend`.
 
 The backend also holds a Python-level singleton lock while running, so a second
 `mediaforce-web` process exits instead of binding another port and confusing the
-local session. `scripts/mediaforce-web-dev.sh` remains as a compatibility alias
-for backend-only actions.
+local session. Busy startup reports the active owner PID and bind address when
+that metadata is available. `scripts/mediaforce-web-dev.sh` remains as a
+compatibility alias for backend-only actions.
 
 To enforce the local acceptance gate before each commit, point Git at the
 checked-in hooks once per clone:

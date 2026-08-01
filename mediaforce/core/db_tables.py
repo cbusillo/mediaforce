@@ -23,6 +23,8 @@ scan_runs = Table(
     Column("scan_id", Text, primary_key=True),
     Column("started_at", Text, nullable=False),
     Column("completed_at", Text),
+    Column("status", Text, nullable=False, server_default="running"),
+    Column("error", Text),
     Column("owner_pid", Integer),
     Column("last_progress_at", Text),
     Column("roots_json", Text, nullable=False),

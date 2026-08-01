@@ -55,6 +55,9 @@ class EvidenceWorkerTests(unittest.TestCase):
                 web_state_dir=self.project_root / "state" / "web",
                 review_dir=self.project_root / "state" / "review",
                 runtime_settings_path=self.project_root / "state" / "settings.json",
+                runtime_reservation_dir=(
+                    self.project_root / "runtime-reservations"
+                ),
             ),
         )
 
@@ -914,6 +917,7 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_worker.assert_called_once_with(
             config_path=self.config.paths.config_path,
+            config=self.config,
             max_work_items=1,
             max_seconds=None,
         )

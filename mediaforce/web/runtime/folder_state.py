@@ -72,12 +72,21 @@ def load_calibration_state(
     )
     payload["browser_review_ready"] = bool(payload["review_pairs"])
     payload["review_media_ready"] = bool(compare_clips or preview_clips or source_clips or payload["review_pairs"])
+    stored_review_artifact_fingerprint = str(
+        payload.get("review_artifact_fingerprint") or ""
+    ).strip()
     current_review_artifact_fingerprint = (
-        _current_review_artifact_fingerprint(deps, config, preview_clips, source_clips)
+        _current_review_artifact_fingerprint(
+            deps,
+            config,
+            preview_clips,
+            source_clips,
+            compare_clips,
+            stored_review_artifact_fingerprint=stored_review_artifact_fingerprint,
+        )
         if verify_boundary_artifact
         else None
     )
-    stored_review_artifact_fingerprint = str(payload.get("review_artifact_fingerprint") or "").strip()
     payload["current_review_artifact_fingerprint"] = current_review_artifact_fingerprint
     payload["boundary_review_media_ready"] = bool(
         preview_clips
@@ -101,9 +110,25 @@ def _current_review_artifact_fingerprint(
         config: MediaforceConfig,
         preview_clips: list[dict[str, Any]],
         source_clips: list[dict[str, Any]],
+        compare_clips: list[dict[str, Any]],
+        stored_review_artifact_fingerprint: str,
 ) -> str | None:
+    if stored_review_artifact_fingerprint.startswith("cira3_"):
+        schema_version = 3
+    elif stored_review_artifact_fingerprint.startswith("cira2_"):
+        schema_version = 2
+    elif stored_review_artifact_fingerprint.startswith("cira1_"):
+        schema_version = 1
+    else:
+        return None
     clips: list[tuple[str, Path, float, float]] = []
-    for role, review_clips in (("preview", preview_clips), ("source", source_clips)):
+    role_clips = [
+        ("preview", preview_clips),
+        ("source", source_clips),
+    ]
+    if schema_version >= 3:
+        role_clips.append(("compare", compare_clips))
+    for role, review_clips in role_clips:
         for clip in review_clips:
             review_file = deps.review_file_from_url(config, str(clip.get("path") or ""))
             if review_file is None or not review_file.exists():
@@ -116,7 +141,10 @@ def _current_review_artifact_fingerprint(
                     float_value(clip.get("duration_seconds")),
                 )
             )
-    return reviewed_artifact_fingerprint(clips)
+    return reviewed_artifact_fingerprint(
+        clips,
+        schema_version=schema_version,
+    )
 
 
 def _merge_review_pairs(

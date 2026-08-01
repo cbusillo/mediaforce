@@ -7,7 +7,12 @@ from typing import Any, Sequence
 
 from sqlalchemy import select
 
-from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config
+from mediaforce.core.config import (
+    DEFAULT_CONFIG_PATH,
+    MediaforceConfig,
+    load_config,
+    migrate_config_state,
+)
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
 from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
@@ -35,6 +40,11 @@ from mediaforce.tuning.quality_acceptance import format_quality_acceptance_repor
 from mediaforce.tuning.av1_trait_feasibility import (
     format_av1_trait_feasibility_report,
     load_av1_trait_feasibility_report_from_path,
+)
+from mediaforce.web.runtime_lock import (
+    MediaforceRuntimeBusyError,
+    exclusive_mediaforce_runtime_lock,
+    reserve_mediaforce_database_identity,
 )
 
 
@@ -234,10 +244,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    config = load_config(args.config)
+    args = build_parser().parse_args(argv)
+    return _main(args, load_config(args.config))
 
+
+def _main(
+        args: argparse.Namespace,
+        config: MediaforceConfig,
+) -> int:
     if args.command == "quality-memory":
         with open_readonly_db(config.paths.db_path) as connection:
             report = load_quality_acceptance_report(
@@ -268,6 +282,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(format_av1_trait_feasibility_report(report))
         return 0 if report.ready else 2
 
+    try:
+        with exclusive_mediaforce_runtime_lock(
+            config,
+            owner_payload={
+                "purpose": "mediaforce-cli",
+                "command": str(args.command),
+            },
+        ):
+            return _run_locked_command(args, config)
+    except MediaforceRuntimeBusyError as exc:
+        print(f"Mediaforce command blocked: {exc}")
+        return 2
+
+
+def _run_locked_command(
+        args: argparse.Namespace,
+        config: MediaforceConfig,
+) -> int:
+    migrate_config_state(config)
+    reserve_mediaforce_database_identity(
+        config,
+        create_if_missing=True,
+    )
     purge_transient_artifacts(config)
     default_review_dir = config.paths.review_dir
 
@@ -507,6 +544,7 @@ def _run_evidence_command(config: MediaforceConfig, args: argparse.Namespace) ->
         if action == "run":
             summary = run_evidence_queue_until_blocked(
                 config_path=config.paths.config_path,
+                config=config,
                 max_work_items=args.max_items,
                 max_seconds=args.max_seconds,
             )

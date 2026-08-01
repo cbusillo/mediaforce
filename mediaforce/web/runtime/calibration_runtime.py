@@ -69,6 +69,7 @@ class CalibrationRunDeps:
     quality_toolchain_identity: Any | None = None
     select_quality_metric: Any | None = None
     plan_av1_cold_start: Any | None = None
+    secure_review_artifacts: Any | None = None
 
 
 class _CalibrationTelemetry:
@@ -100,7 +101,6 @@ class _CalibrationTelemetry:
         self.thread = threading.Thread(
             target=self._heartbeat_loop,
             name=f"calibration-heartbeat-{self.job_id[:8]}",
-            daemon=True,
         )
         self.thread.start()
 
@@ -171,6 +171,11 @@ def _stored_sample_item_payload(sample_item: dict[str, Any]) -> dict[str, Any]:
         "source_fingerprint": sample_item.get("source_fingerprint"),
         "content_version_fingerprint": sample_item.get("content_version_fingerprint"),
         "source_size_bytes": sample_item.get("source_size_bytes"),
+        "source_snapshot_sha256": sample_item.get("source_snapshot_sha256"),
+        "source_snapshot_size_bytes": sample_item.get("source_snapshot_size_bytes"),
+        "source_snapshot_content_version_fingerprint": sample_item.get(
+            "source_snapshot_content_version_fingerprint"
+        ),
         "video_codec": sample_item.get("video_codec"),
         "video_bitrate": sample_item.get("video_bitrate"),
         "width": sample_item.get("width"),
@@ -294,6 +299,7 @@ def _content_intent_compatibility_payload(
 def _review_artifact_fingerprint(
         preview_clips: list[Any],
         source_clips: list[Any] | None = None,
+        compare_clips: list[Any] | None = None,
 ) -> str | None:
     fingerprint = reviewed_artifact_fingerprint(
         [
@@ -303,9 +309,14 @@ def _review_artifact_fingerprint(
                 float_value(getattr(clip, "timestamp_seconds", None)),
                 float_value(getattr(clip, "duration_seconds", None)),
             )
-            for role, clips in (("preview", preview_clips), ("source", source_clips or []))
+            for role, clips in (
+                ("preview", preview_clips),
+                ("source", source_clips or []),
+                ("compare", compare_clips or []),
+            )
             for clip in clips
-        ]
+        ],
+        schema_version=3 if compare_clips is not None else 2,
     )
     if fingerprint is None:
         LOGGER.info("Review artifact fingerprint unavailable: no preview clips were produced")
@@ -630,17 +641,22 @@ def run_sampled_calibration(
         calibration_run_id: str,
         process_controller: ManagedProcessController,
         deps: CalibrationRunDeps,
+        source_path_override: Path | None = None,
         progress_callback: Any | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
-    controller_source_path = Path(sample_item["source_path"])
     quality_host = _quality_host_data(config, host_data)
-    quality_source_path = resolve_item_source_path(
-        config,
-        sample_item,
-        host=quality_host,
-        host_media_access_for_host=host_media_access_for_host,
-    )
+    if source_path_override is None:
+        controller_source_path = Path(sample_item["source_path"])
+        quality_source_path = resolve_item_source_path(
+            config,
+            sample_item,
+            host=quality_host,
+            host_media_access_for_host=host_media_access_for_host,
+        )
+    else:
+        controller_source_path = source_path_override
+        quality_source_path = source_path_override
     quality_temp_dir = _quality_temp_dir_for_host(config, quality_host)
     video_policy = object_dict(policy.get("video"))
     stream_budget = deps.resolve_stream_budget_ledger(
@@ -873,7 +889,18 @@ def run_sampled_calibration(
         output_dir=output_dir,
         process_controller=process_controller,
     )
-    review_artifact_fingerprint = _review_artifact_fingerprint(preview_clips, source_clips)
+    if deps.secure_review_artifacts is not None:
+        review_artifact_fingerprint = deps.secure_review_artifacts(
+            preview_clips,
+            source_clips,
+            compare_clips,
+        )
+    else:
+        review_artifact_fingerprint = _review_artifact_fingerprint(
+            preview_clips,
+            source_clips,
+            compare_clips,
+        )
     review_artifact_size_bytes = sum(max(0, int_value(getattr(clip, "size_bytes", None))) for clip in preview_clips)
     if progress_callback is not None:
         progress_callback("building_review", completed=3, total=3)

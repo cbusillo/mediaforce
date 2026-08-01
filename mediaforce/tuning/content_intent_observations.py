@@ -29,6 +29,12 @@ CONTENT_INTENT_COMPATIBILITY_SCHEMA_VERSION = 1
 CONTENT_PROFILE_SCHEMA_VERSION = 1
 CONTENT_VERSION_FINGERPRINT_KIND = "mediaforce_content_version_v1"
 BOUNDARY_ASSESSMENT_CONTRACT = "operator_visual_v1"
+AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON = (
+    "av1_validation_derivation_quarantine"
+)
+PROTECTED_PERSONALIZATION_EXCLUSION_REASONS = frozenset({
+    AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
+})
 MAX_CORRECTION_REBASE_ATTEMPTS = 8
 VISUAL_BOUNDARY_CONCERN_TAGS = frozenset({
     "softness_detail_loss",
@@ -425,8 +431,14 @@ def build_visual_content_intent_observation(
         evidence_ids: Sequence[str],
         moment_indexes: Sequence[int],
         recorded_at: str,
+        personalization_eligible: bool = True,
+        personalization_exclusion_reason: str | None = None,
 ) -> ContentIntentObservationBuildResult:
     normalized_recorded_at = _timestamp(recorded_at, "recorded timestamp")
+    if personalization_eligible == (personalization_exclusion_reason is not None):
+        raise ValueError(
+            "Visual boundary personalization eligibility requires one consistent exclusion state"
+        )
     if verdict not in {"approved", "rejected"}:
         raise ValueError("Visual boundary observations require an approved or rejected verdict")
     normalized_concerns = tuple(
@@ -436,6 +448,18 @@ def build_visual_content_intent_observation(
         return ContentIntentObservationBuildResult(None, "visual_rejection_reason_missing")
     item = object_dict(sample_item)
     calibration_payload = object_dict(calibration)
+    calibration_action = str(calibration_payload.get("action") or "sample").strip()
+    if (
+        calibration_action == "av1_derivation"
+        and (
+            personalization_eligible
+            or personalization_exclusion_reason
+            != AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
+        )
+    ):
+        raise ValueError(
+            "AV1 derivation observations must remain quarantined from personalization"
+        )
     policy = object_dict(calibration_payload.get("policy"))
     sample_result = object_dict(calibration_payload.get("sample_result"))
     compatibility_payload = object_dict(sample_result.get("content_intent_compatibility"))
@@ -607,8 +631,8 @@ def build_visual_content_intent_observation(
             supersession_reason=None,
             authority="runtime_native",
             disposition="active",
-            personalization_eligible=True,
-            exclusion_reason=None,
+            personalization_eligible=personalization_eligible,
+            exclusion_reason=personalization_exclusion_reason,
             library_item_id=library_item_id,
             prefix=normalized_prefix,
             source_rel_path=source_rel_path,
@@ -759,6 +783,14 @@ def correct_content_intent_boundary_observation(
 ) -> ContentIntentBoundaryObservation:
     if previous.disposition == "withdrawn":
         raise ValueError("Withdrawn boundary evidence cannot be corrected")
+    if (
+        previous.exclusion_reason in PROTECTED_PERSONALIZATION_EXCLUSION_REASONS
+        and (
+            personalization_eligible
+            or exclusion_reason != previous.exclusion_reason
+        )
+    ):
+        raise ValueError("Protected boundary evidence quarantine cannot be lifted")
     successor_recorded_at = _successor_timestamp(previous.recorded_at, recorded_at)
     observation_kind: BoundaryObservationKind = (
         "visual_approval" if verdict == "acceptable" else "visual_rejection"
@@ -835,11 +867,16 @@ def withdraw_content_intent_boundary_observation(
         reason_code: str,
         recorded_at: str,
 ) -> ContentIntentBoundaryObservation:
+    exclusion_reason = (
+        previous.exclusion_reason
+        if previous.exclusion_reason in PROTECTED_PERSONALIZATION_EXCLUSION_REASONS
+        else _required_text(reason_code, "withdrawal reason")
+    )
     correction = correct_content_intent_boundary_observation(
         previous,
         verdict=previous.verdict,
         personalization_eligible=False,
-        exclusion_reason=_required_text(reason_code, "withdrawal reason"),
+        exclusion_reason=exclusion_reason,
         reason_code=reason_code,
         recorded_at=recorded_at,
     )
@@ -1046,6 +1083,7 @@ def _content_intent_replay_scope_rows(
         and str(observation.get("compatibility_key")) == compatibility_key
         and str(observation.get("disposition")) == "active"
         and bool(observation.get("personalization_eligible"))
+        and not _observation_has_derivation_provenance(observation)
         and _observation_integrity_valid(observation)
     ]
     exact = [
@@ -1074,6 +1112,18 @@ def _content_intent_replay_scope_rows(
         ],
         "operator": profile_compatible,
     }
+
+
+def _observation_has_derivation_provenance(
+        observation: Mapping[str, Any],
+) -> bool:
+    try:
+        provenance = object_dict(
+            json.loads(str(observation.get("provenance_json") or "{}"))
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return True
+    return str(provenance.get("calibration_action") or "") == "av1_derivation"
 
 
 def content_intent_replay_context(
@@ -1436,6 +1486,24 @@ def _observation_integrity_valid(observation: Mapping[str, Any]) -> bool:
         rebuilt.observation_id == str(observation.get("observation_id") or "")
         and rebuilt.payload_sha256 == str(observation.get("payload_sha256") or "")
     )
+
+
+def content_intent_boundary_observation_integrity_valid(
+        observation: ContentIntentBoundaryObservation,
+) -> bool:
+    return _observation_integrity_valid(observation.values())
+
+
+def content_intent_boundary_observation_from_values(
+        values: Mapping[str, Any],
+) -> ContentIntentBoundaryObservation:
+    observation = _rehash_observation(values)
+    if (
+        observation.observation_id != str(values.get("observation_id") or "")
+        or observation.payload_sha256 != str(values.get("payload_sha256") or "")
+    ):
+        raise ValueError("Boundary observation digest does not match its payload")
+    return observation
 
 
 def _same_visual_review(

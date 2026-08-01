@@ -13,6 +13,7 @@ from mediaforce.tuning.av1_cold_start_evaluation import (
     AV1ColdStartValidationCellReportV1,
     AV1ColdStartValidationEvidenceSetV1,
     AV1ColdStartValidationError,
+    AV1ColdStartValidationExecutionAuthorizationV1,
     AV1ColdStartValidationManifestV1,
     AV1ColdStartValidationPredictionStatus,
     AV1ColdStartValidationReportV1,
@@ -167,7 +168,7 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         self.assertIn("held_out_series_reused", cell.blocking_reasons)
         self.assertIn("local_evidence_contamination", cell.blocking_reasons)
 
-    def test_wide_candidate_and_derivation_overlap_are_rejected(self) -> None:
+    def test_merged_candidate_contract_allows_wide_range_at_type_boundary(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
         candidate_lock = self._candidate_lock(
@@ -176,6 +177,16 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             ("animation",),
             crf_lower=18.0,
             crf_upper=45.0,
+        )
+        self.assertEqual(candidate_lock.crf_upper - candidate_lock.crf_lower, 27.0)
+
+    def test_derivation_overlap_is_rejected(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
             derivation_source_tokens=(
                 "derivation.source.002",
                 "derivation.source.003",
@@ -192,7 +203,6 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         cell = self._cell_report(report, plan.name)
 
         self.assertEqual(cell.decision, "rejected")
-        self.assertIn("candidate_range_too_wide", cell.blocking_reasons)
         self.assertIn("derivation_holdout_source_overlap", cell.blocking_reasons)
 
     def test_duplicate_reviews_are_preregistered_independent_and_safety_bounded(self) -> None:
@@ -397,7 +407,7 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
         self.assertEqual(first_report.cell_reports, second_report.cell_reports)
         self.assertNotEqual(first_report.report_id, second_report.report_id)
 
-    def test_stale_conflicting_low_confidence_derivation_is_rejected(self) -> None:
+    def test_conflicting_low_confidence_derivation_is_rejected(self) -> None:
         manifest = self._manifest()
         plan = self._plan(manifest, "animation_balanced_candidate")
         candidate_lock = self._candidate_lock(
@@ -406,7 +416,6 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             ("animation",),
             confidence_level="limited",
             confidence_score=0.4,
-            derivation_oldest_recorded_at="2025-01-01T00:00:00Z",
             derivation_conflict_count=1,
         )
         results = self._candidate_results(manifest, plan.cell_plan_id, candidate_lock.candidate_lock_id)
@@ -415,8 +424,21 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
 
         self.assertEqual(cell.decision, "rejected")
         self.assertIn("candidate_confidence_insufficient", cell.blocking_reasons)
-        self.assertIn("derivation_evidence_stale", cell.blocking_reasons)
         self.assertIn("derivation_evidence_conflicting", cell.blocking_reasons)
+
+    def test_merged_candidate_contract_allows_stale_timestamp_at_type_boundary(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            derivation_oldest_recorded_at="2025-01-01T00:00:00Z",
+        )
+        self.assertEqual(
+            candidate_lock.derivation_oldest_recorded_at,
+            "2025-01-01T00:00:00Z",
+        )
 
     def test_oversized_json_number_uses_the_controlled_error_path(self) -> None:
         payload = self._manifest().to_payload()
@@ -426,6 +448,238 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AV1ColdStartValidationError, "too large"):
             av1_cold_start_validation_manifest_from_payload(payload)
+
+    def test_merged_criteria_contract_allows_more_than_twelve_observations(self) -> None:
+        criteria = replace(
+            self._manifest().criteria,
+            minimum_derivation_evidence_count=13,
+        )
+        self.assertEqual(criteria.minimum_derivation_evidence_count, 13)
+
+    def test_merged_candidate_contract_allows_nonfixed_evidence_count(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            derivation_evidence_count=11,
+        )
+        self.assertEqual(candidate_lock.derivation_evidence_count, 11)
+
+    def test_candidate_lock_payload_keys_match_frozen_v1_schema(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(manifest, plan.cell_plan_id, ("animation",))
+        self.assertEqual(
+            set(candidate_lock.to_payload()),
+            {
+                "candidate_lock_id",
+                "manifest_id",
+                "cell_plan_id",
+                "exact_traits",
+                "crf_lower",
+                "crf_center",
+                "crf_upper",
+                "compatibility_signature",
+                "policy_signature",
+                "target_video_bitrate_min_bps",
+                "target_video_bitrate_max_bps",
+                "minimum_quality_score",
+                "confidence_level",
+                "confidence_score",
+                "derivation_evidence_count",
+                "derivation_source_count",
+                "derivation_source_tokens",
+                "derivation_series_tokens",
+                "derivation_source_group_tokens",
+                "derivation_oldest_recorded_at",
+                "derivation_newest_recorded_at",
+                "derivation_conflict_count",
+                "derivation_snapshot_sha256",
+                "selection_lock_sha256",
+                "locked_at",
+                "reviewed_at",
+                "review_state",
+                "payload_sha256",
+            },
+        )
+
+    def test_result_and_criteria_payload_keys_match_frozen_v1_schema(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+        )
+        result = self._candidate_results(
+            manifest,
+            plan.cell_plan_id,
+            candidate_lock.candidate_lock_id,
+        )[0]
+        self.assertEqual(
+            set(result.to_payload()),
+            {
+                "result_id",
+                "manifest_id",
+                "cell_plan_id",
+                "case_id",
+                "execution_order",
+                "completed_at",
+                "status",
+                "source_token",
+                "series_token",
+                "source_group_token",
+                "content_traits",
+                "intent_level",
+                "compatibility_signature",
+                "policy_signature",
+                "review_environment_token",
+                "target_video_bitrate_bps",
+                "prediction_status",
+                "fallback_reason",
+                "local_evidence_present",
+                "candidate_lock_id",
+                "blinded_visual_review",
+                "duplicate_guided_visual_accepted",
+                "duplicate_review_environment_token",
+                "baseline",
+                "guided",
+                "failure_reason",
+                "payload_sha256",
+            },
+        )
+        self.assertEqual(
+            set(manifest.criteria.to_payload()),
+            {
+                "minimum_derivation_evidence_count",
+                "minimum_derivation_source_count",
+                "minimum_holdout_count",
+                "minimum_holdout_source_count",
+                "maximum_derivation_age_days",
+                "maximum_candidate_crf_span",
+                "range_hit_null_rate",
+                "maximum_one_sided_p_value",
+                "maximum_safety_regression_count",
+                "duplicate_review_fraction",
+                "minimum_duplicate_review_agreement",
+                "confidence_level",
+                "confidence_score",
+            },
+        )
+
+    def test_merged_candidate_contract_allows_zero_quality_floor(self) -> None:
+        manifest = self._manifest()
+        plan = self._plan(manifest, "animation_balanced_candidate")
+        candidate_lock = self._candidate_lock(
+            manifest,
+            plan.cell_plan_id,
+            ("animation",),
+            minimum_quality_score=0.0,
+        )
+        self.assertEqual(candidate_lock.minimum_quality_score, 0.0)
+
+    def test_holdout_authorization_binds_every_publication_candidate_lock(self) -> None:
+        manifest = self._manifest()
+        locks = self._publication_locks(manifest)
+        authorization = self._authorization(manifest, locks)
+
+        self.assertEqual(len(locks), 2)
+        self.assertEqual({lock.cell_plan_id for lock in locks}, {
+            plan.cell_plan_id
+            for plan in manifest.cell_plans
+            if plan.mode == "publication_candidate"
+        })
+        self.assertEqual(
+            authorization.candidate_lock_ids,
+            tuple(sorted(lock.candidate_lock_id for lock in locks)),
+        )
+        self.assertEqual(
+            set(authorization.to_payload()),
+            {
+                "authorization_id",
+                "manifest_id",
+                "selection_lock_sha256",
+                "candidate_lock_ids",
+                "review_environment_token",
+                "authorized_at",
+                "review_state",
+                "payload_sha256",
+            },
+        )
+        self.assertEqual(
+            authorization.authorization_id,
+            "av1vauthorization1_ce864ccf6656638bf862a4341cfab23f",
+        )
+        self.assertEqual(
+            authorization.payload_sha256,
+            "sha256:d4441d8c0aa9ab015f0e4aab15bcd80b90c8a58af6bea77498d87f141ecec11a",
+        )
+
+    def test_holdout_authorization_rejects_incomplete_or_padded_lock_sets(self) -> None:
+        manifest = self._manifest()
+        animation = self._plan(manifest, "animation_balanced_candidate")
+        live_action = self._plan(manifest, "typical_live_action_balanced_candidate")
+        fallback = self._plan(manifest, "darkness_risk_fallback")
+        animation_lock = self._candidate_lock(manifest, animation.cell_plan_id, ("animation",))
+        live_action_lock = self._candidate_lock(manifest, live_action.cell_plan_id, ("typical",))
+        lock_sets = {
+            "single_lock": (animation_lock,),
+            "duplicate_cell": (
+                animation_lock,
+                self._candidate_lock(
+                    manifest,
+                    animation.cell_plan_id,
+                    ("animation",),
+                    crf_lower=28.5,
+                ),
+            ),
+            "wrong_cell": (
+                animation_lock,
+                self._candidate_lock(manifest, fallback.cell_plan_id, ("darkness",)),
+            ),
+            "extra_lock": (
+                animation_lock,
+                live_action_lock,
+                self._candidate_lock(manifest, fallback.cell_plan_id, ("darkness",)),
+            ),
+            "wrong_manifest": (
+                animation_lock,
+                self._candidate_lock(
+                    manifest,
+                    live_action.cell_plan_id,
+                    ("typical",),
+                    manifest_id="av1vmanifest2_" + "0" * 32,
+                ),
+            ),
+            "wrong_traits": (
+                animation_lock,
+                self._candidate_lock(manifest, live_action.cell_plan_id, ("animation",)),
+            ),
+            "mixed_selection_locks": (
+                animation_lock,
+                self._candidate_lock(
+                    manifest,
+                    live_action.cell_plan_id,
+                    ("typical",),
+                    selection_lock_sha256="sha256:" + "3" * 64,
+                ),
+            ),
+        }
+
+        for name, locks in lock_sets.items():
+            with self.subTest(name=name), self.assertRaises(AV1ColdStartValidationError):
+                self._authorization(manifest, locks)
+
+        with self.assertRaises(AV1ColdStartValidationError):
+            self._authorization(
+                manifest,
+                (animation_lock, live_action_lock),
+                selection_lock_sha256="sha256:" + "4" * 64,
+            )
+        with self.assertRaises(AV1ColdStartValidationError):
+            replace(animation_lock, review_state="pending_review")
 
     def _manifest(self) -> AV1ColdStartValidationManifestV1:
         return build_preregistered_av1_cold_start_validation_manifest()
@@ -439,6 +693,8 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             crf_upper: float = 30.0,
             confidence_level: str = "moderate",
             confidence_score: float = 0.7,
+            derivation_evidence_count: int = 12,
+            minimum_quality_score: float = 93.0,
             derivation_oldest_recorded_at: str = "2026-07-20T00:00:00Z",
             derivation_newest_recorded_at: str = "2026-07-26T00:00:00Z",
             derivation_conflict_count: int = 0,
@@ -452,9 +708,11 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
                 "derivation.source.005",
                 "derivation.source.006",
             ),
+            selection_lock_sha256: str = "sha256:" + "2" * 64,
+            manifest_id: str | None = None,
     ) -> AV1ColdStartValidationCandidateLockV1:
         return build_av1_cold_start_validation_candidate_lock(
-            manifest_id=manifest.manifest_id,
+            manifest_id=manifest_id or manifest.manifest_id,
             cell_plan_id=cell_plan_id,
             exact_traits=traits,
             crf_lower=crf_lower,
@@ -464,14 +722,14 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             policy_signature="policy.v1.test",
             target_video_bitrate_min_bps=2_000_000,
             target_video_bitrate_max_bps=4_000_000,
-            minimum_quality_score=93.0,
+            minimum_quality_score=minimum_quality_score,
             confidence_level=confidence_level,
             confidence_score=confidence_score,
-            derivation_evidence_count=12,
+            derivation_evidence_count=derivation_evidence_count,
             derivation_source_count=6,
             derivation_source_tokens=derivation_source_tokens,
             derivation_series_tokens=tuple(
-                f"derivation.series.{index:03d}" for index in range(1, 7)
+                f"derivation.series.{index:03d}" for index in range(1, 13)
             ),
             derivation_source_group_tokens=tuple(
                 f"derivation.group.{index:03d}" for index in range(1, 7)
@@ -480,9 +738,33 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
             derivation_newest_recorded_at=derivation_newest_recorded_at,
             derivation_conflict_count=derivation_conflict_count,
             derivation_snapshot_sha256="sha256:" + "1" * 64,
-            selection_lock_sha256="sha256:" + "2" * 64,
+            selection_lock_sha256=selection_lock_sha256,
             locked_at=locked_at,
             reviewed_at=reviewed_at,
+        )
+
+    def _publication_locks(
+            self,
+            manifest: AV1ColdStartValidationManifestV1,
+    ) -> tuple[AV1ColdStartValidationCandidateLockV1, ...]:
+        return tuple(
+            self._candidate_lock(manifest, plan.cell_plan_id, plan.trait_selector.traits)
+            for plan in manifest.cell_plans
+            if plan.mode == "publication_candidate"
+        )
+
+    def _authorization(
+            self,
+            manifest: AV1ColdStartValidationManifestV1,
+            locks: Sequence[AV1ColdStartValidationCandidateLockV1],
+            selection_lock_sha256: str = "sha256:" + "2" * 64,
+    ) -> AV1ColdStartValidationExecutionAuthorizationV1:
+        return build_av1_cold_start_validation_execution_authorization(
+            manifest=manifest,
+            selection_lock_sha256=selection_lock_sha256,
+            candidate_locks=locks,
+            review_environment_token="review.environment.authorization",
+            authorized_at="2026-07-27T02:30:00Z",
         )
 
     def _candidate_results(
@@ -610,11 +892,9 @@ class AV1ColdStartEvaluationTests(unittest.TestCase):
                     )
                 )
         authorization = build_av1_cold_start_validation_execution_authorization(
-            manifest_id=manifest.manifest_id,
+            manifest=manifest,
             selection_lock_sha256="sha256:" + "2" * 64,
-            candidate_lock_ids=tuple(
-                candidate_lock.candidate_lock_id for candidate_lock in resolved_locks
-            ),
+            candidate_locks=resolved_locks,
             review_environment_token="review.environment.authorization",
             authorized_at="2026-07-27T02:30:00Z",
         )
