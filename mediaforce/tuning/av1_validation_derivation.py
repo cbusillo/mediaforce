@@ -79,6 +79,12 @@ AV1_VALIDATION_DERIVATION_REVIEW_ENVELOPE_SCHEMA = (
 AV1_VALIDATION_DERIVATION_REVIEW_CLAIM_SCHEMA = (
     "mediaforce.av1_cold_start_derivation_review_claim"
 )
+AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_CHECKPOINT_SCHEMA = (
+    "mediaforce.av1_cold_start_derivation_review_response_checkpoint"
+)
+AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA = (
+    "mediaforce.av1_cold_start_derivation_review_recovery"
+)
 AV1_VALIDATION_DERIVATION_LOCK_ENVELOPE_SCHEMA = (
     "mediaforce.av1_cold_start_derivation_candidate_lock_envelope"
 )
@@ -110,6 +116,9 @@ AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA = (
 )
 AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION = 1
 AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_VERSION = 1
+AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_CHECKPOINT_SCHEMA_VERSION = 1
+AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION = 1
+AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_RESPONSE_BYTES = 64 * 1024
 AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES = 384 * 1024
 AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES = 512 * 1024
 AV1_VALIDATION_DERIVATION_REVIEW_MINIMUM_ANALYSIS_CHARACTERS = 120
@@ -136,6 +145,10 @@ AV1ValidationDerivationReviewLane = Literal[
     "adversarial",
 ]
 AV1ValidationDerivationReviewDecision = Literal["approved", "rejected"]
+AV1ValidationDerivationReviewRecoveryReason = Literal[
+    "interrupted_before_durable_response",
+    "invalid_durable_response",
+]
 AV1ValidationDerivationAttemptPublicationDisposition = Literal[
     "accepted",
     "rejected",
@@ -2626,6 +2639,68 @@ def validate_av1_validation_derivation_review_response(
     return cast(AV1ValidationDerivationReviewDecision, decision)
 
 
+def build_av1_validation_derivation_review_recovery_evidence(
+        *,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+        reason_code: AV1ValidationDerivationReviewRecoveryReason,
+        recovered_at: str,
+        response_checkpoint_payload_sha256: str | None = None,
+) -> bytes:
+    _assert_av1_validation_derivation_review_request_bindings(
+        proposal=proposal,
+        claim=claim,
+    )
+    recovered = _parse_timestamp(recovered_at, "review recovery timestamp")
+    if recovered < _parse_timestamp(claim.claimed_at, "review-claim timestamp"):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review recovery predates its immutable claim"
+        )
+    if reason_code == "interrupted_before_durable_response":
+        if response_checkpoint_payload_sha256 is not None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation interrupted review recovery cannot bind a response"
+            )
+    elif reason_code == "invalid_durable_response":
+        _require_sha256(
+            _required_text(
+                response_checkpoint_payload_sha256,
+                "review response checkpoint digest",
+            ),
+            "review response checkpoint digest",
+        )
+    else:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review recovery reason is invalid"
+        )
+    payload = {
+        "schema": AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
+        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION,
+        "review_run_id": claim.review_run_id,
+        "reviewer_token": claim.reviewer_token,
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "lane": claim.lane,
+        "decision": "rejected",
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "review_runner_canonical_path_sha256": (
+            claim.review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
+        "proposal": proposal.to_payload(),
+        "review_claim": claim.to_payload(),
+        "reason_code": reason_code,
+        "response_checkpoint_payload_sha256": (
+            response_checkpoint_payload_sha256
+        ),
+        "recovered_at": _utc_timestamp(recovered),
+    }
+    return canonical_json_bytes(payload)
+
+
 def av1_validation_derivation_review_analysis_sha256(
         response: Mapping[str, Any],
 ) -> str:
@@ -2749,10 +2824,6 @@ def _av1_validation_derivation_review_set_sha256(
         envelopes: Sequence[AV1ValidationDerivationReviewEnvelope],
 ) -> str:
     reviews = tuple(envelope.review for envelope in envelopes)
-    analysis_digests = tuple(
-        _av1_validation_derivation_review_analysis_sha256(envelope)
-        for envelope in envelopes
-    )
     claims_by_lane = {claim.lane: claim for claim in claims}
     if (
         len(claims) != len(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
@@ -2763,8 +2834,19 @@ def _av1_validation_derivation_review_set_sha256(
         != set(AV1_VALIDATION_DERIVATION_REVIEW_LANES)
         or len({review.reviewer_token for review in reviews}) != len(reviews)
         or len({review.review_evidence_sha256 for review in reviews}) != len(reviews)
-        or len(set(analysis_digests)) != len(analysis_digests)
     ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review set is incomplete or not independent"
+        )
+    if any(review.decision != "approved" for review in reviews):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review set contains a terminal rejection"
+        )
+    analysis_digests = tuple(
+        _av1_validation_derivation_review_analysis_sha256(envelope)
+        for envelope in envelopes
+    )
+    if len(set(analysis_digests)) != len(analysis_digests):
         raise AV1ValidationDerivationError(
             "AV1 derivation review set is incomplete or not independent"
         )
@@ -4899,6 +4981,220 @@ def load_av1_validation_derivation_review_claims(
     return tuple(sorted(claims, key=lambda item: item.lane))
 
 
+def _av1_validation_derivation_review_response_checkpoint_payload(
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+        request_sha256: str,
+        response: str,
+        stderr_sha256: str,
+        completed_at: str,
+) -> dict[str, object]:
+    _require_sha256(request_sha256, "review request digest")
+    _require_sha256(stderr_sha256, "review stderr digest")
+    response_bytes = response.encode("utf-8")
+    if (
+        not response
+        or len(response_bytes)
+        > AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_RESPONSE_BYTES
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is invalid"
+        )
+    completed = _parse_timestamp(
+        completed_at,
+        "derivation review response checkpoint timestamp",
+    )
+    claimed = _parse_timestamp(claim.claimed_at, "review-claim timestamp")
+    deadline = _parse_timestamp(
+        plan.authorization.valid_until,
+        "derivation authorization deadline",
+    )
+    if completed < claimed or completed >= deadline:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is outside authorization"
+        )
+    semantic_payload: dict[str, object] = {
+        "schema": AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_CHECKPOINT_SCHEMA,
+        "schema_version": (
+            AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_CHECKPOINT_SCHEMA_VERSION
+        ),
+        "plan_id": plan.plan_id,
+        "authorization_id": plan.authorization.authorization_id,
+        "proposal_id": proposal.proposal_id,
+        "proposal_payload_sha256": proposal.payload_sha256,
+        "review_claim_id": claim.claim_id,
+        "review_claim_payload_sha256": claim.payload_sha256,
+        "lane": claim.lane,
+        "review_run_id": claim.review_run_id,
+        "repository_commit": claim.repository_commit,
+        "repository_tree": claim.repository_tree,
+        "review_runner_canonical_path_sha256": (
+            claim.review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
+        "request_sha256": request_sha256,
+        "response": response,
+        "response_sha256": (
+            f"sha256:{hashlib.sha256(response_bytes).hexdigest()}"
+        ),
+        "returncode": 0,
+        "stderr_sha256": stderr_sha256,
+        "completed_at": _utc_timestamp(completed),
+    }
+    return {
+        **semantic_payload,
+        "payload_sha256": _payload_sha256(semantic_payload),
+    }
+
+
+def write_av1_validation_derivation_review_response_checkpoint(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+        request_sha256: str,
+        response: str,
+        stderr_sha256: str,
+        completed_at: str,
+        before_publish: Callable[[], None] | None = None,
+) -> Path:
+    root = _bind_av1_validation_derivation_artifact_root(artifact_root, plan)
+    assert_av1_validation_derivation_repository_identity(
+        plan,
+        repository_commit=claim.repository_commit,
+        repository_tree=claim.repository_tree,
+    )
+    if (
+        proposal.plan_id != plan.plan_id
+        or proposal.manifest_id != plan.manifest_id
+        or claim.plan_id != plan.plan_id
+        or claim.authorization_id != plan.authorization.authorization_id
+        or claim.proposal_id != proposal.proposal_id
+        or claim.proposal_payload_sha256 != proposal.payload_sha256
+        or claim.review_runner_canonical_path_sha256
+        != plan.review_runner_canonical_path_sha256
+        or claim.review_runner_binary_sha256
+        != plan.review_runner_binary_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is bound to another run"
+        )
+    payload = _av1_validation_derivation_review_response_checkpoint_payload(
+        plan=plan,
+        proposal=proposal,
+        claim=claim,
+        request_sha256=request_sha256,
+        response=response,
+        stderr_sha256=stderr_sha256,
+        completed_at=completed_at,
+    )
+    directory = root / "review-responses" / proposal.proposal_id
+    _bind_owner_only_directory(
+        directory,
+        kind="review_responses",
+        binding_id=proposal.proposal_id,
+        binding_digest=proposal.payload_sha256,
+    )
+    path = directory / f"{claim.lane}.json"
+    try:
+        _write_owner_only(
+            path,
+            canonical_json_bytes(payload),
+            before_publish=before_publish,
+            published_before=plan.authorization.valid_until,
+        )
+    except _AV1ValidationDerivationArtifactAlreadyExists:
+        existing = load_av1_validation_derivation_review_response_checkpoint(
+            root,
+            plan=plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        if existing != payload:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review response checkpoint conflicts with existing state"
+            )
+        _fsync_owner_only_parent(path, "derivation review response checkpoint")
+    return path
+
+
+def load_av1_validation_derivation_review_response_checkpoint(
+        artifact_root: Path,
+        *,
+        plan: AV1ValidationDerivationPlan,
+        proposal: AV1ValidationDerivationCandidateProposal,
+        claim: AV1ValidationDerivationReviewClaim,
+) -> dict[str, object] | None:
+    root = _assert_av1_validation_derivation_artifact_root_binding(
+        artifact_root,
+        plan,
+    )
+    directory = root / "review-responses" / proposal.proposal_id
+    if not (directory.exists() or directory.is_symlink()):
+        return None
+    binding = _load_owner_only_directory_binding(
+        directory,
+        expected_kind="review_responses",
+    )
+    if (
+        binding["binding_id"] != proposal.proposal_id
+        or binding["binding_digest"] != proposal.payload_sha256
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review-response directory binding drifted"
+        )
+    path = directory / f"{claim.lane}.json"
+    if not (path.exists() or path.is_symlink()):
+        return None
+    payload, _raw = _load_owner_only_json(
+        path,
+        "derivation review response checkpoint",
+        published_before=plan.authorization.valid_until,
+    )
+    _require_exact_keys(payload, {
+        "schema", "schema_version", "plan_id", "authorization_id",
+        "proposal_id", "proposal_payload_sha256", "review_claim_id",
+        "review_claim_payload_sha256", "lane", "review_run_id",
+        "repository_commit", "repository_tree",
+        "review_runner_canonical_path_sha256",
+        "review_runner_binary_sha256", "request_sha256", "response",
+        "response_sha256", "returncode", "stderr_sha256", "completed_at",
+        "payload_sha256",
+    }, "derivation review response checkpoint")
+    response = payload.get("response")
+    if not isinstance(response, str):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is invalid"
+        )
+    expected = _av1_validation_derivation_review_response_checkpoint_payload(
+        plan=plan,
+        proposal=proposal,
+        claim=claim,
+        request_sha256=_required_text(
+            payload.get("request_sha256"),
+            "review request digest",
+        ),
+        response=response,
+        stderr_sha256=_required_text(
+            payload.get("stderr_sha256"),
+            "review stderr digest",
+        ),
+        completed_at=_required_text(
+            payload.get("completed_at"),
+            "review response checkpoint timestamp",
+        ),
+    )
+    if payload != expected:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is invalid"
+        )
+    _fsync_owner_only_parent(path, "derivation review response checkpoint")
+    return payload
+
+
 def write_av1_validation_derivation_review_envelope(
         artifact_root: Path,
         *,
@@ -5199,6 +5495,99 @@ def _validate_av1_validation_derivation_structured_review_run_evidence(
         )
 
 
+def _validate_av1_validation_derivation_review_recovery_evidence(
+        payload: Mapping[str, Any],
+        *,
+        evidence: bytes,
+        review: AV1ValidationDerivationReviewAttestation,
+) -> None:
+    _require_exact_keys(payload, {
+        "schema", "schema_version", "review_run_id", "reviewer_token",
+        "proposal_id", "proposal_payload_sha256", "review_claim_id",
+        "review_claim_payload_sha256", "lane", "decision",
+        "repository_commit", "repository_tree",
+        "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
+        "proposal", "review_claim", "reason_code",
+        "response_checkpoint_payload_sha256", "recovered_at",
+    }, "derivation review recovery evidence")
+    try:
+        proposal_payload = object_dict(payload.get("proposal"))
+        claim_payload = object_dict(payload.get("review_claim"))
+        proposal = av1_validation_derivation_candidate_proposal_from_payload(
+            proposal_payload,
+            raw=canonical_json_bytes(proposal_payload),
+        )
+        claim = av1_validation_derivation_review_claim_from_payload(
+            claim_payload,
+            raw=canonical_json_bytes(claim_payload),
+        )
+    except (TypeError, ValueError) as exc:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review recovery bindings are invalid"
+        ) from exc
+    review_run_id = _required_text(payload.get("review_run_id"), "review run ID")
+    recovered_at = _required_text(
+        payload.get("recovered_at"),
+        "review recovery timestamp",
+    )
+    recovered = _parse_timestamp(recovered_at, "review recovery timestamp")
+    reason_code = payload.get("reason_code")
+    checkpoint_digest = payload.get("response_checkpoint_payload_sha256")
+    if reason_code == "interrupted_before_durable_response":
+        reason_binding_valid = checkpoint_digest is None
+    elif reason_code == "invalid_durable_response":
+        reason_binding_valid = isinstance(checkpoint_digest, str)
+        if reason_binding_valid:
+            _require_sha256(checkpoint_digest, "review response checkpoint digest")
+    else:
+        reason_binding_valid = False
+    if (
+        payload.get("schema") != AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA
+        or payload.get("schema_version")
+        != AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION
+        or payload.get("reviewer_token") != review.reviewer_token
+        or review.reviewer_token != f"agent:{review_run_id}"
+        or payload.get("proposal_id") != review.proposal_id
+        or payload.get("proposal_payload_sha256") != review.proposal_payload_sha256
+        or payload.get("review_claim_id") != review.review_claim_id
+        or payload.get("review_claim_payload_sha256")
+        != review.review_claim_payload_sha256
+        or payload.get("repository_commit") != claim.repository_commit
+        or payload.get("repository_tree") != claim.repository_tree
+        or payload.get("lane") != review.lane
+        or payload.get("decision") != "rejected"
+        or review.decision != "rejected"
+        or payload.get("review_runner_canonical_path_sha256")
+        != review.review_runner_canonical_path_sha256
+        or payload.get("review_runner_binary_sha256")
+        != review.review_runner_binary_sha256
+        or proposal.proposal_id != review.proposal_id
+        or proposal.payload_sha256 != review.proposal_payload_sha256
+        or claim.review_run_id != review_run_id
+        or claim.plan_id != proposal.plan_id
+        or not _av1_validation_derivation_review_matches_claim(review, claim)
+        or recovered < _parse_timestamp(claim.claimed_at, "review-claim timestamp")
+        or recovered_at != _utc_timestamp(recovered)
+        or _utc_timestamp(recovered) != review.reviewed_at
+        or not reason_binding_valid
+        or evidence != canonical_json_bytes(payload)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review recovery evidence does not match its attestation"
+        )
+    for key, label in (
+        ("review_runner_canonical_path_sha256", "review-runner canonical-path digest"),
+        ("review_runner_binary_sha256", "review-runner binary digest"),
+    ):
+        _require_sha256(_required_text(payload.get(key), label), label)
+    if review.review_evidence_sha256 != (
+        f"sha256:{hashlib.sha256(evidence).hexdigest()}"
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review evidence digest does not match its canonical evidence"
+        )
+
+
 def validate_av1_validation_derivation_review_run_evidence(
         evidence: bytes,
         *,
@@ -5210,14 +5599,23 @@ def validate_av1_validation_derivation_review_run_evidence(
         raise AV1ValidationDerivationError(
             "AV1 derivation review run evidence is invalid"
         ) from exc
-    if payload.get("schema") != AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation review evidence must be one structured response"
+    schema = payload.get("schema")
+    if schema == AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA:
+        _validate_av1_validation_derivation_structured_review_run_evidence(
+            payload,
+            evidence=evidence,
+            review=review,
         )
-    _validate_av1_validation_derivation_structured_review_run_evidence(
-        payload,
-        evidence=evidence,
-        review=review,
+        return
+    if schema == AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA:
+        _validate_av1_validation_derivation_review_recovery_evidence(
+            payload,
+            evidence=evidence,
+            review=review,
+        )
+        return
+    raise AV1ValidationDerivationError(
+        "AV1 derivation review evidence schema is unsupported"
     )
 
 

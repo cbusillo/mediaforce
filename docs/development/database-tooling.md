@@ -138,8 +138,10 @@ Mediaforce's SQLite schema.
   stops cleanup before the legacy main is retired. Before completion becomes
   authoritative, Mediaforce also publishes an immutable migration receipt in
   the machine-local runtime-reservation namespace, outside the replaceable
-  destination parent. Startup checks migration authority even after the legacy
-  `state/` directory has become empty: a surviving receipt or retired-source
+  destination parent. A configuration that places that reservation namespace
+  at or below the destination parent is rejected before migration or recovery
+  can mutate either location. Startup checks migration authority even after the
+  legacy `state/` directory has become empty: a surviving receipt or retired-source
   quarantine without the canonical destination intent fails closed instead of
   permitting a replacement database to be created or adopted. This also
   upgrades the parent-v4 all-absent cleanup case on its first verified startup.

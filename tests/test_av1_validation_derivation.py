@@ -42,6 +42,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
+    AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
     AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
     AV1ValidationDerivationAttempt,
@@ -78,6 +79,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
+    build_av1_validation_derivation_review_recovery_evidence,
     build_av1_validation_derivation_review_request,
     build_av1_validation_derivation_review_response_schema,
     build_av1_validation_derivation_terminal_record,
@@ -96,6 +98,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelope,
     load_av1_validation_derivation_review_envelopes,
+    load_av1_validation_derivation_review_response_checkpoint,
     load_av1_validation_derivation_terminal_intents,
     load_av1_validation_derivation_terminal_records,
     resolve_av1_validation_derivation_verdict_intent,
@@ -108,6 +111,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     write_av1_validation_derivation_plan,
     write_av1_validation_derivation_review_claim,
     write_av1_validation_derivation_review_envelope,
+    write_av1_validation_derivation_review_response_checkpoint,
     write_av1_validation_derivation_attempt,
     write_av1_validation_derivation_assignment_claim,
     write_av1_validation_derivation_terminal_record,
@@ -3353,9 +3357,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             proposal=proposal,
             claim=claim,
         )
-        evidence = _review_run_evidence(
+        evidence = build_av1_validation_derivation_review_recovery_evidence(
             proposal=proposal,
             claim=claim,
+            reason_code="interrupted_before_durable_response",
+            recovered_at="2026-07-28T03:30:00Z",
         )
         args = SimpleNamespace(
             action="record-derivation-review",
@@ -3386,13 +3392,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_run_code_llm_review",
-                return_value=(claim, evidence, "approved"),
+                return_value=(
+                    claim,
+                    evidence,
+                    "rejected",
+                    "2026-07-28T03:30:00Z",
+                ),
             ) as run_review,
-            patch.object(
-                verify_av1_cold_start_preregistration,
-                "_now_iso",
-                return_value="2026-07-28T03:30:00Z",
-            ),
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_print_partition_payload",
@@ -3404,7 +3410,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     locked_config=self.runtime_config,
                 )
             )
-        self.assertEqual(exit_code, 0)
+        self.assertEqual(exit_code, 2)
         self.assertEqual(run_review.call_args.kwargs["claim"], claim)
         recovered = load_av1_validation_derivation_review_envelope(
             self.runtime_artifact_root,
@@ -3413,6 +3419,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             claim=claim,
         )
         self.assertEqual(recovered.review.review_claim_id, claim.claim_id)
+        self.assertEqual(recovered.review.decision, "rejected")
         self.assertEqual(recovered.review.reviewed_at, "2026-07-28T03:30:00Z")
 
     def test_immutable_write_failure_cleans_unpublished_temporary(self) -> None:
@@ -4567,7 +4574,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration,
                 "run_command",
                 side_effect=fake_run,
-            ),
+            ) as run_command,
             patch.object(
                 verify_av1_cold_start_preregistration.uuid,
                 "uuid4",
@@ -4579,11 +4586,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 return_value="2026-07-28T03:00:01Z",
             ) as now_iso,
         ):
-            claim, evidence, decision = verify_av1_cold_start_preregistration._run_code_llm_review(
-                artifact_root=self.runtime_artifact_root,
-                plan=self.plan,
-                proposal=proposal,
-                lane="architecture",
+            claim, evidence, decision, reviewed_at = (
+                verify_av1_cold_start_preregistration._run_code_llm_review(
+                    artifact_root=self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    lane="architecture",
+                )
             )
             claim_path = (
                 self.runtime_artifact_root
@@ -4592,7 +4601,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 / "architecture.json"
             )
             claim_info = claim_path.stat(follow_symlinks=False)
-            retried_claim, retried_evidence, retried_decision = (
+            (
+                retried_claim,
+                retried_evidence,
+                retried_decision,
+                retried_reviewed_at,
+            ) = (
                 verify_av1_cold_start_preregistration._run_code_llm_review(
                     artifact_root=self.runtime_artifact_root,
                     plan=self.plan,
@@ -4605,8 +4619,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(retried_decision, "approved")
         self.assertEqual(retried_claim, claim)
         self.assertEqual(retried_evidence, evidence)
+        self.assertEqual(retried_reviewed_at, reviewed_at)
+        self.assertEqual(run_command.call_count, 1)
         self.assertEqual(uuid4.call_count, 1)
-        self.assertEqual(now_iso.call_count, 1)
+        self.assertEqual(now_iso.call_count, 2)
         retried_claim_info = claim_path.stat(follow_symlinks=False)
         self.assertEqual(
             (retried_claim_info.st_dev, retried_claim_info.st_ino),
@@ -4631,14 +4647,344 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         )
         self.assertNotIn("stderr", evidence_payload)
         self.assertNotIn("transcript", evidence_payload)
+        checkpoint = load_av1_validation_derivation_review_response_checkpoint(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        self.assertIsNotNone(checkpoint)
         review = build_av1_validation_derivation_review_attestation(
             proposal=proposal,
             claim=claim,
             review_evidence_sha256=f"sha256:{hashlib.sha256(evidence).hexdigest()}",
             decision=decision,
-            reviewed_at="2026-07-28T03:00:02Z",
+            reviewed_at=reviewed_at,
         )
         validate_av1_validation_derivation_review_run_evidence(evidence, review=review)
+
+    def test_review_response_checkpoint_is_strictly_predeadline_and_refsynced(
+            self,
+    ) -> None:
+        proposal = self._candidate_proposal()
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
+            lane="architecture",
+            review_run_id="90000000-0000-0000-0000-000000000004",
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        request_sha256 = f"sha256:{'a' * 64}"
+        stderr_sha256 = f"sha256:{hashlib.sha256(b'').hexdigest()}"
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "outside authorization",
+        ):
+            write_av1_validation_derivation_review_response_checkpoint(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                request_sha256=request_sha256,
+                response="{}\n",
+                stderr_sha256=stderr_sha256,
+                completed_at=self.plan.authorization.valid_until,
+            )
+        write_av1_validation_derivation_review_response_checkpoint(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+            request_sha256=request_sha256,
+            response="{}\n",
+            stderr_sha256=stderr_sha256,
+            completed_at="2026-07-28T03:00:02Z",
+        )
+        checkpoint_directory = (
+            self.runtime_artifact_root
+            / "review-responses"
+            / proposal.proposal_id
+        )
+        checkpoint_directory_identity = (
+            checkpoint_directory.stat().st_dev,
+            checkpoint_directory.stat().st_ino,
+        )
+        real_fsync = os.fsync
+        parent_refsynced = False
+
+        def track_fsync(descriptor: int) -> None:
+            nonlocal parent_refsynced
+            descriptor_info = os.fstat(descriptor)
+            if (
+                descriptor_info.st_dev,
+                descriptor_info.st_ino,
+            ) == checkpoint_directory_identity:
+                parent_refsynced = True
+            real_fsync(descriptor)
+
+        with patch(
+            "mediaforce.tuning.av1_validation_derivation.os.fsync",
+            side_effect=track_fsync,
+        ):
+            checkpoint = load_av1_validation_derivation_review_response_checkpoint(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+            )
+        self.assertIsNotNone(checkpoint)
+        self.assertEqual(checkpoint["returncode"], 0)
+        self.assertTrue(parent_refsynced)
+
+    def test_interrupted_review_claim_terminalizes_without_relaunch(self) -> None:
+        proposal = self._candidate_proposal()
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
+            lane="architecture",
+            review_run_id="90000000-0000-0000-0000-000000000002",
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        write_av1_validation_derivation_review_claim(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        trusted_runner = Path("/private/trusted-code")
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_av1_validation_derivation_execution_environment",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_authorized_review_runner_identity",
+                return_value=(
+                    trusted_runner,
+                    self.plan.review_runner_canonical_path_sha256,
+                    self.plan.review_runner_binary_sha256,
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=(REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_assert_code_llm_request_contract",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_build_av1_validation_derivation_review_bundle",
+            ) as build_bundle,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_command",
+            ) as run_command,
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_now_iso",
+                return_value="2026-07-28T03:30:00Z",
+            ),
+        ):
+            recovered_claim, evidence, decision, reviewed_at = (
+                verify_av1_cold_start_preregistration._run_code_llm_review(
+                    artifact_root=self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    lane="architecture",
+                    claim=claim,
+                )
+            )
+        self.assertEqual(recovered_claim, claim)
+        self.assertEqual(decision, "rejected")
+        self.assertEqual(reviewed_at, "2026-07-28T03:30:00Z")
+        run_command.assert_not_called()
+        build_bundle.assert_not_called()
+        evidence_payload = json.loads(evidence)
+        self.assertEqual(
+            evidence_payload["schema"],
+            AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
+        )
+        self.assertEqual(
+            evidence_payload["reason_code"],
+            "interrupted_before_durable_response",
+        )
+        review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=f"sha256:{hashlib.sha256(evidence).hexdigest()}",
+            decision=decision,
+            reviewed_at=reviewed_at,
+        )
+        envelope = build_av1_validation_derivation_review_envelope(
+            review=review,
+            evidence=evidence,
+        )
+        self.assertEqual(envelope.review.decision, "rejected")
+        claims = [claim]
+        envelopes = [envelope]
+        for index, lane in enumerate(
+            AV1_VALIDATION_DERIVATION_REVIEW_LANES[1:],
+            start=2,
+        ):
+            approved_claim = build_av1_validation_derivation_review_claim(
+                plan=self.plan,
+                proposal=proposal,
+                repository_commit=REVIEW_REPOSITORY_COMMIT,
+                repository_tree=REVIEW_REPOSITORY_TREE,
+                lane=lane,
+                review_run_id=f"91000000-0000-0000-0000-{index:012x}",
+                review_runner_canonical_path_sha256=(
+                    self.plan.review_runner_canonical_path_sha256
+                ),
+                review_runner_binary_sha256=(
+                    self.plan.review_runner_binary_sha256
+                ),
+                claimed_at=f"2026-07-28T03:00:{index:02d}Z",
+            )
+            approved_evidence = _review_run_evidence(
+                proposal=proposal,
+                claim=approved_claim,
+            )
+            approved_review = build_av1_validation_derivation_review_attestation(
+                proposal=proposal,
+                claim=approved_claim,
+                review_evidence_sha256=(
+                    f"sha256:{hashlib.sha256(approved_evidence).hexdigest()}"
+                ),
+                decision="approved",
+                reviewed_at=f"2026-07-28T03:{index:02d}:00Z",
+            )
+            claims.append(approved_claim)
+            envelopes.append(build_av1_validation_derivation_review_envelope(
+                review=approved_review,
+                evidence=approved_evidence,
+            ))
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "terminal rejection",
+        ):
+            _av1_validation_derivation_review_set_sha256(
+                self.plan,
+                claims,
+                envelopes,
+            )
+
+    def test_invalid_durable_review_response_terminalizes_without_relaunch(
+            self,
+    ) -> None:
+        proposal = self._candidate_proposal()
+        trusted_runner = Path("/private/trusted-code")
+
+        def bundle_for_claim(*, claim: object, **_kwargs: object) -> dict[str, object]:
+            return _review_bundle_for_claim(claim)
+
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_av1_validation_derivation_execution_environment",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_authorized_review_runner_identity",
+                return_value=(
+                    trusted_runner,
+                    self.plan.review_runner_canonical_path_sha256,
+                    self.plan.review_runner_binary_sha256,
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=(REVIEW_REPOSITORY_COMMIT, REVIEW_REPOSITORY_TREE),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_assert_code_llm_request_contract",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_build_av1_validation_derivation_review_bundle",
+                side_effect=bundle_for_claim,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_command",
+                return_value=SimpleNamespace(
+                    returncode=0,
+                    stdout="{}\n",
+                    stderr="",
+                ),
+            ) as run_command,
+            patch.object(
+                verify_av1_cold_start_preregistration.uuid,
+                "uuid4",
+                return_value="90000000-0000-0000-0000-000000000003",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_now_iso",
+                side_effect=(
+                    "2026-07-28T03:00:01Z",
+                    "2026-07-28T03:00:02Z",
+                    "2026-07-28T03:00:03Z",
+                    "2026-07-28T03:00:04Z",
+                ),
+            ),
+        ):
+            claim, evidence, decision, reviewed_at = (
+                verify_av1_cold_start_preregistration._run_code_llm_review(
+                    artifact_root=self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    lane="architecture",
+                )
+            )
+            _, retried_evidence, retried_decision, _ = (
+                verify_av1_cold_start_preregistration._run_code_llm_review(
+                    artifact_root=self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    lane="architecture",
+                    claim=claim,
+                )
+            )
+        self.assertEqual(decision, "rejected")
+        self.assertEqual(retried_decision, "rejected")
+        self.assertEqual(run_command.call_count, 1)
+        for recovery_evidence in (evidence, retried_evidence):
+            payload = json.loads(recovery_evidence)
+            self.assertEqual(
+                payload["schema"],
+                AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
+            )
+            self.assertEqual(payload["reason_code"], "invalid_durable_response")
+        review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=f"sha256:{hashlib.sha256(evidence).hexdigest()}",
+            decision=decision,
+            reviewed_at=reviewed_at,
+        )
+        build_av1_validation_derivation_review_envelope(
+            review=review,
+            evidence=evidence,
+        )
 
     def test_code_llm_request_contract_and_environment_are_allowlisted(self) -> None:
         runner = Path("/private/trusted-code")

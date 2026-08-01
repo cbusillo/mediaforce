@@ -209,6 +209,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             *,
             database_path: Path,
             name: str,
+            runtime_reservation_dir: Path | None = None,
     ) -> MediaforceConfig:
         config_path = root / f"{name}.toml"
         config_path.write_text("[state]\n", encoding="utf-8")
@@ -223,7 +224,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 web_state_dir=runtime_root / "web",
                 review_dir=runtime_root / "review",
                 runtime_settings_path=runtime_root / "runtime-settings.json",
-                runtime_reservation_dir=runtime_root / "reservations",
+                runtime_reservation_dir=(
+                    runtime_reservation_dir
+                    if runtime_reservation_dir is not None
+                    else runtime_root / "reservations"
+                ),
             ),
         )
 
@@ -1915,6 +1920,48 @@ class DatabaseRuntimeTests(unittest.TestCase):
             ):
                 migrate_config_state(config)
             self.assertFalse(destination_path.exists())
+
+    def test_migrate_config_state_rejects_receipt_inside_destination_parent(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+                runtime_reservation_dir=(
+                    destination_path.parent / "reservations"
+                ),
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('co-located-receipt-row')"
+                )
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-co-located-receipt"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "receipt storage must be outside",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(source_path.is_file())
+            self.assertFalse(destination_path.exists())
+            self.assertFalse(
+                config_module._legacy_sqlite_migration_intent_path(
+                    destination_path
+                ).exists()
+            )
 
     def test_migrate_config_state_publishes_receipt_before_v4_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -878,15 +878,29 @@ privacy/security, experimental-design, and adversarial.
 accepts no caller-supplied result path. Before launch it atomically creates one
 immutable proposal/lane claim that binds the run nonce, authorization, proposal,
 lane, canonical runner-path digest, runner-binary digest, repository commit, and
-repository tree. A concurrent or repeated lane cannot replace that claim; a
-A crash before a complete lane envelope exists leaves an unresolved claim that
-`derivation-status` reports for recovery. A retry may launch the structured
-request again only with that exact immutable claim, including its original run
-nonce, repository identity, lane, proposal, and runner identity; it never
-publishes a replacement claim. The first valid envelope remains immutable. A
-retry after the complete matching claim and envelope are visible validates both,
-re-fsyncs the envelope parent, returns the original decision and `reviewed_at`,
-and does not launch a second request.
+repository tree. A concurrent or repeated lane cannot replace that claim.
+A successful command response is checkpointed immutably before it is parsed or
+used to construct the lane envelope. The checkpoint binds the original claim,
+request digest, decoded stdout response, stderr digest, completion time,
+repository identity, and runner identity. A crash before a complete lane
+envelope exists
+leaves recovery state that `derivation-status` reports. If the checkpoint is
+present, retry parses that exact response and reuses its original completion
+time without launching Code again. If only the claim is present, retry
+terminalizes the lane as a rejected
+`interrupted_before_durable_response` recovery without launching Code. An
+invalid checkpointed response is likewise terminalized as a rejected
+`invalid_durable_response` recovery bound to the checkpoint digest. Therefore a
+completed or interrupted request can never be rerolled under the same claim.
+The first valid envelope remains immutable. A retry after the complete matching
+claim and envelope are visible validates both, re-fsyncs the envelope parent,
+returns the original decision and `reviewed_at`, and does not launch a second
+request.
+A review recovery envelope is non-authorizing and remains subject to the same
+strict publication deadline as a normal review. If authorization expires before
+the checkpoint or envelope becomes durable, the unresolved claim remains a
+visible fail-closed status and cannot be converted into an approval under that
+plan.
 A rejected review remains terminal. The review command and its
 repository/toolchain probes remain under the plan's absolute authorization
 deadline. Before claim publication, the verifier checks that the live Git commit

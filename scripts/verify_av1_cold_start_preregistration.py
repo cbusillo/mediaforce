@@ -2396,6 +2396,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
+    AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_RESPONSE_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_NAME,
     AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1ValidationDerivationCandidateProposal,
@@ -2422,6 +2423,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     build_av1_validation_derivation_review_claim,
     build_av1_validation_derivation_review_attestation,
     build_av1_validation_derivation_review_envelope,
+    build_av1_validation_derivation_review_recovery_evidence,
     build_av1_validation_derivation_review_request,
     build_av1_validation_derivation_review_response_schema,
     evaluate_av1_validation_derivation_candidate,
@@ -2432,6 +2434,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     load_av1_validation_derivation_plan,
     load_av1_validation_derivation_review_claims,
     load_av1_validation_derivation_review_envelope,
+    load_av1_validation_derivation_review_response_checkpoint,
     load_av1_validation_derivation_terminal_intents,
     load_av1_validation_derivation_terminal_records,
     load_av1_validation_derivation_verdict_claims,
@@ -2443,6 +2446,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     write_av1_validation_derivation_plan,
     write_av1_validation_derivation_review_claim,
     write_av1_validation_derivation_review_envelope,
+    write_av1_validation_derivation_review_response_checkpoint,
 )
 from mediaforce.web.runtime.av1_validation_derivation import (
     av1_validation_derivation_artifact_root,
@@ -2503,7 +2507,6 @@ _REVIEW_GIT_COMMAND_PREFIX = (
     "-c",
     "core.hooksPath=/dev/null",
 )
-_LLM_REVIEW_MAXIMUM_RESPONSE_BYTES = 64 * 1024
 _MACH_O_MAGICS = frozenset({
     b"\xce\xfa\xed\xfe",
     b"\xfe\xed\xfa\xce",
@@ -3272,6 +3275,12 @@ def _run_derivation_action_body(
                 proposal.proposal_id,
                 proposal.payload_sha256,
             ),
+            (
+                artifact_root / "review-responses" / proposal.proposal_id,
+                "review_responses",
+                proposal.proposal_id,
+                proposal.payload_sha256,
+            ),
         )) as publication_guard:
             def guarded_publication() -> None:
                 _call_preregistration_publication_guard(publication_guard)
@@ -3296,7 +3305,12 @@ def _run_derivation_action_body(
                     if existing_review is not None
                     else None
                 )
-                claim, review_evidence, decision = _run_code_llm_review(
+                (
+                    claim,
+                    review_evidence,
+                    decision,
+                    reviewed_at,
+                ) = _run_code_llm_review(
                     artifact_root=artifact_root,
                     plan=plan,
                     proposal=proposal,
@@ -3312,7 +3326,7 @@ def _run_derivation_action_body(
                     claim=claim,
                     review_evidence_sha256=review_evidence_sha256,
                     decision=decision,
-                    reviewed_at=_now_iso(),
+                    reviewed_at=reviewed_at,
                 )
                 envelope = build_av1_validation_derivation_review_envelope(
                     review=review,
@@ -5209,6 +5223,7 @@ def _run_code_llm_review(
     AV1ValidationDerivationReviewClaim,
     bytes,
     AV1ValidationDerivationReviewDecision,
+    str,
 ]:
     try:
         deadline = datetime.fromisoformat(
@@ -5253,6 +5268,7 @@ def _run_code_llm_review_before_deadline(
     AV1ValidationDerivationReviewClaim,
     bytes,
     AV1ValidationDerivationReviewDecision,
+    str,
 ]:
     _assert_preregistration_bootstrap_authority()
 
@@ -5271,6 +5287,7 @@ def _run_code_llm_review_before_deadline(
     before_repository_identity = _repository_review_identity(
         process_controller=process_controller,
     )
+    claim_was_existing = claim is not None
     if claim is None:
         review_run_id = str(uuid.uuid4())
         claim = build_av1_validation_derivation_review_claim(
@@ -5308,6 +5325,22 @@ def _run_code_llm_review_before_deadline(
             )
         review_run_id = claim.review_run_id
         guarded_before_publish()
+    checkpoint = load_av1_validation_derivation_review_response_checkpoint(
+        artifact_root,
+        plan=plan,
+        proposal=proposal,
+        claim=claim,
+    )
+    if claim_was_existing and checkpoint is None:
+        reviewed_at = _now_iso()
+        evidence = build_av1_validation_derivation_review_recovery_evidence(
+            proposal=proposal,
+            claim=claim,
+            reason_code="interrupted_before_durable_response",
+            recovered_at=reviewed_at,
+        )
+        _assert_preregistration_bootstrap_authority()
+        return claim, evidence, "rejected", reviewed_at
     safe_bundle = _build_av1_validation_derivation_review_bundle(
         claim=claim,
         process_controller=process_controller,
@@ -5323,83 +5356,145 @@ def _run_code_llm_review_before_deadline(
         claim=claim,
     )
     request_bytes = canonical_json_bytes(request)
+    request_sha256 = f"sha256:{hashlib.sha256(request_bytes).hexdigest()}"
     response_schema_text = canonical_json_bytes(response_schema).decode("utf-8")
-    try:
-        with _owner_only_review_request_file(request_bytes) as request_path:
-            command = [
-                str(before_identity[0]),
-                "llm",
-                "request",
-                "--developer",
-                developer_text,
-                "--message-file",
-                str(request_path),
-                "--format-type",
-                "json_schema",
-                "--format-name",
-                AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_NAME,
-                "--format-strict",
-                "--schema-json",
-                response_schema_text,
-            ]
-            _assert_no_tool_llm_review_command(command)
-            _assert_preregistration_bootstrap_authority()
+    if checkpoint is None:
+        try:
+            with _owner_only_review_request_file(request_bytes) as request_path:
+                command = [
+                    str(before_identity[0]),
+                    "llm",
+                    "request",
+                    "--developer",
+                    developer_text,
+                    "--message-file",
+                    str(request_path),
+                    "--format-type",
+                    "json_schema",
+                    "--format-name",
+                    AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_NAME,
+                    "--format-strict",
+                    "--schema-json",
+                    response_schema_text,
+                ]
+                _assert_no_tool_llm_review_command(command)
+                _assert_preregistration_bootstrap_authority()
+                try:
+                    completed = run_command(
+                        command,
+                        process_controller=process_controller,
+                        cwd=request_path.parent,
+                        env=_review_runner_environment(
+                            working_directory=request_path.parent,
+                        ),
+                        timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
+                        check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation Every Code structured review did not complete"
+                    ) from exc
+        finally:
+            integrity_errors: list[BaseException] = []
             try:
-                completed = run_command(
-                    command,
+                after_repository_identity = _repository_review_identity(
                     process_controller=process_controller,
-                    cwd=request_path.parent,
-                    env=_review_runner_environment(
-                        working_directory=request_path.parent,
-                    ),
-                    timeout=_AGENT_REVIEW_MAX_SECONDS + 30,
-                    check=False,
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation Every Code structured review did not complete"
-                ) from exc
-    finally:
-        integrity_errors: list[BaseException] = []
-        try:
-            after_repository_identity = _repository_review_identity(
-                process_controller=process_controller,
+                if after_repository_identity != before_repository_identity:
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation review repository changed during review"
+                    )
+            except BaseException as exc:
+                integrity_errors.append(exc)
+            try:
+                after_identity = _authorized_review_runner_identity(plan)
+                if after_identity != before_identity:
+                    raise AV1ValidationDerivationError(
+                        "AV1 derivation Every Code executable changed during review"
+                    )
+            except BaseException as exc:
+                integrity_errors.append(exc)
+            if integrity_errors:
+                primary_error = integrity_errors[0]
+                for error in integrity_errors[1:]:
+                    primary_error.add_note(
+                        "AV1 review integrity check also failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+                raise primary_error
+        if completed.returncode != 0:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation Every Code structured review failed"
             )
-            if after_repository_identity != before_repository_identity:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review repository changed during review"
-                )
-        except BaseException as exc:
-            integrity_errors.append(exc)
-        try:
-            after_identity = _authorized_review_runner_identity(plan)
-            if after_identity != before_identity:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation Every Code executable changed during review"
-                )
-        except BaseException as exc:
-            integrity_errors.append(exc)
-        if integrity_errors:
-            primary_error = integrity_errors[0]
-            for error in integrity_errors[1:]:
-                primary_error.add_note(
-                    "AV1 review integrity check also failed: "
-                    f"{type(error).__name__}: {error}"
-                )
-            raise primary_error
-    if completed.returncode != 0:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code structured review failed"
+        if (
+            len(completed.stdout.encode("utf-8"))
+            > AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_RESPONSE_BYTES
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation Every Code structured review response is oversized"
+            )
+        write_av1_validation_derivation_review_response_checkpoint(
+            artifact_root,
+            plan=plan,
+            proposal=proposal,
+            claim=claim,
+            request_sha256=request_sha256,
+            response=completed.stdout,
+            stderr_sha256=(
+                f"sha256:{hashlib.sha256(completed.stderr.encode('utf-8')).hexdigest()}"
+            ),
+            completed_at=_now_iso(),
+            before_publish=guarded_before_publish,
         )
-    if len(completed.stdout.encode("utf-8")) > _LLM_REVIEW_MAXIMUM_RESPONSE_BYTES:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation Every Code structured review response is oversized"
+        checkpoint = (
+            load_av1_validation_derivation_review_response_checkpoint(
+                artifact_root,
+                plan=plan,
+                proposal=proposal,
+                claim=claim,
+            )
         )
-    model_response, decision = _structured_review_response(
-        completed.stdout,
-        proposal=proposal,
-        claim=claim,
-    )
+        if checkpoint is None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review response checkpoint was not published"
+            )
+    if checkpoint.get("request_sha256") != request_sha256:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint request changed"
+        )
+    response_text = checkpoint.get("response")
+    stderr_sha256 = checkpoint.get("stderr_sha256")
+    reviewed_at = checkpoint.get("completed_at")
+    if (
+        not isinstance(response_text, str)
+        or not isinstance(stderr_sha256, str)
+        or not isinstance(reviewed_at, str)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review response checkpoint is invalid"
+        )
+    try:
+        model_response, decision = _structured_review_response(
+            response_text,
+            proposal=proposal,
+            claim=claim,
+        )
+    except AV1ValidationDerivationError:
+        checkpoint_payload_sha256 = checkpoint.get("payload_sha256")
+        if not isinstance(checkpoint_payload_sha256, str):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review response checkpoint is invalid"
+            ) from None
+        recovered_at = _now_iso()
+        evidence = build_av1_validation_derivation_review_recovery_evidence(
+            proposal=proposal,
+            claim=claim,
+            reason_code="invalid_durable_response",
+            recovered_at=recovered_at,
+            response_checkpoint_payload_sha256=checkpoint_payload_sha256,
+        )
+        _assert_preregistration_bootstrap_authority()
+        return claim, evidence, "rejected", recovered_at
     evidence = canonical_json_bytes({
         "schema": AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
         "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
@@ -5419,7 +5514,7 @@ def _run_code_llm_review_before_deadline(
         "review_claim": claim.to_payload(),
         "safe_bundle": safe_bundle,
         "request": request,
-        "request_sha256": f"sha256:{hashlib.sha256(request_bytes).hexdigest()}",
+        "request_sha256": request_sha256,
         "developer_text": developer_text,
         "developer_text_sha256": (
             f"sha256:{hashlib.sha256(developer_text.encode('utf-8')).hexdigest()}"
@@ -5428,10 +5523,8 @@ def _run_code_llm_review_before_deadline(
         "response_schema_sha256": (
             f"sha256:{hashlib.sha256(canonical_json_bytes(response_schema)).hexdigest()}"
         ),
-        "returncode": completed.returncode,
-        "stderr_sha256": (
-            f"sha256:{hashlib.sha256(completed.stderr.encode('utf-8')).hexdigest()}"
-        ),
+        "returncode": 0,
+        "stderr_sha256": stderr_sha256,
         "model_response": model_response,
         "model_response_sha256": (
             f"sha256:{hashlib.sha256(canonical_json_bytes(model_response)).hexdigest()}"
@@ -5441,7 +5534,7 @@ def _run_code_llm_review_before_deadline(
         ),
     })
     _assert_preregistration_bootstrap_authority()
-    return claim, evidence, decision
+    return claim, evidence, decision, reviewed_at
 
 
 def _print_partition_payload(payload: dict[str, object], *, json_output: bool) -> None:

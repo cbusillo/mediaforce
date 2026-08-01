@@ -535,7 +535,24 @@ def _migrate_legacy_sqlite_database(
         config,
         source=source,
     )
-    if _path_entry_exists(intent_path) and _resume_legacy_sqlite_migration_intent(
+    intent_exists = _path_entry_exists(intent_path)
+    receipt_exists = _path_entry_exists(receipt_path)
+    source_exists = _path_entry_exists(source)
+    destination_exists = _path_entry_exists(destination)
+    retired_source_residue_exists = (
+        _legacy_sqlite_retired_source_residue_exists(source)
+    )
+    if (
+        intent_exists
+        or receipt_exists
+        or source_exists
+        or retired_source_residue_exists
+    ):
+        _assert_legacy_sqlite_migration_receipt_outside_destination(
+            receipt_path,
+            destination=destination,
+        )
+    if intent_exists and _resume_legacy_sqlite_migration_intent(
             config,
             source,
             destination,
@@ -543,17 +560,12 @@ def _migrate_legacy_sqlite_database(
             receipt_path,
     ):
         return
-    if (
-        _path_entry_exists(receipt_path)
-        or _legacy_sqlite_retired_source_residue_exists(source)
-    ):
+    if receipt_exists or retired_source_residue_exists:
         from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
 
         raise MediaforceRuntimeBusyError(
             "Legacy SQLite migration authority is missing from the configured destination"
         )
-    source_exists = _path_entry_exists(source)
-    destination_exists = _path_entry_exists(destination)
     if source_exists and destination_exists:
         from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
 
@@ -1096,6 +1108,24 @@ def _legacy_sqlite_migration_receipt_path(
     })).hexdigest()
     return mediaforce_runtime_reservation_dir(config) / (
         f"legacy-sqlite-migration-{identity[:40]}.json"
+    )
+
+
+def _assert_legacy_sqlite_migration_receipt_outside_destination(
+        receipt_path: Path,
+        *,
+        destination: Path,
+) -> None:
+    destination_parent = destination.parent.expanduser().resolve()
+    try:
+        receipt_path.parent.relative_to(destination_parent)
+    except ValueError:
+        return
+    from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+    raise MediaforceRuntimeBusyError(
+        "Legacy SQLite migration receipt storage must be outside the "
+        "configured destination parent"
     )
 
 
