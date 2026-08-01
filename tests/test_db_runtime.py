@@ -357,6 +357,18 @@ class DatabaseRuntimeTests(unittest.TestCase):
         return config, source_path, destination_path, intent_path, payload
 
     @staticmethod
+    def _discard_fixture_migration_receipt(
+            config: MediaforceConfig,
+            source_path: Path,
+    ) -> Path:
+        receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+            config,
+            source=source_path,
+        )
+        receipt_path.unlink()
+        return receipt_path
+
+    @staticmethod
     def _cleanup_quarantine_path(
             source_path: Path,
             payload: dict[str, object],
@@ -1904,6 +1916,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=current_payload,
                 payload=legacy_payload,
             )
+            self._discard_fixture_migration_receipt(config, source_path)
 
             with exclusive_mediaforce_runtime_lock(
                 config,
@@ -1939,9 +1952,9 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=current_payload,
                 payload=v4_payload,
             )
-            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+            receipt_path = self._discard_fixture_migration_receipt(
                 config,
-                source=source_path,
+                source_path,
             )
             for suffix in ("", "-wal", "-shm", "-journal"):
                 Path(f"{source_path}{suffix}").unlink()
@@ -2247,6 +2260,123 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     [("authoritative",)],
                 )
 
+    def test_migrate_config_state_publishes_receipt_before_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            runtime_reservation_dir = root / "runtime-reservations"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+                runtime_reservation_dir=runtime_reservation_dir,
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('receipt-first')"
+                )
+            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+                config,
+                source=source_path,
+            )
+            real_publish = (
+                config_module._LegacySQLiteMigrationDestination.publish
+            )
+            publication_observed = False
+
+            def publish_after_receipt(
+                    binding: object,
+                    staging_name: str,
+                    expected: dict[str, object],
+            ) -> None:
+                nonlocal publication_observed
+                publication_observed = True
+                self.assertTrue(receipt_path.is_file())
+                real_publish(binding, staging_name, expected)
+
+            with (
+                patch.object(
+                    config_module._LegacySQLiteMigrationDestination,
+                    "publish",
+                    new=publish_after_receipt,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-receipt-before-publication"},
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(publication_observed)
+            self.assertTrue(receipt_path.is_file())
+            self.assertFalse(source_path.exists())
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM migration_rows"
+                    ).fetchall(),
+                    [("receipt-first",)],
+                )
+
+    def test_migrate_config_state_rejects_same_path_rollback_after_publication_interruption(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                migrated_config,
+                source_path,
+                destination_path,
+                intent_path,
+                _,
+            ) = self._prepare_interrupted_cleaning_migration(
+                root,
+                name="migrated",
+                value="interrupted-authoritative",
+            )
+            runtime_reservation_dir = (
+                migrated_config.paths.runtime_reservation_dir
+            )
+            assert runtime_reservation_dir is not None
+            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+                migrated_config,
+                source=source_path,
+            )
+            self.assertTrue(source_path.is_file())
+            self.assertTrue(destination_path.is_file())
+            self.assertTrue(intent_path.is_file())
+            self.assertTrue(receipt_path.is_file())
+
+            rollback_config = self._legacy_migration_config(
+                root,
+                database_path=source_path,
+                name="rollback",
+                runtime_reservation_dir=runtime_reservation_dir,
+            )
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    rollback_config,
+                    owner_payload={
+                        "purpose": "legacy-interrupted-same-path-rollback"
+                    },
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "migration authority is missing",
+                ),
+            ):
+                migrate_config_state(rollback_config)
+
+            self.assertTrue(source_path.is_file())
+            self.assertTrue(destination_path.is_file())
+            self.assertTrue(intent_path.is_file())
+            self.assertTrue(receipt_path.is_file())
+
     def test_migrate_config_state_rejects_symlinked_receipt_discovery_through_destination_parent(
             self,
     ) -> None:
@@ -2360,10 +2490,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=current_payload,
                 payload=v4_payload,
             )
-            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+            receipt_path = self._discard_fixture_migration_receipt(
                 config,
-                source=source_path,
+                source_path,
             )
+            self.assertFalse(receipt_path.exists())
             for suffix in ("", "-wal", "-shm", "-journal"):
                 Path(f"{source_path}{suffix}").unlink()
             real_replace = config_module._replace_legacy_sqlite_migration_intent
@@ -2422,6 +2553,118 @@ class DatabaseRuntimeTests(unittest.TestCase):
             ):
                 migrate_config_state(config)
 
+    def test_migrate_config_state_publishes_receipt_before_v4_ready_upgrade(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            intent_path = config_module._legacy_sqlite_migration_intent_path(
+                destination_path
+            )
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('v4-ready-receipt-row')"
+                )
+            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+                config,
+                source=source_path,
+            )
+
+            def interrupt_ready_publication(
+                    _binding: object,
+                    _staging_name: str,
+                    _expected: dict[str, object],
+            ) -> None:
+                self.assertTrue(receipt_path.is_file())
+                raise OSError("simulated unpublished ready interruption")
+
+            with (
+                patch.object(
+                    config_module._LegacySQLiteMigrationDestination,
+                    "publish",
+                    new=interrupt_ready_publication,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-v4-ready-setup"},
+                ),
+                self.assertRaisesRegex(
+                    OSError,
+                    "simulated unpublished ready interruption",
+                ),
+            ):
+                migrate_config_state(config)
+
+            current_payload = json.loads(
+                intent_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(current_payload["phase"], "ready")
+            self.assertFalse(destination_path.exists())
+            v4_payload = self._legacy_v4_migration_intent(current_payload)
+            config_module._replace_legacy_sqlite_migration_intent(
+                intent_path,
+                expected=current_payload,
+                payload=v4_payload,
+            )
+            self._discard_fixture_migration_receipt(config, source_path)
+            self.assertFalse(receipt_path.exists())
+            real_replace = config_module._replace_legacy_sqlite_migration_intent
+
+            def interrupt_after_receipt(
+                    path: Path,
+                    *,
+                    expected: dict[str, object],
+                    payload: dict[str, object],
+                    before_exchange: Callable[[], None] | None = None,
+            ) -> None:
+                if (
+                    expected.get("schema_version") == 4
+                    and expected.get("phase") == "ready"
+                    and payload.get("schema_version") == 5
+                    and payload.get("phase") == "ready"
+                ):
+                    self.assertTrue(receipt_path.is_file())
+                    raise OSError("simulated post-receipt ready upgrade")
+                real_replace(
+                    path,
+                    expected=expected,
+                    payload=payload,
+                    before_exchange=before_exchange,
+                )
+
+            with (
+                patch.object(
+                    config_module,
+                    "_replace_legacy_sqlite_migration_intent",
+                    side_effect=interrupt_after_receipt,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-v4-ready-resume"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "could not be resumed safely",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(receipt_path.is_file())
+            self.assertEqual(
+                json.loads(intent_path.read_text(encoding="utf-8")),
+                v4_payload,
+            )
+            self.assertFalse(destination_path.exists())
+
     def test_migrate_config_state_recovers_parent_v4_partial_prefix_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -2442,6 +2685,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=current_payload,
                 payload=v4_payload,
             )
+            self._discard_fixture_migration_receipt(config, source_path)
             staging_path = destination_path.parent / str(
                 v4_payload["staging_name"]
             )
@@ -2528,6 +2772,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     expected=current_payload,
                     payload=v4_payload,
                 )
+                self._discard_fixture_migration_receipt(config, source_path)
                 staging_path = destination_path.parent / str(
                     v4_payload["staging_name"]
                 )
@@ -2661,6 +2906,10 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         expected=current_payload,
                         payload=legacy_payload,
                     )
+                    self._discard_fixture_migration_receipt(
+                        config,
+                        source_path,
+                    )
                     quarantines = list(source_path.parent.glob(
                         f".{source_path.name}.mediaforce-retired-*"
                     ))
@@ -2749,6 +2998,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=v3_payload,
                 payload=v2_payload,
             )
+            self._discard_fixture_migration_receipt(config, source_path)
 
             with exclusive_mediaforce_runtime_lock(
                 config,
@@ -2816,6 +3066,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=v3_payload,
                 payload=v2_payload,
             )
+            self._discard_fixture_migration_receipt(config, source_path)
             residual_wal = Path(f"{source_path}-wal")
             residual_quarantine = source_path.parent / (
                 f".{source_path.name}-shm.mediaforce-retired-legacy"
@@ -3212,13 +3463,46 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     transition_payload["phase"],
                     "ready" if crash_state == "prepared" else "copying",
                 )
+                receipt_path = (
+                    config_module._legacy_sqlite_migration_receipt_path(
+                        config,
+                        source=source_path,
+                    )
+                )
+                self.assertFalse(receipt_path.exists())
+                destination_type = (
+                    config_module._LegacySQLiteMigrationDestination
+                )
+                real_publish = destination_type.publish
+                publication_observed = False
 
-                with exclusive_mediaforce_runtime_lock(
-                    config,
-                    owner_payload={"purpose": f"intent-{crash_state}-resume"},
+                def publish_after_receipt(
+                        binding: object,
+                        staging_name: str,
+                        expected: dict[str, object],
+                ) -> None:
+                    nonlocal publication_observed
+                    publication_observed = True
+                    self.assertTrue(receipt_path.is_file())
+                    real_publish(binding, staging_name, expected)
+
+                with (
+                    patch.object(
+                        destination_type,
+                        "publish",
+                        new=publish_after_receipt,
+                    ),
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={
+                            "purpose": f"intent-{crash_state}-resume"
+                        },
+                    ),
                 ):
                     migrate_config_state(config)
 
+                self.assertTrue(publication_observed)
+                self.assertTrue(receipt_path.is_file())
                 self._assert_completed_v5_intent(intent_path)
                 self.assertFalse(source_path.exists())
                 with sqlite3.connect(destination_path) as connection:
@@ -3228,6 +3512,133 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         ).fetchall(),
                         [(f"intent-{crash_state}-row",)],
                     )
+
+    def test_migrate_config_state_seals_prepared_published_transition_before_exchange(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                migrated_config,
+                source_path,
+                destination_path,
+                intent_path,
+                cleaning_payload,
+            ) = self._prepare_interrupted_cleaning_migration(
+                root,
+                name="migrated",
+                value="prepared-transition-authoritative",
+            )
+            receipt_path = self._discard_fixture_migration_receipt(
+                migrated_config,
+                source_path,
+            )
+            ready_transition_path: Path | None = None
+            for transition_path in intent_path.parent.glob(
+                    f"{intent_path.name}.transition-*.json"
+            ):
+                transition_payload = json.loads(
+                    transition_path.read_text(encoding="utf-8")
+                )
+                if (
+                    transition_payload.get("schema_version") == 5
+                    and transition_payload.get("phase") == "ready"
+                ):
+                    ready_transition_path = transition_path
+                    break
+            assert ready_transition_path is not None
+            directory_descriptor = -1
+            try:
+                _, directory_descriptor = config_module.open_stable_directory(
+                    intent_path.parent
+                )
+                config_module.rename_exchange(
+                    first_directory_descriptor=directory_descriptor,
+                    first_name=intent_path.name,
+                    second_directory_descriptor=directory_descriptor,
+                    second_name=ready_transition_path.name,
+                )
+                os.fsync(directory_descriptor)
+            finally:
+                if directory_descriptor >= 0:
+                    os.close(directory_descriptor)
+            self.assertEqual(
+                json.loads(intent_path.read_text(encoding="utf-8"))["phase"],
+                "ready",
+            )
+            self.assertEqual(
+                json.loads(
+                    ready_transition_path.read_text(encoding="utf-8")
+                ),
+                cleaning_payload,
+            )
+            self.assertFalse(receipt_path.exists())
+            real_exchange = config_module.rename_exchange
+            transition_exchanged = False
+
+            def interrupt_after_receipted_exchange(**kwargs: object) -> None:
+                nonlocal transition_exchanged
+                if (
+                    kwargs.get("first_name") == intent_path.name
+                    and kwargs.get("second_name")
+                    == ready_transition_path.name
+                    and not transition_exchanged
+                ):
+                    self.assertTrue(receipt_path.is_file())
+                    real_exchange(**kwargs)
+                    transition_exchanged = True
+                    raise OSError("simulated post-transition exchange crash")
+                real_exchange(**kwargs)
+
+            with (
+                patch.object(
+                    config_module,
+                    "rename_exchange",
+                    side_effect=interrupt_after_receipted_exchange,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    migrated_config,
+                    owner_payload={
+                        "purpose": "legacy-prepared-transition-resume"
+                    },
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "could not be resumed safely",
+                ),
+            ):
+                migrate_config_state(migrated_config)
+
+            self.assertTrue(transition_exchanged)
+            self.assertTrue(receipt_path.is_file())
+            runtime_reservation_dir = (
+                migrated_config.paths.runtime_reservation_dir
+            )
+            assert runtime_reservation_dir is not None
+            rollback_config = self._legacy_migration_config(
+                root,
+                database_path=source_path,
+                name="rollback",
+                runtime_reservation_dir=runtime_reservation_dir,
+            )
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    rollback_config,
+                    owner_payload={
+                        "purpose": "legacy-prepared-transition-rollback"
+                    },
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "migration authority is missing",
+                ),
+            ):
+                migrate_config_state(rollback_config)
+
+            self.assertTrue(source_path.is_file())
+            self.assertTrue(destination_path.is_file())
+            self.assertTrue(intent_path.is_file())
+            self.assertTrue(receipt_path.is_file())
 
     def test_migrate_config_state_preserves_intent_transition_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

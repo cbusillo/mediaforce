@@ -137,10 +137,13 @@ Mediaforce's SQLite schema.
   its predecessor and verifies that identity against the retained transition
   directory descriptor. The configured parent is also rechecked before every
   source retirement, so a destination-parent swap or copying-to-ready rebind
-  stops cleanup before the legacy main is retired. Before completion becomes
-  authoritative, Mediaforce also publishes an immutable migration receipt in
-  the machine-local runtime-reservation namespace, outside the replaceable
-  destination parent. The configured reservation namespace must remain
+  stops cleanup before the legacy main is retired. Before destination
+  publication becomes possible, Mediaforce also publishes an immutable
+  migration receipt in the machine-local runtime-reservation namespace,
+  outside the replaceable destination parent. The receipt remains byte-identical
+  through cleaning, sealing, and completion, so a crash after publication cannot
+  hide migration authority merely by changing the configured database path back
+  to the legacy source. The configured reservation namespace must remain
   independently discoverable: neither its configured path nor any symlink
   expansion may pass through an entry hidden by destination replacement. A
   configuration that places that namespace at or below the destination parent,

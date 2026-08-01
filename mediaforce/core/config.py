@@ -660,6 +660,11 @@ def _execute_legacy_sqlite_copy(
                         "destination_parent_identity"
                     ),
             ) as destination_binding:
+                _ensure_legacy_sqlite_migration_receipt(
+                    receipt_path,
+                    ready_intent,
+                )
+                locked_source.assert_stable()
                 destination_binding.publish(
                     staging_path.name,
                     staging_snapshot,
@@ -1246,7 +1251,12 @@ def _legacy_sqlite_migration_receipt_payload(
     )
     if (
         payload.get("schema_version") != _LEGACY_SQLITE_INTENT_VERSION
-        or payload.get("phase") not in {"cleaning", "sealing", "complete"}
+        or payload.get("phase") not in {
+            "ready",
+            "cleaning",
+            "sealing",
+            "complete",
+        }
         or not isinstance(payload.get("source_path"), str)
         or not isinstance(payload.get("destination_path"), str)
         or not isinstance(payload.get("staging_name"), str)
@@ -2004,11 +2014,55 @@ def _legacy_sqlite_migration_transition_digests(
     return parts[0], parts[1]
 
 
+def _ensure_legacy_sqlite_migration_transition_receipt(
+        *,
+        payload: dict[str, object],
+        destination: Path,
+        receipt_path: Path,
+) -> None:
+    if payload.get("phase") not in {
+        "ready",
+        "cleaning",
+        "sealing",
+        "complete",
+    }:
+        return
+    receipt_payload = payload
+    if payload.get("schema_version") != _LEGACY_SQLITE_INTENT_VERSION:
+        if not _path_entry_exists(destination):
+            return
+        staging_snapshot = _legacy_sqlite_migration_snapshot_dict(
+            payload.get("staging_snapshot"),
+            "staging snapshot",
+        )
+        with _opened_legacy_sqlite_migration_destination(
+                destination,
+                expected_parent_identity=payload.get(
+                    "destination_parent_identity"
+                ),
+        ) as destination_binding:
+            publication_policy = (
+                _legacy_sqlite_publication_policy_for_state(
+                    destination_binding,
+                    str(payload["staging_name"]),
+                    staging_snapshot,
+                )
+            )
+        receipt_payload = dict(payload)
+        receipt_payload["schema_version"] = _LEGACY_SQLITE_INTENT_VERSION
+        receipt_payload["publication_policy"] = publication_policy
+    _ensure_legacy_sqlite_migration_receipt(
+        receipt_path,
+        receipt_payload,
+    )
+
+
 def _recover_legacy_sqlite_migration_intent_transitions(
         intent_path: Path,
         *,
         source: Path,
         destination: Path,
+        receipt_path: Path,
 ) -> tuple[dict[str, object], dict[str, object] | None]:
     for _attempt in range(64):
         current = _load_legacy_sqlite_migration_intent(intent_path)
@@ -2110,6 +2164,11 @@ def _recover_legacy_sqlite_migration_intent_transitions(
                     "legacy SQLite migration completion transition is invalid"
                 )
             return current, pending[0]
+        _ensure_legacy_sqlite_migration_transition_receipt(
+            payload=pending[0],
+            destination=destination,
+            receipt_path=receipt_path,
+        )
         _replace_legacy_sqlite_migration_intent(
             intent_path,
             expected=current,
@@ -2136,6 +2195,7 @@ def _resume_legacy_sqlite_migration_intent(
                 intent_path,
                 source=source,
                 destination=destination,
+                receipt_path=receipt_path,
             )
         )
         staging_path = _validated_legacy_sqlite_migration_intent(
@@ -2317,6 +2377,14 @@ def _resume_legacy_sqlite_migration_intent(
                             locked_source,
                             payload,
                         )
+                        _ensure_legacy_sqlite_migration_receipt(
+                            receipt_path,
+                            payload,
+                        )
+                        _assert_legacy_sqlite_migration_source_matches(
+                            locked_source,
+                            payload,
+                        )
                         destination_binding.publish(
                             staging_path.name,
                             staging_snapshot,
@@ -2359,6 +2427,14 @@ def _resume_legacy_sqlite_migration_intent(
                     publication_policy=publication_policy,
                 )
             destination_binding.assert_database_valid()
+            if (
+                payload.get("schema_version") == 5
+                and payload.get("phase") in {"ready", "cleaning"}
+            ):
+                _ensure_legacy_sqlite_migration_receipt(
+                    receipt_path,
+                    payload,
+                )
             if _path_entry_exists(source):
                 with exclusive_legacy_sqlite_migration_source(
                         config,
@@ -2375,6 +2451,10 @@ def _resume_legacy_sqlite_migration_intent(
                                 locked_source=locked_source,
                                 publication_policy=str(publication_policy),
                             )
+                        )
+                        _ensure_legacy_sqlite_migration_receipt(
+                            receipt_path,
+                            cleaning_payload,
                         )
                         if cleaning_payload != payload:
                             _replace_legacy_sqlite_migration_intent(
@@ -3145,7 +3225,12 @@ def _upgrade_legacy_sqlite_v4_intent(
             raise OSError(
                 "legacy SQLite v4 ready publication state is invalid"
             )
-        if phase == "cleaning":
+        if phase == "ready":
+            _ensure_legacy_sqlite_migration_receipt(
+                receipt_path,
+                upgraded,
+            )
+        elif phase == "cleaning":
             absent_prefix, cleanup_complete = (
                 _legacy_sqlite_v4_cleanup_absent_prefix(
                 source,
