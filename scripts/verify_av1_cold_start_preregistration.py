@@ -2482,9 +2482,7 @@ from mediaforce.tuning.av1_validation_partition_inventory import (
 ValidationManifest: TypeAlias = (
     AV1ColdStartValidationManifestV1 | AV1ValidationManifestV2
 )
-REPOSITORY_ROOT = Path(
-    av1_validation_derivation_runtime.__file__
-).resolve().parents[3]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _CANONICAL_PREREGISTRATION_RUNNER = (
     REPOSITORY_ROOT / "scripts" / "verify_av1_cold_start_preregistration.py"
 )

@@ -2814,6 +2814,49 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ):
                 _run_test_git(repository, *arguments)
 
+            canonical_repository = repository.resolve()
+            canonical_python = canonical_repository / ".venv" / "bin" / "python"
+            canonical_python.parent.mkdir(parents=True)
+            canonical_python.symlink_to(Path(sys.executable).resolve())
+            site_packages = next(
+                Path(entry).resolve()
+                for entry in sys.path
+                if Path(entry).name == "site-packages"
+                and (Path(entry) / "sqlalchemy").is_dir()
+            )
+            fixture_site_packages = (
+                canonical_repository
+                / ".venv"
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+            )
+            fixture_site_packages.parent.mkdir(parents=True)
+            fixture_site_packages.symlink_to(site_packages, target_is_directory=True)
+            child_environment = dict(os.environ)
+            child_environment.pop("PYTHONPATH", None)
+            child_environment["VIRTUAL_ENV"] = str(
+                canonical_repository / ".venv"
+            )
+            completed = subprocess.run(
+                [
+                    canonical_python,
+                    "-I",
+                    "-S",
+                    canonical_repository
+                    / "scripts"
+                    / "verify_av1_cold_start_preregistration.py",
+                    "--help",
+                ],
+                cwd=canonical_repository,
+                env=child_environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Validate an AV1 cold-start preregistration", completed.stdout)
+
             monitor = verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
                 repository,
                 retain_authority_monitor=True,
