@@ -1689,6 +1689,7 @@ def _canonical_system_git_binary(platform: str) -> str:
 def _preregistration_executable_is_trusted(
         *,
         owner_uid: int,
+        owner_gid: int,
         mode: int,
         current_uid: int,
 ) -> bool:
@@ -1697,7 +1698,13 @@ def _preregistration_executable_is_trusted(
         bootstrap_stat.S_ISREG(mode)
         and owner_uid in {0, current_uid}
         and not mode & (
-            0o022 | bootstrap_stat.S_ISUID | bootstrap_stat.S_ISGID
+            bootstrap_stat.S_IWOTH
+            | bootstrap_stat.S_ISUID
+            | bootstrap_stat.S_ISGID
+        )
+        and (
+            not mode & bootstrap_stat.S_IWGRP
+            or (owner_uid == 0 and owner_gid == 0)
         )
     )
 
@@ -2318,6 +2325,7 @@ def _assert_preregistration_import_tree_clean(
                     bootstrap_os.path.isfile(executable_realpath)
                     and _preregistration_executable_is_trusted(
                         owner_uid=descriptor_info.st_uid,
+                        owner_gid=descriptor_info.st_gid,
                         mode=descriptor_info.st_mode,
                         current_uid=bootstrap_os.getuid(),
                     )
