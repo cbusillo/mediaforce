@@ -1,3 +1,6 @@
+_PREREGISTRATION_MINIMUM_EXTERNAL_DESCRIPTOR_RESERVE = 128
+
+
 class _RepositoryAuthorityMonitor:
     _IN_MODIFY = 0x00000002
     _IN_ATTRIB = 0x00000004
@@ -54,6 +57,7 @@ class _RepositoryAuthorityMonitor:
         self._inotify_descriptor = -1
         self._inotify_add_watch = None
         self._nofile_resource = None
+        self._nofile_baseline_soft_limit: int | None = None
         self._original_nofile_soft_limit: int | None = None
         self._raised_nofile_soft_limit: int | None = None
         try:
@@ -174,14 +178,27 @@ class _RepositoryAuthorityMonitor:
 
     def _ensure_descriptor_capacity(self, additional: int) -> None:
         self._raise_sticky_failure()
-        required = len(self._descriptors) + additional + 128
+        projected_monitor_descriptors = len(self._descriptors) + additional + 1
         try:
             resource = __import__("resource")
             soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-            if soft_limit == resource.RLIM_INFINITY or soft_limit >= required:
+            if self._nofile_baseline_soft_limit is None:
+                self._nofile_baseline_soft_limit = soft_limit
+            baseline_soft_limit = self._nofile_baseline_soft_limit
+            if baseline_soft_limit == resource.RLIM_INFINITY:
                 return
-            if hard_limit != resource.RLIM_INFINITY and hard_limit < required:
-                self._fail_unavailable()
+            minimum_limit = (
+                projected_monitor_descriptors
+                + _PREREGISTRATION_MINIMUM_EXTERNAL_DESCRIPTOR_RESERVE
+            )
+            desired_limit = baseline_soft_limit + projected_monitor_descriptors
+            target_limit = desired_limit
+            if hard_limit != resource.RLIM_INFINITY:
+                if hard_limit < minimum_limit:
+                    self._fail_unavailable()
+                target_limit = min(desired_limit, hard_limit)
+            if soft_limit == resource.RLIM_INFINITY or soft_limit >= target_limit:
+                return
             if (
                 self._raised_nofile_soft_limit is not None
                 and soft_limit != self._raised_nofile_soft_limit
@@ -193,7 +210,7 @@ class _RepositoryAuthorityMonitor:
                 self._original_nofile_soft_limit = soft_limit
             resource.setrlimit(
                 resource.RLIMIT_NOFILE,
-                (required, hard_limit),
+                (target_limit, hard_limit),
             )
             raised_soft_limit, _raised_hard_limit = resource.getrlimit(
                 resource.RLIMIT_NOFILE
@@ -202,7 +219,7 @@ class _RepositoryAuthorityMonitor:
             self._raised_nofile_soft_limit = raised_soft_limit
             if (
                 raised_soft_limit != resource.RLIM_INFINITY
-                and raised_soft_limit < required
+                and raised_soft_limit < target_limit
             ):
                 self._fail_unavailable()
         except (OSError, ValueError) as exc:
@@ -595,6 +612,7 @@ class _RepositoryAuthorityMonitor:
         original_soft_limit = self._original_nofile_soft_limit
         raised_soft_limit = self._raised_nofile_soft_limit
         self._nofile_resource = None
+        self._nofile_baseline_soft_limit = None
         self._original_nofile_soft_limit = None
         self._raised_nofile_soft_limit = None
         if (
