@@ -135,9 +135,12 @@ Mediaforce's SQLite schema.
   destination and is recorded by the publication policy rather than removed.
   Every intent transition preserves the destination-parent identity captured by
   its predecessor and verifies that identity against the retained transition
-  directory descriptor. The configured parent is also rechecked before every
-  source retirement, so a destination-parent swap or copying-to-ready rebind
-  stops cleanup before the legacy main is retired. Before destination
+  directory descriptor. Recovery re-fsyncs that directory immediately before
+  publishing any receipt derived from a prepared transition, so external
+  migration authority cannot outlive the namespace edge that established it.
+  The configured parent is also rechecked before every source retirement, so a
+  destination-parent swap or copying-to-ready rebind stops cleanup before the
+  legacy main is retired. Before destination
   publication becomes possible, Mediaforce also publishes an immutable
   migration receipt in the machine-local runtime-reservation namespace,
   outside the replaceable destination parent. The receipt remains byte-identical

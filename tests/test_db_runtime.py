@@ -3574,7 +3574,31 @@ class DatabaseRuntimeTests(unittest.TestCase):
             )
             self.assertFalse(receipt_path.exists())
             real_exchange = config_module.rename_exchange
+            real_fsync = config_module.os.fsync
+            real_ensure_transition_receipt = (
+                config_module._ensure_legacy_sqlite_migration_transition_receipt
+            )
+            intent_parent_info = intent_path.parent.stat(follow_symlinks=False)
+            intent_parent_identity = (
+                intent_parent_info.st_dev,
+                intent_parent_info.st_ino,
+            )
             transition_exchanged = False
+            intent_parent_fsynced = False
+
+            def record_fsync(descriptor: int) -> None:
+                nonlocal intent_parent_fsynced
+                descriptor_info = os.fstat(descriptor)
+                if (
+                    descriptor_info.st_dev,
+                    descriptor_info.st_ino,
+                ) == intent_parent_identity:
+                    intent_parent_fsynced = True
+                real_fsync(descriptor)
+
+            def ensure_after_transition_fsync(**kwargs: object) -> None:
+                self.assertTrue(intent_parent_fsynced)
+                real_ensure_transition_receipt(**kwargs)
 
             def interrupt_after_receipted_exchange(**kwargs: object) -> None:
                 nonlocal transition_exchanged
@@ -3591,6 +3615,16 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 real_exchange(**kwargs)
 
             with (
+                patch.object(
+                    config_module.os,
+                    "fsync",
+                    side_effect=record_fsync,
+                ),
+                patch.object(
+                    config_module,
+                    "_ensure_legacy_sqlite_migration_transition_receipt",
+                    side_effect=ensure_after_transition_fsync,
+                ),
                 patch.object(
                     config_module,
                     "rename_exchange",

@@ -1838,6 +1838,7 @@ def _replace_legacy_sqlite_migration_intent(
             payload_descriptor,
         )
         if before_exchange is not None:
+            os.fsync(directory_descriptor)
             before_exchange()
             _assert_legacy_sqlite_migration_intent_descriptor_at(
                 directory_descriptor,
@@ -2164,15 +2165,19 @@ def _recover_legacy_sqlite_migration_intent_transitions(
                     "legacy SQLite migration completion transition is invalid"
                 )
             return current, pending[0]
-        _ensure_legacy_sqlite_migration_transition_receipt(
-            payload=pending[0],
-            destination=destination,
-            receipt_path=receipt_path,
-        )
+
+        def ensure_transition_receipt() -> None:
+            _ensure_legacy_sqlite_migration_transition_receipt(
+                payload=pending[0],
+                destination=destination,
+                receipt_path=receipt_path,
+            )
+
         _replace_legacy_sqlite_migration_intent(
             intent_path,
             expected=current,
             payload=pending[0],
+            before_exchange=ensure_transition_receipt,
         )
     raise OSError("legacy SQLite migration intent transition chain is too deep")
 
