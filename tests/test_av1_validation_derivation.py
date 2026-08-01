@@ -2688,6 +2688,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     ),
                     expected,
                 )
+        self.assertEqual(
+            verify_av1_cold_start_preregistration
+            ._preregistration_executable_rejection_reasons(
+                owner_uid=current_uid + 1,
+                owner_gid=20,
+                mode=stat.S_IFREG | 0o6777,
+                current_uid=current_uid,
+            ),
+            (
+                "executable_owner",
+                "executable_world_write",
+                "executable_set_id",
+                "executable_group_write",
+            ),
+        )
 
     def test_review_git_uses_root_owned_direct_system_binary(self) -> None:
         expected = (

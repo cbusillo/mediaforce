@@ -1686,6 +1686,28 @@ def _canonical_system_git_binary(platform: str) -> str:
     return "/usr/bin/git"
 
 
+def _preregistration_executable_rejection_reasons(
+        *,
+        owner_uid: int,
+        owner_gid: int,
+        mode: int,
+        current_uid: int,
+) -> tuple[str, ...]:
+    bootstrap_stat = __import__("stat")
+    reasons: list[str] = []
+    if not bootstrap_stat.S_ISREG(mode):
+        reasons.append("executable_type")
+    if owner_uid not in {0, current_uid}:
+        reasons.append("executable_owner")
+    if mode & bootstrap_stat.S_IWOTH:
+        reasons.append("executable_world_write")
+    if mode & (bootstrap_stat.S_ISUID | bootstrap_stat.S_ISGID):
+        reasons.append("executable_set_id")
+    if mode & bootstrap_stat.S_IWGRP and owner_gid != 0:
+        reasons.append("executable_group_write")
+    return tuple(reasons)
+
+
 def _preregistration_executable_is_trusted(
         *,
         owner_uid: int,
@@ -1693,19 +1715,11 @@ def _preregistration_executable_is_trusted(
         mode: int,
         current_uid: int,
 ) -> bool:
-    bootstrap_stat = __import__("stat")
-    return (
-        bootstrap_stat.S_ISREG(mode)
-        and owner_uid in {0, current_uid}
-        and not mode & (
-            bootstrap_stat.S_IWOTH
-            | bootstrap_stat.S_ISUID
-            | bootstrap_stat.S_ISGID
-        )
-        and (
-            not mode & bootstrap_stat.S_IWGRP
-            or owner_gid == 0
-        )
+    return not _preregistration_executable_rejection_reasons(
+        owner_uid=owner_uid,
+        owner_gid=owner_gid,
+        mode=mode,
+        current_uid=current_uid,
     )
 
 
@@ -2287,16 +2301,22 @@ def _assert_preregistration_import_tree_clean(
             if isinstance(base_executable, str) and base_executable
             else None
         )
+        executable_rejection_reasons: list[str] = []
+        if (
+            bootstrap_os.path.dirname(executable_path)
+            != expected_executable_directory
+        ):
+            executable_rejection_reasons.append("launcher_directory")
+        if (
+            bootstrap_os.path.basename(executable_path)
+            not in allowed_executable_names
+        ):
+            executable_rejection_reasons.append("launcher_name")
+        if base_executable_realpath != executable_realpath:
+            executable_rejection_reasons.append("base_executable_path")
         executable_descriptor = -1
-        executable_is_canonical = False
         try:
-            if (
-                bootstrap_os.path.dirname(executable_path)
-                == expected_executable_directory
-                and bootstrap_os.path.basename(executable_path)
-                in allowed_executable_names
-                and base_executable_realpath == executable_realpath
-            ):
+            if not executable_rejection_reasons:
                 flags = bootstrap_os.O_RDONLY | getattr(
                     bootstrap_os,
                     "O_CLOEXEC",
@@ -2321,37 +2341,51 @@ def _assert_preregistration_import_tree_clean(
                     canonical_executable_realpath,
                     follow_symlinks=False,
                 )
-                executable_is_canonical = (
-                    bootstrap_os.path.isfile(executable_realpath)
-                    and _preregistration_executable_is_trusted(
+                if not bootstrap_os.path.isfile(executable_realpath):
+                    executable_rejection_reasons.append("executable_file")
+                executable_rejection_reasons.extend(
+                    _preregistration_executable_rejection_reasons(
                         owner_uid=descriptor_info.st_uid,
                         owner_gid=descriptor_info.st_gid,
                         mode=descriptor_info.st_mode,
                         current_uid=bootstrap_os.getuid(),
                     )
-                    and (
-                        descriptor_info.st_dev,
-                        descriptor_info.st_ino,
-                    )
-                    == (path_info.st_dev, path_info.st_ino)
-                    == (base_info.st_dev, base_info.st_ino)
-                    == (canonical_info.st_dev, canonical_info.st_ino)
                 )
+                descriptor_identity = (
+                    descriptor_info.st_dev,
+                    descriptor_info.st_ino,
+                )
+                if descriptor_identity != (path_info.st_dev, path_info.st_ino):
+                    executable_rejection_reasons.append(
+                        "executable_path_identity"
+                    )
+                if descriptor_identity != (base_info.st_dev, base_info.st_ino):
+                    executable_rejection_reasons.append(
+                        "base_executable_inode"
+                    )
+                if descriptor_identity != (
+                    canonical_info.st_dev,
+                    canonical_info.st_ino,
+                ):
+                    executable_rejection_reasons.append(
+                        "canonical_launcher_inode"
+                    )
         except OSError:
-            executable_is_canonical = False
+            executable_rejection_reasons.append("executable_inspection")
         finally:
             if executable_descriptor >= 0:
                 bootstrap_os.close(executable_descriptor)
         if (
-            not executable_is_canonical
-            or (
-                declared_virtual_environment is not None
-                and bootstrap_os.path.realpath(declared_virtual_environment)
-                != expected_virtual_environment
-            )
+            declared_virtual_environment is not None
+            and bootstrap_os.path.realpath(declared_virtual_environment)
+            != expected_virtual_environment
         ):
+            executable_rejection_reasons.append("declared_virtual_environment")
+        if executable_rejection_reasons:
             raise RuntimeError(
-                "AV1 preregistration runner requires the canonical repository virtual environment"
+                "AV1 preregistration runner requires the canonical repository "
+                "virtual environment (failed checks: "
+                f"{','.join(dict.fromkeys(executable_rejection_reasons))})"
             )
         trusted_paths.append(
             bootstrap_os.path.join(
