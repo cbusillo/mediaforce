@@ -3080,6 +3080,62 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(payload["attempt_count"], 0)
         self.assertEqual(payload["terminal_record_count"], 0)
 
+    def test_derivation_status_reports_unresolved_review_claim(self) -> None:
+        proposal = self._candidate_proposal()
+        write_av1_validation_derivation_candidate_proposal(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+        )
+        claim = build_av1_validation_derivation_review_claim(
+            plan=self.plan,
+            proposal=proposal,
+            repository_commit=REVIEW_REPOSITORY_COMMIT,
+            repository_tree=REVIEW_REPOSITORY_TREE,
+            lane="architecture",
+            review_run_id="80500000-0000-0000-0000-000000000001",
+            review_runner_canonical_path_sha256=(
+                self.plan.review_runner_canonical_path_sha256
+            ),
+            review_runner_binary_sha256=self.plan.review_runner_binary_sha256,
+            claimed_at="2026-07-28T03:00:01Z",
+        )
+        write_av1_validation_derivation_review_claim(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        args = SimpleNamespace(
+            action="derivation-status",
+            config=Path("unused.toml"),
+            plan=self.runtime_artifact_root / "plan.json",
+            json_output=True,
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ) as print_payload,
+        ):
+            exit_code = (
+                verify_av1_cold_start_preregistration._run_derivation_action_body(
+                    args,
+                    locked_config=None,
+                )
+            )
+
+        self.assertEqual(exit_code, 2)
+        payload = print_payload.call_args.args[0]
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["review_claim_count"], 1)
+        self.assertEqual(payload["unresolved_review_claim_count"], 1)
+
     def test_review_retry_reuses_complete_envelope_after_parent_fsync_failure(
             self,
     ) -> None:
@@ -3271,7 +3327,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 envelope=conflicting_envelope,
             )
 
-    def test_review_retry_rejects_unresolved_claim_without_launching_agent(self) -> None:
+    def test_review_retry_reuses_unresolved_claim(self) -> None:
         proposal = self._candidate_proposal()
         write_av1_validation_derivation_candidate_proposal(
             self.runtime_artifact_root,
@@ -3297,6 +3353,10 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             proposal=proposal,
             claim=claim,
         )
+        evidence = _review_run_evidence(
+            proposal=proposal,
+            claim=claim,
+        )
         args = SimpleNamespace(
             action="record-derivation-review",
             config=Path("unused.toml"),
@@ -3317,23 +3377,43 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             patch.object(
                 verify_av1_cold_start_preregistration,
+                "_repository_review_identity",
+                return_value=(
+                    self.plan.repository_commit,
+                    self.plan.repository_tree,
+                ),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
                 "_run_code_llm_review",
+                return_value=(claim, evidence, "approved"),
             ) as run_review,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_now_iso",
-            ) as now_iso,
-            self.assertRaisesRegex(
-                AV1ValidationDerivationError,
-                "terminal and cannot be resumed",
+                return_value="2026-07-28T03:30:00Z",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
             ),
         ):
-            verify_av1_cold_start_preregistration._run_derivation_action_body(
-                args,
-                locked_config=self.runtime_config,
+            exit_code = (
+                verify_av1_cold_start_preregistration._run_derivation_action_body(
+                    args,
+                    locked_config=self.runtime_config,
+                )
             )
-        run_review.assert_not_called()
-        now_iso.assert_not_called()
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(run_review.call_args.kwargs["claim"], claim)
+        recovered = load_av1_validation_derivation_review_envelope(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        self.assertEqual(recovered.review.review_claim_id, claim.claim_id)
+        self.assertEqual(recovered.review.reviewed_at, "2026-07-28T03:30:00Z")
 
     def test_immutable_write_failure_cleans_unpublished_temporary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4492,12 +4572,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration.uuid,
                 "uuid4",
                 return_value="90000000-0000-0000-0000-000000000001",
-            ),
+            ) as uuid4,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_now_iso",
                 return_value="2026-07-28T03:00:01Z",
-            ),
+            ) as now_iso,
         ):
             claim, evidence, decision = verify_av1_cold_start_preregistration._run_code_llm_review(
                 artifact_root=self.runtime_artifact_root,
@@ -4505,7 +4585,34 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 proposal=proposal,
                 lane="architecture",
             )
+            claim_path = (
+                self.runtime_artifact_root
+                / "review-claims"
+                / proposal.proposal_id
+                / "architecture.json"
+            )
+            claim_info = claim_path.stat(follow_symlinks=False)
+            retried_claim, retried_evidence, retried_decision = (
+                verify_av1_cold_start_preregistration._run_code_llm_review(
+                    artifact_root=self.runtime_artifact_root,
+                    plan=self.plan,
+                    proposal=proposal,
+                    lane="architecture",
+                    claim=claim,
+                )
+            )
         self.assertEqual(decision, "approved")
+        self.assertEqual(retried_decision, "approved")
+        self.assertEqual(retried_claim, claim)
+        self.assertEqual(retried_evidence, evidence)
+        self.assertEqual(uuid4.call_count, 1)
+        self.assertEqual(now_iso.call_count, 1)
+        retried_claim_info = claim_path.stat(follow_symlinks=False)
+        self.assertEqual(
+            (retried_claim_info.st_dev, retried_claim_info.st_ino),
+            (claim_info.st_dev, claim_info.st_ino),
+        )
+        self.assertEqual(retried_claim_info.st_mtime_ns, claim_info.st_mtime_ns)
         assert request_path is not None
         self.assertFalse(request_path.exists())
         self.assertFalse(request_path.parent.exists())

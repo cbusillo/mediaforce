@@ -3130,6 +3130,12 @@ def _run_derivation_action_body(
                 unresolved_verdict_claim_count += 1
             else:
                 unresolved_verdict_intent_count += 1
+        review_claim_count, unresolved_review_claim_count = (
+            _derivation_review_recovery_counts(
+                artifact_root=artifact_root,
+                plan=plan,
+            )
+        )
         recovery_required = any((
             unaccepted_attempt_count,
             unresolved_assignment_claim_count,
@@ -3137,6 +3143,7 @@ def _run_derivation_action_body(
             late_observed_terminal_intent_count,
             unresolved_verdict_claim_count,
             unresolved_verdict_intent_count,
+            unresolved_review_claim_count,
         ))
         attempt_counts = {
             status: sum(attempt.status == status for attempt in attempts)
@@ -3155,6 +3162,7 @@ def _run_derivation_action_body(
                 "assignment_claim_count": len(assignment_claims),
                 "terminal_intent_count": len(terminal_intents),
                 "verdict_claim_count": len(verdict_claims),
+                "review_claim_count": review_claim_count,
                 "unaccepted_attempt_count": unaccepted_attempt_count,
                 "unresolved_assignment_claim_count": (
                     unresolved_assignment_claim_count
@@ -3170,6 +3178,9 @@ def _run_derivation_action_body(
                 ),
                 "unresolved_verdict_intent_count": (
                     unresolved_verdict_intent_count
+                ),
+                "unresolved_review_claim_count": (
+                    unresolved_review_claim_count
                 ),
                 "recovery_required": recovery_required,
                 **{f"attempt_{key}_count": value for key, value in attempt_counts.items()},
@@ -3279,12 +3290,18 @@ def _run_derivation_action_body(
                 repository_commit=repository_commit,
                 repository_tree=repository_tree,
             )
-            if existing_review is None:
+            if existing_review is None or existing_review[1] is None:
+                existing_claim = (
+                    existing_review[0]
+                    if existing_review is not None
+                    else None
+                )
                 claim, review_evidence, decision = _run_code_llm_review(
                     artifact_root=artifact_root,
                     plan=plan,
                     proposal=proposal,
                     lane=args.lane,
+                    claim=existing_claim,
                     before_publish=guarded_publication,
                 )
                 review_evidence_sha256 = (
@@ -3303,6 +3320,7 @@ def _run_derivation_action_body(
                 )
             else:
                 claim, envelope = existing_review
+                assert envelope is not None
                 review = envelope.review
             assert_av1_validation_derivation_execution_environment(plan)
             write_av1_validation_derivation_review_envelope(
@@ -5014,7 +5032,7 @@ def _load_existing_derivation_review(
         lane: AV1ValidationDerivationReviewLane,
 ) -> tuple[
     AV1ValidationDerivationReviewClaim,
-    AV1ValidationDerivationReviewEnvelope,
+    AV1ValidationDerivationReviewEnvelope | None,
 ] | None:
     claim_path = (
         artifact_root
@@ -5047,9 +5065,7 @@ def _load_existing_derivation_review(
             "AV1 derivation review claim directory lost its requested lane"
         )
     if not envelope_exists:
-        raise AV1ValidationDerivationError(
-            "AV1 derivation interrupted review claim is terminal and cannot be resumed"
-        )
+        return claim, None
     envelope = load_av1_validation_derivation_review_envelope(
         artifact_root,
         plan=plan,
@@ -5057,6 +5073,61 @@ def _load_existing_derivation_review(
         claim=claim,
     )
     return claim, envelope
+
+
+def _derivation_review_recovery_counts(
+        *,
+        artifact_root: Path,
+        plan: AV1ValidationDerivationPlan,
+) -> tuple[int, int]:
+    review_claim_count = 0
+    unresolved_review_claim_count = 0
+    for cell_plan_id in sorted({
+        assignment.cell_plan_id
+        for assignment in plan.assignments
+    }):
+        proposal_path = (
+            artifact_root
+            / "proposals"
+            / f"{cell_plan_id}.json"
+        )
+        if not (proposal_path.exists() or proposal_path.is_symlink()):
+            continue
+        proposal = load_av1_validation_derivation_candidate_proposal(
+            artifact_root,
+            plan=plan,
+            cell_plan_id=cell_plan_id,
+        )
+        claim_directory = (
+            artifact_root
+            / "review-claims"
+            / proposal.proposal_id
+        )
+        if not (claim_directory.exists() or claim_directory.is_symlink()):
+            continue
+        claims = load_av1_validation_derivation_review_claims(
+            artifact_root,
+            plan=plan,
+            proposal=proposal,
+        )
+        review_claim_count += len(claims)
+        for claim in claims:
+            envelope_path = (
+                artifact_root
+                / "reviews"
+                / proposal.proposal_id
+                / f"{claim.lane}.json"
+            )
+            if not (envelope_path.exists() or envelope_path.is_symlink()):
+                unresolved_review_claim_count += 1
+                continue
+            load_av1_validation_derivation_review_envelope(
+                artifact_root,
+                plan=plan,
+                proposal=proposal,
+                claim=claim,
+            )
+    return review_claim_count, unresolved_review_claim_count
 
 
 def _assert_code_llm_request_contract(
@@ -5132,6 +5203,7 @@ def _run_code_llm_review(
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
         lane: AV1ValidationDerivationReviewLane,
+        claim: AV1ValidationDerivationReviewClaim | None = None,
         before_publish: Callable[[], None] | None = None,
 ) -> tuple[
     AV1ValidationDerivationReviewClaim,
@@ -5158,6 +5230,7 @@ def _run_code_llm_review(
                 plan=plan,
                 proposal=proposal,
                 lane=lane,
+                claim=claim,
                 process_controller=process_controller,
                 before_publish=before_publish,
             )
@@ -5173,6 +5246,7 @@ def _run_code_llm_review_before_deadline(
         plan: AV1ValidationDerivationPlan,
         proposal: AV1ValidationDerivationCandidateProposal,
         lane: AV1ValidationDerivationReviewLane,
+        claim: AV1ValidationDerivationReviewClaim | None,
         process_controller: ManagedProcessController,
         before_publish: Callable[[], None] | None = None,
 ) -> tuple[
@@ -5197,25 +5271,43 @@ def _run_code_llm_review_before_deadline(
     before_repository_identity = _repository_review_identity(
         process_controller=process_controller,
     )
-    review_run_id = str(uuid.uuid4())
-    claim = build_av1_validation_derivation_review_claim(
-        plan=plan,
-        proposal=proposal,
-        repository_commit=before_repository_identity[0],
-        repository_tree=before_repository_identity[1],
-        lane=lane,
-        review_run_id=review_run_id,
-        review_runner_canonical_path_sha256=before_identity[1],
-        review_runner_binary_sha256=before_identity[2],
-        claimed_at=_now_iso(),
-    )
-    write_av1_validation_derivation_review_claim(
-        artifact_root,
-        plan=plan,
-        proposal=proposal,
-        claim=claim,
-        before_publish=guarded_before_publish,
-    )
+    if claim is None:
+        review_run_id = str(uuid.uuid4())
+        claim = build_av1_validation_derivation_review_claim(
+            plan=plan,
+            proposal=proposal,
+            repository_commit=before_repository_identity[0],
+            repository_tree=before_repository_identity[1],
+            lane=lane,
+            review_run_id=review_run_id,
+            review_runner_canonical_path_sha256=before_identity[1],
+            review_runner_binary_sha256=before_identity[2],
+            claimed_at=_now_iso(),
+        )
+        write_av1_validation_derivation_review_claim(
+            artifact_root,
+            plan=plan,
+            proposal=proposal,
+            claim=claim,
+            before_publish=guarded_before_publish,
+        )
+    else:
+        if (
+            claim.plan_id != plan.plan_id
+            or claim.authorization_id != plan.authorization.authorization_id
+            or claim.proposal_id != proposal.proposal_id
+            or claim.proposal_payload_sha256 != proposal.payload_sha256
+            or claim.lane != lane
+            or (claim.repository_commit, claim.repository_tree)
+            != before_repository_identity
+            or claim.review_runner_canonical_path_sha256 != before_identity[1]
+            or claim.review_runner_binary_sha256 != before_identity[2]
+        ):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation interrupted review claim is no longer authorized"
+            )
+        review_run_id = claim.review_run_id
+        guarded_before_publish()
     safe_bundle = _build_av1_validation_derivation_review_bundle(
         claim=claim,
         process_controller=process_controller,

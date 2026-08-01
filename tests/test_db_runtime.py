@@ -5,7 +5,7 @@ import struct
 import sys
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -841,7 +841,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                         cleaning_payload,
                     )
 
-    def test_migrate_config_state_rejects_replaced_staging_snapshot(self) -> None:
+    def test_migrate_config_state_rejects_staging_path_swap_before_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_path = root / "state" / "library.sqlite3"
@@ -856,51 +856,43 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 connection.execute("CREATE TABLE migration_rows (value TEXT NOT NULL)")
                 connection.execute("INSERT INTO migration_rows VALUES ('trusted-row')")
 
-            real_snapshot = config_module._legacy_sqlite_migration_file_snapshot
+            victim_path = root / "victim.sqlite3"
+            victim_bytes = b"must-not-be-overwritten"
+            victim_path.write_bytes(victim_bytes)
+            real_write = config_module._LegacySQLiteMigrationStaging.write_from
             replaced = False
             trusted_staging_path: Path | None = None
 
-            def replace_staging_before_snapshot(
-                    path: Path,
-                    *,
-                    include_sha256: bool,
-                    require_single_link: bool,
-                    include_timestamps: bool = True,
-            ) -> dict[str, object]:
+            def replace_staging_before_write(
+                    staging: object,
+                    backup_path: Path,
+            ) -> None:
                 nonlocal replaced, trusted_staging_path
-                if (
-                    not replaced
-                    and path.parent == destination_path.parent
-                    and ".migration-" in path.name
-                ):
-                    trusted_staging_path = path.with_name(f"{path.name}.trusted")
-                    path.rename(trusted_staging_path)
-                    with sqlite3.connect(path) as connection:
-                        connection.execute(
-                            "CREATE TABLE replacement_rows (value TEXT NOT NULL)"
-                        )
-                        connection.execute(
-                            "INSERT INTO replacement_rows VALUES ('replacement-row')"
-                        )
-                    replaced = True
-                return real_snapshot(
-                    path,
-                    include_sha256=include_sha256,
-                    require_single_link=require_single_link,
-                    include_timestamps=include_timestamps,
+                assert isinstance(
+                    staging,
+                    config_module._LegacySQLiteMigrationStaging,
                 )
+                if not replaced:
+                    trusted_staging_path = staging.path.with_name(
+                        f"{staging.path.name}.trusted"
+                    )
+                    staging.path.rename(trusted_staging_path)
+                    staging.path.symlink_to(victim_path)
+                    replaced = True
+                real_write(staging, backup_path)
 
             with (
                 patch.object(
-                    config_module,
-                    "_legacy_sqlite_migration_file_snapshot",
-                    side_effect=replace_staging_before_snapshot,
+                    config_module._LegacySQLiteMigrationStaging,
+                    "write_from",
+                    autospec=True,
+                    side_effect=replace_staging_before_write,
                 ),
                 exclusive_mediaforce_runtime_lock(
                     config,
                     owner_payload={"purpose": "legacy-staging-replacement"},
                 ),
-                self.assertRaisesRegex(OSError, "source content diverged"),
+                self.assertRaisesRegex(OSError, "staging identity changed"),
             ):
                 migrate_config_state(config)
 
@@ -908,6 +900,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
             self.assertIsNotNone(trusted_staging_path)
             assert trusted_staging_path is not None
             self.assertTrue(trusted_staging_path.is_file())
+            self.assertEqual(victim_path.read_bytes(), victim_bytes)
             self.assertTrue(source_path.is_file())
             self.assertFalse(destination_path.exists())
 
@@ -1870,6 +1863,10 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 expected=current_payload,
                 payload=v4_payload,
             )
+            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+                config,
+                source=source_path,
+            )
             for suffix in ("", "-wal", "-shm", "-journal"):
                 Path(f"{source_path}{suffix}").unlink()
 
@@ -1889,11 +1886,117 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 completed["publication_policy"],
                 "legacy_hardlink_without_alias",
             )
+            self.assertTrue(receipt_path.is_file())
+            self.assertFalse(source_path.parent.exists())
             with sqlite3.connect(destination_path) as connection:
                 self.assertEqual(
                     connection.execute("SELECT value FROM migration_rows").fetchall(),
                     [("v4-all-absent-row",)],
                 )
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "parent-v4-all-absent-recheck"},
+            ):
+                migrate_config_state(config)
+
+            displaced_parent = root / "configured-state.displaced"
+            destination_path.parent.rename(displaced_parent)
+            destination_path.parent.mkdir()
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "parent-v4-all-absent-rebind"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "migration authority is missing",
+                ),
+            ):
+                migrate_config_state(config)
+            self.assertFalse(destination_path.exists())
+
+    def test_migrate_config_state_publishes_receipt_before_v4_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (
+                config,
+                source_path,
+                destination_path,
+                intent_path,
+                current_payload,
+            ) = self._prepare_interrupted_cleaning_migration(
+                root,
+                name="target",
+                value="v4-receipt-row",
+            )
+            v4_payload = self._legacy_v4_migration_intent(current_payload)
+            config_module._replace_legacy_sqlite_migration_intent(
+                intent_path,
+                expected=current_payload,
+                payload=v4_payload,
+            )
+            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+                config,
+                source=source_path,
+            )
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                Path(f"{source_path}{suffix}").unlink()
+            real_replace = config_module._replace_legacy_sqlite_migration_intent
+
+            def interrupt_after_receipt(
+                    path: Path,
+                    *,
+                    expected: dict[str, object],
+                    payload: dict[str, object],
+                    before_exchange: Callable[[], None] | None = None,
+            ) -> None:
+                if (
+                    expected.get("schema_version") == 4
+                    and payload.get("schema_version") == 5
+                    and payload.get("phase") == "cleaning"
+                ):
+                    self.assertTrue(receipt_path.is_file())
+                    raise OSError("simulated post-receipt interruption")
+                real_replace(
+                    path,
+                    expected=expected,
+                    payload=payload,
+                    before_exchange=before_exchange,
+                )
+
+            with (
+                patch.object(
+                    config_module,
+                    "_replace_legacy_sqlite_migration_intent",
+                    side_effect=interrupt_after_receipt,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "parent-v4-receipt-interruption"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "could not be resumed safely",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(receipt_path.is_file())
+            displaced_parent = root / "configured-state.displaced"
+            destination_path.parent.rename(displaced_parent)
+            destination_path.parent.mkdir()
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "parent-v4-receipt-rebind"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "migration authority is missing",
+                ),
+            ):
+                migrate_config_state(config)
 
     def test_migrate_config_state_recovers_parent_v4_partial_prefix_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4559,12 +4662,12 @@ class DatabaseRuntimeTests(unittest.TestCase):
             @contextmanager
             def assert_destination_is_missing(
                     locked_source: object,
-                    staging_path: Path,
+                    staging: object,
             ) -> Iterator[None]:
                 nonlocal copy_started
                 self.assertFalse(destination_path.exists())
                 copy_started = True
-                with original_copy(locked_source, staging_path):
+                with original_copy(locked_source, staging):
                     yield
 
             with patch.object(

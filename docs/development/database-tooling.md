@@ -87,9 +87,14 @@ Mediaforce's SQLite schema.
   never removed. The source copy uses that verified SQLite snapshot while the
   write gate excludes new commits, preserving committed WAL state without
   moving sidecar files.
-  Before a staging file becomes visible, an owner-only durable `copying` intent
-  binds its reserved name, the source inode and parent, and the configured
-  destination and parent. New intents use schema version 5. They explicitly
+  Before a populated staging file becomes visible, an owner-only durable
+  `copying` intent binds its reserved name, the source inode and parent, and the
+  configured destination and parent. The observable staging pathname remains
+  bound to its original empty owner-only inode. SQLite writes the backup and
+  runs `quick_check` only inside a private temporary directory; Mediaforce then
+  copies those verified bytes through the retained staging descriptor, fsyncs
+  that inode and parent, and rejects any pathname replacement before mutation.
+  New intents use schema version 5. They explicitly
   record the cleanup policy, publication policy, any parent-v4 cleanup prefix
   that was already deleted, and the exact retained cleanup-artifact set. After
   backup, quick-check, and fsync, the intent advances to `ready` with the staged
@@ -130,7 +135,14 @@ Mediaforce's SQLite schema.
   its predecessor and verifies that identity against the retained transition
   directory descriptor. The configured parent is also rechecked before every
   source retirement, so a destination-parent swap or copying-to-ready rebind
-  stops cleanup before the legacy main is retired.
+  stops cleanup before the legacy main is retired. Before completion becomes
+  authoritative, Mediaforce also publishes an immutable migration receipt in
+  the machine-local runtime-reservation namespace, outside the replaceable
+  destination parent. Startup checks migration authority even after the legacy
+  `state/` directory has become empty: a surviving receipt or retired-source
+  quarantine without the canonical destination intent fails closed instead of
+  permitting a replacement database to be created or adopted. This also
+  upgrades the parent-v4 all-absent cleanup case on its first verified startup.
   Cleanup claims the exact legacy main first with an exclusive rename to an
   identity-derived quarantine name, syncs that namespace transition, and
   validates the claimed inode. It retains that exact quarantine as authorized

@@ -734,10 +734,11 @@ uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
 
 `derivation-status` is a read-only recovery diagnostic. It reports privacy-safe
 counts for assignment claims, attempts, terminal intents and records, verdict
-claims and intents, plus unresolved counts and `recovery_required`. An orphan
-claim, unaccepted attempt, terminal intent without its record, or verdict
-claim/intent without a terminal sets `recovery_required=true` and returns exit
-status `2`. Late observed terminal intents are counted separately and also
+claims and intents, review claims, plus unresolved counts and
+`recovery_required`. An orphan assignment claim, unaccepted attempt, terminal
+intent without its record, verdict claim/intent without a terminal, or review
+claim without its matching envelope sets `recovery_required=true` and returns
+exit status `2`. Late observed terminal intents are counted separately and also
 require recovery; the status command never performs recovery writes.
 
 Successful technical attempts remain `review_pending` until a human records an
@@ -878,10 +879,14 @@ accepts no caller-supplied result path. Before launch it atomically creates one
 immutable proposal/lane claim that binds the run nonce, authorization, proposal,
 lane, canonical runner-path digest, runner-binary digest, repository commit, and
 repository tree. A concurrent or repeated lane cannot replace that claim; a
-crash before a complete lane envelope exists leaves an unresolved terminal claim
-that cannot launch another request. A retry after the complete matching claim
-and envelope are visible validates both, re-fsyncs the envelope parent, returns
-the original decision and `reviewed_at`, and does not launch a second request.
+A crash before a complete lane envelope exists leaves an unresolved claim that
+`derivation-status` reports for recovery. A retry may launch the structured
+request again only with that exact immutable claim, including its original run
+nonce, repository identity, lane, proposal, and runner identity; it never
+publishes a replacement claim. The first valid envelope remains immutable. A
+retry after the complete matching claim and envelope are visible validates both,
+re-fsyncs the envelope parent, returns the original decision and `reviewed_at`,
+and does not launch a second request.
 A rejected review remains terminal. The review command and its
 repository/toolchain probes remain under the plan's absolute authorization
 deadline. Before claim publication, the verifier checks that the live Git commit
