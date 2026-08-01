@@ -147,7 +147,9 @@ Mediaforce's SQLite schema.
   directly or through an alias, is rejected before migration, recovery, fresh
   database creation, or adoption of an existing destination can proceed,
   regardless of whether legacy evidence remains visible. Startup checks
-  migration authority even after the
+  migration authority even when configuration is changed back to the legacy
+  database path: an existing receipt, intent, or retired-source residue blocks
+  same-path adoption or fresh creation. Startup also checks authority after the
   legacy `state/` directory has become empty: a surviving receipt or retired-source
   quarantine without the canonical destination intent fails closed instead of
   permitting a replacement database to be created or adopted. This also

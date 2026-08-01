@@ -2177,6 +2177,76 @@ class DatabaseRuntimeTests(unittest.TestCase):
                                 [("retained",)],
                             )
 
+    def test_migrate_config_state_rejects_same_path_rollback_after_completed_migration(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            runtime_reservation_dir = root / "runtime-reservations"
+            migrated_config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="migrated",
+                runtime_reservation_dir=runtime_reservation_dir,
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute(
+                    "CREATE TABLE migration_rows (value TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('authoritative')"
+                )
+
+            with exclusive_mediaforce_runtime_lock(
+                migrated_config,
+                owner_payload={"purpose": "legacy-completed-migration"},
+            ):
+                migrate_config_state(migrated_config)
+
+            receipt_path = config_module._legacy_sqlite_migration_receipt_path(
+                migrated_config,
+                source=source_path,
+            )
+            self.assertTrue(receipt_path.is_file())
+            self.assertFalse(source_path.exists())
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM migration_rows"
+                    ).fetchall(),
+                    [("authoritative",)],
+                )
+
+            rollback_config = self._legacy_migration_config(
+                root,
+                database_path=source_path,
+                name="rollback",
+                runtime_reservation_dir=runtime_reservation_dir,
+            )
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    rollback_config,
+                    owner_payload={"purpose": "legacy-same-path-rollback"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "migration authority is missing",
+                ),
+            ):
+                migrate_config_state(rollback_config)
+
+            self.assertFalse(source_path.exists())
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM migration_rows"
+                    ).fetchall(),
+                    [("authoritative",)],
+                )
+
     def test_migrate_config_state_rejects_symlinked_receipt_discovery_through_destination_parent(
             self,
     ) -> None:

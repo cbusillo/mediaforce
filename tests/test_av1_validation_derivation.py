@@ -53,6 +53,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1ValidationDerivationPlan,
     AV1ValidationDerivationPublicationDeadlineError,
     AV1ValidationDerivationReviewClaim,
+    AV1ValidationDerivationReviewEnvelope,
     AV1ValidationDerivationSourceCommitment,
     AV1ValidationDerivationTerminalRecord,
     AV1ValidationDerivationVerdictRetryMismatchError,
@@ -5220,6 +5221,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
             )
             self.assertEqual(payload["reason_code"], "invalid_durable_response")
+            self.assertEqual(payload["schema_version"], 2)
+            self.assertIs(payload["checkpoint_completion_bound"], True)
         review = build_av1_validation_derivation_review_attestation(
             proposal=proposal,
             claim=claim,
@@ -5227,10 +5230,34 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             decision=decision,
             reviewed_at=reviewed_at,
         )
-        build_av1_validation_derivation_review_envelope(
+        modern_envelope = build_av1_validation_derivation_review_envelope(
             review=review,
             evidence=evidence,
         )
+        for invalid_schema_version in (2.0, True):
+            malformed_payload = json.loads(evidence)
+            malformed_payload["schema_version"] = invalid_schema_version
+            malformed_evidence = canonical_json_bytes(malformed_payload)
+            malformed_review = build_av1_validation_derivation_review_attestation(
+                proposal=proposal,
+                claim=claim,
+                review_evidence_sha256=(
+                    f"sha256:{hashlib.sha256(malformed_evidence).hexdigest()}"
+                ),
+                decision="rejected",
+                reviewed_at=reviewed_at,
+            )
+            with (
+                self.subTest(schema_version=invalid_schema_version),
+                self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "schema version is invalid",
+                ),
+            ):
+                build_av1_validation_derivation_review_envelope(
+                    review=malformed_review,
+                    evidence=malformed_evidence,
+                )
         checkpoint = load_av1_validation_derivation_review_response_checkpoint(
             self.runtime_artifact_root,
             plan=self.plan,
@@ -5240,45 +5267,63 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         assert checkpoint is not None
         checkpoint_digest = checkpoint["payload_sha256"]
         assert isinstance(checkpoint_digest, str)
-        legacy_recovered_at = "2026-07-28T03:00:04Z"
-        legacy_evidence = build_av1_validation_derivation_review_recovery_evidence(
-            proposal=proposal,
-            claim=claim,
-            reason_code="invalid_durable_response",
-            recovered_at=legacy_recovered_at,
-            response_checkpoint_payload_sha256=checkpoint_digest,
+        self.assertEqual(
+            checkpoint["completed_at"],
+            "2026-07-28T03:00:02Z",
         )
-        legacy_review = build_av1_validation_derivation_review_attestation(
-            proposal=proposal,
-            claim=claim,
-            review_evidence_sha256=(
-                f"sha256:{hashlib.sha256(legacy_evidence).hexdigest()}"
-            ),
-            decision="rejected",
-            reviewed_at=legacy_recovered_at,
-        )
-        legacy_envelope = build_av1_validation_derivation_review_envelope(
-            review=legacy_review,
-            evidence=legacy_evidence,
-        )
-        late_legacy_evidence = (
-            build_av1_validation_derivation_review_recovery_evidence(
+
+        def legacy_envelope_at(
+                recovered_at: str,
+        ) -> AV1ValidationDerivationReviewEnvelope:
+            recovery_payload = json.loads(
+                build_av1_validation_derivation_review_recovery_evidence(
+                    proposal=proposal,
+                    claim=claim,
+                    reason_code="invalid_durable_response",
+                    recovered_at=recovered_at,
+                    response_checkpoint_payload_sha256=checkpoint_digest,
+                )
+            )
+            recovery_payload["schema_version"] = 1
+            recovery_payload.pop("checkpoint_completion_bound")
+            recovery_evidence = canonical_json_bytes(recovery_payload)
+            recovery_review = build_av1_validation_derivation_review_attestation(
                 proposal=proposal,
                 claim=claim,
-                reason_code="invalid_durable_response",
-                recovered_at=AFTER_VALID_UNTIL,
-                response_checkpoint_payload_sha256=checkpoint_digest,
+                review_evidence_sha256=(
+                    f"sha256:{hashlib.sha256(recovery_evidence).hexdigest()}"
+                ),
+                decision="rejected",
+                reviewed_at=recovered_at,
+            )
+            return build_av1_validation_derivation_review_envelope(
+                review=recovery_review,
+                evidence=recovery_evidence,
+            )
+
+        derivation_module = import_module(
+            "mediaforce.tuning.av1_validation_derivation"
+        )
+        self.assertTrue(
+            derivation_module._assert_av1_validation_derivation_review_checkpoint_authority(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                envelope=modern_envelope,
             )
         )
-        late_legacy_review = build_av1_validation_derivation_review_attestation(
-            proposal=proposal,
-            claim=claim,
-            review_evidence_sha256=(
-                f"sha256:{hashlib.sha256(late_legacy_evidence).hexdigest()}"
-            ),
-            decision="rejected",
-            reviewed_at=AFTER_VALID_UNTIL,
-        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "predates its checkpoint",
+        ):
+            write_av1_validation_derivation_review_envelope(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                envelope=legacy_envelope_at(claim.claimed_at),
+            )
         with self.assertRaisesRegex(
             AV1ValidationDerivationError,
             "legacy invalid-response recovery is outside authorization",
@@ -5288,11 +5333,60 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 plan=self.plan,
                 proposal=proposal,
                 claim=claim,
-                envelope=build_av1_validation_derivation_review_envelope(
-                    review=late_legacy_review,
-                    evidence=late_legacy_evidence,
-                ),
+                envelope=legacy_envelope_at(AFTER_VALID_UNTIL),
             )
+        equal_legacy_envelope = legacy_envelope_at(
+            str(checkpoint["completed_at"])
+        )
+        self.assertFalse(
+            derivation_module._assert_av1_validation_derivation_review_checkpoint_authority(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                envelope=equal_legacy_envelope,
+            )
+        )
+        real_publication_check = (
+            derivation_module._assert_owner_only_publication_before
+        )
+
+        def reject_legacy_envelope_after_deadline(
+                path: Path,
+                label: str,
+                *,
+                info: os.stat_result,
+                published_before: str,
+        ) -> None:
+            if label in {
+                "private derivation artifact",
+                "derivation review envelope",
+            }:
+                raise AV1ValidationDerivationPublicationDeadlineError(path, label)
+            real_publication_check(
+                path,
+                label,
+                info=info,
+                published_before=published_before,
+            )
+
+        with (
+            patch.object(
+                derivation_module,
+                "_assert_owner_only_publication_before",
+                side_effect=reject_legacy_envelope_after_deadline,
+            ),
+            self.assertRaises(AV1ValidationDerivationPublicationDeadlineError),
+        ):
+            write_av1_validation_derivation_review_envelope(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                envelope=equal_legacy_envelope,
+            )
+
+        legacy_envelope = legacy_envelope_at("2026-07-28T03:00:04Z")
         write_av1_validation_derivation_review_envelope(
             self.runtime_artifact_root,
             plan=self.plan,
@@ -5309,28 +5403,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             ),
             legacy_envelope,
         )
-        derivation_module = import_module(
-            "mediaforce.tuning.av1_validation_derivation"
-        )
-        real_publication_check = (
-            derivation_module._assert_owner_only_publication_before
-        )
-
-        def reject_legacy_envelope_after_deadline(
-                path: Path,
-                label: str,
-                *,
-                info: os.stat_result,
-                published_before: str,
-        ) -> None:
-            if label == "derivation review envelope":
-                raise AV1ValidationDerivationPublicationDeadlineError(path, label)
-            real_publication_check(
-                path,
-                label,
-                info=info,
-                published_before=published_before,
-            )
 
         with (
             patch.object(

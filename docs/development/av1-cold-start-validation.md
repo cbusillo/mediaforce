@@ -443,8 +443,10 @@ uses its exact durable response checkpoint or publishes a rejected
 runner or launches another agent. Claim-only recovery remains deadline-bound;
 a predeadline checkpoint may be sealed later only through its retained physical
 artifact and exact digest, request, response, decision, and completion-time
-bindings. Legacy `invalid_durable_response` envelopes that were already sealed
-with a later retry timestamp remain readable only when the envelope itself was
+bindings. Version-2 `invalid_durable_response` evidence explicitly records that
+its review time is checkpoint-completion-bound. Legacy version-1 envelopes with
+a retry timestamp at or after checkpoint completion remain readable only when
+the envelope itself was
 durably published before `valid_until`; they do not gain the checkpoint-based
 late-sealing exception. Any conflicting final artifact is rejected. A
 normal pre-publication failure durably removes its temporary and surfaces any
@@ -907,10 +909,13 @@ bindings. If only the claim is present, retry terminalizes the lane as a rejecte
 `interrupted_before_durable_response` recovery without launching Code. An
 invalid checkpointed response is likewise terminalized as a rejected
 `invalid_durable_response` recovery bound to the checkpoint digest and original
-completion time. A previously sealed invalid-response recovery that used its
-retry timestamp remains compatible only under the original strict envelope
-publication deadline. Therefore a completed or interrupted request can never
-be rerolled under the same claim.
+completion time, with version-2 evidence carrying an explicit
+`checkpoint_completion_bound` marker. A previously sealed version-1
+invalid-response recovery that used its retry timestamp remains compatible only
+under the original strict envelope publication deadline, including when
+second-level timestamp resolution made the retry and completion times equal.
+Therefore a completed or interrupted request can never be rerolled under the
+same claim.
 Recovery validates the runner digests already sealed by the plan, claim, and
 checkpoint; it does not require or probe the live runner executable.
 The first valid envelope remains immutable. A retry after the complete matching

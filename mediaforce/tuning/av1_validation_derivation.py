@@ -121,6 +121,7 @@ AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION = 1
 AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_SCHEMA_VERSION = 1
 AV1_VALIDATION_DERIVATION_REVIEW_RESPONSE_CHECKPOINT_SCHEMA_VERSION = 1
 AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION = 1
+AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RECOVERY_SCHEMA_VERSION = 2
 AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_RESPONSE_BYTES = 64 * 1024
 AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES = 384 * 1024
 AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES = 768 * 1024
@@ -2709,6 +2710,7 @@ def build_av1_validation_derivation_review_recovery_evidence(
             raise AV1ValidationDerivationError(
                 "AV1 derivation interrupted review recovery cannot bind a response"
             )
+        schema_version = AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION
     elif reason_code == "invalid_durable_response":
         _require_sha256(
             _required_text(
@@ -2717,13 +2719,16 @@ def build_av1_validation_derivation_review_recovery_evidence(
             ),
             "review response checkpoint digest",
         )
+        schema_version = (
+            AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RECOVERY_SCHEMA_VERSION
+        )
     else:
         raise AV1ValidationDerivationError(
             "AV1 derivation review recovery reason is invalid"
         )
     payload = {
         "schema": AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
-        "schema_version": AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "review_run_id": claim.review_run_id,
         "reviewer_token": claim.reviewer_token,
         "proposal_id": proposal.proposal_id,
@@ -2746,6 +2751,8 @@ def build_av1_validation_derivation_review_recovery_evidence(
         ),
         "recovered_at": _utc_timestamp(recovered),
     }
+    if reason_code == "invalid_durable_response":
+        payload["checkpoint_completion_bound"] = True
     return canonical_json_bytes(payload)
 
 
@@ -5271,6 +5278,14 @@ def _assert_av1_validation_derivation_review_checkpoint_authority(
         envelope
     )
     schema = evidence.get("schema")
+    schema_version = evidence.get("schema_version")
+    if (
+        schema == AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA
+        and type(schema_version) is not int
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review recovery schema version is invalid"
+        )
     checkpoint_digest: str | None = None
     if schema == AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RUN_SCHEMA:
         checkpoint_digest = _required_text(
@@ -5345,11 +5360,36 @@ def _assert_av1_validation_derivation_review_checkpoint_authority(
             raise AV1ValidationDerivationError(
                 "AV1 derivation invalid-response recovery timestamp drifted"
             )
-        if recovered_at != completed_at:
+        checkpoint_completion_bound = (
+            schema_version
+            == AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RECOVERY_SCHEMA_VERSION
+            and evidence.get("checkpoint_completion_bound") is True
+        )
+        if checkpoint_completion_bound:
+            if recovered_at != completed_at:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation checkpoint-bound invalid-response recovery timestamp drifted"
+                )
+        else:
+            if (
+                schema_version
+                != AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION
+            ):
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation invalid-response recovery provenance is invalid"
+                )
             recovered = _parse_timestamp(
                 recovered_at,
                 "review recovery timestamp",
             )
+            completed = _parse_timestamp(
+                completed_at,
+                "review response checkpoint timestamp",
+            )
+            if recovered < completed:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation legacy invalid-response recovery predates its checkpoint"
+                )
             deadline = _parse_timestamp(
                 plan.authorization.valid_until,
                 "derivation authorization deadline",
@@ -5727,7 +5767,12 @@ def _validate_av1_validation_derivation_review_recovery_evidence(
         evidence: bytes,
         review: AV1ValidationDerivationReviewAttestation,
 ) -> None:
-    _require_exact_keys(payload, {
+    schema_version = payload.get("schema_version")
+    if type(schema_version) is not int:
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review recovery schema version is invalid"
+        )
+    expected_keys = {
         "schema", "schema_version", "review_run_id", "reviewer_token",
         "proposal_id", "proposal_payload_sha256", "review_claim_id",
         "review_claim_payload_sha256", "lane", "decision",
@@ -5735,7 +5780,17 @@ def _validate_av1_validation_derivation_review_recovery_evidence(
         "review_runner_canonical_path_sha256", "review_runner_binary_sha256",
         "proposal", "review_claim", "reason_code",
         "response_checkpoint_payload_sha256", "recovered_at",
-    }, "derivation review recovery evidence")
+    }
+    if (
+        schema_version
+        == AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RECOVERY_SCHEMA_VERSION
+    ):
+        expected_keys.add("checkpoint_completion_bound")
+    _require_exact_keys(
+        payload,
+        expected_keys,
+        "derivation review recovery evidence",
+    )
     try:
         proposal_payload = object_dict(payload.get("proposal"))
         claim_payload = object_dict(payload.get("review_claim"))
@@ -5760,17 +5815,34 @@ def _validate_av1_validation_derivation_review_recovery_evidence(
     reason_code = payload.get("reason_code")
     checkpoint_digest = payload.get("response_checkpoint_payload_sha256")
     if reason_code == "interrupted_before_durable_response":
-        reason_binding_valid = checkpoint_digest is None
+        reason_binding_valid = (
+            schema_version
+            == AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION
+            and checkpoint_digest is None
+        )
     elif reason_code == "invalid_durable_response":
-        reason_binding_valid = isinstance(checkpoint_digest, str)
+        reason_binding_valid = (
+            isinstance(checkpoint_digest, str)
+            and (
+                schema_version
+                == AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION
+                or (
+                    schema_version
+                    == AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RECOVERY_SCHEMA_VERSION
+                    and payload.get("checkpoint_completion_bound") is True
+                )
+            )
+        )
         if reason_binding_valid:
             _require_sha256(checkpoint_digest, "review response checkpoint digest")
     else:
         reason_binding_valid = False
     if (
         payload.get("schema") != AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA
-        or payload.get("schema_version")
-        != AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION
+        or schema_version not in {
+            AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA_VERSION,
+            AV1_VALIDATION_DERIVATION_CHECKPOINTED_REVIEW_RECOVERY_SCHEMA_VERSION,
+        }
         or payload.get("reviewer_token") != review.reviewer_token
         or review.reviewer_token != f"agent:{review_run_id}"
         or payload.get("proposal_id") != review.proposal_id

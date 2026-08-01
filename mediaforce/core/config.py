@@ -538,17 +538,26 @@ def _migrate_legacy_sqlite_database(
         receipt_path,
         destination=destination,
     )
-    if _path_without_resolution(source) == _path_without_resolution(destination):
-        return
+    source_is_destination = (
+        _path_without_resolution(source) == _path_without_resolution(destination)
+    )
     intent_path = _legacy_sqlite_migration_intent_path(destination)
     intent_exists = _path_entry_exists(intent_path)
     receipt_exists = _path_entry_exists(receipt_path)
-    source_exists = _path_entry_exists(source)
-    destination_exists = _path_entry_exists(destination)
-    live_source_sidecar_exists = _legacy_sqlite_live_source_sidecar_exists(source)
     retired_source_residue_exists = (
         _legacy_sqlite_retired_source_residue_exists(source)
     )
+    if source_is_destination:
+        if intent_exists or receipt_exists or retired_source_residue_exists:
+            from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite migration authority is missing from the configured destination"
+            )
+        return
+    source_exists = _path_entry_exists(source)
+    destination_exists = _path_entry_exists(destination)
+    live_source_sidecar_exists = _legacy_sqlite_live_source_sidecar_exists(source)
     if intent_exists and _resume_legacy_sqlite_migration_intent(
             config,
             source,
