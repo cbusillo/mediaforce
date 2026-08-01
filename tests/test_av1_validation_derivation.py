@@ -5,6 +5,7 @@ from dataclasses import replace
 import errno
 import fcntl
 import hashlib
+from importlib import import_module, resources
 import io
 import json
 import os
@@ -2316,6 +2317,32 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
                 self.assertFalse(sentinel.exists())
 
+    def test_preregistration_bootstrap_git_environment_disables_lazy_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            _initialize_preregistration_test_repository(repository)
+            recorded_values = root / "lazy-fetch-values"
+            real_execve = os.execve
+
+            def record_execve(
+                    path: str,
+                    arguments: tuple[str, ...],
+                    environment: dict[str, str],
+            ) -> None:
+                with recorded_values.open("a", encoding="utf-8") as handle:
+                    handle.write(f"{environment['GIT_NO_LAZY_FETCH']}\n")
+                real_execve(path, arguments, environment)
+
+            with patch.object(os, "execve", new=record_execve):
+                verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                )
+
+            values = recorded_values.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(values)
+            self.assertEqual(set(values), {"1"})
+
     def test_git_authority_rejects_local_and_worktree_config_includes(self) -> None:
         for config_kind in ("local", "worktree"):
             with self.subTest(config_kind=config_kind), tempfile.TemporaryDirectory() as directory:
@@ -2369,6 +2396,51 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                         "external or symlinked Git authority",
                     ):
                         guard()
+
+    def test_git_authority_rejects_local_and_worktree_promisor_config(self) -> None:
+        for config_kind in ("local", "worktree"):
+            for configuration in (
+                    "[extensions]\n\tpartialClone = origin\n",
+                    "[remote \"origin\"]\n\tpromisor = true\n",
+            ):
+                with self.subTest(
+                        config_kind=config_kind,
+                        configuration=configuration,
+                ), tempfile.TemporaryDirectory() as directory:
+                    repository = Path(directory) / "repository"
+                    _initialize_preregistration_test_repository(repository)
+                    if config_kind == "local":
+                        with (repository / ".git" / "config").open(
+                                "a",
+                                encoding="utf-8",
+                        ) as handle:
+                            handle.write(configuration)
+                    else:
+                        _run_test_git(
+                            repository,
+                            "config",
+                            "--local",
+                            "extensions.worktreeConfig",
+                            "true",
+                        )
+                        (repository / ".git" / "config.worktree").write_text(
+                            configuration,
+                            encoding="utf-8",
+                        )
+
+                    for guard in (
+                        lambda: verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                            repository
+                        ),
+                        lambda: verify_av1_cold_start_preregistration._review_git_environment(
+                            repository_root=repository
+                        ),
+                    ):
+                        with self.assertRaisesRegex(
+                            (RuntimeError, AV1ValidationDerivationError),
+                            "external or symlinked Git authority",
+                        ):
+                            guard()
 
     def test_git_authority_rejects_nonempty_object_alternates(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2453,6 +2525,21 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "previously failed"):
                 verify_av1_cold_start_preregistration._assert_preregistration_bootstrap_authority()
         self.assertEqual(monitor.calls, 1)
+
+    def test_validate_output_rechecks_bootstrap_authority_before_print(self) -> None:
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_assert_preregistration_bootstrap_authority",
+                side_effect=(None, RuntimeError("sticky authority failure")),
+            ),
+            patch("builtins.print") as print_mock,
+            self.assertRaisesRegex(RuntimeError, "sticky authority failure"),
+        ):
+            verify_av1_cold_start_preregistration.main(
+                ["validate", str(V2_MANIFEST_PATH), "--json"]
+            )
+        print_mock.assert_not_called()
 
     def test_preregistration_bootstrap_rejects_unapproved_venv_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2682,6 +2769,187 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertNotEqual(process.returncode, 0, stdout)
             self.assertIn("changed repository authority", stderr)
             self.assertFalse(malicious_executed.exists())
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires kqueue or inotify",
+    )
+    def test_preregistration_snapshot_binds_resources_helpers_and_source_defaults(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            source_root = Path(
+                verify_av1_cold_start_preregistration.__file__
+            ).resolve().parents[1]
+            shutil.copytree(
+                source_root / "mediaforce",
+                repository / "mediaforce",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            (repository / "scripts").mkdir()
+            shutil.copyfile(
+                source_root / "scripts" / "verify_av1_cold_start_preregistration.py",
+                repository / "scripts" / "verify_av1_cold_start_preregistration.py",
+            )
+            (repository / "config").mkdir()
+            shutil.copyfile(
+                source_root / "config" / "defaults.toml",
+                repository / "config" / "defaults.toml",
+            )
+            for filename in ("hatch_build.py", "pyproject.toml"):
+                shutil.copyfile(source_root / filename, repository / filename)
+            for arguments in (
+                ("init", "-q"),
+                (
+                    "add",
+                    "config/defaults.toml",
+                    "hatch_build.py",
+                    "mediaforce",
+                    "pyproject.toml",
+                    "scripts",
+                ),
+                ("commit", "-qm", "bound snapshot fixture"),
+            ):
+                _run_test_git(repository, *arguments)
+
+            monitor = verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                repository,
+                retain_authority_monitor=True,
+            )
+            self.assertIsInstance(
+                monitor,
+                verify_av1_cold_start_preregistration._RepositoryAuthorityMonitor,
+            )
+            assert isinstance(
+                monitor,
+                verify_av1_cold_start_preregistration._RepositoryAuthorityMonitor,
+            )
+            snapshot = Path(monitor.bound_snapshot_directory())
+            self.assertNotEqual(
+                os.path.commonpath((repository.resolve(), snapshot)),
+                str(repository.resolve()),
+            )
+            self.assertEqual(stat.S_IMODE(snapshot.stat().st_mode), 0o700)
+            source_map = monitor.bound_python_sources()
+            self.assertEqual(
+                Path(source_map["mediaforce.core.config"][0]),
+                snapshot / "mediaforce" / "core" / "config.py",
+            )
+
+            authority_paths = (
+                Path("config/defaults.toml"),
+                Path("mediaforce/core/_process_deadline.py"),
+                Path("mediaforce/core/db_migration_scripts/env.py"),
+                Path("mediaforce/core/sql/schema.sql"),
+                Path("mediaforce/package_defaults/defaults.toml"),
+            )
+            original_payloads = {
+                relative_path: (repository / relative_path).read_bytes()
+                for relative_path in authority_paths
+            }
+            saved_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == "mediaforce" or name.startswith("mediaforce.")
+            }
+            saved_meta_path = list(sys.meta_path)
+            bound_config = None
+            bound_migrations = None
+            bound_process_control = None
+            try:
+                for name in tuple(saved_modules):
+                    del sys.modules[name]
+                verify_av1_cold_start_preregistration._install_bound_mediaforce_importer(
+                    monitor
+                )
+                bound_config = import_module("mediaforce.core.config")
+                bound_migrations = import_module("mediaforce.core.db_migrations")
+                bound_process_control = import_module("mediaforce.core.process_control")
+                for relative_path in authority_paths:
+                    (repository / relative_path).write_bytes(
+                        b"mutable checkout replacement\n"
+                    )
+
+                self.assertEqual(
+                    Path(bound_config.__file__),
+                    snapshot / "mediaforce" / "core" / "config.py",
+                )
+                self.assertEqual(
+                    bound_config.DEFAULT_CONFIG_PATH,
+                    snapshot / "config" / "defaults.toml",
+                )
+                self.assertEqual(
+                    resources.files("mediaforce.package_defaults")
+                    .joinpath("defaults.toml")
+                    .read_bytes(),
+                    original_payloads[Path("mediaforce/package_defaults/defaults.toml")],
+                )
+                self.assertEqual(
+                    resources.files("mediaforce.core")
+                    .joinpath("sql")
+                    .joinpath("schema.sql")
+                    .read_bytes(),
+                    original_payloads[Path("mediaforce/core/sql/schema.sql")],
+                )
+                with bound_migrations._alembic_script_location() as script_location:
+                    self.assertEqual(
+                        Path(script_location),
+                        snapshot / "mediaforce" / "core" / "db_migration_scripts",
+                    )
+                    self.assertEqual(
+                        (Path(script_location) / "env.py").read_bytes(),
+                        original_payloads[
+                            Path("mediaforce/core/db_migration_scripts/env.py")
+                        ],
+                    )
+                result = bound_process_control.run_command(
+                    [sys.executable, "-c", "print('bound-helper')"],
+                    process_controller=bound_process_control.ManagedProcessController(),
+                )
+                self.assertEqual(result.stdout, "bound-helper\n")
+                self.assertEqual(
+                    (snapshot / "config" / "defaults.toml").read_bytes(),
+                    original_payloads[Path("config/defaults.toml")],
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "detected changed Git metadata",
+                ):
+                    monitor.assert_quiet()
+            finally:
+                for relative_path, payload in original_payloads.items():
+                    (repository / relative_path).write_bytes(payload)
+                sys.meta_path[:] = saved_meta_path
+                for name in tuple(sys.modules):
+                    if name == "mediaforce" or name.startswith("mediaforce."):
+                        del sys.modules[name]
+                sys.modules.update(saved_modules)
+                monitor.close()
+            self.assertFalse(snapshot.exists())
+
+    def test_preregistration_bootstrap_rejects_intermediate_execution_symlink(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            _initialize_preregistration_test_repository(repository)
+            external_tree = root / "external-tree"
+            external_tree.mkdir()
+            (repository / "mediaforce" / "nested").symlink_to(
+                external_tree,
+                target_is_directory=True,
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "symlinked execution authority",
+            ):
+                verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                )
 
     def test_derivation_review_checks_environment_before_claim(self) -> None:
         args = SimpleNamespace(
@@ -4284,6 +4552,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(environment["GIT_ATTR_NOSYSTEM"], "1")
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], "/dev/null")
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(environment["GIT_NO_LAZY_FETCH"], "1")
         self.assertEqual(environment["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(environment["GIT_OPTIONAL_LOCKS"], "0")
         self.assertEqual(

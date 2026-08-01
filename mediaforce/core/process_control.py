@@ -1,14 +1,16 @@
 import errno
 import os
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
+from typing import BinaryIO
 
 
 class ProcessCancelledError(RuntimeError):
@@ -34,6 +36,165 @@ class _ContainmentReportedUnavailableError(ProcessDeadlineEnforcementError):
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
 _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
+_PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES = 1024 * 1024
+
+
+def _process_deadline_helper_state(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_process_deadline_helper_bytes() -> bytes:
+    helper_path = os.path.join(
+        os.path.dirname(__file__),
+        "_process_deadline.py",
+    )
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ProcessDeadlineEnforcementError(
+            "Managed process deadline helper cannot be captured safely."
+        )
+    descriptor = -1
+    try:
+        path_info = os.stat(helper_path, follow_symlinks=False)
+        if (
+            stat.S_ISLNK(path_info.st_mode)
+            or not stat.S_ISREG(path_info.st_mode)
+            or path_info.st_size > _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES
+        ):
+            raise ProcessDeadlineEnforcementError(
+                "Managed process deadline helper is unsafe."
+            )
+        descriptor = os.open(
+            helper_path,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+        )
+        descriptor_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+            or descriptor_info.st_size != path_info.st_size
+        ):
+            raise ProcessDeadlineEnforcementError(
+                "Managed process deadline helper changed while it was captured."
+            )
+        payload = bytearray()
+        while len(payload) <= _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES + 1),
+            )
+            if not chunk:
+                break
+            payload.extend(chunk)
+        final_descriptor_info = os.fstat(descriptor)
+        final_path_info = os.stat(helper_path, follow_symlinks=False)
+        if (
+            len(payload) > _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES
+            or _process_deadline_helper_state(descriptor_info)
+            != _process_deadline_helper_state(final_descriptor_info)
+            or _process_deadline_helper_state(path_info)
+            != _process_deadline_helper_state(final_path_info)
+        ):
+            raise ProcessDeadlineEnforcementError(
+                "Managed process deadline helper changed while it was captured."
+            )
+        return bytes(payload)
+    except OSError as exc:
+        raise ProcessDeadlineEnforcementError(
+            "Managed process deadline helper is unavailable."
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _capture_process_deadline_helper(payload: bytes) -> BinaryIO:
+    helper_file = tempfile.TemporaryFile(mode="w+b")
+    descriptor = helper_file.fileno()
+    try:
+        os.fchmod(descriptor, 0o600)
+        descriptor_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_nlink != 0
+            or stat.S_IMODE(descriptor_info.st_mode) & 0o077
+        ):
+            raise ProcessDeadlineEnforcementError(
+                "Managed process deadline helper cannot retain private bytes."
+            )
+        written = 0
+        while written < len(payload):
+            count = os.write(descriptor, payload[written:])
+            if count <= 0:
+                raise ProcessDeadlineEnforcementError(
+                    "Managed process deadline helper could not retain private bytes."
+                )
+            written += count
+        os.fsync(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        return helper_file
+    except BaseException:
+        helper_file.close()
+        raise
+
+
+def _process_deadline_helper_descriptor_path(descriptor: int) -> str:
+    if sys.platform == "darwin":
+        return f"/dev/fd/{descriptor}"
+    if sys.platform.startswith("linux"):
+        return f"/proc/self/fd/{descriptor}"
+    raise ProcessDeadlineEnforcementError(
+        "Managed process deadline helper requires descriptor execution support."
+    )
+
+
+_PROCESS_DEADLINE_HELPER_BYTES: bytes | None
+if sys.platform == "darwin" or sys.platform.startswith("linux"):
+    _PROCESS_DEADLINE_HELPER_BYTES = _read_process_deadline_helper_bytes()
+else:
+    _PROCESS_DEADLINE_HELPER_BYTES = None
+
+
+@contextmanager
+def _retained_process_deadline_helper() -> Iterator[tuple[int, str]]:
+    payload = _PROCESS_DEADLINE_HELPER_BYTES
+    if payload is None:
+        raise ProcessDeadlineEnforcementError(
+            "Managed process deadline helper is unavailable."
+        )
+    try:
+        helper_file = _capture_process_deadline_helper(payload)
+    except OSError as exc:
+        raise ProcessDeadlineEnforcementError(
+            "Managed process deadline helper is unavailable."
+        ) from exc
+    try:
+        descriptor = helper_file.fileno()
+        try:
+            helper_info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(helper_info.st_mode)
+                or helper_info.st_nlink != 0
+            ):
+                raise ProcessDeadlineEnforcementError(
+                    "Managed process deadline helper is unavailable."
+                )
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        except OSError as exc:
+            raise ProcessDeadlineEnforcementError(
+                "Managed process deadline helper is unavailable."
+            ) from exc
+        yield descriptor, _process_deadline_helper_descriptor_path(descriptor)
+    finally:
+        helper_file.close()
 
 
 class ManagedProcessController:
@@ -567,25 +728,25 @@ def run_command(
         raise ProcessDeadlineEnforcementError(
             "Managed process containment is unavailable."
         )
-    deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
-    try:
-        parent_liveness_descriptor, parent_liveness_write_descriptor = os.pipe()
-    except BaseException:
-        os.close(deadline_status_descriptor)
-        os.close(deadline_status_write_descriptor)
-        raise
-    helper_path = Path(__file__).with_name("_process_deadline.py")
-    process_cmd = [
-        sys.executable,
-        "-I",
-        str(helper_path),
-        str(process_deadline_ns if process_deadline_ns is not None else -1),
-        str(deadline_status_write_descriptor),
-        str(parent_liveness_descriptor),
-        "--",
-        *cmd,
-    ]
-    try:
+    with _retained_process_deadline_helper() as (helper_descriptor, helper_path):
+        deadline_status_descriptor, deadline_status_write_descriptor = os.pipe()
+        try:
+            parent_liveness_descriptor, parent_liveness_write_descriptor = os.pipe()
+        except BaseException:
+            os.close(deadline_status_descriptor)
+            os.close(deadline_status_write_descriptor)
+            raise
+        process_cmd = [
+            sys.executable,
+            "-I",
+            "-S",
+            helper_path,
+            str(process_deadline_ns if process_deadline_ns is not None else -1),
+            str(deadline_status_write_descriptor),
+            str(parent_liveness_descriptor),
+            "--",
+            *cmd,
+        ]
         try:
             process = subprocess.Popen(
                 process_cmd,
@@ -598,6 +759,7 @@ def run_command(
                 start_new_session=True,
                 close_fds=True,
                 pass_fds=(
+                    helper_descriptor,
                     deadline_status_write_descriptor,
                     parent_liveness_descriptor,
                 ),
@@ -606,97 +768,98 @@ def run_command(
             os.close(deadline_status_descriptor)
             os.close(deadline_status_write_descriptor)
             os.close(parent_liveness_descriptor)
+            os.close(parent_liveness_write_descriptor)
             raise
-        os.close(deadline_status_write_descriptor)
-        os.close(parent_liveness_descriptor)
-        attached = False
-        containment_finalized = False
-        status_monitor = _ContainmentStatusMonitor(
-            status_descriptor=deadline_status_descriptor,
-            process_controller=process_controller,
-            process=process,
+    os.close(deadline_status_write_descriptor)
+    os.close(parent_liveness_descriptor)
+    attached = False
+    containment_finalized = False
+    status_monitor = _ContainmentStatusMonitor(
+        status_descriptor=deadline_status_descriptor,
+        process_controller=process_controller,
+        process=process,
+    )
+    status_monitor.start()
+    try:
+        process_controller.attach(process, terminate_process_group=True)
+        attached = True
+        stdout, stderr = _communicate_with_containment_monitor(
+            process,
+            cmd=cmd,
+            input_text=input_text,
+            timeout=timeout,
+            monitor=status_monitor,
         )
-        status_monitor.start()
-        try:
-            process_controller.attach(process, terminate_process_group=True)
-            attached = True
-            stdout, stderr = _communicate_with_containment_monitor(
-                process,
-                cmd=cmd,
-                input_text=input_text,
-                timeout=timeout,
-                monitor=status_monitor,
+        if not status_monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
+            raise ProcessDeadlineEnforcementError(
+                "Managed process containment status is unavailable."
             )
-            if not status_monitor.wait(_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS):
-                raise ProcessDeadlineEnforcementError(
-                    "Managed process containment status is unavailable."
-                )
-            status_error = status_monitor.error()
-            if status_error is not None:
-                raise status_error
-            deadline_status = status_monitor.status()
-            containment_finalized = True
-            if deadline_status == b"E":
-                raise ProcessDeadlineExpiredError(
-                    "Process authorization deadline expired."
-                )
-            process_controller.throw_if_cancelled()
-            completed = subprocess.CompletedProcess(
+        status_error = status_monitor.error()
+        if status_error is not None:
+            raise status_error
+        deadline_status = status_monitor.status()
+        containment_finalized = True
+        if deadline_status == b"E":
+            raise ProcessDeadlineExpiredError(
+                "Process authorization deadline expired."
+            )
+        process_controller.throw_if_cancelled()
+        completed = subprocess.CompletedProcess(
+            cmd,
+            process.returncode,
+            stdout,
+            stderr,
+        )
+        if check and completed.returncode:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
                 cmd,
-                process.returncode,
-                stdout,
-                stderr,
+                output=stdout,
+                stderr=stderr,
             )
-            if check and completed.returncode:
-                raise subprocess.CalledProcessError(
-                    completed.returncode,
-                    cmd,
-                    output=stdout,
-                    stderr=stderr,
+    except BaseException as exc:
+        cleanup_succeeded = containment_finalized
+        controller_cleared = False
+        if not containment_finalized:
+            if status_monitor.error() is exc:
+                cleanup_succeeded = _finish_containment_status_failure(
+                    monitor=status_monitor,
+                    process=process,
+                    error=exc,
                 )
-        except BaseException as exc:
-            cleanup_succeeded = containment_finalized
-            controller_cleared = False
-            if not containment_finalized:
-                if status_monitor.error() is exc:
-                    cleanup_succeeded = _finish_containment_status_failure(
-                        monitor=status_monitor,
-                        process=process,
-                        error=exc,
-                    )
-                else:
-                    cleanup_succeeded = _terminate_and_reap_managed_process(
-                        process_controller=process_controller,
-                        process=process,
-                        monitor=status_monitor,
-                        attached=attached,
-                        error=exc,
-                    )
-                if not cleanup_succeeded:
-                    try:
-                        process_controller.clear(
-                            process,
-                            cleanup_unproven=True,
-                        )
-                        controller_cleared = True
-                    except BaseException as cleanup_error:
-                        _add_managed_process_cleanup_note(exc, cleanup_error)
-                    _add_managed_process_cleanup_note(
-                        exc,
-                        RuntimeError(
-                            "managed process containment cleanup did not complete"
-                        ),
-                    )
-            if not controller_cleared:
+            else:
+                cleanup_succeeded = _terminate_and_reap_managed_process(
+                    process_controller=process_controller,
+                    process=process,
+                    monitor=status_monitor,
+                    attached=attached,
+                    error=exc,
+                )
+            if not cleanup_succeeded:
                 try:
                     process_controller.clear(
                         process,
-                        cleanup_unproven=not cleanup_succeeded,
+                        cleanup_unproven=True,
                     )
+                    controller_cleared = True
                 except BaseException as cleanup_error:
                     _add_managed_process_cleanup_note(exc, cleanup_error)
-            raise
-        process_controller.clear(process, cleanup_unproven=False)
-        return completed
+                _add_managed_process_cleanup_note(
+                    exc,
+                    RuntimeError(
+                        "managed process containment cleanup did not complete"
+                    ),
+                )
+        if not controller_cleared:
+            try:
+                process_controller.clear(
+                    process,
+                    cleanup_unproven=not cleanup_succeeded,
+                )
+            except BaseException as cleanup_error:
+                _add_managed_process_cleanup_note(exc, cleanup_error)
+        raise
     finally:
         os.close(parent_liveness_write_descriptor)
+    process_controller.clear(process, cleanup_unproven=False)
+    return completed

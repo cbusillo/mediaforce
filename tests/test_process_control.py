@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 import errno
 import os
@@ -82,6 +83,57 @@ class ProcessControlTests(TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "hello")
+
+    @skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires retained descriptor helper execution",
+    )
+    def test_managed_command_uses_captured_helper_after_source_path_swap(self) -> None:
+        helper_path = Path(process_control_module.__file__).with_name(
+            "_process_deadline.py"
+        )
+        original_helper = helper_path.read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            substituted_marker = Path(directory) / "substituted-helper-executed"
+            helper_path.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(substituted_marker)!r}).write_text('executed')\n"
+                "raise SystemExit(91)\n",
+                encoding="utf-8",
+            )
+            try:
+                result = run_command(
+                    [sys.executable, "-c", "print('captured-helper')"],
+                    process_controller=ManagedProcessController(),
+                )
+            finally:
+                helper_path.write_bytes(original_helper)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "captured-helper\n")
+        self.assertFalse(substituted_marker.exists())
+
+    @skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires retained descriptor helper execution",
+    )
+    def test_concurrent_managed_commands_use_independent_helper_descriptors(self) -> None:
+        command_count = 16
+        start_barrier = threading.Barrier(command_count)
+
+        def run_managed_command(index: int) -> str:
+            start_barrier.wait(timeout=5)
+            result = run_command(
+                [sys.executable, "-c", f"print({index})"],
+                process_controller=ManagedProcessController(),
+            )
+            self.assertEqual(result.returncode, 0)
+            return result.stdout
+
+        with ThreadPoolExecutor(max_workers=command_count) as executor:
+            results = list(executor.map(run_managed_command, range(command_count)))
+
+        self.assertEqual(results, [f"{index}\n" for index in range(command_count)])
 
     def test_schedule_cancellation_preserves_specific_error(self) -> None:
         controller = ManagedProcessController()
@@ -1224,15 +1276,30 @@ class ProcessControlTests(TestCase):
         self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
         self.assertTrue(popen_mock.call_args.kwargs["close_fds"])
         self.assertEqual(
+            popen_mock.call_args.args[0][1:3],
+            ["-I", "-S"],
+        )
+        helper_descriptor = popen_mock.call_args.kwargs["pass_fds"][0]
+        expected_helper_path = (
+            f"/dev/fd/{helper_descriptor}"
+            if sys.platform == "darwin"
+            else f"/proc/self/fd/{helper_descriptor}"
+        )
+        self.assertEqual(popen_mock.call_args.args[0][3], expected_helper_path)
+        self.assertNotIn(
+            "_process_deadline.py",
+            popen_mock.call_args.args[0][3],
+        )
+        self.assertEqual(
             popen_mock.call_args.args[0][-3:],
             ["--", "echo", "ok"],
         )
         self.assertEqual(
             popen_mock.call_args.kwargs["pass_fds"],
-            (102, 103),
+            (helper_descriptor, 102, 103),
         )
         self.assertEqual(
-            popen_mock.call_args.args[0][4:6],
+            popen_mock.call_args.args[0][5:7],
             ["102", "103"],
         )
         self.assertNotIn(104, popen_mock.call_args.kwargs["pass_fds"])

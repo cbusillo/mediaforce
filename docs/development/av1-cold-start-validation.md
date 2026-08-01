@@ -243,14 +243,17 @@ live identity resolver into the runtime. Each resolution uses an independent
 bounded Git probe, so cancellation or deadline state on the media controller
 cannot suppress publication of an immutable stopped or expired outcome. The
 Git environment is explicit and non-inherited: global and system config are
-disabled, replacement refs are disabled, and optional index locks are disabled
-so every read probe is non-writing. The verifier validates the checkout's main
+disabled, replacement refs are disabled, lazy fetch is disabled with
+`GIT_NO_LAZY_FETCH=1`, and optional index locks are disabled so every read probe
+is non-writing and cannot invoke a remote helper. The verifier validates the
+checkout's main
 or linked-worktree metadata, pins `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` to that one authority tuple, disables system and configured
 attribute and exclude files, and disables repository-configured fsmonitor and
 hook paths for these probes. Local and per-worktree config remain readable only
-when self-contained: any `include`/`includeIf` directive fails closed, as does a
-nonempty `objects/info/alternates` file. Nested symlinks anywhere in the current
+when self-contained: any `include`/`includeIf`, promisor, or partial-clone
+directive fails closed, as does a nonempty `objects/info/alternates` file.
+Nested symlinks anywhere in the current
 Git directory or authoritative shared metadata fail closed; the validated
 top-level linked-worktree `.git` pointer remains the only indirection. Each
 repository-identity or review-bundle transaction creates one
@@ -279,9 +282,13 @@ Clean-state proof does not invoke `diff`, `status`, text conversion, clean
 filters, or process filters. Binary `ls-files --stage -z` and `ls-tree -r -z`
 snapshots must contain the same stage-zero mode/path/blob tuples, while binary
 `ls-files -v -z` must report ordinary `H` state for every path. The verifier then
-opens each regular worktree file directly with no-follow semantics, or reads the
-target bytes for a tracked symlink, checks its mode and stable descriptor/path
-identity, and computes Git's canonical `blob <size>\0<bytes>` object ID. The
+opens each regular worktree file through retained descriptor-relative,
+no-follow path components, checks its mode and stable descriptor/path identity,
+and computes Git's canonical `blob <size>\0<bytes>` object ID. The bootstrap
+rejects every symlinked component or tracked symlink entry beneath
+`mediaforce/`, `scripts/`, and `config/defaults.toml` before monitoring or
+direct proof, so an intermediate directory cannot route sources, resources, or
+helpers outside the watched authority. The
 object-ID width selects repository SHA-1 or SHA-256. Dirty bytes therefore
 cannot be normalized back to the index by a configured filter, and a malicious
 filter command is never executed. NUL-delimited path output remains binary until
@@ -303,29 +310,36 @@ stdlib-only bootstrap establishes one recursive metadata and import-tree monitor
 before its first fixed Git probe. That monitor remains active across every
 bootstrap probe, all repository-local imports, and the complete command
 execution, then performs a final fail-closed drain before process exit. After
-the raw exact-object proof, the bootstrap retains the already-read bytes for
-every tracked `mediaforce/**/*.py` module and installs an in-memory finder and
-loader before importing the package. Source compilation and `get_source()` use
-those bound bytes; module `__file__` and package resource readers still point at
-the canonical checkout, and unknown later-created `mediaforce` modules cannot
-fall through to the mutable worktree. A swap-and-restore during import can only
+the raw exact-object proof, the bootstrap retains all tracked `mediaforce`
+bytes, including package resources, Alembic environment and version scripts,
+SQL, and `_process_deadline.py`, plus `config/defaults.toml` and the
+source-default resolver markers. It materializes those exact bytes into an
+owner-only private snapshot outside the repository, monitors that snapshot
+through command completion, and removes it only after the monitor closes. The
+in-memory finder and loader compile from those bound bytes; module `__file__`,
+package `__path__`, package resource readers, Alembic script locations, SQL
+resources, and `DEFAULT_CONFIG_PATH` all resolve inside the private snapshot
+rather than the mutable checkout. Unknown later-created `mediaforce` modules
+cannot fall through to the worktree. A swap-and-restore during import can only
 execute the previously bound authoritative source, while the retained monitor
 makes the command fail closed. Bootstrap-authority failure is sticky and is
 reasserted before runtime locks, artifact publication callbacks, review launch,
-and public success output, so catching one authority exception cannot permit a
-later side effect. Transient directory swaps, in-place Git metadata rewrites,
-and package replace-and-restore attempts therefore remain observable after the
-last bootstrap probe. It refuses modified,
-exceptional-index, untracked, or ignored state anywhere under `mediaforce/` or
-`scripts/`; it also rejects
-repository bytecode caches and disables bytecode writes. The bootstrap removes
-the repository and script directories from normal module search, adds only
-trusted interpreter paths plus the canonical checkout's `.venv` site-packages,
-requires the running interpreter to use an approved `.venv/bin/python*` launcher
-whose opened binary is the same inode as canonical `.venv/bin/python` and the
-interpreter's base executable, requires any `VIRTUAL_ENV` declaration to match
-that environment, and explicitly binds the canonical `mediaforce` source
-snapshot. An ignored `scripts/argparse.py`,
+and immediately before every direct successful validation or report output, so
+catching one authority exception cannot permit a later side effect. Transient
+directory swaps, in-place Git metadata rewrites, and package replace-and-restore
+attempts therefore remain observable after the last bootstrap probe. It refuses
+modified, exceptional-index, untracked, or ignored state anywhere under
+`mediaforce/` or `scripts/`; it also rejects repository bytecode caches and
+disables bytecode writes. The bootstrap removes the repository and script
+directories from normal module search, adds only trusted interpreter paths plus
+the canonical checkout's `.venv` site-packages, requires the running interpreter
+to use an approved `.venv/bin/python*` launcher whose opened binary is the same
+inode as canonical `.venv/bin/python` and the interpreter's base executable,
+requires any `VIRTUAL_ENV` declaration to match that environment, and explicitly
+binds the canonical `mediaforce` source snapshot. Under the owner-local threat
+model, that canonical `.venv`/site-packages installation and the external Every
+Code binary remain trusted; the verifier does not broaden its scope by hashing
+dependencies or copying the Code runner. An ignored `scripts/argparse.py`,
 Python source, bytecode, native extension, or package substitution therefore
 cannot execute before the exact-object authority proof. Operators must remove
 those artifacts before invoking this security-sensitive runner.
@@ -676,6 +690,13 @@ if the parent operator process is stopped. If a group leader exits while its
 descendants remain, the watchdog keeps policing the process group until every
 descendant exits or the deadline kills the group. A dedicated status pipe
 reports explicit clean completion, deadline expiry, or enforcement failure.
+When `mediaforce.core.process_control` is imported from the bound snapshot, it
+captures `_process_deadline.py` once into an owner-only anonymous, unlinked
+descriptor. Managed launches pass that descriptor explicitly and execute it with
+`python -I -S` through `/dev/fd/<fd>` on macOS or `/proc/self/fd/<fd>` on Linux;
+they never launch the mutable repository helper pathname. A later helper-path
+swap therefore cannot change watchdog code, and no site initialization runs in
+the helper interpreter.
 The watchdog sends the deadline kill before reporting expiry; a kill error other
 than an already-absent process group reports enforcement unavailable instead.
 The parent consumes that pipe on a dedicated monitor while `communicate()` runs

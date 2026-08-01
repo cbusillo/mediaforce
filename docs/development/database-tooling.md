@@ -89,56 +89,66 @@ Mediaforce's SQLite schema.
   moving sidecar files.
   Before a staging file becomes visible, an owner-only durable `copying` intent
   binds its reserved name, the source inode and parent, and the configured
-  destination and parent. After backup, quick-check, and fsync, that intent is
-  atomically finalized to `ready` with the staged inode and exact backup bytes.
-  The configured destination parent is then retained by descriptor. Publication
-  links the staging inode through that descriptor, fsyncs it, validates the
-  exact bytes through the platform-pinned directory path, and atomically advances
-  the version-4 intent to `cleaning` with the exact identity, size, timestamps,
-  ownership, mode, guard-origin flag, and SHA-256 for the main database and every
-  bound source sidecar. The configured
-  parent is rechecked before every source retirement. A destination-parent swap
-  therefore rolls back publication or stops cleanup before the legacy main is
-  retired. Cleanup claims the exact legacy main first with an exclusive rename
-  to an identity-derived quarantine name, syncs that namespace transition, and
-  validates the claimed inode. It then retains that exact quarantine as
-  authorized migration residue rather than unlinking an unbound pathname; WAL,
-  SHM, and the rollback journal follow in the same order. Live cleanup consumes
-  the durable
-  `cleaning` manifest rather than recapturing current sidecar metadata: every
-  main/sidecar inode must still match all recorded fields and its descriptor-
-  read SHA-256 before its exclusive claim and again while quarantined; only the
-  expected rename-induced ctime change is relaxed afterward. A
-  crash-surviving quarantine entry
-  is durable cleanup progress, not an orphan, and recovery validates and retains
-  it against the intent. If another inode appears between the final live-name
-  check and the claim, cleanup stops with the claimed inode retained in its
-  deterministic quarantine and the replacement is preserved. A missing main
-  file therefore proves cleanup started. Recovery
-  preflights every live or quarantined sidecar against the `cleaning` manifest,
-  so a replacement is preserved and fails closed rather than being mistaken for
-  an orphan. While the main still exists, an existing `cleaning` manifest keeps
-  its sidecar lineage; only an exact prior inode or a missing path reserved anew
-  by the current guard can be adopted. Recovery
-  discards only an intent-bound partial stage; after publication it requires a
-  fresh gated backup while the main still exists, or the exact descriptor-bound
-  destination plus sidecar manifest once the main has been retired, before
-  completing source/staging cleanup and intent removal. The retained source
-  authority rechecks that the main and all three live sidecar names remain
-  absent while the exact manifest-derived retirement-quarantine set remains
-  present and bound to its expected inode and digest through final intent
-  deletion. Intent removal performs another retained-source check after its
-  directory fsync and restores the exact cleaning intent through the already-
-  bound destination directory descriptor on failure. A later
-  startup also fails closed if both legacy and configured databases exist
-  without a resumable intent. Version-2 `ready` intents and version-3 `cleaning`
-  intents predate the digest manifest. When their live main still exists, gated
-  recovery upgrades version 3 to the version-4 digest format before retiring
-  anything. When the main is already retired, recovery preserves and logs any
-  stat-bound main quarantine plus unidentified sidecar or quarantine artifacts
-  instead of deleting data it cannot authorize. Parent replacement, source
-  recreation, malformed legacy quarantine state, metadata-only divergence, or
-  any other ambiguous state fails closed.
+  destination and parent. New intents use schema version 5. They explicitly
+  record the cleanup policy, publication policy, any parent-v4 cleanup prefix
+  that was already deleted, and the exact retained cleanup-artifact set. After
+  backup, quick-check, and fsync, the intent advances to `ready` with the staged
+  inode and exact backup bytes.
+  Intent transitions never overwrite or unlink the canonical pathname. The
+  successor is first published under a digest-derived transition name, both
+  files are opened and bound by descriptor, and macOS `RENAME_SWAP` or Linux
+  `RENAME_EXCHANGE` atomically exchanges them. The canonical name receives the
+  successor while the transition name retains the exact predecessor as a
+  tombstone. Recovery validates the transition graph and resumes either the
+  prepared pre-exchange or claimed post-exchange state. If either pathname is
+  replaced at the exchange boundary, descriptor/inode checks fail while the
+  trusted and replacement artifacts remain present. Finalization is another
+  exchange to a durable schema-v5 `complete` intent; the canonical completion
+  record is retained and revalidated on later startups instead of being removed.
+  Scratch preparation files and interrupted copy files are inert residue: they
+  are never deleted by pathname, never become authoritative without an
+  exclusive publication step, and a later attempt uses a fresh reserved name.
+  The configured destination parent is retained by descriptor. Fresh schema-v5
+  publication exclusively renames the staging inode to the destination, fsyncs
+  the directory, and validates the exact inode and bytes through the
+  platform-pinned directory path. A destination that wins the exclusive rename
+  is preserved alongside the staging file and causes a fail-closed result; there
+  is no validation-then-unlink rollback. Older v2-v4 hardlink publications are
+  still recognized. A surviving legacy staging alias remains linked to the
+  destination and is recorded by the publication policy rather than removed.
+  The configured parent is rechecked before every source retirement, so a
+  destination-parent swap stops cleanup before the legacy main is retired.
+  Cleanup claims the exact legacy main first with an exclusive rename to an
+  identity-derived quarantine name, syncs that namespace transition, and
+  validates the claimed inode. It retains that exact quarantine as authorized
+  migration residue; WAL, SHM, and the rollback journal follow in order. Live
+  cleanup consumes the durable `cleaning` manifest rather than recapturing
+  current sidecar metadata: every main/sidecar inode must still match all
+  recorded fields and its descriptor-read SHA-256 before its exclusive claim and
+  again while quarantined; only the expected rename-induced ctime change is
+  relaxed afterward. A crash-surviving quarantine is durable progress. If
+  another inode appears at a claim or final verification boundary, cleanup stops
+  with both the trusted quarantine and replacement preserved.
+  Schema-v4 `cleaning` intents from parent `8236711` are upgraded to version 5
+  before any further mutation. Recovery accepts only states that implementation
+  could have made: an absent cleanup prefix followed by at most one in-flight
+  quarantine and then untouched live suffixes, including the durable all-absent
+  window, or the later retained-quarantine prefix followed by live suffixes.
+  Incomplete v4 cleanup must still have the original hardlink staging alias;
+  after complete source cleanup either the alias or the parent's already-removed
+  alias state is valid. Replacements, live/quarantine conflicts, out-of-order
+  progress, unidentified retirement names, and mismatched digests fail closed.
+  The v5 manifest records the exact legacy-absent prefix and exact quarantines
+  that the new retained policy must produce, so final completion can recheck the
+  namespace without guessing from absence.
+  Version-2 `ready` and version-3 `cleaning` intents remain supported. When the
+  live main exists, gated recovery captures a schema-v5 digest manifest before
+  retirement. When the main is already retired, recovery snapshots and preserves
+  the exact stat/content-bound legacy residue rather than deleting data it cannot
+  authorize. Parent replacement, source recreation, malformed legacy quarantine
+  state, metadata-only divergence, or any other ambiguous state fails closed.
+  A later startup also fails closed if both legacy and configured databases exist
+  without a resumable intent.
   Startup reserves the published destination only after migration or recovery
   returns.
 - SQLite URLs use URI modes explicitly: `rwc` for first-use creation, `rw` for

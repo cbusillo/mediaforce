@@ -49,6 +49,7 @@ class _RepositoryAuthorityMonitor:
             str,
             tuple[str, bytes | None, bool, bool],
         ] = {}
+        self._bound_snapshot_directory: str | None = None
         self._darwin_watcher = None
         self._inotify_descriptor = -1
         self._inotify_add_watch = None
@@ -465,6 +466,63 @@ class _RepositoryAuthorityMonitor:
             self._fail_changed()
         self.assert_quiet()
 
+    def bind_bound_snapshot_directory(self, snapshot_directory: str) -> None:
+        self._raise_sticky_failure()
+        if self._bound_snapshot_directory is not None:
+            self._fail_changed()
+        normalized_directory = self._os.path.realpath(snapshot_directory)
+        try:
+            if self._os.path.commonpath((self._root, normalized_directory)) == self._root:
+                self._fail_changed()
+        except ValueError as exc:
+            self._fail_changed(exc)
+        try:
+            root_state = self._lstat_state(normalized_directory)
+        except OSError as exc:
+            self._fail_changed(exc)
+        if (
+            not self._stat.S_ISDIR(root_state[2])
+            or self._stat.S_ISLNK(root_state[2])
+            or self._os.stat(
+                normalized_directory,
+                follow_symlinks=False,
+            ).st_uid != self._os.getuid()
+            or root_state[2] & 0o077
+        ):
+            self._fail_changed()
+        self._bound_snapshot_directory = normalized_directory
+        try:
+            expected_states = self._collect_tree_states(
+                normalized_directory,
+                reject_symlinks=True,
+            )
+            self._ensure_descriptor_capacity(
+                sum(
+                    self._is_watchable_state(state)
+                    for state in expected_states.values()
+                )
+            )
+            for path, expected_state in sorted(
+                    expected_states.items(),
+                    key=lambda entry: (entry[0].count(self._os.sep), entry[0]),
+            ):
+                self._add_existing_path(path, expected_state)
+            if self._collect_tree_states(
+                    normalized_directory,
+                    reject_symlinks=True,
+            ) != expected_states:
+                self._fail_changed()
+            self.assert_quiet()
+        except BaseException:
+            self.close()
+            raise
+
+    def bound_snapshot_directory(self) -> str:
+        self.assert_quiet()
+        if self._bound_snapshot_directory is None:
+            self._fail_changed()
+        return self._bound_snapshot_directory
+
     def _events_changed(self) -> bool:
         self._raise_sticky_failure()
         if self._darwin_watcher is not None:
@@ -559,6 +617,8 @@ class _RepositoryAuthorityMonitor:
             pass
 
     def close(self) -> None:
+        snapshot_directory = getattr(self, "_bound_snapshot_directory", None)
+        self._bound_snapshot_directory = None
         if self._darwin_watcher is not None:
             try:
                 self._darwin_watcher.close()
@@ -579,6 +639,15 @@ class _RepositoryAuthorityMonitor:
         self._descriptors.clear()
         self._watched_paths.clear()
         self._restore_descriptor_capacity()
+        if snapshot_directory is not None:
+            shutil_module = __import__("shutil")
+            try:
+                if self._os.path.islink(snapshot_directory):
+                    self._os.unlink(snapshot_directory)
+                else:
+                    shutil_module.rmtree(snapshot_directory)
+            except OSError:
+                pass
 
     def __del__(self) -> None:
         self.close()
@@ -655,7 +724,200 @@ def _bounded_authority_file_bytes(
             os_module.close(descriptor)
 
 
-def _git_config_has_include_directive(payload: bytes) -> bool:
+_BOUND_MEDIAFORCE_SNAPSHOT_AUXILIARY_PATHS = (
+    b"config/defaults.toml",
+    b"hatch_build.py",
+    b"pyproject.toml",
+)
+
+
+def _assert_execution_authority_roots_are_not_symlinked(
+        root: str,
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> None:
+    os_module = __import__("os")
+    stat_module = __import__("stat")
+    root_bytes = os_module.fsencode(root)
+    for relative_path in (
+            b"mediaforce",
+            b"scripts",
+            b"config/defaults.toml",
+    ):
+        components = _validate_git_path_bytes(
+            relative_path,
+            failure_type=failure_type,
+            message=message,
+        )
+        current = root_bytes
+        missing = False
+        for component in components:
+            current = os_module.path.join(current, component)
+            try:
+                info = os_module.stat(current, follow_symlinks=False)
+            except FileNotFoundError:
+                missing = True
+                break
+            except OSError as exc:
+                _raise_repository_authority_error(failure_type, message, exc)
+            if stat_module.S_ISLNK(info.st_mode):
+                _raise_repository_authority_error(failure_type, message)
+        if missing:
+            continue
+        pending = [current]
+        while pending:
+            candidate = pending.pop()
+            try:
+                info = os_module.stat(candidate, follow_symlinks=False)
+            except OSError as exc:
+                _raise_repository_authority_error(failure_type, message, exc)
+            if stat_module.S_ISLNK(info.st_mode):
+                _raise_repository_authority_error(failure_type, message)
+            if not stat_module.S_ISDIR(info.st_mode):
+                continue
+            try:
+                with os_module.scandir(candidate) as entries:
+                    pending.extend(entry.path for entry in entries)
+            except OSError as exc:
+                _raise_repository_authority_error(failure_type, message, exc)
+
+
+def _materialize_bound_mediaforce_snapshot(
+        repository_root: str,
+        captured_entries: dict[bytes, bytes],
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> str:
+    os_module = __import__("os")
+    shutil_module = __import__("shutil")
+    stat_module = __import__("stat")
+    tempfile_module = __import__("tempfile")
+    if not hasattr(os_module, "O_NOFOLLOW"):
+        _raise_repository_authority_error(failure_type, message)
+    try:
+        snapshot_directory = tempfile_module.mkdtemp(
+            prefix="mediaforce-av1-bound-",
+            dir="/tmp",
+        )
+    except OSError as exc:
+        _raise_repository_authority_error(failure_type, message, exc)
+    try:
+        snapshot_directory = os_module.path.realpath(snapshot_directory)
+        try:
+            if (
+                os_module.path.commonpath((
+                    os_module.path.realpath(repository_root),
+                    snapshot_directory,
+                ))
+                == os_module.path.realpath(repository_root)
+            ):
+                _raise_repository_authority_error(failure_type, message)
+        except ValueError as exc:
+            _raise_repository_authority_error(failure_type, message, exc)
+        os_module.chmod(snapshot_directory, 0o700)
+        snapshot_info = os_module.stat(snapshot_directory, follow_symlinks=False)
+        if (
+            not stat_module.S_ISDIR(snapshot_info.st_mode)
+            or stat_module.S_ISLNK(snapshot_info.st_mode)
+            or snapshot_info.st_uid != os_module.getuid()
+            or snapshot_info.st_mode & 0o077
+        ):
+            _raise_repository_authority_error(failure_type, message)
+
+        def ensure_directory(components: tuple[str, ...]) -> str:
+            directory = snapshot_directory
+            for component in components:
+                directory = os_module.path.join(directory, component)
+                try:
+                    os_module.mkdir(directory, 0o700)
+                except FileExistsError:
+                    pass
+                except OSError as exc:
+                    _raise_repository_authority_error(failure_type, message, exc)
+                try:
+                    directory_info = os_module.stat(
+                        directory,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    _raise_repository_authority_error(failure_type, message, exc)
+                if (
+                    not stat_module.S_ISDIR(directory_info.st_mode)
+                    or stat_module.S_ISLNK(directory_info.st_mode)
+                    or directory_info.st_uid != os_module.getuid()
+                    or directory_info.st_mode & 0o077
+                ):
+                    _raise_repository_authority_error(failure_type, message)
+            return directory
+
+        for path, payload in sorted(captured_entries.items()):
+            components = _validate_git_path_bytes(
+                path,
+                failure_type=failure_type,
+                message=message,
+            )
+            if not (
+                path.startswith(b"mediaforce/")
+                or path in _BOUND_MEDIAFORCE_SNAPSHOT_AUXILIARY_PATHS
+            ):
+                _raise_repository_authority_error(failure_type, message)
+            decoded_components = tuple(
+                os_module.fsdecode(component)
+                for component in components
+            )
+            parent_directory = ensure_directory(decoded_components[:-1])
+            target_path = os_module.path.join(
+                parent_directory,
+                decoded_components[-1],
+            )
+            descriptor = -1
+            try:
+                descriptor = os_module.open(
+                    target_path,
+                    (
+                        os_module.O_WRONLY
+                        | os_module.O_CREAT
+                        | os_module.O_EXCL
+                        | os_module.O_NOFOLLOW
+                        | getattr(os_module, "O_CLOEXEC", 0)
+                    ),
+                    0o600,
+                )
+                written = 0
+                while written < len(payload):
+                    count = os_module.write(descriptor, payload[written:])
+                    if count <= 0:
+                        _raise_repository_authority_error(failure_type, message)
+                    written += count
+                os_module.fsync(descriptor)
+                descriptor_info = os_module.fstat(descriptor)
+                path_info = os_module.stat(target_path, follow_symlinks=False)
+                if (
+                    written != len(payload)
+                    or not stat_module.S_ISREG(descriptor_info.st_mode)
+                    or descriptor_info.st_uid != os_module.getuid()
+                    or descriptor_info.st_mode & 0o077
+                    or (descriptor_info.st_dev, descriptor_info.st_ino)
+                    != (path_info.st_dev, path_info.st_ino)
+                ):
+                    _raise_repository_authority_error(failure_type, message)
+            except OSError as exc:
+                _raise_repository_authority_error(failure_type, message, exc)
+            finally:
+                if descriptor >= 0:
+                    os_module.close(descriptor)
+        return snapshot_directory
+    except BaseException:
+        try:
+            shutil_module.rmtree(snapshot_directory)
+        except OSError:
+            pass
+        raise
+
+
+def _git_config_has_external_authority_directive(payload: bytes) -> bool:
     current_section = b""
     for raw_line in payload.splitlines():
         line = raw_line.lstrip(b" \t\xef\xbb\xbf")
@@ -676,6 +938,19 @@ def _git_config_has_include_directive(payload: bytes) -> bool:
         key = line.split(b"=", 1)[0].split(None, 1)[0].strip().lower()
         if key == b"include.path" or (
             key.startswith(b"includeif.") and key.endswith(b".path")
+        ):
+            return True
+        if (
+            (current_section == b"extensions" and key == b"partialclone")
+            or (
+                current_section == b"remote"
+                and key in {b"promisor", b"partialclonefilter"}
+            )
+            or key == b"extensions.partialclone"
+            or (
+                key.startswith(b"remote.")
+                and key.endswith((b".promisor", b".partialclonefilter"))
+            )
         ):
             return True
     return False
@@ -726,7 +1001,9 @@ def _assert_git_metadata_authority_is_closed(
             failure_type=failure_type,
             message=message,
         )
-        if payload is not None and _git_config_has_include_directive(payload):
+        if payload is not None and _git_config_has_external_authority_directive(
+                payload
+        ):
             _raise_repository_authority_error(failure_type, message)
 
     alternates = _bounded_authority_file_bytes(
@@ -869,6 +1146,7 @@ def _verify_git_worktree_entry(
         object_id: bytes,
         *,
         capture_bytes: bool,
+        reject_symlink_components: bool = False,
         failure_type: type[BaseException],
         message: str,
 ) -> bytes | None:
@@ -879,51 +1157,119 @@ def _verify_git_worktree_entry(
         failure_type=failure_type,
         message=message,
     )
-    absolute_path = os_module.path.join(os_module.fsencode(root), *components)
-    try:
-        initial_path_info = os_module.stat(absolute_path, follow_symlinks=False)
-    except OSError as exc:
-        _raise_repository_authority_error(failure_type, message, exc)
-    if mode == b"160000":
-        _raise_repository_authority_error(failure_type, message)
-    if mode == b"120000":
-        if not stat_module.S_ISLNK(initial_path_info.st_mode):
-            _raise_repository_authority_error(failure_type, message)
-        try:
-            payload = os_module.readlink(absolute_path)
-            final_path_info = os_module.stat(absolute_path, follow_symlinks=False)
-        except OSError as exc:
-            _raise_repository_authority_error(failure_type, message, exc)
-        if not isinstance(payload, bytes) or (
-            _RepositoryAuthorityMonitor._state(initial_path_info)
-            != _RepositoryAuthorityMonitor._state(final_path_info)
-        ):
-            _raise_repository_authority_error(failure_type, message)
-        hasher = _git_blob_hasher(object_id)
-        hasher.update(f"blob {len(payload)}\0".encode("ascii"))
-        hasher.update(payload)
-        if hasher.hexdigest().encode("ascii") != object_id:
-            _raise_repository_authority_error(failure_type, message)
-        return payload if capture_bytes else None
     if (
-        mode not in {b"100644", b"100755"}
-        or not stat_module.S_ISREG(initial_path_info.st_mode)
+        not hasattr(os_module, "O_DIRECTORY")
+        or not hasattr(os_module, "O_NOFOLLOW")
+        or os_module.open not in os_module.supports_dir_fd
+        or os_module.stat not in os_module.supports_dir_fd
     ):
         _raise_repository_authority_error(failure_type, message)
-    worktree_mode = (
-        b"100755" if initial_path_info.st_mode & stat_module.S_IXUSR else b"100644"
-    )
-    if worktree_mode != mode or not hasattr(os_module, "O_NOFOLLOW"):
-        _raise_repository_authority_error(failure_type, message)
-    flags = (
+    root_path = os_module.fsencode(root)
+    directory_flags = (
         os_module.O_RDONLY
+        | os_module.O_DIRECTORY
         | os_module.O_NOFOLLOW
         | getattr(os_module, "O_CLOEXEC", 0)
-        | getattr(os_module, "O_NONBLOCK", 0)
     )
     descriptor = -1
+    directory_descriptors: list[int] = []
     try:
-        descriptor = os_module.open(absolute_path, flags)
+        root_path_info = os_module.stat(root_path, follow_symlinks=False)
+        if (
+            not stat_module.S_ISDIR(root_path_info.st_mode)
+            or stat_module.S_ISLNK(root_path_info.st_mode)
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        current_directory = os_module.open(root_path, directory_flags)
+        directory_descriptors.append(current_directory)
+        root_descriptor_info = os_module.fstat(current_directory)
+        if (
+            not stat_module.S_ISDIR(root_descriptor_info.st_mode)
+            or (root_descriptor_info.st_dev, root_descriptor_info.st_ino)
+            != (root_path_info.st_dev, root_path_info.st_ino)
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        for component in components[:-1]:
+            component_info = os_module.stat(
+                component,
+                dir_fd=current_directory,
+                follow_symlinks=False,
+            )
+            if (
+                not stat_module.S_ISDIR(component_info.st_mode)
+                or stat_module.S_ISLNK(component_info.st_mode)
+            ):
+                _raise_repository_authority_error(failure_type, message)
+            next_directory = os_module.open(
+                component,
+                directory_flags,
+                dir_fd=current_directory,
+            )
+            directory_descriptors.append(next_directory)
+            next_directory_info = os_module.fstat(next_directory)
+            if (
+                not stat_module.S_ISDIR(next_directory_info.st_mode)
+                or (next_directory_info.st_dev, next_directory_info.st_ino)
+                != (component_info.st_dev, component_info.st_ino)
+            ):
+                _raise_repository_authority_error(failure_type, message)
+            current_directory = next_directory
+        initial_path_info = os_module.stat(
+            components[-1],
+            dir_fd=current_directory,
+            follow_symlinks=False,
+        )
+        if mode == b"160000":
+            _raise_repository_authority_error(failure_type, message)
+        if mode == b"120000":
+            if (
+                reject_symlink_components
+                or not stat_module.S_ISLNK(initial_path_info.st_mode)
+            ):
+                _raise_repository_authority_error(failure_type, message)
+            payload = os_module.readlink(
+                components[-1],
+                dir_fd=current_directory,
+            )
+            final_path_info = os_module.stat(
+                components[-1],
+                dir_fd=current_directory,
+                follow_symlinks=False,
+            )
+            if not isinstance(payload, bytes) or (
+                _RepositoryAuthorityMonitor._state(initial_path_info)
+                != _RepositoryAuthorityMonitor._state(final_path_info)
+            ):
+                _raise_repository_authority_error(failure_type, message)
+            hasher = _git_blob_hasher(object_id)
+            hasher.update(f"blob {len(payload)}\0".encode("ascii"))
+            hasher.update(payload)
+            if hasher.hexdigest().encode("ascii") != object_id:
+                _raise_repository_authority_error(failure_type, message)
+            return payload if capture_bytes else None
+        if (
+            mode not in {b"100644", b"100755"}
+            or not stat_module.S_ISREG(initial_path_info.st_mode)
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        worktree_mode = (
+            b"100755"
+            if initial_path_info.st_mode & stat_module.S_IXUSR
+            else b"100644"
+        )
+        if worktree_mode != mode:
+            _raise_repository_authority_error(failure_type, message)
+        flags = (
+            os_module.O_RDONLY
+            | os_module.O_NOFOLLOW
+            | getattr(os_module, "O_CLOEXEC", 0)
+            | getattr(os_module, "O_NONBLOCK", 0)
+        )
+        descriptor = os_module.open(
+            components[-1],
+            flags,
+            dir_fd=current_directory,
+        )
         initial_descriptor_info = os_module.fstat(descriptor)
         if (
             not stat_module.S_ISREG(initial_descriptor_info.st_mode)
@@ -947,7 +1293,11 @@ def _verify_git_worktree_entry(
             if captured is not None:
                 captured.extend(chunk)
         final_descriptor_info = os_module.fstat(descriptor)
-        final_path_info = os_module.stat(absolute_path, follow_symlinks=False)
+        final_path_info = os_module.stat(
+            components[-1],
+            dir_fd=current_directory,
+            follow_symlinks=False,
+        )
         if (
             bytes_read != initial_descriptor_info.st_size
             or _RepositoryAuthorityMonitor._state(initial_descriptor_info)
@@ -963,6 +1313,8 @@ def _verify_git_worktree_entry(
     finally:
         if descriptor >= 0:
             os_module.close(descriptor)
+        for directory_descriptor in reversed(directory_descriptors):
+            os_module.close(directory_descriptor)
 
 
 def _assert_exact_git_worktree_snapshot(
@@ -972,6 +1324,8 @@ def _assert_exact_git_worktree_snapshot(
         verbose_output: bytes,
         *,
         capture_mediaforce_python: bool,
+        capture_mediaforce_resources: bool = False,
+        reject_symlink_components: bool = False,
         failure_type: type[BaseException],
         message: str,
 ) -> dict[bytes, bytes]:
@@ -994,12 +1348,18 @@ def _assert_exact_git_worktree_snapshot(
         failure_type=failure_type,
         message=message,
     )
-    captured_sources: dict[bytes, bytes] = {}
+    captured_entries: dict[bytes, bytes] = {}
     for path, mode, object_id in index_entries:
         capture_bytes = (
             capture_mediaforce_python
             and path.startswith(b"mediaforce/")
             and path.endswith(b".py")
+        ) or (
+            capture_mediaforce_resources
+            and (
+                path.startswith(b"mediaforce/")
+                or path in _BOUND_MEDIAFORCE_SNAPSHOT_AUXILIARY_PATHS
+            )
         )
         payload = _verify_git_worktree_entry(
             root,
@@ -1007,14 +1367,15 @@ def _assert_exact_git_worktree_snapshot(
             mode,
             object_id,
             capture_bytes=capture_bytes,
+            reject_symlink_components=reject_symlink_components,
             failure_type=failure_type,
             message=message,
         )
         if capture_bytes:
             if payload is None:
                 _raise_repository_authority_error(failure_type, message)
-            captured_sources[path] = payload
-    return captured_sources
+            captured_entries[path] = payload
+    return captured_entries
 
 
 def _build_bound_mediaforce_sources(
@@ -1033,8 +1394,12 @@ def _build_bound_mediaforce_sources(
             failure_type=failure_type,
             message=message,
         )
-        if components[0] != b"mediaforce" or not components[-1].endswith(b".py"):
-            _raise_repository_authority_error(failure_type, message)
+        if components[0] != b"mediaforce":
+            if path not in _BOUND_MEDIAFORCE_SNAPSHOT_AUXILIARY_PATHS:
+                _raise_repository_authority_error(failure_type, message)
+            continue
+        if not components[-1].endswith(b".py"):
+            continue
         decoded_components = tuple(os_module.fsdecode(component) for component in components)
         for component in decoded_components[:-1]:
             if "." in component:
@@ -1080,6 +1445,10 @@ class _BoundMediaforceLoader:
         self._fullname = fullname
         self._location, self._source, self._is_package, self._is_namespace = record
         self._sources = sources
+        mediaforce_location = sources["mediaforce"][0]
+        self._snapshot_root = __import__("os").path.dirname(
+            __import__("os").path.dirname(mediaforce_location)
+        )
         self.path = (
             self._location
             if self._source is not None
@@ -1092,9 +1461,15 @@ class _BoundMediaforceLoader:
     def exec_module(self, module: object) -> None:
         _assert_preregistration_bootstrap_authority()
         if self._source is None:
+            if self._is_package:
+                module.__dict__["__path__"] = [self._location]
             return
         try:
             module.__dict__["__file__"] = self._location
+            if self._is_package:
+                module.__dict__["__path__"] = [
+                    __import__("os").path.dirname(self._location)
+                ]
             code = compile(
                 self._source,
                 self._location,
@@ -1129,7 +1504,14 @@ class _BoundMediaforceLoader:
         for location, source, _is_package, _is_namespace in self._sources.values():
             if source is not None and os_module.path.normpath(location) == normalized:
                 return source
-        with open(path, "rb") as handle:
+        try:
+            if os_module.path.commonpath((self._snapshot_root, normalized)) != (
+                    self._snapshot_root
+            ):
+                raise OSError("bound mediaforce resource escaped its snapshot")
+        except ValueError as exc:
+            raise OSError("bound mediaforce resource escaped its snapshot") from exc
+        with open(normalized, "rb") as handle:
             return handle.read()
 
     def get_resource_reader(self, fullname: str) -> object | None:
@@ -1510,6 +1892,14 @@ def _assert_preregistration_import_tree_clean(
             "AV1 preregistration runner refuses unsafe repository root"
         )
     root_identity = (root_info.st_dev, root_info.st_ino)
+    execution_symlink_message = (
+        "AV1 preregistration runner refuses symlinked execution authority"
+    )
+    _assert_execution_authority_roots_are_not_symlinked(
+        root,
+        failure_type=RuntimeError,
+        message=execution_symlink_message,
+    )
     metadata_path = bootstrap_os.path.join(root, ".git")
     metadata_info = bootstrap_os.stat(metadata_path, follow_symlinks=False)
     metadata_files = (
@@ -1557,6 +1947,19 @@ def _assert_preregistration_import_tree_clean(
         authority_monitor.add_worktree_tree(
             bootstrap_os.path.join(root, relative_root)
         )
+    source_default_authority_paths = tuple(
+        relative_path
+        for relative_path in (
+            "config/defaults.toml",
+            "hatch_build.py",
+            "pyproject.toml",
+        )
+        if bootstrap_os.path.lexists(
+            bootstrap_os.path.join(root, relative_path)
+        )
+    )
+    if source_default_authority_paths:
+        authority_monitor.add_worktree_paths(source_default_authority_paths)
 
     def git_output(*arguments: str) -> tuple[int, bytes]:
         authority_monitor.assert_quiet()
@@ -1603,6 +2006,7 @@ def _assert_preregistration_import_tree_clean(
                         "GIT_CONFIG_NOSYSTEM": "1",
                         "GIT_DIR": git_directory,
                         "GIT_COMMON_DIR": git_common_directory,
+                        "GIT_NO_LAZY_FETCH": "1",
                         "GIT_NO_REPLACE_OBJECTS": "1",
                         "GIT_OPTIONAL_LOCKS": "0",
                         "GIT_WORK_TREE": root,
@@ -1682,7 +2086,14 @@ def _assert_preregistration_import_tree_clean(
             )
         return bootstrap_os.waitstatus_to_exitcode(process_status), bytes(output)
 
-    pathspec = ("--", "mediaforce", "scripts")
+    pathspec = (
+        "--",
+        "mediaforce",
+        "scripts",
+        "config/defaults.toml",
+        "hatch_build.py",
+        "pyproject.toml",
+    )
     for ignored in (False, True):
         arguments = ["ls-files", "-z", "--others"]
         if ignored:
@@ -1720,6 +2131,7 @@ def _assert_preregistration_import_tree_clean(
         root,
         *initial_snapshot,
         capture_mediaforce_python=False,
+        reject_symlink_components=True,
         failure_type=RuntimeError,
         message=modified_import_message,
     )
@@ -1729,21 +2141,34 @@ def _assert_preregistration_import_tree_clean(
         raise RuntimeError(
             "AV1 preregistration runner detected changed Git metadata or import authority"
         )
-    captured_sources = _assert_exact_git_worktree_snapshot(
+    captured_entries = _assert_exact_git_worktree_snapshot(
         root,
         *verified_snapshot,
         capture_mediaforce_python=True,
+        capture_mediaforce_resources=True,
+        reject_symlink_components=True,
         failure_type=RuntimeError,
         message=modified_import_message,
     )
-    authority_monitor.bind_python_sources(
-        _build_bound_mediaforce_sources(
-            root,
-            captured_sources,
-            failure_type=RuntimeError,
-            message=modified_import_message,
-        )
+    snapshot_directory = _materialize_bound_mediaforce_snapshot(
+        root,
+        captured_entries,
+        failure_type=RuntimeError,
+        message=modified_import_message,
     )
+    try:
+        authority_monitor.bind_bound_snapshot_directory(snapshot_directory)
+        authority_monitor.bind_python_sources(
+            _build_bound_mediaforce_sources(
+                snapshot_directory,
+                captured_entries,
+                failure_type=RuntimeError,
+                message=modified_import_message,
+            )
+        )
+    except BaseException:
+        authority_monitor.close()
+        raise
 
     if repository_root is None:
         version_directory = (
@@ -2355,14 +2780,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.action == "validate":
             payload = _validation_payload(manifest)
             if args.json_output:
-                print(json.dumps(payload, indent=2, sort_keys=True))
+                rendered_payload = json.dumps(payload, indent=2, sort_keys=True)
             else:
-                print(
+                rendered_payload = (
                     f"manifest={manifest.manifest_id} state={payload['state']} "
                     f"plans={len(manifest.cell_plans)} cases={len(manifest.cases)} "
                     "runtime_execution_authorized=false "
                     f"holdout_execution_authorized={str(payload['holdout_execution_authorized']).lower()}"
                 )
+            _assert_preregistration_bootstrap_authority()
+            print(rendered_payload)
             return 0
 
         if isinstance(manifest, AV1ValidationManifestV2):
@@ -2377,9 +2804,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime_state=args.runtime_state,
         )
         if args.json_output:
-            print(json.dumps(report.to_payload(), indent=2, sort_keys=True))
+            rendered_report = json.dumps(report.to_payload(), indent=2, sort_keys=True)
         else:
-            print(format_av1_cold_start_validation_report(report))
+            rendered_report = format_av1_cold_start_validation_report(report)
+        _assert_preregistration_bootstrap_authority()
+        print(rendered_report)
         return 0 if report.supports_publication_review else 2
     except OSError:
         print(
@@ -3909,6 +4338,7 @@ def _review_git_environment_for_authority(
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_DIR": str(git_entry[0]),
         "GIT_COMMON_DIR": str(common_entry[0]),
+        "GIT_NO_LAZY_FETCH": "1",
         "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
@@ -4922,16 +5352,19 @@ def _run_code_llm_review_before_deadline(
 
 
 def _print_partition_payload(payload: dict[str, object], *, json_output: bool) -> None:
-    _assert_preregistration_bootstrap_authority()
     assert_av1_cold_start_public_payload_safe(payload)
     if json_output:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+        rendered_payload = json.dumps(payload, indent=2, sort_keys=True)
+        _assert_preregistration_bootstrap_authority()
+        print(rendered_payload)
         return
     fields = [
         f"{key}={str(value).lower() if isinstance(value, bool) else value}"
         for key, value in payload.items()
     ]
-    print(" ".join(fields))
+    rendered_payload = " ".join(fields)
+    _assert_preregistration_bootstrap_authority()
+    print(rendered_payload)
 
 
 def _load_manifest(path: Path) -> ValidationManifest:

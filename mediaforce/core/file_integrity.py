@@ -84,6 +84,45 @@ def rename_exclusive(
         raise OSError(error_number, os.strerror(error_number))
 
 
+def rename_exchange(
+        *,
+        first_directory_descriptor: int,
+        first_name: str,
+        second_directory_descriptor: int,
+        second_name: str,
+) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename_function = getattr(libc, "renameatx_np", None)
+        rename_flags = 0x00000002
+    elif sys.platform.startswith("linux"):
+        rename_function = getattr(libc, "renameat2", None)
+        rename_flags = 0x00000002
+    else:
+        rename_function = None
+        rename_flags = 0
+    if rename_function is None:
+        raise OSError(errno.ENOTSUP, "atomic rename exchange is unavailable")
+    rename_function.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename_function.restype = ctypes.c_int
+    result = rename_function(
+        first_directory_descriptor,
+        os.fsencode(first_name),
+        second_directory_descriptor,
+        os.fsencode(second_name),
+        rename_flags,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
 @dataclass(frozen=True, slots=True)
 class _PathBinding:
     path: Path
