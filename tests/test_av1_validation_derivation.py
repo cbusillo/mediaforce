@@ -4555,7 +4555,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     self.plan.review_runner_canonical_path_sha256,
                     self.plan.review_runner_binary_sha256,
                 ),
-            ),
+            ) as runner_identity,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_repository_review_identity",
@@ -4564,7 +4564,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_assert_code_llm_request_contract",
-            ),
+            ) as assert_contract,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_build_av1_validation_derivation_review_bundle",
@@ -4621,6 +4621,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(retried_evidence, evidence)
         self.assertEqual(retried_reviewed_at, reviewed_at)
         self.assertEqual(run_command.call_count, 1)
+        self.assertEqual(runner_identity.call_count, 2)
+        self.assertEqual(assert_contract.call_count, 1)
         self.assertEqual(uuid4.call_count, 1)
         self.assertEqual(now_iso.call_count, 2)
         retried_claim_info = claim_path.stat(follow_symlinks=False)
@@ -4763,7 +4765,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             proposal=proposal,
             claim=claim,
         )
-        trusted_runner = Path("/private/trusted-code")
         with (
             patch.object(
                 verify_av1_cold_start_preregistration,
@@ -4772,12 +4773,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_authorized_review_runner_identity",
-                return_value=(
-                    trusted_runner,
-                    self.plan.review_runner_canonical_path_sha256,
-                    self.plan.review_runner_binary_sha256,
-                ),
-            ),
+            ) as runner_identity,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_repository_review_identity",
@@ -4786,7 +4782,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_assert_code_llm_request_contract",
-            ),
+            ) as assert_contract,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_build_av1_validation_derivation_review_bundle",
@@ -4813,6 +4809,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(recovered_claim, claim)
         self.assertEqual(decision, "rejected")
         self.assertEqual(reviewed_at, "2026-07-28T03:30:00Z")
+        runner_identity.assert_not_called()
+        assert_contract.assert_not_called()
         run_command.assert_not_called()
         build_bundle.assert_not_called()
         evidence_payload = json.loads(evidence)
@@ -4907,7 +4905,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     self.plan.review_runner_canonical_path_sha256,
                     self.plan.review_runner_binary_sha256,
                 ),
-            ),
+            ) as runner_identity,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_repository_review_identity",
@@ -4916,7 +4914,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_assert_code_llm_request_contract",
-            ),
+            ) as assert_contract,
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_build_av1_validation_derivation_review_bundle",
@@ -4967,6 +4965,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(decision, "rejected")
         self.assertEqual(retried_decision, "rejected")
         self.assertEqual(run_command.call_count, 1)
+        self.assertEqual(runner_identity.call_count, 2)
+        self.assertEqual(assert_contract.call_count, 1)
         for recovery_evidence in (evidence, retried_evidence):
             payload = json.loads(recovery_evidence)
             self.assertEqual(

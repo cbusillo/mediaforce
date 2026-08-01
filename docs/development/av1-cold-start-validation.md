@@ -892,6 +892,8 @@ terminalizes the lane as a rejected
 invalid checkpointed response is likewise terminalized as a rejected
 `invalid_durable_response` recovery bound to the checkpoint digest. Therefore a
 completed or interrupted request can never be rerolled under the same claim.
+Recovery validates the runner digests already sealed by the plan, claim, and
+checkpoint; it does not require or probe the live runner executable.
 The first valid envelope remains immutable. A retry after the complete matching
 claim and envelope are visible validates both, re-fsyncs the envelope parent,
 returns the original decision and `reviewed_at`, and does not launch a second

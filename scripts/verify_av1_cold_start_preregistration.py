@@ -5279,16 +5279,17 @@ def _run_code_llm_review_before_deadline(
         plan,
         process_controller=process_controller,
     )
-    before_identity = _authorized_review_runner_identity(plan)
-    _assert_code_llm_request_contract(
-        before_identity[0],
-        process_controller=process_controller,
-    )
     before_repository_identity = _repository_review_identity(
         process_controller=process_controller,
     )
     claim_was_existing = claim is not None
+    before_identity: tuple[Path, str, str] | None = None
     if claim is None:
+        before_identity = _authorized_review_runner_identity(plan)
+        _assert_code_llm_request_contract(
+            before_identity[0],
+            process_controller=process_controller,
+        )
         review_run_id = str(uuid.uuid4())
         claim = build_av1_validation_derivation_review_claim(
             plan=plan,
@@ -5317,8 +5318,10 @@ def _run_code_llm_review_before_deadline(
             or claim.lane != lane
             or (claim.repository_commit, claim.repository_tree)
             != before_repository_identity
-            or claim.review_runner_canonical_path_sha256 != before_identity[1]
-            or claim.review_runner_binary_sha256 != before_identity[2]
+            or claim.review_runner_canonical_path_sha256
+            != plan.review_runner_canonical_path_sha256
+            or claim.review_runner_binary_sha256
+            != plan.review_runner_binary_sha256
         ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation interrupted review claim is no longer authorized"
@@ -5359,6 +5362,10 @@ def _run_code_llm_review_before_deadline(
     request_sha256 = f"sha256:{hashlib.sha256(request_bytes).hexdigest()}"
     response_schema_text = canonical_json_bytes(response_schema).decode("utf-8")
     if checkpoint is None:
+        if before_identity is None:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review runner identity is unavailable for launch"
+            )
         try:
             with _owner_only_review_request_file(request_bytes) as request_path:
                 command = [
@@ -5508,8 +5515,10 @@ def _run_code_llm_review_before_deadline(
         "decision": decision,
         "repository_commit": claim.repository_commit,
         "repository_tree": claim.repository_tree,
-        "review_runner_canonical_path_sha256": before_identity[1],
-        "review_runner_binary_sha256": before_identity[2],
+        "review_runner_canonical_path_sha256": (
+            claim.review_runner_canonical_path_sha256
+        ),
+        "review_runner_binary_sha256": claim.review_runner_binary_sha256,
         "proposal": proposal.to_payload(),
         "review_claim": claim.to_payload(),
         "safe_bundle": safe_bundle,

@@ -145,6 +145,10 @@ Mediaforce's SQLite schema.
   quarantine without the canonical destination intent fails closed instead of
   permitting a replacement database to be created or adopted. This also
   upgrades the parent-v4 all-absent cleanup case on its first verified startup.
+  Unsafe custom layouts are intentionally not grandfathered. Before upgrading
+  such an installation, stop Mediaforce, move the complete reservation
+  directory atomically to a path outside the destination parent, update
+  `state.runtime_reservation_dir`, and preserve every migration receipt.
   Cleanup claims the exact legacy main first with an exclusive rename to an
   identity-derived quarantine name, syncs that namespace transition, and
   validates the claimed inode. It retains that exact quarantine as authorized
