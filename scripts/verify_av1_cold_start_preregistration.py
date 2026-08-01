@@ -18,6 +18,7 @@ class _RepositoryAuthorityMonitor:
                 ...,
             ],
             metadata_roots: tuple[str, ...],
+            metadata_excluded_roots: tuple[str, ...],
             metadata_files: tuple[str, ...],
             failure_type: type[BaseException],
             changed_message: str,
@@ -29,17 +30,31 @@ class _RepositoryAuthorityMonitor:
         self._root = self._os.path.realpath(root)
         self._authority_directories = authority_directories
         self._metadata_roots = tuple(dict.fromkeys(metadata_roots))
+        self._metadata_excluded_roots = tuple(
+            dict.fromkeys(
+                self._os.path.realpath(path)
+                for path in metadata_excluded_roots
+            )
+        )
         self._metadata_files = tuple(dict.fromkeys(metadata_files))
         self._failure_type = failure_type
         self._changed_message = changed_message
         self._unavailable_message = unavailable_message
+        self._failure_message: str | None = None
         self._descriptors: list[int] = []
         self._watched_paths: set[str] = set()
         self._path_states: dict[str, tuple[int, ...]] = {}
         self._missing_paths: set[str] = set()
+        self._bound_python_sources: dict[
+            str,
+            tuple[str, bytes | None, bool, bool],
+        ] = {}
         self._darwin_watcher = None
         self._inotify_descriptor = -1
         self._inotify_add_watch = None
+        self._nofile_resource = None
+        self._original_nofile_soft_limit: int | None = None
+        self._raised_nofile_soft_limit: int | None = None
         try:
             self._metadata_states = self._collect_metadata_states()
             descriptor_count = sum(
@@ -65,17 +80,27 @@ class _RepositoryAuthorityMonitor:
             self.close()
             raise
 
-    def _fail_changed(self, cause: BaseException | None = None) -> None:
-        error = self._failure_type(self._changed_message)
+    def _fail(
+            self,
+            message: str,
+            cause: BaseException | None = None,
+    ) -> None:
+        if self._failure_message is None:
+            self._failure_message = message
+        error = self._failure_type(self._failure_message)
         if cause is None:
             raise error
         raise error from cause
 
+    def _raise_sticky_failure(self) -> None:
+        if self._failure_message is not None:
+            raise self._failure_type(self._failure_message)
+
+    def _fail_changed(self, cause: BaseException | None = None) -> None:
+        self._fail(self._changed_message, cause)
+
     def _fail_unavailable(self, cause: BaseException | None = None) -> None:
-        error = self._failure_type(self._unavailable_message)
-        if cause is None:
-            raise error
-        raise error from cause
+        self._fail(self._unavailable_message, cause)
 
     @staticmethod
     def _state(info: object) -> tuple[int, ...]:
@@ -95,13 +120,23 @@ class _RepositoryAuthorityMonitor:
     def _lstat_state(self, path: str) -> tuple[int, ...]:
         return self._state(self._os.stat(path, follow_symlinks=False))
 
-    def _collect_tree_states(self, root: str) -> dict[str, tuple[int, ...]]:
+    def _collect_tree_states(
+            self,
+            root: str,
+            *,
+            excluded_roots: tuple[str, ...] = (),
+            reject_symlinks: bool = False,
+    ) -> dict[str, tuple[int, ...]]:
         states: dict[str, tuple[int, ...]] = {}
         pending = [root]
         while pending:
             current = pending.pop()
+            if current in excluded_roots:
+                continue
             try:
                 state = self._lstat_state(current)
+                if reject_symlinks and self._stat.S_ISLNK(state[2]):
+                    self._fail_changed()
                 states[current] = state
                 if not self._stat.S_ISDIR(state[2]):
                     continue
@@ -118,7 +153,17 @@ class _RepositoryAuthorityMonitor:
     def _collect_metadata_states(self) -> dict[str, tuple[int, ...]]:
         states: dict[str, tuple[int, ...]] = {}
         for root in self._metadata_roots:
-            states.update(self._collect_tree_states(root))
+            excluded_roots = tuple(
+                path
+                for path in self._metadata_excluded_roots
+                if path != root
+                and self._os.path.commonpath((root, path)) == root
+            )
+            states.update(self._collect_tree_states(
+                root,
+                excluded_roots=excluded_roots,
+                reject_symlinks=True,
+            ))
         for path in self._metadata_files:
             try:
                 states[path] = self._lstat_state(path)
@@ -127,6 +172,7 @@ class _RepositoryAuthorityMonitor:
         return dict(sorted(states.items()))
 
     def _ensure_descriptor_capacity(self, additional: int) -> None:
+        self._raise_sticky_failure()
         required = len(self._descriptors) + additional + 128
         try:
             resource = __import__("resource")
@@ -135,6 +181,15 @@ class _RepositoryAuthorityMonitor:
                 return
             if hard_limit != resource.RLIM_INFINITY and hard_limit < required:
                 self._fail_unavailable()
+            if (
+                self._raised_nofile_soft_limit is not None
+                and soft_limit != self._raised_nofile_soft_limit
+            ):
+                self._original_nofile_soft_limit = None
+                self._raised_nofile_soft_limit = None
+                self._nofile_resource = None
+            if self._original_nofile_soft_limit is None:
+                self._original_nofile_soft_limit = soft_limit
             resource.setrlimit(
                 resource.RLIMIT_NOFILE,
                 (required, hard_limit),
@@ -142,6 +197,8 @@ class _RepositoryAuthorityMonitor:
             raised_soft_limit, _raised_hard_limit = resource.getrlimit(
                 resource.RLIMIT_NOFILE
             )
+            self._nofile_resource = resource
+            self._raised_nofile_soft_limit = raised_soft_limit
             if (
                 raised_soft_limit != resource.RLIM_INFINITY
                 and raised_soft_limit < required
@@ -350,6 +407,7 @@ class _RepositoryAuthorityMonitor:
                     self._add_existing_path(current, state)
 
     def add_worktree_paths(self, relative_paths: tuple[str, ...]) -> None:
+        self._raise_sticky_failure()
         unique_paths = tuple(dict.fromkeys(relative_paths))
         self._ensure_descriptor_capacity(len(unique_paths))
         for relative_path in unique_paths:
@@ -382,6 +440,7 @@ class _RepositoryAuthorityMonitor:
         self.assert_quiet()
 
     def add_worktree_tree(self, tree_root: str) -> None:
+        self._raise_sticky_failure()
         normalized_root = self._os.path.realpath(tree_root)
         try:
             if self._os.path.commonpath((self._root, normalized_root)) != self._root:
@@ -407,6 +466,7 @@ class _RepositoryAuthorityMonitor:
         self.assert_quiet()
 
     def _events_changed(self) -> bool:
+        self._raise_sticky_failure()
         if self._darwin_watcher is not None:
             try:
                 return bool(self._darwin_watcher.control(None, 64, 0))
@@ -428,6 +488,7 @@ class _RepositoryAuthorityMonitor:
         return changed
 
     def assert_quiet(self) -> None:
+        self._raise_sticky_failure()
         changed = self._events_changed()
         try:
             try:
@@ -453,6 +514,50 @@ class _RepositoryAuthorityMonitor:
         if changed:
             self._fail_changed()
 
+    def bind_python_sources(
+            self,
+            sources: dict[str, tuple[str, bytes | None, bool, bool]],
+    ) -> None:
+        self.assert_quiet()
+        if self._bound_python_sources:
+            self._fail_changed()
+        self._bound_python_sources = dict(sources)
+        self.assert_quiet()
+
+    def bound_python_sources(
+            self,
+    ) -> dict[str, tuple[str, bytes | None, bool, bool]]:
+        self.assert_quiet()
+        if not self._bound_python_sources:
+            self._fail_changed()
+        return dict(self._bound_python_sources)
+
+    def _restore_descriptor_capacity(self) -> None:
+        resource = self._nofile_resource
+        original_soft_limit = self._original_nofile_soft_limit
+        raised_soft_limit = self._raised_nofile_soft_limit
+        self._nofile_resource = None
+        self._original_nofile_soft_limit = None
+        self._raised_nofile_soft_limit = None
+        if (
+            resource is None
+            or original_soft_limit is None
+            or raised_soft_limit is None
+        ):
+            return
+        try:
+            current_soft_limit, current_hard_limit = resource.getrlimit(
+                resource.RLIMIT_NOFILE
+            )
+            if current_soft_limit != raised_soft_limit:
+                return
+            resource.setrlimit(
+                resource.RLIMIT_NOFILE,
+                (original_soft_limit, current_hard_limit),
+            )
+        except (OSError, ValueError):
+            pass
+
     def close(self) -> None:
         if self._darwin_watcher is not None:
             try:
@@ -473,24 +578,705 @@ class _RepositoryAuthorityMonitor:
                 pass
         self._descriptors.clear()
         self._watched_paths.clear()
+        self._restore_descriptor_capacity()
 
     def __del__(self) -> None:
         self.close()
 
 
+def _raise_repository_authority_error(
+        failure_type: type[BaseException],
+        message: str,
+        cause: BaseException | None = None,
+) -> None:
+    error = failure_type(message)
+    if cause is None:
+        raise error
+    raise error from cause
+
+
+def _bounded_authority_file_bytes(
+        path: str,
+        *,
+        maximum_bytes: int,
+        failure_type: type[BaseException],
+        message: str,
+) -> bytes | None:
+    os_module = __import__("os")
+    stat_module = __import__("stat")
+    try:
+        path_info = os_module.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        _raise_repository_authority_error(failure_type, message, exc)
+    if (
+        stat_module.S_ISLNK(path_info.st_mode)
+        or not stat_module.S_ISREG(path_info.st_mode)
+        or path_info.st_size > maximum_bytes
+    ):
+        _raise_repository_authority_error(failure_type, message)
+    flags = os_module.O_RDONLY | getattr(os_module, "O_CLOEXEC", 0)
+    if not hasattr(os_module, "O_NOFOLLOW"):
+        _raise_repository_authority_error(failure_type, message)
+    flags |= os_module.O_NOFOLLOW
+    descriptor = -1
+    try:
+        descriptor = os_module.open(path, flags)
+        descriptor_info = os_module.fstat(descriptor)
+        if (
+            not stat_module.S_ISREG(descriptor_info.st_mode)
+            or descriptor_info.st_size > maximum_bytes
+            or (descriptor_info.st_dev, descriptor_info.st_ino)
+            != (path_info.st_dev, path_info.st_ino)
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        payload = bytearray()
+        while len(payload) <= maximum_bytes:
+            chunk = os_module.read(descriptor, min(64 * 1024, maximum_bytes + 1))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        final_descriptor_info = os_module.fstat(descriptor)
+        final_path_info = os_module.stat(path, follow_symlinks=False)
+        if (
+            len(payload) > maximum_bytes
+            or _RepositoryAuthorityMonitor._state(descriptor_info)
+            != _RepositoryAuthorityMonitor._state(final_descriptor_info)
+            or _RepositoryAuthorityMonitor._state(path_info)
+            != _RepositoryAuthorityMonitor._state(final_path_info)
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        return bytes(payload)
+    except OSError as exc:
+        _raise_repository_authority_error(failure_type, message, exc)
+    finally:
+        if descriptor >= 0:
+            os_module.close(descriptor)
+
+
+def _git_config_has_include_directive(payload: bytes) -> bool:
+    current_section = b""
+    for raw_line in payload.splitlines():
+        line = raw_line.lstrip(b" \t\xef\xbb\xbf")
+        if not line or line.startswith((b"#", b";")):
+            continue
+        if line.startswith(b"["):
+            closing = line.find(b"]")
+            if closing < 0:
+                continue
+            section = line[1:closing].strip().lower()
+            current_section = section.split(None, 1)[0].split(b'"', 1)[0]
+            if (
+                current_section in {b"include", b"includeif"}
+                or current_section.startswith((b"include.", b"includeif."))
+            ):
+                return True
+            continue
+        key = line.split(b"=", 1)[0].split(None, 1)[0].strip().lower()
+        if key == b"include.path" or (
+            key.startswith(b"includeif.") and key.endswith(b".path")
+        ):
+            return True
+    return False
+
+
+def _assert_git_metadata_authority_is_closed(
+        git_directory: str,
+        common_directory: str,
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> None:
+    os_module = __import__("os")
+    stat_module = __import__("stat")
+    excluded_root = os_module.path.join(common_directory, "worktrees")
+    roots = tuple(dict.fromkeys((git_directory, common_directory)))
+    pending = list(roots)
+    seen: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            info = os_module.stat(current, follow_symlinks=False)
+        except OSError as exc:
+            _raise_repository_authority_error(failure_type, message, exc)
+        if stat_module.S_ISLNK(info.st_mode):
+            _raise_repository_authority_error(failure_type, message)
+        if not stat_module.S_ISDIR(info.st_mode):
+            continue
+        if current == excluded_root:
+            continue
+        try:
+            with os_module.scandir(current) as entries:
+                pending.extend(entry.path for entry in entries)
+        except OSError as exc:
+            _raise_repository_authority_error(failure_type, message, exc)
+
+    for config_path in dict.fromkeys((
+        os_module.path.join(common_directory, "config"),
+        os_module.path.join(common_directory, "config.worktree"),
+        os_module.path.join(git_directory, "config.worktree"),
+    )):
+        payload = _bounded_authority_file_bytes(
+            config_path,
+            maximum_bytes=1024 * 1024,
+            failure_type=failure_type,
+            message=message,
+        )
+        if payload is not None and _git_config_has_include_directive(payload):
+            _raise_repository_authority_error(failure_type, message)
+
+    alternates = _bounded_authority_file_bytes(
+        os_module.path.join(common_directory, "objects", "info", "alternates"),
+        maximum_bytes=1024 * 1024,
+        failure_type=failure_type,
+        message=message,
+    )
+    if alternates is not None and alternates.strip():
+        _raise_repository_authority_error(failure_type, message)
+
+
+def _validate_git_path_bytes(
+        path: bytes,
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> tuple[bytes, ...]:
+    components = tuple(path.split(b"/"))
+    if (
+        not path
+        or path.startswith(b"/")
+        or b"\0" in path
+        or any(component in {b"", b".", b".."} for component in components)
+    ):
+        _raise_repository_authority_error(failure_type, message)
+    return components
+
+
+def _valid_git_object_id_bytes(object_id: bytes) -> bool:
+    return len(object_id) in {40, 64} and all(
+        byte in b"0123456789abcdef" for byte in object_id
+    )
+
+
+def _parse_git_index_snapshot(
+        output: bytes,
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> tuple[tuple[bytes, bytes, bytes], ...]:
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    seen_paths: set[bytes] = set()
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, object_id, stage = metadata.split(b" ", 2)
+        except ValueError as exc:
+            _raise_repository_authority_error(failure_type, message, exc)
+        _validate_git_path_bytes(
+            path,
+            failure_type=failure_type,
+            message=message,
+        )
+        if (
+            stage != b"0"
+            or mode not in {b"100644", b"100755", b"120000", b"160000"}
+            or not _valid_git_object_id_bytes(object_id)
+            or path in seen_paths
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        seen_paths.add(path)
+        entries.append((path, mode, object_id))
+    return tuple(entries)
+
+
+def _parse_git_tree_snapshot(
+        output: bytes,
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> tuple[tuple[bytes, bytes, bytes], ...]:
+    entries: list[tuple[bytes, bytes, bytes]] = []
+    seen_paths: set[bytes] = set()
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.split(b" ", 2)
+        except ValueError as exc:
+            _raise_repository_authority_error(failure_type, message, exc)
+        _validate_git_path_bytes(
+            path,
+            failure_type=failure_type,
+            message=message,
+        )
+        expected_type = b"commit" if mode == b"160000" else b"blob"
+        if (
+            mode not in {b"100644", b"100755", b"120000", b"160000"}
+            or object_type != expected_type
+            or not _valid_git_object_id_bytes(object_id)
+            or path in seen_paths
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        seen_paths.add(path)
+        entries.append((path, mode, object_id))
+    return tuple(entries)
+
+
+def _assert_ordinary_git_index_state(
+        output: bytes,
+        expected_paths: tuple[bytes, ...],
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> None:
+    paths: list[bytes] = []
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        if len(record) < 3 or not record.startswith(b"H "):
+            _raise_repository_authority_error(failure_type, message)
+        path = record[2:]
+        _validate_git_path_bytes(
+            path,
+            failure_type=failure_type,
+            message=message,
+        )
+        paths.append(path)
+    if tuple(paths) != expected_paths:
+        _raise_repository_authority_error(failure_type, message)
+
+
+def _git_blob_hasher(object_id: bytes) -> object:
+    hashlib_module = __import__("hashlib")
+    algorithm = "sha1" if len(object_id) == 40 else "sha256"
+    try:
+        return hashlib_module.new(algorithm, usedforsecurity=False)
+    except TypeError:
+        return hashlib_module.new(algorithm)
+
+
+def _verify_git_worktree_entry(
+        root: str,
+        path: bytes,
+        mode: bytes,
+        object_id: bytes,
+        *,
+        capture_bytes: bool,
+        failure_type: type[BaseException],
+        message: str,
+) -> bytes | None:
+    os_module = __import__("os")
+    stat_module = __import__("stat")
+    components = _validate_git_path_bytes(
+        path,
+        failure_type=failure_type,
+        message=message,
+    )
+    absolute_path = os_module.path.join(os_module.fsencode(root), *components)
+    try:
+        initial_path_info = os_module.stat(absolute_path, follow_symlinks=False)
+    except OSError as exc:
+        _raise_repository_authority_error(failure_type, message, exc)
+    if mode == b"160000":
+        _raise_repository_authority_error(failure_type, message)
+    if mode == b"120000":
+        if not stat_module.S_ISLNK(initial_path_info.st_mode):
+            _raise_repository_authority_error(failure_type, message)
+        try:
+            payload = os_module.readlink(absolute_path)
+            final_path_info = os_module.stat(absolute_path, follow_symlinks=False)
+        except OSError as exc:
+            _raise_repository_authority_error(failure_type, message, exc)
+        if not isinstance(payload, bytes) or (
+            _RepositoryAuthorityMonitor._state(initial_path_info)
+            != _RepositoryAuthorityMonitor._state(final_path_info)
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        hasher = _git_blob_hasher(object_id)
+        hasher.update(f"blob {len(payload)}\0".encode("ascii"))
+        hasher.update(payload)
+        if hasher.hexdigest().encode("ascii") != object_id:
+            _raise_repository_authority_error(failure_type, message)
+        return payload if capture_bytes else None
+    if (
+        mode not in {b"100644", b"100755"}
+        or not stat_module.S_ISREG(initial_path_info.st_mode)
+    ):
+        _raise_repository_authority_error(failure_type, message)
+    worktree_mode = (
+        b"100755" if initial_path_info.st_mode & stat_module.S_IXUSR else b"100644"
+    )
+    if worktree_mode != mode or not hasattr(os_module, "O_NOFOLLOW"):
+        _raise_repository_authority_error(failure_type, message)
+    flags = (
+        os_module.O_RDONLY
+        | os_module.O_NOFOLLOW
+        | getattr(os_module, "O_CLOEXEC", 0)
+        | getattr(os_module, "O_NONBLOCK", 0)
+    )
+    descriptor = -1
+    try:
+        descriptor = os_module.open(absolute_path, flags)
+        initial_descriptor_info = os_module.fstat(descriptor)
+        if (
+            not stat_module.S_ISREG(initial_descriptor_info.st_mode)
+            or (initial_descriptor_info.st_dev, initial_descriptor_info.st_ino)
+            != (initial_path_info.st_dev, initial_path_info.st_ino)
+            or initial_descriptor_info.st_size != initial_path_info.st_size
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        hasher = _git_blob_hasher(object_id)
+        hasher.update(
+            f"blob {initial_descriptor_info.st_size}\0".encode("ascii")
+        )
+        captured = bytearray() if capture_bytes else None
+        bytes_read = 0
+        while True:
+            chunk = os_module.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            bytes_read += len(chunk)
+            if captured is not None:
+                captured.extend(chunk)
+        final_descriptor_info = os_module.fstat(descriptor)
+        final_path_info = os_module.stat(absolute_path, follow_symlinks=False)
+        if (
+            bytes_read != initial_descriptor_info.st_size
+            or _RepositoryAuthorityMonitor._state(initial_descriptor_info)
+            != _RepositoryAuthorityMonitor._state(final_descriptor_info)
+            or _RepositoryAuthorityMonitor._state(initial_path_info)
+            != _RepositoryAuthorityMonitor._state(final_path_info)
+            or hasher.hexdigest().encode("ascii") != object_id
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        return bytes(captured) if captured is not None else None
+    except OSError as exc:
+        _raise_repository_authority_error(failure_type, message, exc)
+    finally:
+        if descriptor >= 0:
+            os_module.close(descriptor)
+
+
+def _assert_exact_git_worktree_snapshot(
+        root: str,
+        index_output: bytes,
+        tree_output: bytes,
+        verbose_output: bytes,
+        *,
+        capture_mediaforce_python: bool,
+        failure_type: type[BaseException],
+        message: str,
+) -> dict[bytes, bytes]:
+    index_entries = _parse_git_index_snapshot(
+        index_output,
+        failure_type=failure_type,
+        message=message,
+    )
+    tree_entries = _parse_git_tree_snapshot(
+        tree_output,
+        failure_type=failure_type,
+        message=message,
+    )
+    if index_entries != tree_entries:
+        _raise_repository_authority_error(failure_type, message)
+    expected_paths = tuple(path for path, _mode, _object_id in index_entries)
+    _assert_ordinary_git_index_state(
+        verbose_output,
+        expected_paths,
+        failure_type=failure_type,
+        message=message,
+    )
+    captured_sources: dict[bytes, bytes] = {}
+    for path, mode, object_id in index_entries:
+        capture_bytes = (
+            capture_mediaforce_python
+            and path.startswith(b"mediaforce/")
+            and path.endswith(b".py")
+        )
+        payload = _verify_git_worktree_entry(
+            root,
+            path,
+            mode,
+            object_id,
+            capture_bytes=capture_bytes,
+            failure_type=failure_type,
+            message=message,
+        )
+        if capture_bytes:
+            if payload is None:
+                _raise_repository_authority_error(failure_type, message)
+            captured_sources[path] = payload
+    return captured_sources
+
+
+def _build_bound_mediaforce_sources(
+        root: str,
+        captured_sources: dict[bytes, bytes],
+        *,
+        failure_type: type[BaseException],
+        message: str,
+) -> dict[str, tuple[str, bytes | None, bool, bool]]:
+    os_module = __import__("os")
+    sources: dict[str, tuple[str, bytes | None, bool, bool]] = {}
+    package_directories: dict[str, str] = {}
+    for path, payload in captured_sources.items():
+        components = _validate_git_path_bytes(
+            path,
+            failure_type=failure_type,
+            message=message,
+        )
+        if components[0] != b"mediaforce" or not components[-1].endswith(b".py"):
+            _raise_repository_authority_error(failure_type, message)
+        decoded_components = tuple(os_module.fsdecode(component) for component in components)
+        for component in decoded_components[:-1]:
+            if "." in component:
+                _raise_repository_authority_error(failure_type, message)
+        filename = os_module.path.join(root, *decoded_components)
+        is_package = components[-1] == b"__init__.py"
+        module_components = (
+            decoded_components[:-1]
+            if is_package
+            else (*decoded_components[:-1], decoded_components[-1][:-3])
+        )
+        if not module_components or any(
+            not component or "." in component
+            for component in module_components
+        ):
+            _raise_repository_authority_error(failure_type, message)
+        module_name = ".".join(module_components)
+        if module_name in sources:
+            _raise_repository_authority_error(failure_type, message)
+        sources[module_name] = (filename, payload, is_package, False)
+        for depth in range(1, len(decoded_components)):
+            package_name = ".".join(decoded_components[:depth])
+            package_directories[package_name] = os_module.path.join(
+                root,
+                *decoded_components[:depth],
+            )
+    for package_name, directory in package_directories.items():
+        if package_name not in sources:
+            sources[package_name] = (directory, None, True, True)
+    root_source = sources.get("mediaforce")
+    if root_source is None or root_source[1] is None or not root_source[2]:
+        _raise_repository_authority_error(failure_type, message)
+    return sources
+
+
+class _BoundMediaforceLoader:
+    def __init__(
+            self,
+            fullname: str,
+            record: tuple[str, bytes | None, bool, bool],
+            sources: dict[str, tuple[str, bytes | None, bool, bool]],
+    ) -> None:
+        self._fullname = fullname
+        self._location, self._source, self._is_package, self._is_namespace = record
+        self._sources = sources
+        self.path = (
+            self._location
+            if self._source is not None
+            else __import__("os").path.join(self._location, "__init__.py")
+        )
+
+    def create_module(self, _spec: object) -> None:
+        return None
+
+    def exec_module(self, module: object) -> None:
+        _assert_preregistration_bootstrap_authority()
+        if self._source is None:
+            return
+        try:
+            module.__dict__["__file__"] = self._location
+            code = compile(
+                self._source,
+                self._location,
+                "exec",
+                dont_inherit=True,
+            )
+            exec(code, module.__dict__)
+        finally:
+            _assert_preregistration_bootstrap_authority()
+
+    def get_filename(self, fullname: str) -> str:
+        if fullname != self._fullname or self._source is None:
+            raise ImportError(fullname)
+        return self._location
+
+    def get_source(self, fullname: str) -> str | None:
+        if fullname != self._fullname:
+            raise ImportError(fullname)
+        if self._source is None:
+            return None
+        importlib_util = __import__("importlib.util", fromlist=("decode_source",))
+        return importlib_util.decode_source(self._source)
+
+    def is_package(self, fullname: str) -> bool:
+        if fullname != self._fullname:
+            raise ImportError(fullname)
+        return self._is_package
+
+    def get_data(self, path: str) -> bytes:
+        os_module = __import__("os")
+        normalized = os_module.path.normpath(path)
+        for location, source, _is_package, _is_namespace in self._sources.values():
+            if source is not None and os_module.path.normpath(location) == normalized:
+                return source
+        with open(path, "rb") as handle:
+            return handle.read()
+
+    def get_resource_reader(self, fullname: str) -> object | None:
+        if fullname != self._fullname or not self._is_package:
+            return None
+        readers = __import__("importlib.resources.readers", fromlist=("FileReader",))
+        return readers.FileReader(self)
+
+
+class _BoundMediaforceFinder:
+    def __init__(
+            self,
+            sources: dict[str, tuple[str, bytes | None, bool, bool]],
+    ) -> None:
+        self._sources = sources
+        self._importlib_util = __import__("importlib.util", fromlist=("spec_from_loader",))
+        self._importlib_machinery = __import__(
+            "importlib.machinery",
+            fromlist=("ModuleSpec",),
+        )
+
+    def find_spec(
+            self,
+            fullname: str,
+            _path: object = None,
+            _target: object = None,
+    ) -> object | None:
+        if fullname != "mediaforce" and not fullname.startswith("mediaforce."):
+            return None
+        record = self._sources.get(fullname)
+        if record is None:
+            raise ModuleNotFoundError(
+                f"{fullname!r} is outside the bound mediaforce source snapshot",
+                name=fullname,
+            )
+        loader = _BoundMediaforceLoader(fullname, record, self._sources)
+        location, _source, is_package, is_namespace = record
+        if is_namespace:
+            spec = self._importlib_machinery.ModuleSpec(
+                fullname,
+                loader,
+                is_package=True,
+            )
+            spec.submodule_search_locations = [location]
+            return spec
+        spec = self._importlib_util.spec_from_loader(
+            fullname,
+            loader,
+            origin=location,
+            is_package=is_package,
+        )
+        if spec is None:
+            raise ImportError(f"could not bind {fullname!r}")
+        spec.has_location = True
+        if is_package:
+            spec.submodule_search_locations = [__import__("os").path.dirname(location)]
+        return spec
+
+
 _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR: (
     _RepositoryAuthorityMonitor | None
 ) = None
+_PREREGISTRATION_BOOTSTRAP_ACTIVE = False
+_PREREGISTRATION_BOOTSTRAP_FAILURE: BaseException | None = None
+
+
+def _record_preregistration_bootstrap_failure(exc: BaseException) -> None:
+    global _PREREGISTRATION_BOOTSTRAP_FAILURE
+    if (
+        _PREREGISTRATION_BOOTSTRAP_ACTIVE
+        and _PREREGISTRATION_BOOTSTRAP_FAILURE is None
+    ):
+        _PREREGISTRATION_BOOTSTRAP_FAILURE = exc
+
+
+def _assert_preregistration_bootstrap_authority() -> None:
+    if not _PREREGISTRATION_BOOTSTRAP_ACTIVE:
+        return
+    failure = _PREREGISTRATION_BOOTSTRAP_FAILURE
+    if failure is not None:
+        raise RuntimeError(
+            "AV1 preregistration bootstrap authority previously failed"
+        ) from failure
+    monitor = _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR
+    if monitor is None:
+        error = RuntimeError(
+            "AV1 preregistration bootstrap authority is unavailable"
+        )
+        _record_preregistration_bootstrap_failure(error)
+        raise error
+    try:
+        monitor.assert_quiet()
+    except BaseException as exc:
+        _record_preregistration_bootstrap_failure(exc)
+        raise RuntimeError(
+            "AV1 preregistration runner detected changed repository authority"
+        ) from exc
+
+
+def _call_preregistration_publication_guard(
+        callback: object = None,
+) -> None:
+    _assert_preregistration_bootstrap_authority()
+    if callback is not None:
+        callback()
+    _assert_preregistration_bootstrap_authority()
+
+
+def _install_bound_mediaforce_importer(
+        monitor: _RepositoryAuthorityMonitor,
+) -> None:
+    sources = monitor.bound_python_sources()
+    finder = _BoundMediaforceFinder(sources)
+    sys_module = __import__("sys")
+    if any(
+        name == "mediaforce" or name.startswith("mediaforce.")
+        for name in sys_module.modules
+    ):
+        raise RuntimeError(
+            "AV1 preregistration runner refuses preloaded mediaforce modules"
+        )
+    sys_module.meta_path.insert(0, finder)
+    try:
+        __import__("importlib").import_module("mediaforce")
+    finally:
+        _assert_preregistration_bootstrap_authority()
 
 
 def _finalize_preregistration_bootstrap_authority() -> None:
     global _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR
     monitor = _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR
     if monitor is None:
+        if _PREREGISTRATION_BOOTSTRAP_FAILURE is not None:
+            raise RuntimeError(
+                "AV1 preregistration bootstrap authority previously failed"
+            ) from _PREREGISTRATION_BOOTSTRAP_FAILURE
         return
     _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR = None
     try:
+        if _PREREGISTRATION_BOOTSTRAP_FAILURE is not None:
+            raise RuntimeError(
+                "AV1 preregistration bootstrap authority previously failed"
+            ) from _PREREGISTRATION_BOOTSTRAP_FAILURE
         monitor.assert_quiet()
+    except BaseException as exc:
+        _record_preregistration_bootstrap_failure(exc)
+        raise
     finally:
         monitor.close()
 
@@ -731,6 +1517,15 @@ def _assert_preregistration_import_tree_clean(
         if bootstrap_stat.S_ISREG(metadata_info.st_mode)
         else ()
     )
+    closed_authority_message = (
+        "AV1 preregistration runner refuses external or symlinked Git authority"
+    )
+    _assert_git_metadata_authority_is_closed(
+        git_directory,
+        git_common_directory,
+        failure_type=RuntimeError,
+        message=closed_authority_message,
+    )
     authority_monitor = _RepositoryAuthorityMonitor(
         root=root,
         authority_directories=(
@@ -739,6 +1534,9 @@ def _assert_preregistration_import_tree_clean(
             (git_common_directory, git_common_directory_identity, True),
         ),
         metadata_roots=(git_directory, git_common_directory),
+        metadata_excluded_roots=(
+            bootstrap_os.path.join(git_common_directory, "worktrees"),
+        ),
         metadata_files=metadata_files,
         failure_type=RuntimeError,
         changed_message=(
@@ -748,6 +1546,13 @@ def _assert_preregistration_import_tree_clean(
             "AV1 preregistration Git authority monitoring is unavailable"
         ),
     )
+    _assert_git_metadata_authority_is_closed(
+        git_directory,
+        git_common_directory,
+        failure_type=RuntimeError,
+        message=closed_authority_message,
+    )
+    authority_monitor.assert_quiet()
     for relative_root in ("mediaforce", "scripts"):
         authority_monitor.add_worktree_tree(
             bootstrap_os.path.join(root, relative_root)
@@ -784,6 +1589,8 @@ def _assert_preregistration_import_tree_clean(
                         "/usr/bin/git",
                         "-c",
                         "core.attributesFile=/dev/null",
+                        "-c",
+                        "core.excludesFile=/dev/null",
                         "-c",
                         "core.fsmonitor=false",
                         "-c",
@@ -890,49 +1697,53 @@ def _assert_preregistration_import_tree_clean(
             raise RuntimeError(
                 "AV1 preregistration runner refuses untracked or ignored import state"
             )
-    for arguments in (
-        (
-            "diff",
-            "--quiet",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            *pathspec,
-        ),
-        (
-            "diff",
-            "--cached",
-            "--quiet",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            "HEAD",
-            *pathspec,
-        ),
-    ):
-        return_code, _output = git_output(*arguments)
-        if return_code == 1:
-            raise RuntimeError(
-                "AV1 preregistration runner refuses modified import state"
-            )
-        if return_code != 0:
-            raise RuntimeError(
-                "AV1 preregistration runner could not inspect repository imports"
-            )
-    return_code, index_output = git_output(
-        "ls-files",
-        "-v",
-        "-z",
-        *pathspec,
+    def repository_snapshot() -> tuple[bytes, bytes, bytes]:
+        outputs: list[bytes] = []
+        for arguments in (
+            ("ls-files", "--cached", "--stage", "-z", *pathspec),
+            ("ls-tree", "-r", "-z", "--full-tree", "HEAD", *pathspec),
+            ("ls-files", "--cached", "-v", "-z", *pathspec),
+        ):
+            return_code, output = git_output(*arguments)
+            if return_code != 0:
+                raise RuntimeError(
+                    "AV1 preregistration runner could not inspect repository imports"
+                )
+            outputs.append(output)
+        return outputs[0], outputs[1], outputs[2]
+
+    modified_import_message = (
+        "AV1 preregistration runner refuses modified import state"
     )
-    if return_code != 0 or any(
-        not record.startswith(b"H ")
-        for record in index_output.split(b"\0")
-        if record
-    ):
+    initial_snapshot = repository_snapshot()
+    _assert_exact_git_worktree_snapshot(
+        root,
+        *initial_snapshot,
+        capture_mediaforce_python=False,
+        failure_type=RuntimeError,
+        message=modified_import_message,
+    )
+    authority_monitor.assert_quiet()
+    verified_snapshot = repository_snapshot()
+    if verified_snapshot != initial_snapshot:
         raise RuntimeError(
-            "AV1 preregistration runner refuses exceptional repository index state"
+            "AV1 preregistration runner detected changed Git metadata or import authority"
         )
+    captured_sources = _assert_exact_git_worktree_snapshot(
+        root,
+        *verified_snapshot,
+        capture_mediaforce_python=True,
+        failure_type=RuntimeError,
+        message=modified_import_message,
+    )
+    authority_monitor.bind_python_sources(
+        _build_bound_mediaforce_sources(
+            root,
+            captured_sources,
+            failure_type=RuntimeError,
+            message=modified_import_message,
+        )
+    )
 
     if repository_root is None:
         version_directory = (
@@ -1082,6 +1893,7 @@ def _assert_preregistration_import_tree_clean(
 
 
 if __name__ == "__main__":
+    _PREREGISTRATION_BOOTSTRAP_ACTIVE = True
     _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR = (
         _assert_preregistration_import_tree_clean(
             retain_authority_monitor=True,
@@ -1094,34 +1906,9 @@ if __name__ == "__main__":
     __import__("atexit").register(
         _fail_closed_preregistration_bootstrap_exit
     )
-    import importlib.util as _bootstrap_importlib_util
-
-    _bootstrap_package_path = (
-        __import__("os").path.realpath(
-            __import__("os").path.join(
-                __import__("os").path.dirname(__file__),
-                __import__("os").pardir,
-                "mediaforce",
-            )
-        )
+    _install_bound_mediaforce_importer(
+        _PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR
     )
-    _bootstrap_package_spec = _bootstrap_importlib_util.spec_from_file_location(
-        "mediaforce",
-        __import__("os").path.join(_bootstrap_package_path, "__init__.py"),
-        submodule_search_locations=[_bootstrap_package_path],
-    )
-    if (
-        _bootstrap_package_spec is None
-        or _bootstrap_package_spec.loader is None
-    ):
-        raise RuntimeError(
-            "AV1 preregistration runner could not bind the canonical mediaforce package"
-        )
-    _bootstrap_package = _bootstrap_importlib_util.module_from_spec(
-        _bootstrap_package_spec
-    )
-    __import__("sys").modules["mediaforce"] = _bootstrap_package
-    _bootstrap_package_spec.loader.exec_module(_bootstrap_package)
 
 
 import argparse
@@ -1284,13 +2071,11 @@ _REVIEW_GIT_COMMAND_PREFIX = (
     "-c",
     "core.attributesFile=/dev/null",
     "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
     "core.fsmonitor=false",
-)
-_REVIEW_GIT_DIFF_OPTIONS = (
-    "--quiet",
-    "--no-ext-diff",
-    "--no-textconv",
-    "--ignore-submodules=none",
+    "-c",
+    "core.hooksPath=/dev/null",
 )
 _LLM_REVIEW_MAXIMUM_RESPONSE_BYTES = 64 * 1024
 _MACH_O_MAGICS = frozenset({
@@ -1495,6 +2280,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    _assert_preregistration_bootstrap_authority()
     _assert_canonical_preregistration_runner()
     args = build_parser().parse_args(argv)
     try:
@@ -1502,15 +2288,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             assert_private_artifact_path(args.key, repository_root=REPOSITORY_ROOT)
             config = load_config(args.config)
             try:
+                _assert_preregistration_bootstrap_authority()
                 with exclusive_mediaforce_runtime_lock(
                     config,
                     owner_payload={"purpose": "av1-partition-key-create"},
                 ):
+                    _assert_preregistration_bootstrap_authority()
                     migrate_config_state(config)
+                    _assert_preregistration_bootstrap_authority()
                     reserve_mediaforce_database_identity(config)
+                    _assert_preregistration_bootstrap_authority()
                     token_key_id, created = ensure_av1_validation_partition_key(
                         args.key
                     )
+                    _assert_preregistration_bootstrap_authority()
             except MediaforceRuntimeBusyError as exc:
                 raise AV1ValidationPartitionError(
                     "AV1 partition key creation requires the Mediaforce runtime to be paused"
@@ -1614,6 +2405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run_partition_action(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
     manifest = load_av1_validation_manifest_v2(args.manifest)
     assert_preregistered_av1_validation_manifest_v2(manifest)
     assert_private_artifact_path(args.eligibility, repository_root=REPOSITORY_ROOT)
@@ -1625,12 +2417,16 @@ def _run_partition_action(args: argparse.Namespace) -> int:
         assert_private_artifact_path(args.output, repository_root=REPOSITORY_ROOT)
         config = load_config(args.config)
         try:
+            _assert_preregistration_bootstrap_authority()
             with exclusive_mediaforce_runtime_lock(
                 config,
                 owner_payload={"purpose": "av1-partition-build"},
             ):
+                _assert_preregistration_bootstrap_authority()
                 migrate_config_state(config)
+                _assert_preregistration_bootstrap_authority()
                 reserve_mediaforce_database_identity(config)
+                _assert_preregistration_bootstrap_authority()
                 with open_readonly_db(config.paths.db_path) as connection:
                     inventory = load_av1_validation_partition_inventory(
                         connection,
@@ -1661,10 +2457,15 @@ def _run_partition_action(args: argparse.Namespace) -> int:
                             resolver=source_sha256_resolver,
                         )
                         source_sha256_resolver.verify()
+                        def before_partition_publish() -> None:
+                            _call_preregistration_publication_guard(
+                                source_sha256_resolver.assert_quiet
+                            )
+
                         write_av1_validation_private_partition(
                             args.output,
                             partition,
-                            before_publish=source_sha256_resolver.assert_quiet,
+                            before_publish=before_partition_publish,
                         )
         except MediaforceRuntimeBusyError as exc:
             raise AV1ValidationPartitionError(
@@ -1705,6 +2506,7 @@ def _run_partition_action(args: argparse.Namespace) -> int:
 def _run_derivation_action(
         args: argparse.Namespace,
 ) -> int:
+    _assert_preregistration_bootstrap_authority()
     _assert_canonical_preregistration_runner()
     direct_write_action = args.action in {
         "create-derivation-plan",
@@ -1714,6 +2516,7 @@ def _run_derivation_action(
     if direct_write_action:
         config = load_config(args.config)
         try:
+            _assert_preregistration_bootstrap_authority()
             with exclusive_mediaforce_runtime_lock(
                 config,
                 owner_payload={
@@ -1721,8 +2524,11 @@ def _run_derivation_action(
                     "action": str(args.action),
                 },
             ):
+                _assert_preregistration_bootstrap_authority()
                 migrate_config_state(config)
+                _assert_preregistration_bootstrap_authority()
                 reserve_mediaforce_database_identity(config)
+                _assert_preregistration_bootstrap_authority()
                 return _run_derivation_action_body(
                     args,
                     locked_config=config,
@@ -1739,6 +2545,7 @@ def _run_derivation_action_body(
         *,
         locked_config: MediaforceConfig | None,
 ) -> int:
+    _assert_preregistration_bootstrap_authority()
     direct_write_action = args.action in {
         "create-derivation-plan",
         "build-derivation-proposal",
@@ -2025,6 +2832,9 @@ def _run_derivation_action_body(
                 proposal.payload_sha256,
             ),
         )) as publication_guard:
+            def guarded_publication() -> None:
+                _call_preregistration_publication_guard(publication_guard)
+
             existing_review = _load_existing_derivation_review(
                 artifact_root=artifact_root,
                 plan=plan,
@@ -2045,7 +2855,7 @@ def _run_derivation_action_body(
                     plan=plan,
                     proposal=proposal,
                     lane=args.lane,
-                    before_publish=publication_guard,
+                    before_publish=guarded_publication,
                 )
                 review_evidence_sha256 = (
                     f"sha256:{hashlib.sha256(review_evidence).hexdigest()}"
@@ -2071,9 +2881,9 @@ def _run_derivation_action_body(
                 proposal=proposal,
                 claim=claim,
                 envelope=envelope,
-                before_publish=publication_guard,
+                before_publish=guarded_publication,
             )
-            publication_guard()
+            guarded_publication()
         _print_partition_payload(
             {
                 "proposal_id": proposal.proposal_id,
@@ -2277,6 +3087,7 @@ def _run_derivation_plan_action(
                     )
 
             def _before_plan_publish() -> None:
+                _assert_preregistration_bootstrap_authority()
                 assert_av1_validation_derivation_authorization_active(
                     plan,
                     at=_now_iso(),
@@ -2293,10 +3104,13 @@ def _run_derivation_plan_action(
                     plan,
                     at=_now_iso(),
                 )
+                _assert_preregistration_bootstrap_authority()
 
             def _after_plan_publish() -> None:
+                _assert_preregistration_bootstrap_authority()
                 source_sha256_session.assert_quiet()
                 _assert_plan_repository_identity()
+                _assert_preregistration_bootstrap_authority()
 
             write_av1_validation_derivation_plan(
                 artifact_root,
@@ -2401,12 +3215,14 @@ def _run_derivation_proposal_action(
             return 2
         assert_av1_validation_derivation_execution_environment(plan)
         def _before_proposal_publish() -> None:
+            _assert_preregistration_bootstrap_authority()
             source_sha256_session.assert_quiet()
             assert_av1_validation_derivation_authorization_active(
                 plan,
                 at=_now_iso(),
             )
             assert_live_repository_identity()
+            _assert_preregistration_bootstrap_authority()
 
         write_av1_validation_derivation_candidate_proposal(
             artifact_root,
@@ -2667,19 +3483,12 @@ def _review_git_command(*arguments: str) -> list[str]:
     return [*_REVIEW_GIT_COMMAND_PREFIX, *arguments]
 
 
-def _review_git_diff_command(command: str, *arguments: str) -> list[str]:
-    return _review_git_command(
-        command,
-        *_REVIEW_GIT_DIFF_OPTIONS,
-        *arguments,
-    )
-
-
 def _repository_review_identity(
         *,
         process_controller: ManagedProcessController,
         repository_root: Path | None = None,
 ) -> tuple[str, str]:
+    _assert_preregistration_bootstrap_authority()
     root = (REPOSITORY_ROOT if repository_root is None else repository_root).resolve()
     git_environment, git_authority = _review_git_context(repository_root=root)
     git_monitor = _ReviewGitAuthorityMonitor(git_authority)
@@ -2706,55 +3515,56 @@ def _repository_review_identity(
 
     def assert_clean_state(
             object_ids: tuple[str, str],
-            index_output: str,
-    ) -> None:
-        if any(
-            not record.startswith("H ")
-            for record in index_output.split("\0")
-            if record
-        ):
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review repository has unsafe index state"
-            )
-        for tracked_state_command in (
-            _review_git_diff_command(
-                "diff-index",
-                "--cached",
-                object_ids[0],
-                "--",
-            ),
-            _review_git_diff_command("diff-files", "--"),
-        ):
-            tracked_state = _run_review_git_process(
-                tracked_state_command,
-                process_controller=process_controller,
-                repository_root=root,
-                git_environment=git_environment,
-                git_authority=git_authority,
-                git_monitor=git_monitor,
-            )
-            if tracked_state.returncode == 1:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review repository has uncommitted tracked changes"
-                )
-            if tracked_state.returncode != 0:
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review repository state is unavailable"
-                )
-        repository_state = _run_review_git_process(
+            index_snapshot: tuple[bytes, bytes],
+    ) -> bytes:
+        tree_state = _run_review_git_process(
             _review_git_command(
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
+                "ls-tree",
+                "-r",
+                "-z",
+                "--full-tree",
+                object_ids[1],
             ),
             process_controller=process_controller,
             repository_root=root,
             git_environment=git_environment,
             git_authority=git_authority,
             git_monitor=git_monitor,
+            text=False,
         )
-        if repository_state.returncode != 0:
+        if tree_state.returncode != 0 or not isinstance(tree_state.stdout, bytes):
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository state is unavailable"
+            )
+        _assert_exact_git_worktree_snapshot(
+            str(root),
+            index_snapshot[0],
+            tree_state.stdout,
+            index_snapshot[1],
+            capture_mediaforce_python=False,
+            failure_type=AV1ValidationDerivationError,
+            message=(
+                "AV1 derivation review repository has uncommitted tracked changes"
+            ),
+        )
+        repository_state = _run_review_git_process(
+            _review_git_command(
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+            ),
+            process_controller=process_controller,
+            repository_root=root,
+            git_environment=git_environment,
+            git_authority=git_authority,
+            git_monitor=git_monitor,
+            text=False,
+        )
+        if (
+            repository_state.returncode != 0
+            or not isinstance(repository_state.stdout, bytes)
+        ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation review repository state is unavailable"
             )
@@ -2778,8 +3588,12 @@ def _repository_review_identity(
             git_environment=git_environment,
             git_authority=git_authority,
             git_monitor=git_monitor,
+            text=False,
         )
-        if ignored_implementation_state.returncode != 0:
+        if (
+            ignored_implementation_state.returncode != 0
+            or not isinstance(ignored_implementation_state.stdout, bytes)
+        ):
             raise AV1ValidationDerivationError(
                 "AV1 derivation ignored implementation state is unavailable"
             )
@@ -2787,41 +3601,48 @@ def _repository_review_identity(
             raise AV1ValidationDerivationError(
                 "AV1 derivation repository has ignored implementation artifacts"
             )
+        return tree_state.stdout
 
     try:
         _assert_review_git_authority(root, git_authority)
         git_monitor.assert_quiet()
-        index_output = _prime_review_worktree_monitor(
+        index_snapshot = _prime_review_worktree_monitor(
             repository_root=root,
             process_controller=process_controller,
             git_environment=git_environment,
             git_authority=git_authority,
             git_monitor=git_monitor,
-            verbose=True,
         )
         object_ids = resolve_identity()
-        assert_clean_state(object_ids, index_output)
+        tree_snapshot = assert_clean_state(object_ids, index_snapshot)
         verified_object_ids = resolve_identity()
         if verified_object_ids != object_ids:
             raise AV1ValidationDerivationError(
                 "AV1 derivation review repository identity changed during verification"
             )
-        verified_index_output = _prime_review_worktree_monitor(
+        verified_index_snapshot = _prime_review_worktree_monitor(
             repository_root=root,
             process_controller=process_controller,
             git_environment=git_environment,
             git_authority=git_authority,
             git_monitor=git_monitor,
-            verbose=True,
         )
-        if verified_index_output != index_output:
+        if verified_index_snapshot != index_snapshot:
             raise AV1ValidationDerivationError(
                 "AV1 derivation review repository identity changed during verification"
             )
-        assert_clean_state(verified_object_ids, verified_index_output)
+        verified_tree_snapshot = assert_clean_state(
+            verified_object_ids,
+            verified_index_snapshot,
+        )
+        if verified_tree_snapshot != tree_snapshot:
+            raise AV1ValidationDerivationError(
+                "AV1 derivation review repository identity changed during verification"
+            )
         git_monitor.assert_quiet()
         _assert_review_git_authority(root, git_authority)
         git_monitor.assert_quiet()
+        _assert_preregistration_bootstrap_authority()
         return verified_object_ids
     finally:
         try:
@@ -2833,9 +3654,12 @@ def _repository_review_identity(
 
 
 def _live_repository_identity() -> tuple[str, str]:
-    return _repository_review_identity(
+    _assert_preregistration_bootstrap_authority()
+    identity = _repository_review_identity(
         process_controller=ManagedProcessController(),
     )
+    _assert_preregistration_bootstrap_authority()
+    return identity
 
 
 def _read_review_git_metadata_file(path: Path, label: str) -> str:
@@ -2955,6 +3779,14 @@ def _review_git_authority(repository_root: Path) -> tuple[Path, Path]:
             raise AV1ValidationDerivationError(
                 f"AV1 derivation review refuses unsafe {label}"
             )
+    _assert_git_metadata_authority_is_closed(
+        str(git_directory),
+        str(common_directory),
+        failure_type=AV1ValidationDerivationError,
+        message=(
+            "AV1 derivation review refuses external or symlinked Git authority"
+        ),
+    )
     return git_directory, common_directory
 
 
@@ -2991,6 +3823,9 @@ class _ReviewGitAuthorityMonitor(_RepositoryAuthorityMonitor):
                 for path, expected_identity in authority
             ),
             metadata_roots=(str(git_entry[0]), str(common_entry[0])),
+            metadata_excluded_roots=(
+                str(common_entry[0] / "worktrees"),
+            ),
             metadata_files=metadata_files,
             failure_type=AV1ValidationDerivationError,
             changed_message="AV1 derivation review Git authority changed",
@@ -2998,6 +3833,15 @@ class _ReviewGitAuthorityMonitor(_RepositoryAuthorityMonitor):
                 "AV1 derivation review Git authority monitoring is unavailable"
             ),
         )
+        _assert_git_metadata_authority_is_closed(
+            str(git_entry[0]),
+            str(common_entry[0]),
+            failure_type=AV1ValidationDerivationError,
+            message=(
+                "AV1 derivation review refuses external or symlinked Git authority"
+            ),
+        )
+        self.assert_quiet()
 
 
 def _review_git_authority_snapshot(
@@ -3245,31 +4089,6 @@ def _run_review_git_process(
     return completed
 
 
-def _review_git_tracked_paths(
-        output: str,
-        *,
-        verbose: bool,
-) -> tuple[str, ...]:
-    paths: list[str] = []
-    for record in output.split("\0"):
-        if not record:
-            continue
-        if verbose:
-            if len(record) < 3 or record[1] != " ":
-                raise AV1ValidationDerivationError(
-                    "AV1 derivation review repository has unsafe index state"
-                )
-            path = record[2:]
-        else:
-            path = record
-        if not path:
-            raise AV1ValidationDerivationError(
-                "AV1 derivation review repository index state is unavailable"
-            )
-        paths.append(path)
-    return tuple(paths)
-
-
 def _prime_review_worktree_monitor(
         *,
         repository_root: Path,
@@ -3277,44 +4096,97 @@ def _prime_review_worktree_monitor(
         git_environment: dict[str, str],
         git_authority: _ReviewGitAuthoritySnapshot,
         git_monitor: _ReviewGitAuthorityMonitor,
-        verbose: bool,
-) -> str:
-    arguments = ["ls-files", "--cached", "-z"]
-    if verbose:
-        arguments.insert(2, "-v")
-    command = _review_git_command(*arguments)
-    initial = _run_review_git_process(
-        command,
+) -> tuple[bytes, bytes]:
+    stage_command = _review_git_command(
+        "ls-files",
+        "--cached",
+        "--stage",
+        "-z",
+    )
+    verbose_command = _review_git_command(
+        "ls-files",
+        "--cached",
+        "-v",
+        "-z",
+    )
+    initial_stage = _run_review_git_process(
+        stage_command,
         process_controller=process_controller,
         repository_root=repository_root,
         git_environment=git_environment,
         git_authority=git_authority,
         git_monitor=git_monitor,
+        text=False,
     )
-    if initial.returncode != 0 or not isinstance(initial.stdout, str):
+    if initial_stage.returncode != 0 or not isinstance(initial_stage.stdout, bytes):
         raise AV1ValidationDerivationError(
             "AV1 derivation review repository index state is unavailable"
         )
+    index_entries = _parse_git_index_snapshot(
+        initial_stage.stdout,
+        failure_type=AV1ValidationDerivationError,
+        message="AV1 derivation review repository has unsafe index state",
+    )
     git_monitor.add_worktree_paths(
-        _review_git_tracked_paths(initial.stdout, verbose=verbose)
+        tuple(os.fsdecode(path) for path, _mode, _object_id in index_entries)
     )
-    verified = _run_review_git_process(
-        command,
+    initial_verbose = _run_review_git_process(
+        verbose_command,
         process_controller=process_controller,
         repository_root=repository_root,
         git_environment=git_environment,
         git_authority=git_authority,
         git_monitor=git_monitor,
+        text=False,
     )
-    if verified.returncode != 0 or not isinstance(verified.stdout, str):
+    if (
+        initial_verbose.returncode != 0
+        or not isinstance(initial_verbose.stdout, bytes)
+    ):
         raise AV1ValidationDerivationError(
             "AV1 derivation review repository index state is unavailable"
         )
-    if verified.stdout != initial.stdout:
+    _assert_ordinary_git_index_state(
+        initial_verbose.stdout,
+        tuple(path for path, _mode, _object_id in index_entries),
+        failure_type=AV1ValidationDerivationError,
+        message="AV1 derivation review repository has unsafe index state",
+    )
+    verified_stage = _run_review_git_process(
+        stage_command,
+        process_controller=process_controller,
+        repository_root=repository_root,
+        git_environment=git_environment,
+        git_authority=git_authority,
+        git_monitor=git_monitor,
+        text=False,
+    )
+    verified_verbose = _run_review_git_process(
+        verbose_command,
+        process_controller=process_controller,
+        repository_root=repository_root,
+        git_environment=git_environment,
+        git_authority=git_authority,
+        git_monitor=git_monitor,
+        text=False,
+    )
+    if (
+        verified_stage.returncode != 0
+        or not isinstance(verified_stage.stdout, bytes)
+        or verified_verbose.returncode != 0
+        or not isinstance(verified_verbose.stdout, bytes)
+    ):
+        raise AV1ValidationDerivationError(
+            "AV1 derivation review repository index state is unavailable"
+        )
+    if (
+        verified_stage.stdout != initial_stage.stdout
+        or verified_verbose.stdout != initial_verbose.stdout
+    ):
         raise AV1ValidationDerivationError(
             "AV1 derivation review Git authority changed"
         )
-    return verified.stdout
+    return verified_stage.stdout, verified_verbose.stdout
 
 
 def _review_git_commit_tree(
@@ -3380,7 +4252,6 @@ def _build_av1_validation_derivation_review_bundle(
             git_environment=git_environment,
             git_authority=git_authority,
             git_monitor=git_monitor,
-            verbose=False,
         )
         return _build_av1_validation_derivation_review_bundle_transaction(
             claim=claim,
@@ -3878,6 +4749,11 @@ def _run_code_llm_review_before_deadline(
     bytes,
     AV1ValidationDerivationReviewDecision,
 ]:
+    _assert_preregistration_bootstrap_authority()
+
+    def guarded_before_publish() -> None:
+        _call_preregistration_publication_guard(before_publish)
+
     assert_av1_validation_derivation_execution_environment(
         plan,
         process_controller=process_controller,
@@ -3907,7 +4783,7 @@ def _run_code_llm_review_before_deadline(
         plan=plan,
         proposal=proposal,
         claim=claim,
-        before_publish=before_publish,
+        before_publish=guarded_before_publish,
     )
     safe_bundle = _build_av1_validation_derivation_review_bundle(
         claim=claim,
@@ -3944,6 +4820,7 @@ def _run_code_llm_review_before_deadline(
                 response_schema_text,
             ]
             _assert_no_tool_llm_review_command(command)
+            _assert_preregistration_bootstrap_authority()
             try:
                 completed = run_command(
                     command,
@@ -4040,10 +4917,12 @@ def _run_code_llm_review_before_deadline(
             model_response
         ),
     })
+    _assert_preregistration_bootstrap_authority()
     return claim, evidence, decision
 
 
 def _print_partition_payload(payload: dict[str, object], *, json_output: bool) -> None:
+    _assert_preregistration_bootstrap_authority()
     assert_av1_cold_start_public_payload_safe(payload)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))

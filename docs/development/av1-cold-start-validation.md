@@ -247,36 +247,52 @@ disabled, replacement refs are disabled, and optional index locks are disabled
 so every read probe is non-writing. The verifier validates the checkout's main
 or linked-worktree metadata, pins `GIT_DIR`, `GIT_COMMON_DIR`, and
 `GIT_WORK_TREE` to that one authority tuple, disables system and configured
-attribute files, and disables repository-configured fsmonitor hooks for these
-probes. Each repository-identity or review-bundle transaction creates one
+attribute and exclude files, and disables repository-configured fsmonitor and
+hook paths for these probes. Local and per-worktree config remain readable only
+when self-contained: any `include`/`includeIf` directive fails closed, as does a
+nonempty `objects/info/alternates` file. Nested symlinks anywhere in the current
+Git directory or authoritative shared metadata fail closed; the validated
+top-level linked-worktree `.git` pointer remains the only indirection. Each
+repository-identity or review-bundle transaction creates one
 retained-descriptor authority monitor before its first Git child and keeps that
 same monitor through every command and the final fail-closed drain. The monitor
-recursively covers the checkout's Git directory and common directory, including
-their regular metadata files and a linked worktree's `.git` pointer, so an
+recursively covers the checkout's current Git directory and the shared refs,
+objects, config, logs, and packed metadata. Shared `worktrees/*` metadata is
+excluded so an unrelated linked worktree can update its own `HEAD`, index, or
+lock state without invalidating the current checkout; the current linked
+worktree's Git directory remains separately and recursively monitored. An
 in-place loose-ref, index, config, object, or packed-metadata rewrite is detected
 even when the original bytes and pathname are restored. Repository-identity and
 review-bundle transactions also derive their worktree watch set from Git's
-tracked-file listing, retain the tracked files and their ancestor directories,
-and deliberately do not recurse into ignored dependency trees. macOS uses
-kqueue and raises the process soft file-descriptor limit only when the complete
-watch set requires it; Linux uses inotify. Other platforms fail closed. Any
-write, rename, replacement, relink, attribute change, or namespace mutation is
-a permanent authority failure. The same frozen authority tuple is revalidated
-immediately before and after every Git child and monitor drain. It does not
-blanket-disable repository-local configuration, because ordinary linked-worktree
-and core/remote/branch behavior must remain intact. Instead, the only local
-configuration vectors that could reinterpret authority are neutralized at the
-probe boundary: tracked-state checks use raw `diff-index` and `diff-files` with
-external diff, text conversion, and submodule ignoring disabled; every
-repository-authority probe requires that clean state and explicitly includes all
-untracked files and submodules. Git aliases,
-remotes, hooks, and ordinary branch settings are not invoked by these direct
-built-in read commands, and remaining local configuration cannot alter the raw
-commit, tree, or blob object IDs they consume. Before any clean-tree decision,
-the verifier also requires every tracked index entry to have Git's ordinary
-`H` state; `assume-unchanged`, `skip-worktree`, unmerged, and other exceptional
-index states fail closed instead of allowing live implementation bytes to
-diverge from the reviewed commit. The canonical runner must be launched with
+binary tracked-file listing, retain the tracked files and their ancestor
+directories, and deliberately do not recurse into ignored dependency trees.
+macOS uses kqueue and raises the process soft file-descriptor limit only when the
+complete watch set requires it; monitor close restores the previous soft limit
+only when it still equals the value set by that monitor, so a concurrent
+external limit change is never overwritten. Linux uses inotify. Other platforms
+fail closed. Any write, rename, replacement, relink, attribute change, or
+authoritative namespace mutation is a permanent authority failure. The same
+frozen authority tuple is revalidated immediately before and after every Git
+child and monitor drain.
+
+Clean-state proof does not invoke `diff`, `status`, text conversion, clean
+filters, or process filters. Binary `ls-files --stage -z` and `ls-tree -r -z`
+snapshots must contain the same stage-zero mode/path/blob tuples, while binary
+`ls-files -v -z` must report ordinary `H` state for every path. The verifier then
+opens each regular worktree file directly with no-follow semantics, or reads the
+target bytes for a tracked symlink, checks its mode and stable descriptor/path
+identity, and computes Git's canonical `blob <size>\0<bytes>` object ID. The
+object-ID width selects repository SHA-1 or SHA-256. Dirty bytes therefore
+cannot be normalized back to the index by a configured filter, and a malicious
+filter command is never executed. NUL-delimited path output remains binary until
+filesystem decoding with `surrogateescape`, so arbitrary Linux Git path bytes
+either round-trip into the direct proof or produce a controlled derivation error
+instead of a `UnicodeDecodeError`. Untracked state is checked with binary
+built-in `ls-files` queries; Git aliases, remotes, and hooks are not invoked by
+these fixed read commands. `assume-unchanged`, `skip-worktree`, unmerged,
+gitlink, and other exceptional index states fail closed instead of allowing live
+implementation bytes to diverge from the reviewed commit. The canonical runner
+must be launched with
 CPython isolated/no-site startup before importing `argparse`, dependencies, or
 `mediaforce`; non-`-I -S` startup fails closed. A stdlib-only bootstrap invokes
 fixed `/usr/bin/git` through a
@@ -285,11 +301,21 @@ sanitized environment with validated `GIT_DIR`, `GIT_COMMON_DIR`, and
 `core.worktree` or a foreign `.git` pointer cannot redirect the proof. The
 stdlib-only bootstrap establishes one recursive metadata and import-tree monitor
 before its first fixed Git probe. That monitor remains active across every
-bootstrap probe, canonical `mediaforce` package binding, all repository-local
-imports, and the complete command execution, then performs a final fail-closed
-drain before process exit. Transient directory swaps, in-place Git metadata
-rewrites, and package replace-and-restore attempts therefore remain observable
-after the last bootstrap probe. It refuses modified,
+bootstrap probe, all repository-local imports, and the complete command
+execution, then performs a final fail-closed drain before process exit. After
+the raw exact-object proof, the bootstrap retains the already-read bytes for
+every tracked `mediaforce/**/*.py` module and installs an in-memory finder and
+loader before importing the package. Source compilation and `get_source()` use
+those bound bytes; module `__file__` and package resource readers still point at
+the canonical checkout, and unknown later-created `mediaforce` modules cannot
+fall through to the mutable worktree. A swap-and-restore during import can only
+execute the previously bound authoritative source, while the retained monitor
+makes the command fail closed. Bootstrap-authority failure is sticky and is
+reasserted before runtime locks, artifact publication callbacks, review launch,
+and public success output, so catching one authority exception cannot permit a
+later side effect. Transient directory swaps, in-place Git metadata rewrites,
+and package replace-and-restore attempts therefore remain observable after the
+last bootstrap probe. It refuses modified,
 exceptional-index, untracked, or ignored state anywhere under `mediaforce/` or
 `scripts/`; it also rejects
 repository bytecode caches and disables bytecode writes. The bootstrap removes
@@ -298,8 +324,8 @@ trusted interpreter paths plus the canonical checkout's `.venv` site-packages,
 requires the running interpreter to use an approved `.venv/bin/python*` launcher
 whose opened binary is the same inode as canonical `.venv/bin/python` and the
 interpreter's base executable, requires any `VIRTUAL_ENV` declaration to match
-that environment, and explicitly binds the canonical `mediaforce` package
-directory. An ignored `scripts/argparse.py`,
+that environment, and explicitly binds the canonical `mediaforce` source
+snapshot. An ignored `scripts/argparse.py`,
 Python source, bytecode, native extension, or package substitution therefore
 cannot execute before the exact-object authority proof. Operators must remove
 those artifacts before invoking this security-sensitive runner.
@@ -455,8 +481,8 @@ and every derivation attempt use `cira3`. Persisted calibration requires
 nonempty preview, source, and compare arrays with valid absolute `file:` URIs,
 finite positive durations, unique nonnegative millisecond-normalized moments,
 and the same moment set in all three roles before review media can be marked
-ready or a `cira3` fingerprint can be accepted. Verdict-time identity checks use the same
-all-clips-held procedure, closing the earlier-clip mutation window.
+ready or a `cira3` fingerprint can be accepted. Verdict-time identity checks use
+the same all-clips-held procedure, closing the earlier-clip mutation window.
 Descriptor/resource or integrity failure is an affected-cell `safety_stop`, not
 `media_unavailable` or measured evidence.
 

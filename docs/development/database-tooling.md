@@ -75,14 +75,16 @@ Mediaforce's SQLite schema.
   retained source before and after backup. A retained vnode/inotify guard makes
   any transient rename, relink, replacement, or write to that source identity a
   permanent migration failure even if the original pathname is restored before
-  the next stat check. Before the first SQLite open, missing WAL, SHM, and
+  the next stat check. After cleanup seals, Linux filters named unrelated
+  sibling events, while macOS kqueue directory churn has no name and fails
+  closed. Before the first SQLite open, missing WAL, SHM, and
   rollback-journal paths are created as owner-only empty files and all three
   inode identities are bound. SQLite may initialize those bound inodes while
   acquiring the no-wait source write gate, but any sidecar removal, replacement,
-  relink, or later WAL write fails the transfer. A pre-publication failure
-  removes only reservation inodes that remain byte-empty and metadata-identical
-  to the files the guard created; changed or pre-existing sidecars are never
-  removed. The source is copied through that verified SQLite snapshot while the
+  relink, or later WAL write fails the transfer. A pre-publication failure moves
+  only byte-empty, metadata-identical guard reservations into a separate
+  deterministic reservation quarantine; changed or pre-existing sidecars are
+  never removed. The source copy uses that verified SQLite snapshot while the
   write gate excludes new commits, preserving committed WAL state without
   moving sidecar files.
   Before a staging file becomes visible, an owner-only durable `copying` intent
@@ -98,16 +100,18 @@ Mediaforce's SQLite schema.
   parent is rechecked before every source retirement. A destination-parent swap
   therefore rolls back publication or stops cleanup before the legacy main is
   retired. Cleanup claims the exact legacy main first with an exclusive rename
-  to an identity-derived quarantine name, syncs that namespace transition,
-  validates the claimed inode, removes it, and syncs again; WAL, SHM, and the
-  rollback journal follow in the same order. Live cleanup consumes the durable
+  to an identity-derived quarantine name, syncs that namespace transition, and
+  validates the claimed inode. It then retains that exact quarantine as
+  authorized migration residue rather than unlinking an unbound pathname; WAL,
+  SHM, and the rollback journal follow in the same order. Live cleanup consumes
+  the durable
   `cleaning` manifest rather than recapturing current sidecar metadata: every
   main/sidecar inode must still match all recorded fields and its descriptor-
   read SHA-256 before its exclusive claim and again while quarantined; only the
   expected rename-induced ctime change is relaxed afterward. A
   crash-surviving quarantine entry
-  is durable cleanup progress, not an orphan, and recovery validates it against
-  the intent before removal. If another inode appears between the final live-name
+  is durable cleanup progress, not an orphan, and recovery validates and retains
+  it against the intent. If another inode appears between the final live-name
   check and the claim, cleanup stops with the claimed inode retained in its
   deterministic quarantine and the replacement is preserved. A missing main
   file therefore proves cleanup started. Recovery
@@ -120,15 +124,16 @@ Mediaforce's SQLite schema.
   fresh gated backup while the main still exists, or the exact descriptor-bound
   destination plus sidecar manifest once the main has been retired, before
   completing source/staging cleanup and intent removal. The retained source
-  authority rechecks that the main, all three live sidecar names, and every
-  matching retirement quarantine remain absent through the final intent
+  authority rechecks that the main and all three live sidecar names remain
+  absent while the exact manifest-derived retirement-quarantine set remains
+  present and bound to its expected inode and digest through final intent
   deletion. Intent removal performs another retained-source check after its
   directory fsync and restores the exact cleaning intent through the already-
   bound destination directory descriptor on failure. A later
   startup also fails closed if both legacy and configured databases exist
   without a resumable intent. Version-2 `ready` intents and version-3 `cleaning`
   intents predate the digest manifest. When their live main still exists, gated
-  recovery upgrades version 3 to the version-4 digest format before deleting
+  recovery upgrades version 3 to the version-4 digest format before retiring
   anything. When the main is already retired, recovery preserves and logs any
   stat-bound main quarantine plus unidentified sidecar or quarantine artifacts
   instead of deleting data it cannot authorize. Parent replacement, source

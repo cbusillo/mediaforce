@@ -1547,9 +1547,12 @@ def _resume_legacy_sqlite_migration_intent(
                     )
                     if retained_artifacts:
                         LOGGER.warning(
-                            "Retained legacy SQLite digestless cleanup artifacts after "
+                            "Retained legacy SQLite cleanup artifacts after "
                             "safe migration: %s",
-                            ", ".join(retained_artifacts),
+                            ", ".join(
+                                artifact.name
+                                for artifact in retained_artifacts
+                            ),
                         )
 
                     def assert_source_cleanup_complete() -> None:
@@ -1558,7 +1561,7 @@ def _resume_legacy_sqlite_migration_intent(
                             expected_parent_identity=payload.get(
                                 "source_parent_identity"
                             ),
-                            allowed_sidecar_artifacts=retained_artifacts,
+                            allowed_cleanup_artifacts=retained_artifacts,
                         )
 
                     finish_migration(assert_source_cleanup_complete)
@@ -1948,6 +1951,13 @@ def _assert_legacy_sqlite_migration_source_parent_stable(
         raise OSError("legacy SQLite migration source parent changed")
 
 
+@dataclass(frozen=True, slots=True)
+class _LegacySQLiteRetainedCleanupArtifact:
+    name: str
+    expected_snapshot: tuple[int, ...] | None
+    expected_sha256: str | None
+
+
 def _complete_legacy_sqlite_source_cleanup(
         source: Path,
         *,
@@ -1957,7 +1967,7 @@ def _complete_legacy_sqlite_source_cleanup(
         expected_sidecar_snapshots: object,
         before_remove: Callable[[], None] | None = None,
         preserve_unmanifested_artifacts: bool = False,
-) -> tuple[str, ...]:
+) -> tuple[_LegacySQLiteRetainedCleanupArtifact, ...]:
     if (
         not isinstance(expected_parent_identity, list)
         or len(expected_parent_identity) != 2
@@ -2012,40 +2022,7 @@ def _complete_legacy_sqlite_source_cleanup(
             size=main_snapshot[2],
             mtime_ns=main_snapshot[3],
         )
-        def main_exact_match(info: os.stat_result) -> bool:
-            return (
-                stat.S_ISREG(info.st_mode)
-                and (
-                    info.st_dev,
-                    info.st_ino,
-                    info.st_size,
-                    info.st_mtime_ns,
-                    info.st_ctime_ns,
-                    info.st_nlink,
-                )
-                == main_snapshot
-            )
-
-        def main_retired_match(info: os.stat_result) -> bool:
-            return (
-                stat.S_ISREG(info.st_mode)
-                and (
-                    info.st_dev,
-                    info.st_ino,
-                    info.st_size,
-                    info.st_mtime_ns,
-                    info.st_nlink,
-                )
-                == (
-                    main_snapshot[0],
-                    main_snapshot[1],
-                    main_snapshot[2],
-                    main_snapshot[3],
-                    main_snapshot[5],
-                )
-            )
-
-        retained_artifacts: list[str] = []
+        retained_artifacts: dict[str, _LegacySQLiteRetainedCleanupArtifact] = {}
         if main_sha256 is None and preserve_unmanifested_artifacts:
             live_info = _legacy_sqlite_directory_entry_info(
                 directory_descriptor,
@@ -2060,21 +2037,30 @@ def _complete_legacy_sqlite_source_cleanup(
                     "legacy SQLite migration source cleanup is incomplete"
                 )
             if quarantine_info is not None:
-                if not main_retired_match(quarantine_info):
+                if not _legacy_sqlite_cleanup_retired_snapshot_matches(
+                        quarantine_info,
+                        main_snapshot,
+                ):
                     raise OSError(
                         "legacy SQLite migration cleanup quarantine is unsafe"
                     )
-                retained_artifacts.append(main_quarantine_name)
+                retained_artifacts[main_quarantine_name] = (
+                    _LegacySQLiteRetainedCleanupArtifact(
+                        name=main_quarantine_name,
+                        expected_snapshot=main_snapshot,
+                        expected_sha256=None,
+                    )
+                )
         else:
-            _complete_legacy_sqlite_cleanup_entry(
+            artifact = _complete_legacy_sqlite_cleanup_entry(
                 directory_descriptor=directory_descriptor,
                 name=source.name,
                 quarantine_name=main_quarantine_name,
-                exact_match=main_exact_match,
-                retired_match=main_retired_match,
+                expected_snapshot=main_snapshot,
                 expected_sha256=main_sha256,
                 before_remove=before_remove,
             )
+            retained_artifacts[artifact.name] = artifact
         assert_parent_stable()
         if sidecar_snapshots is None:
             retained_sidecars = tuple(sorted(
@@ -2092,7 +2078,12 @@ def _complete_legacy_sqlite_source_cleanup(
                 raise OSError(
                     "legacy SQLite migration source cleanup is incomplete"
                 )
-            retained_artifacts.extend(retained_sidecars)
+            for candidate in retained_sidecars:
+                retained_artifacts[candidate] = _LegacySQLiteRetainedCleanupArtifact(
+                    name=candidate,
+                    expected_snapshot=None,
+                    expected_sha256=None,
+                )
         else:
             for suffix in ("-wal", "-shm", "-journal"):
                 assert_parent_stable()
@@ -2105,44 +2096,17 @@ def _complete_legacy_sqlite_source_cleanup(
                     size=int(expected["size"]),
                     mtime_ns=int(expected["mtime_ns"]),
                 )
-                _complete_legacy_sqlite_cleanup_entry(
+                artifact = _complete_legacy_sqlite_cleanup_entry(
                     directory_descriptor=directory_descriptor,
                     name=name,
                     quarantine_name=quarantine_name,
-                    exact_match=lambda info, expected=expected: (
-                        stat.S_ISREG(info.st_mode)
-                        and all(
-                            current == expected[key]
-                            for key, current in (
-                                ("device", info.st_dev),
-                                ("inode", info.st_ino),
-                                ("size", info.st_size),
-                                ("link_count", info.st_nlink),
-                                ("mtime_ns", info.st_mtime_ns),
-                                ("ctime_ns", info.st_ctime_ns),
-                                ("uid", info.st_uid),
-                                ("mode", stat.S_IMODE(info.st_mode)),
-                            )
-                        )
-                    ),
-                    retired_match=lambda info, expected=expected: (
-                        stat.S_ISREG(info.st_mode)
-                        and all(
-                            current == expected[key]
-                            for key, current in (
-                                ("device", info.st_dev),
-                                ("inode", info.st_ino),
-                                ("size", info.st_size),
-                                ("link_count", info.st_nlink),
-                                ("mtime_ns", info.st_mtime_ns),
-                                ("uid", info.st_uid),
-                                ("mode", stat.S_IMODE(info.st_mode)),
-                            )
-                        )
+                    expected_snapshot=_legacy_sqlite_cleanup_sidecar_snapshot(
+                        expected
                     ),
                     expected_sha256=str(expected["sha256"]),
                     before_remove=before_remove,
                 )
+                retained_artifacts[artifact.name] = artifact
                 assert_parent_stable()
         remaining_names = set(os.listdir(directory_descriptor))
         main_quarantine_prefix = f".{source.name}.mediaforce-retired-"
@@ -2162,10 +2126,19 @@ def _complete_legacy_sqlite_source_cleanup(
         }
         if remaining_artifacts != set(retained_artifacts):
             raise OSError("legacy SQLite migration source cleanup is incomplete")
+        for artifact in retained_artifacts.values():
+            if not _legacy_sqlite_retained_cleanup_artifact_matches(
+                    directory_descriptor,
+                    artifact,
+            ):
+                raise OSError("legacy SQLite migration cleanup quarantine is unsafe")
         assert_parent_stable()
         os.fsync(directory_descriptor)
         assert_parent_stable()
-        return tuple(sorted(retained_artifacts))
+        return tuple(
+            retained_artifacts[name]
+            for name in sorted(retained_artifacts)
+        )
     except FileIntegrityError as exc:
         raise OSError("legacy SQLite migration source parent is unsafe") from exc
     finally:
@@ -2177,7 +2150,10 @@ def _assert_legacy_sqlite_source_cleanup_complete(
         source: Path,
         *,
         expected_parent_identity: object,
-        allowed_sidecar_artifacts: tuple[str, ...],
+        allowed_cleanup_artifacts: tuple[
+            _LegacySQLiteRetainedCleanupArtifact,
+            ...,
+        ],
 ) -> None:
     if (
         not isinstance(expected_parent_identity, list)
@@ -2207,8 +2183,21 @@ def _assert_legacy_sqlite_source_cleanup_complete(
                 for suffix in ("-wal", "-shm", "-journal")
             )
         }
-        if current_cleanup_artifacts != set(allowed_sidecar_artifacts):
+        allowed_artifact_names = {
+            artifact.name
+            for artifact in allowed_cleanup_artifacts
+        }
+        if (
+            len(allowed_artifact_names) != len(allowed_cleanup_artifacts)
+            or current_cleanup_artifacts != allowed_artifact_names
+        ):
             raise OSError("legacy SQLite migration source cleanup is incomplete")
+        for artifact in allowed_cleanup_artifacts:
+            if not _legacy_sqlite_retained_cleanup_artifact_matches(
+                    directory_descriptor,
+                    artifact,
+            ):
+                raise OSError("legacy SQLite migration cleanup quarantine is unsafe")
         _assert_legacy_sqlite_migration_source_parent_stable(
             source,
             expected_parent_identity,
@@ -2225,11 +2214,10 @@ def _complete_legacy_sqlite_cleanup_entry(
         directory_descriptor: int,
         name: str,
         quarantine_name: str,
-        exact_match: Callable[[os.stat_result], bool],
-        retired_match: Callable[[os.stat_result], bool],
+        expected_snapshot: tuple[int, ...],
         expected_sha256: str | None,
         before_remove: Callable[[], None] | None,
-) -> None:
+) -> _LegacySQLiteRetainedCleanupArtifact:
     def digest_matches(candidate_name: str) -> bool:
         if expected_sha256 is None:
             return False
@@ -2252,10 +2240,13 @@ def _complete_legacy_sqlite_cleanup_entry(
     if live_info is not None and quarantine_info is not None:
         raise OSError("legacy SQLite migration cleanup has conflicting entries")
     if live_info is None and quarantine_info is None:
-        return
+        raise OSError("legacy SQLite migration source cleanup is incomplete")
     if quarantine_info is not None:
         if (
-            not retired_match(quarantine_info)
+            not _legacy_sqlite_cleanup_retired_snapshot_matches(
+                quarantine_info,
+                expected_snapshot,
+            )
             or not digest_matches(quarantine_name)
         ):
             raise OSError("legacy SQLite migration cleanup quarantine is unsafe")
@@ -2266,22 +2257,43 @@ def _complete_legacy_sqlite_cleanup_entry(
             dir_fd=directory_descriptor,
             follow_symlinks=False,
         )
-        if not retired_match(current) or not digest_matches(quarantine_name):
+        if (
+            not _legacy_sqlite_cleanup_retired_snapshot_matches(
+                current,
+                expected_snapshot,
+            )
+            or not digest_matches(quarantine_name)
+        ):
             raise OSError("legacy SQLite migration cleanup quarantine changed")
-        os.unlink(quarantine_name, dir_fd=directory_descriptor)
         os.fsync(directory_descriptor)
-        if _legacy_sqlite_directory_entry_exists(
+        current = os.stat(
+            quarantine_name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if (
+            not _legacy_sqlite_cleanup_retired_snapshot_matches(
+                current,
+                expected_snapshot,
+            )
+            or not digest_matches(quarantine_name)
+            or _legacy_sqlite_directory_entry_exists(
                 directory_descriptor,
                 name,
-        ) or _legacy_sqlite_directory_entry_exists(
-                directory_descriptor,
-                quarantine_name,
+            )
         ):
-            raise OSError("legacy SQLite migration source cleanup is incomplete")
-        return
+            raise OSError("legacy SQLite migration cleanup quarantine changed")
+        return _LegacySQLiteRetainedCleanupArtifact(
+            name=quarantine_name,
+            expected_snapshot=expected_snapshot,
+            expected_sha256=expected_sha256,
+        )
     if (
         live_info is None
-        or not exact_match(live_info)
+        or not _legacy_sqlite_cleanup_live_snapshot_matches(
+            live_info,
+            expected_snapshot,
+        )
         or not digest_matches(name)
     ):
         raise OSError("legacy SQLite migration source cleanup is unsafe")
@@ -2298,7 +2310,13 @@ def _complete_legacy_sqlite_cleanup_entry(
         dir_fd=directory_descriptor,
         follow_symlinks=False,
     )
-    if not retired_match(current) or not digest_matches(quarantine_name):
+    if (
+        not _legacy_sqlite_cleanup_retired_snapshot_matches(
+            current,
+            expected_snapshot,
+        )
+        or not digest_matches(quarantine_name)
+    ):
         raise OSError("legacy SQLite migration cleanup claimed an unsafe entry")
     os.fsync(directory_descriptor)
     current = os.stat(
@@ -2306,18 +2324,113 @@ def _complete_legacy_sqlite_cleanup_entry(
         dir_fd=directory_descriptor,
         follow_symlinks=False,
     )
-    if not retired_match(current) or not digest_matches(quarantine_name):
-        raise OSError("legacy SQLite migration cleanup quarantine changed")
-    os.unlink(quarantine_name, dir_fd=directory_descriptor)
-    os.fsync(directory_descriptor)
-    if _legacy_sqlite_directory_entry_exists(
+    if (
+        not _legacy_sqlite_cleanup_retired_snapshot_matches(
+            current,
+            expected_snapshot,
+        )
+        or not digest_matches(quarantine_name)
+        or _legacy_sqlite_directory_entry_exists(
             directory_descriptor,
             name,
-    ) or _legacy_sqlite_directory_entry_exists(
-            directory_descriptor,
-            quarantine_name,
+        )
     ):
-        raise OSError("legacy SQLite migration source cleanup is incomplete")
+        raise OSError("legacy SQLite migration cleanup quarantine changed")
+    return _LegacySQLiteRetainedCleanupArtifact(
+        name=quarantine_name,
+        expected_snapshot=expected_snapshot,
+        expected_sha256=expected_sha256,
+    )
+
+
+def _legacy_sqlite_cleanup_live_snapshot_matches(
+        info: os.stat_result,
+        expected_snapshot: tuple[int, ...],
+) -> bool:
+    if not stat.S_ISREG(info.st_mode) or len(expected_snapshot) not in {6, 8}:
+        return False
+    if (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_nlink,
+    ) != expected_snapshot[:6]:
+        return False
+    return len(expected_snapshot) == 6 or (
+        info.st_uid,
+        stat.S_IMODE(info.st_mode),
+    ) == expected_snapshot[6:]
+
+
+def _legacy_sqlite_cleanup_retired_snapshot_matches(
+        info: os.stat_result,
+        expected_snapshot: tuple[int, ...],
+) -> bool:
+    if not stat.S_ISREG(info.st_mode) or len(expected_snapshot) not in {6, 8}:
+        return False
+    if (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_nlink,
+    ) != (
+        expected_snapshot[0],
+        expected_snapshot[1],
+        expected_snapshot[2],
+        expected_snapshot[3],
+        expected_snapshot[5],
+    ):
+        return False
+    return len(expected_snapshot) == 6 or (
+        info.st_uid,
+        stat.S_IMODE(info.st_mode),
+    ) == expected_snapshot[6:]
+
+
+def _legacy_sqlite_cleanup_sidecar_snapshot(
+        snapshot: dict[str, object],
+) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        int(snapshot["device"]),
+        int(snapshot["inode"]),
+        int(snapshot["size"]),
+        int(snapshot["mtime_ns"]),
+        int(snapshot["ctime_ns"]),
+        int(snapshot["link_count"]),
+        int(snapshot["uid"]),
+        int(snapshot["mode"]),
+    )
+
+
+def _legacy_sqlite_retained_cleanup_artifact_matches(
+        directory_descriptor: int,
+        artifact: _LegacySQLiteRetainedCleanupArtifact,
+) -> bool:
+    info = _legacy_sqlite_directory_entry_info(
+        directory_descriptor,
+        artifact.name,
+    )
+    if info is None:
+        return False
+    if artifact.expected_snapshot is None:
+        return True
+    if not _legacy_sqlite_cleanup_retired_snapshot_matches(
+            info,
+            artifact.expected_snapshot,
+    ):
+        return False
+    if artifact.expected_sha256 is None:
+        return True
+    snapshot = _legacy_sqlite_migration_file_snapshot_at(
+        directory_descriptor,
+        artifact.name,
+        include_sha256=True,
+        require_single_link=True,
+    )
+    return snapshot.get("sha256") == artifact.expected_sha256
 
 
 def _legacy_sqlite_directory_entry_info(

@@ -180,7 +180,9 @@ from scripts import verify_av1_cold_start_preregistration
 V2_MANIFEST_PATH = Path("docs/validation/av1-cold-start-preregistration-v2.json")
 SELECTED_AT = "2026-07-27T22:50:00Z"
 AUTHORIZED_AT = "2026-07-28T00:00:00Z"
-VALID_UNTIL = "2026-08-01T00:00:00Z"
+VALID_UNTIL = "2027-01-01T00:00:00Z"
+JUST_BEFORE_VALID_UNTIL = "2026-12-31T23:59:59Z"
+AFTER_VALID_UNTIL = "2027-01-01T00:00:01Z"
 REVIEW_RUNNER_BYTES = b"\xcf\xfa\xed\xfe" + b"test-code-binary"
 REVIEW_REPOSITORY_COMMIT = "1" * 40
 REVIEW_REPOSITORY_TREE = "2" * 40
@@ -266,6 +268,29 @@ def _run_test_git(repository: Path, *arguments: str) -> str:
         },
     )
     return completed.stdout.strip()
+
+
+def _initialize_preregistration_test_repository(repository: Path) -> None:
+    (repository / "scripts").mkdir(parents=True)
+    (repository / "mediaforce").mkdir()
+    (repository / "scripts" / "runner.py").write_text(
+        "VALUE = 'tracked'\n",
+        encoding="utf-8",
+    )
+    (repository / "mediaforce" / "__init__.py").write_text(
+        '"""fixture"""\n',
+        encoding="utf-8",
+    )
+    (repository / "mediaforce" / "module.py").write_text(
+        "VALUE = 'tracked'\n",
+        encoding="utf-8",
+    )
+    for arguments in (
+        ("init", "-q"),
+        ("add", "mediaforce", "scripts"),
+        ("commit", "-qm", "preregistration fixture"),
+    ):
+        _run_test_git(repository, *arguments)
 
 
 class _DescriptorBindingFileIntegrityGuard:
@@ -388,6 +413,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 verify_av1_cold_start_preregistration,
                 "MacOSFileIntegrityGuard",
                 new=_DescriptorBindingFileIntegrityGuard,
+                create=True,
             )
             review_guard_patcher.start()
             self.addCleanup(review_guard_patcher.stop)
@@ -2247,6 +2273,187 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 linked_worktree
             )
 
+    def test_preregistration_bootstrap_raw_bytes_do_not_execute_filters(self) -> None:
+        for filter_kind in ("clean", "process"):
+            with self.subTest(filter_kind=filter_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository = root / "repository"
+                _initialize_preregistration_test_repository(repository)
+                sentinel = root / f"{filter_kind}-filter-executed"
+                filter_command = root / f"hostile-{filter_kind}.sh"
+                filter_command.write_text(
+                    "#!/bin/sh\n"
+                    f": > {str(sentinel)!r}\n"
+                    + ("cat\n" if filter_kind == "clean" else "exit 1\n"),
+                    encoding="utf-8",
+                )
+                filter_command.chmod(0o700)
+                info_directory = repository / ".git" / "info"
+                info_directory.mkdir(exist_ok=True)
+                (info_directory / "attributes").write_text(
+                    "mediaforce/module.py filter=hostile\n",
+                    encoding="utf-8",
+                )
+                _run_test_git(
+                    repository,
+                    "config",
+                    "--local",
+                    f"filter.hostile.{filter_kind}",
+                    str(filter_command),
+                )
+                (repository / "mediaforce" / "module.py").write_text(
+                    "VALUE = 'dirty'\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "refuses modified import state",
+                ):
+                    verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                        repository
+                    )
+
+                self.assertFalse(sentinel.exists())
+
+    def test_git_authority_rejects_local_and_worktree_config_includes(self) -> None:
+        for config_kind in ("local", "worktree"):
+            with self.subTest(config_kind=config_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository = root / "repository"
+                _initialize_preregistration_test_repository(repository)
+                external_config = root / "external-config"
+                external_config.write_text(
+                    "[core]\n\tfilemode = false\n",
+                    encoding="utf-8",
+                )
+                include_payload = (
+                    "[include]\n"
+                    f"\tpath = {external_config}\n"
+                )
+                if config_kind == "local":
+                    with (repository / ".git" / "config").open(
+                        "a",
+                        encoding="utf-8",
+                    ) as handle:
+                        handle.write(include_payload)
+                else:
+                    _run_test_git(
+                        repository,
+                        "config",
+                        "--local",
+                        "extensions.worktreeConfig",
+                        "true",
+                    )
+                    (repository / ".git" / "config.worktree").write_text(
+                        include_payload,
+                        encoding="utf-8",
+                    )
+
+                for guard_name, guard in (
+                    (
+                        "bootstrap",
+                        lambda: verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                            repository
+                        ),
+                    ),
+                    (
+                        "runtime",
+                        lambda: verify_av1_cold_start_preregistration._review_git_environment(
+                            repository_root=repository
+                        ),
+                    ),
+                ):
+                    with self.subTest(guard=guard_name), self.assertRaisesRegex(
+                        (RuntimeError, AV1ValidationDerivationError),
+                        "external or symlinked Git authority",
+                    ):
+                        guard()
+
+    def test_git_authority_rejects_nonempty_object_alternates(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            _initialize_preregistration_test_repository(repository)
+            alternate_objects = root / "alternate-objects"
+            alternate_objects.mkdir()
+            alternates = repository / ".git" / "objects" / "info" / "alternates"
+            alternates.parent.mkdir(parents=True, exist_ok=True)
+            alternates.write_text(f"{alternate_objects}\n", encoding="utf-8")
+
+            for guard in (
+                lambda: verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                ),
+                lambda: verify_av1_cold_start_preregistration._review_git_environment(
+                    repository_root=repository
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    (RuntimeError, AV1ValidationDerivationError),
+                    "external or symlinked Git authority",
+                ):
+                    guard()
+
+    def test_git_authority_rejects_nested_metadata_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            _initialize_preregistration_test_repository(repository)
+            external_ref = root / "external-ref"
+            external_ref.write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (repository / ".git" / "refs" / "authority-link").symlink_to(
+                external_ref
+            )
+
+            for guard in (
+                lambda: verify_av1_cold_start_preregistration._assert_preregistration_import_tree_clean(
+                    repository
+                ),
+                lambda: verify_av1_cold_start_preregistration._review_git_environment(
+                    repository_root=repository
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    (RuntimeError, AV1ValidationDerivationError),
+                    "external or symlinked Git authority",
+                ):
+                    guard()
+
+    def test_preregistration_bootstrap_authority_failure_is_sticky(self) -> None:
+        class OneShotFailureMonitor:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def assert_quiet(self) -> None:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("transient authority failure")
+
+        monitor = OneShotFailureMonitor()
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_PREREGISTRATION_BOOTSTRAP_ACTIVE",
+                True,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_PREREGISTRATION_BOOTSTRAP_AUTHORITY_MONITOR",
+                monitor,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_PREREGISTRATION_BOOTSTRAP_FAILURE",
+                None,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "changed repository authority"):
+                verify_av1_cold_start_preregistration._assert_preregistration_bootstrap_authority()
+            with self.assertRaisesRegex(RuntimeError, "previously failed"):
+                verify_av1_cold_start_preregistration._assert_preregistration_bootstrap_authority()
+        self.assertEqual(monitor.calls, 1)
+
     def test_preregistration_bootstrap_rejects_unapproved_venv_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
@@ -2359,6 +2566,122 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 completed.stderr,
             )
             self.assertFalse(sentinel.exists())
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires kqueue or inotify",
+    )
+    def test_preregistration_imports_only_bound_source_bytes_during_swap_restore(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            scripts_directory = repository / "scripts"
+            scripts_directory.mkdir(parents=True)
+            source_root = Path(
+                verify_av1_cold_start_preregistration.__file__
+            ).resolve().parents[1]
+            shutil.copytree(
+                source_root / "mediaforce",
+                repository / "mediaforce",
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+            runner = scripts_directory / Path(
+                verify_av1_cold_start_preregistration.__file__
+            ).name
+            shutil.copyfile(
+                Path(verify_av1_cold_start_preregistration.__file__),
+                runner,
+            )
+            import_started = root / "bound-import-started"
+            package_init = repository / "mediaforce" / "__init__.py"
+            package_source = package_init.read_text(encoding="utf-8")
+            package_init.write_text(
+                "from pathlib import Path as _BoundTestPath\n"
+                "import time as _bound_test_time\n"
+                f"_BoundTestPath({str(import_started)!r}).write_text('ready')\n"
+                "_bound_test_time.sleep(1.0)\n\n"
+                f"{package_source}",
+                encoding="utf-8",
+            )
+            for arguments in (
+                ("init", "-q"),
+                ("add", "mediaforce", "scripts"),
+                ("commit", "-qm", "bound import lifecycle"),
+            ):
+                _run_test_git(repository, *arguments)
+
+            canonical_python = repository / ".venv" / "bin" / "python"
+            canonical_python.parent.mkdir(parents=True)
+            canonical_python.symlink_to(Path(sys.executable).resolve())
+            site_packages = next(
+                Path(entry).resolve()
+                for entry in sys.path
+                if Path(entry).name == "site-packages"
+                and (Path(entry) / "sqlalchemy").is_dir()
+            )
+            fixture_site_packages = (
+                repository
+                / ".venv"
+                / "lib"
+                / f"python{sys.version_info.major}.{sys.version_info.minor}"
+                / "site-packages"
+            )
+            fixture_site_packages.parent.mkdir(parents=True)
+            fixture_site_packages.symlink_to(site_packages, target_is_directory=True)
+            malicious_executed = root / "substituted-module-executed"
+            target_module = repository / "mediaforce" / "core" / "config.py"
+            original_source = target_module.read_bytes()
+            substituted_source = (
+                "from pathlib import Path\n"
+                f"Path({str(malicious_executed)!r}).write_text('executed')\n"
+                "raise RuntimeError('substituted source executed')\n"
+            ).encode("utf-8")
+            child_environment = dict(os.environ)
+            child_environment.pop("PYTHONPATH", None)
+            canonical_repository = repository.resolve()
+            canonical_launcher = canonical_repository / ".venv" / "bin" / "python"
+            child_environment["VIRTUAL_ENV"] = str(canonical_repository / ".venv")
+            process = subprocess.Popen(
+                [
+                    canonical_launcher,
+                    "-I",
+                    "-S",
+                    canonical_repository / "scripts" / runner.name,
+                    "--help",
+                ],
+                cwd=canonical_repository,
+                env=child_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 20
+                while not import_started.exists() and process.poll() is None:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.01)
+                if not import_started.exists():
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.fail(
+                        "bound-source import fixture did not start: "
+                        f"stdout={stdout!r} stderr={stderr!r}"
+                    )
+                target_module.write_bytes(substituted_source)
+                time.sleep(0.1)
+                target_module.write_bytes(original_source)
+                stdout, stderr = process.communicate(timeout=30)
+            finally:
+                target_module.write_bytes(original_source)
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+            self.assertNotEqual(process.returncode, 0, stdout)
+            self.assertIn("changed repository authority", stderr)
+            self.assertFalse(malicious_executed.exists())
 
     def test_derivation_review_checks_environment_before_claim(self) -> None:
         args = SimpleNamespace(
@@ -3529,7 +3852,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     kind="artifact_root",
                     binding_id="plan-id",
                     binding_digest="sha256:" + "2" * 64,
-                    published_before="2026-07-31T23:59:59Z",
+                    published_before=JUST_BEFORE_VALID_UNTIL,
                 )
 
     def test_assignment_claim_loader_marks_post_deadline_publication(self) -> None:
@@ -3979,7 +4302,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "-c",
                 "core.attributesFile=/dev/null",
                 "-c",
+                "core.excludesFile=/dev/null",
+                "-c",
                 "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
                 "cat-file",
                 "blob",
                 "a" * 40,
@@ -4417,6 +4744,136 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.assertFalse(external_diff.with_name(f"{external_diff.name}.called").exists())
             self.assertFalse(textconv.with_name(f"{textconv.name}.called").exists())
 
+    def test_review_git_raw_bytes_do_not_execute_clean_or_process_filters(self) -> None:
+        for filter_kind in ("clean", "process"):
+            with self.subTest(filter_kind=filter_kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                repository = root / "repository"
+                repository.mkdir()
+                _run_test_git(repository, "init", "--quiet")
+                tracked_path = repository / "tracked.txt"
+                tracked_path.write_text("authoritative\n", encoding="utf-8")
+                _run_test_git(repository, "add", "tracked.txt")
+                _run_test_git(repository, "commit", "--quiet", "-m", "authoritative")
+                sentinel = root / f"runtime-{filter_kind}-executed"
+                filter_command = root / f"runtime-{filter_kind}.sh"
+                filter_command.write_text(
+                    "#!/bin/sh\n"
+                    f": > {str(sentinel)!r}\n"
+                    + ("cat\n" if filter_kind == "clean" else "exit 1\n"),
+                    encoding="utf-8",
+                )
+                filter_command.chmod(0o700)
+                info_directory = repository / ".git" / "info"
+                info_directory.mkdir(exist_ok=True)
+                (info_directory / "attributes").write_text(
+                    "tracked.txt filter=hostile\n",
+                    encoding="utf-8",
+                )
+                _run_test_git(
+                    repository,
+                    "config",
+                    "--local",
+                    f"filter.hostile.{filter_kind}",
+                    str(filter_command),
+                )
+                tracked_path.write_text("dirty\n", encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "uncommitted tracked changes",
+                ):
+                    verify_av1_cold_start_preregistration._repository_review_identity(
+                        process_controller=ManagedProcessController(),
+                        repository_root=repository,
+                    )
+
+                self.assertFalse(sentinel.exists())
+
+    def test_review_git_raw_bytes_support_sha256_repositories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            completed = subprocess.run(
+                [
+                    "/usr/bin/git",
+                    "init",
+                    "--quiet",
+                    "--object-format=sha256",
+                    str(repository),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "HOME": directory,
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                    "PATH": "/usr/bin:/bin",
+                },
+            )
+            if completed.returncode != 0:
+                self.skipTest("installed Git does not support SHA-256 repositories")
+            tracked_path = repository / "tracked.txt"
+            tracked_path.write_text("authoritative\n", encoding="utf-8")
+            _run_test_git(repository, "add", "tracked.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "sha256")
+
+            commit, tree = (
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+            )
+            self.assertEqual(len(commit), 64)
+            self.assertEqual(len(tree), 64)
+            tracked_path.write_text("dirty\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "uncommitted tracked changes",
+            ):
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux path bytes")
+    def test_review_git_round_trips_non_utf8_tracked_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            raw_name = b"tracked-\xff.txt"
+            raw_path = os.path.join(os.fsencode(repository), raw_name)
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(descriptor, b"authoritative\n")
+            finally:
+                os.close(descriptor)
+            decoded_name = os.fsdecode(raw_name)
+            _run_test_git(repository, "add", "--", decoded_name)
+            _run_test_git(repository, "commit", "--quiet", "-m", "path bytes")
+
+            identity = verify_av1_cold_start_preregistration._repository_review_identity(
+                process_controller=ManagedProcessController(),
+                repository_root=repository,
+            )
+            self.assertEqual(len(identity), 2)
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_TRUNC)
+            try:
+                os.write(descriptor, b"dirty\n")
+            finally:
+                os.close(descriptor)
+            with self.assertRaisesRegex(
+                AV1ValidationDerivationError,
+                "uncommitted tracked changes",
+            ):
+                verify_av1_cold_start_preregistration._repository_review_identity(
+                    process_controller=ManagedProcessController(),
+                    repository_root=repository,
+                )
+
     def test_review_bundle_uses_tracked_utf8_allowlist_and_rejects_unsafe_blobs(
             self,
     ) -> None:
@@ -4572,6 +5029,122 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 )
                 for watched_paths in watched_snapshots
             ))
+
+    @unittest.skipUnless(
+        sys.platform == "darwin" or sys.platform.startswith("linux"),
+        "requires kqueue or inotify",
+    )
+    def test_linked_worktree_monitor_ignores_sibling_metadata_but_detects_current_churn(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            current_worktree = root / "current-worktree"
+            sibling_worktree = root / "sibling-worktree"
+            repository.mkdir()
+            _run_test_git(repository, "init", "--quiet")
+            (repository / "tracked.txt").write_text(
+                "authoritative\n",
+                encoding="utf-8",
+            )
+            _run_test_git(repository, "add", "tracked.txt")
+            _run_test_git(repository, "commit", "--quiet", "-m", "worktrees")
+            for worktree in (current_worktree, sibling_worktree):
+                _run_test_git(
+                    repository,
+                    "worktree",
+                    "add",
+                    "--detach",
+                    "--quiet",
+                    str(worktree),
+                    "HEAD",
+                )
+
+            authority = verify_av1_cold_start_preregistration._review_git_authority_snapshot(
+                current_worktree
+            )
+            monitor = verify_av1_cold_start_preregistration._ReviewGitAuthorityMonitor(
+                authority
+            )
+            sibling_git_directory, _common_directory = (
+                verify_av1_cold_start_preregistration._review_git_authority(
+                    sibling_worktree
+                )
+            )
+            current_git_directory = authority[1][0]
+            sibling_head = sibling_git_directory / "HEAD"
+            current_head = current_git_directory / "HEAD"
+            sibling_payload = sibling_head.read_bytes()
+            current_payload = current_head.read_bytes()
+            try:
+                sibling_head.write_bytes(b"0" * 40 + b"\n")
+                sibling_head.write_bytes(sibling_payload)
+                monitor.assert_quiet()
+
+                current_head.write_bytes(b"1" * 40 + b"\n")
+                current_head.write_bytes(current_payload)
+                with self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "Git authority changed",
+                ):
+                    monitor.assert_quiet()
+            finally:
+                sibling_head.write_bytes(sibling_payload)
+                current_head.write_bytes(current_payload)
+                monitor.close()
+
+    def test_repository_monitor_restores_owned_nofile_limit_only(self) -> None:
+        resource = __import__("resource")
+
+        def monitor_fixture() -> object:
+            monitor = object.__new__(
+                verify_av1_cold_start_preregistration._RepositoryAuthorityMonitor
+            )
+            monitor._os = os
+            monitor._failure_type = RuntimeError
+            monitor._unavailable_message = "unavailable"
+            monitor._failure_message = None
+            monitor._descriptors = []
+            monitor._watched_paths = set()
+            monitor._darwin_watcher = None
+            monitor._inotify_descriptor = -1
+            monitor._nofile_resource = None
+            monitor._original_nofile_soft_limit = None
+            monitor._raised_nofile_soft_limit = None
+            return monitor
+
+        for external_change in (False, True):
+            with self.subTest(external_change=external_change):
+                state = [256, 4096]
+                set_calls: list[tuple[int, int]] = []
+
+                def getrlimit(_resource: int) -> tuple[int, int]:
+                    return state[0], state[1]
+
+                def setrlimit(_resource: int, limits: tuple[int, int]) -> None:
+                    set_calls.append(limits)
+                    state[:] = limits
+
+                monitor = monitor_fixture()
+                with (
+                    patch.object(resource, "getrlimit", side_effect=getrlimit),
+                    patch.object(resource, "setrlimit", side_effect=setrlimit),
+                ):
+                    monitor._ensure_descriptor_capacity(300)
+                    raised_limit = state[0]
+                    self.assertGreaterEqual(raised_limit, 428)
+                    if external_change:
+                        state[0] = raised_limit + 1
+                    monitor.close()
+
+                self.assertEqual(set_calls[0], (428, 4096))
+                if external_change:
+                    self.assertEqual(set_calls, [(428, 4096)])
+                    self.assertEqual(state[0], raised_limit + 1)
+                else:
+                    self.assertEqual(set_calls[-1], (256, 4096))
+                    self.assertEqual(state[0], 256)
 
     def test_structured_response_and_evidence_reject_binding_decision_and_path_drift(
             self,
@@ -6057,7 +6630,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "2026-07-31T23:59:57Z",
             "2026-07-31T23:59:58Z",
             "2026-07-31T23:59:58Z",
-            "2026-07-31T23:59:59Z",
+            JUST_BEFORE_VALID_UNTIL,
             VALID_UNTIL,
         ))
 
@@ -6209,7 +6782,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 assignment_id=assignment.assignment_id,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
-                now_iso=lambda: "2026-07-31T23:59:59Z",
+                now_iso=lambda: JUST_BEFORE_VALID_UNTIL,
             )
 
         self.assertEqual(execution_contract.call_count, 2)
@@ -6474,7 +7047,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         assignment = self.plan.assignments[0]
         attempts_dir = self.runtime_artifact_root / "attempts"
         records_dir = self.runtime_artifact_root / "terminal-records"
-        timestamps = iter(("2026-07-31T23:59:59Z", VALID_UNTIL))
+        timestamps = iter((JUST_BEFORE_VALID_UNTIL, VALID_UNTIL))
         with (
             patch(
                 "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract"
@@ -7435,7 +8008,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             artifact_root=self.runtime_artifact_root,
             attempts_directory=attempts_dir,
             terminal_records_directory=records_dir,
-            completed_at="2026-08-01T00:00:01Z",
+            completed_at=AFTER_VALID_UNTIL,
         ))
 
         terminal = load_av1_validation_derivation_terminal_records(records_dir)[0]
@@ -7655,7 +8228,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 artifact_root=self.runtime_artifact_root,
                 attempts_directory=attempts_dir,
                 terminal_records_directory=records_dir,
-                completed_at="2026-08-01T00:00:01Z",
+                completed_at=AFTER_VALID_UNTIL,
             )
 
         self.assertTrue(terminal_intent_path.is_file())
@@ -8579,7 +9152,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             self.runtime_artifact_root / "attempts",
             attempt,
         )
-        clock_values = iter(("2026-07-31T23:59:59Z", VALID_UNTIL))
+        clock_values = iter((JUST_BEFORE_VALID_UNTIL, VALID_UNTIL))
         clock_calls: list[str] = []
 
         def clock() -> str:
@@ -8621,7 +9194,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(terminal.reason_code, "safety_stop")
         self.assertEqual(
             clock_calls,
-            ["2026-07-31T23:59:59Z", VALID_UNTIL],
+            [JUST_BEFORE_VALID_UNTIL, VALID_UNTIL],
         )
         open_database.assert_not_called()
         self.assertFalse(
@@ -8732,7 +9305,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
         clock_values = iter((
             "2026-07-31T23:59:58Z",
-            "2026-07-31T23:59:59Z",
+            JUST_BEFORE_VALID_UNTIL,
             VALID_UNTIL,
         ))
         clock_calls: list[str] = []
@@ -8753,7 +9326,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertTrue(rolled_back)
         self.assertEqual(clock_calls, [
             "2026-07-31T23:59:58Z",
-            "2026-07-31T23:59:59Z",
+            JUST_BEFORE_VALID_UNTIL,
             VALID_UNTIL,
         ])
         self.assertEqual(
@@ -10293,7 +10866,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
     def test_proposal_expiry_crossing_is_checked_at_publication(self) -> None:
         cell_plan_id = self.plan.assignments[0].cell_plan_id
         proposal = self._candidate_proposal(
-            proposed_at="2026-07-31T23:59:59Z",
+            proposed_at=JUST_BEFORE_VALID_UNTIL,
         )
         evaluation = SimpleNamespace(proposal=proposal)
         args = SimpleNamespace(
@@ -10360,7 +10933,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             patch.object(
                 verify_av1_cold_start_preregistration,
                 "_now_iso",
-                side_effect=("2026-07-31T23:59:59Z", VALID_UNTIL),
+                side_effect=(JUST_BEFORE_VALID_UNTIL, VALID_UNTIL),
             ) as now_iso,
             patch.object(
                 verify_av1_cold_start_preregistration,
