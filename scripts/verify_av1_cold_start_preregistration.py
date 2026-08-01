@@ -5168,6 +5168,7 @@ def _assert_code_llm_request_contract(
     required_options = (
         "--developer",
         "--message-file",
+        "--format-type",
         "--format-name",
         "--format-strict",
         "--schema-json",
@@ -5185,6 +5186,7 @@ def _assert_code_llm_request_contract(
 def _assert_no_tool_llm_review_command(command: Sequence[str]) -> None:
     required_options = {
         "--developer",
+        "--format-type",
         "--format-name",
         "--format-strict",
         "--message-file",

@@ -129,7 +129,9 @@ Mediaforce's SQLite schema.
   the platform-pinned directory path. A destination that wins the exclusive rename
   is preserved alongside the staging file and causes a fail-closed result; there
   is no validation-then-unlink rollback. Older v2-v4 hardlink publications are
-  still recognized. A surviving legacy staging alias remains linked to the
+  still recognized. A destination that appears after the legacy source lock but
+  before intent creation is likewise preserved and fails closed instead of being
+  adopted silently. A surviving legacy staging alias remains linked to the
   destination and is recorded by the publication policy rather than removed.
   Every intent transition preserves the destination-parent identity captured by
   its predecessor and verifies that identity against the retained transition

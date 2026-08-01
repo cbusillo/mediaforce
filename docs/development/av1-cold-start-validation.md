@@ -952,7 +952,8 @@ environment variables are not inherited. The request supplies deterministic deve
 text plus a strict dynamic JSON Schema whose constants bind the lane, proposal,
 claim, run, repository commit, and tree. Before publishing the immutable claim,
 the verifier checks the installed `code llm request --help` contract for the
-required no-tool options. The model must return one structured JSON response;
+required no-tool and JSON format-type/schema options. The model must return one
+structured JSON response;
 the verifier rejects duplicate keys or extra output and canonicalizes the parsed
 object for evidence. Its decision must agree with its finding severities:
 approval has no blocking finding, while rejection has at least one. Each

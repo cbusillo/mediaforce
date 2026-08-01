@@ -2593,12 +2593,11 @@ def validate_av1_validation_derivation_review_response(
         raise AV1ValidationDerivationError(
             "AV1 derivation structured review analysis is not substantive"
         )
-    try:
-        findings = object_list(payload.get("findings"))
-    except TypeError as exc:
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
         raise AV1ValidationDerivationError(
             "AV1 derivation structured review findings are invalid"
-        ) from exc
+        )
     if len(findings) > AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_FINDINGS:
         raise AV1ValidationDerivationError(
             "AV1 derivation structured review has too many findings"

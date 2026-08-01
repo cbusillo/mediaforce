@@ -4992,6 +4992,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         help_output = " ".join((
             "--developer",
             "--message-file",
+            "--format-type",
             "--format-name",
             "--format-strict",
             "--schema-json",
@@ -5024,7 +5025,13 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "run_command",
                 return_value=SimpleNamespace(
                     returncode=0,
-                    stdout="--developer --message-file",
+                    stdout=" ".join((
+                        "--developer",
+                        "--message-file",
+                        "--format-name",
+                        "--format-strict",
+                        "--schema-json",
+                    )),
                     stderr="",
                 ),
             ),
@@ -5961,6 +5968,14 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ValidationDerivationError, "bindings"):
             validate_av1_validation_derivation_review_response(
                 binding_drift,
+                proposal=proposal,
+                claim=claim,
+            )
+        invalid_findings = dict(response)
+        invalid_findings["findings"] = None
+        with self.assertRaisesRegex(AV1ValidationDerivationError, "findings"):
+            validate_av1_validation_derivation_review_response(
+                invalid_findings,
                 proposal=proposal,
                 claim=claim,
             )

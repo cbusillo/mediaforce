@@ -586,13 +586,16 @@ def _migrate_legacy_sqlite_database(
                 "Legacy SQLite migration source sidecars exist without the main database"
             )
         return
-    if destination_exists:
-        return
     from mediaforce.web.runtime_lock import exclusive_legacy_sqlite_migration_source
 
     with exclusive_legacy_sqlite_migration_source(config, source) as locked_source:
         if _path_entry_exists(destination):
-            return
+            from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+            raise MediaforceRuntimeBusyError(
+                "Configured SQLite migration destination appeared after the "
+                "legacy source was locked"
+            )
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging_path = _reserved_legacy_sqlite_staging_path(destination)
         copying_intent = _legacy_sqlite_migration_intent_payload(

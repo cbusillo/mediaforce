@@ -461,6 +461,77 @@ class DatabaseRuntimeTests(unittest.TestCase):
             finally:
                 source_connection.close()
 
+    def test_migrate_config_state_rejects_destination_appearing_after_source_lock(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('legacy-source')"
+                )
+
+            real_source_lock = exclusive_legacy_sqlite_migration_source
+
+            @contextmanager
+            def create_destination_after_source_lock(
+                    locked_config: MediaforceConfig,
+                    locked_source_path: Path,
+            ) -> Iterator[LegacySQLiteMigrationSource]:
+                with real_source_lock(
+                    locked_config,
+                    locked_source_path,
+                ) as locked_source:
+                    destination_path.parent.mkdir(exist_ok=True)
+                    with sqlite3.connect(destination_path) as connection:
+                        connection.execute(
+                            "CREATE TABLE replacement_rows (value TEXT)"
+                        )
+                        connection.execute(
+                            "INSERT INTO replacement_rows VALUES ('replacement')"
+                        )
+                    yield locked_source
+
+            with (
+                patch.object(
+                    runtime_lock_module,
+                    "exclusive_legacy_sqlite_migration_source",
+                    new=create_destination_after_source_lock,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-post-lock-destination-race"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "destination appeared after the legacy source was locked",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(source_path.is_file())
+            self.assertFalse(
+                config_module._legacy_sqlite_migration_intent_path(
+                    destination_path
+                ).exists()
+            )
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM replacement_rows"
+                    ).fetchall(),
+                    [("replacement",)],
+                )
+
     def test_migrate_config_state_completed_intent_allows_destination_writes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
