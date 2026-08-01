@@ -1028,11 +1028,12 @@ class MovieWorkflowTests(unittest.TestCase):
             paths=ConfigPaths(
                 project_root=self.root,
                 config_path=self.root / "config.toml",
-                db_path=self.root / "library.sqlite3",
+                db_path=self.root / "database" / "library.sqlite3",
                 run_manifest_dir=self.root / "runs",
                 web_state_dir=self.root / "web",
                 review_dir=self.root / "review",
                 runtime_settings_path=self.root / "runtime-settings.json",
+                runtime_reservation_dir=self.root / "runtime-reservations",
             ),
         )
 

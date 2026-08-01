@@ -142,8 +142,9 @@ Mediaforce's SQLite schema.
   independently discoverable: neither its configured path nor any symlink
   expansion may pass through an entry hidden by destination replacement. A
   configuration that places that namespace at or below the destination parent,
-  directly or through an alias, is rejected before migration or recovery can
-  mutate either location. Startup checks migration authority even after the
+  directly or through an alias, is rejected before migration, recovery, or
+  adoption of an existing destination can proceed, regardless of whether legacy
+  evidence remains visible. Startup checks migration authority even after the
   legacy `state/` directory has become empty: a surviving receipt or retired-source
   quarantine without the canonical destination intent fails closed instead of
   permitting a replacement database to be created or adopted. This also

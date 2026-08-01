@@ -548,6 +548,7 @@ def _migrate_legacy_sqlite_database(
         intent_exists
         or receipt_exists
         or source_exists
+        or destination_exists
         or live_source_sidecar_exists
         or retired_source_residue_exists
     ):
