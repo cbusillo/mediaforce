@@ -55,6 +55,9 @@ class EvidenceWorkerTests(unittest.TestCase):
                 web_state_dir=self.project_root / "state" / "web",
                 review_dir=self.project_root / "state" / "review",
                 runtime_settings_path=self.project_root / "state" / "settings.json",
+                runtime_reservation_dir=(
+                    self.project_root / "runtime-reservations"
+                ),
             ),
         )
 

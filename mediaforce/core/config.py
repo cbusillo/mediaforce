@@ -529,9 +529,6 @@ def _migrate_legacy_sqlite_database(
         source: Path,
         destination: Path,
 ) -> None:
-    if _path_without_resolution(source) == _path_without_resolution(destination):
-        return
-    intent_path = _legacy_sqlite_migration_intent_path(destination)
     receipt_path = _legacy_sqlite_migration_receipt_path(
         config,
         source=source,
@@ -541,6 +538,9 @@ def _migrate_legacy_sqlite_database(
         receipt_path,
         destination=destination,
     )
+    if _path_without_resolution(source) == _path_without_resolution(destination):
+        return
+    intent_path = _legacy_sqlite_migration_intent_path(destination)
     intent_exists = _path_entry_exists(intent_path)
     receipt_exists = _path_entry_exists(receipt_path)
     source_exists = _path_entry_exists(source)

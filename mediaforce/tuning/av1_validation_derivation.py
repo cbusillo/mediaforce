@@ -5337,13 +5337,28 @@ def _assert_av1_validation_derivation_review_checkpoint_authority(
             raise AV1ValidationDerivationError(
                 "AV1 derivation invalid-response recovery binds a valid checkpoint"
             )
-        if (
-            evidence.get("recovered_at") != completed_at
-            or envelope.review.reviewed_at != completed_at
-        ):
+        recovered_at = _required_text(
+            evidence.get("recovered_at"),
+            "review recovery timestamp",
+        )
+        if envelope.review.reviewed_at != recovered_at:
             raise AV1ValidationDerivationError(
                 "AV1 derivation invalid-response recovery timestamp drifted"
             )
+        if recovered_at != completed_at:
+            recovered = _parse_timestamp(
+                recovered_at,
+                "review recovery timestamp",
+            )
+            deadline = _parse_timestamp(
+                plan.authorization.valid_until,
+                "derivation authorization deadline",
+            )
+            if recovered >= deadline:
+                raise AV1ValidationDerivationError(
+                    "AV1 derivation legacy invalid-response recovery is outside authorization"
+                )
+            return False
     return True
 
 

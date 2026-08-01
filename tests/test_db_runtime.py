@@ -2122,6 +2122,61 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 ).exists()
             )
 
+    def test_migrate_config_state_rejects_unsafe_receipt_layout_when_source_is_destination(
+            self,
+    ) -> None:
+        for database_exists in (False, True):
+            with self.subTest(database_exists=database_exists):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    database_path = root / "state" / "library.sqlite3"
+                    config = self._legacy_migration_config(
+                        root,
+                        database_path=database_path,
+                        name="target",
+                        runtime_reservation_dir=(
+                            database_path.parent / "reservations"
+                        ),
+                    )
+                    if database_exists:
+                        database_path.parent.mkdir()
+                        with sqlite3.connect(database_path) as connection:
+                            connection.execute(
+                                "CREATE TABLE retained_rows (value TEXT NOT NULL)"
+                            )
+                            connection.execute(
+                                "INSERT INTO retained_rows VALUES ('retained')"
+                            )
+
+                    with (
+                        exclusive_mediaforce_runtime_lock(
+                            config,
+                            owner_payload={
+                                "purpose": "legacy-unsafe-same-path-layout"
+                            },
+                        ),
+                        self.assertRaisesRegex(
+                            MediaforceRuntimeBusyError,
+                            "receipt storage must be outside",
+                        ),
+                    ):
+                        migrate_config_state(config)
+
+                    self.assertEqual(database_path.exists(), database_exists)
+                    self.assertFalse(
+                        config_module._legacy_sqlite_migration_intent_path(
+                            database_path
+                        ).exists()
+                    )
+                    if database_exists:
+                        with sqlite3.connect(database_path) as connection:
+                            self.assertEqual(
+                                connection.execute(
+                                    "SELECT value FROM retained_rows"
+                                ).fetchall(),
+                                [("retained",)],
+                            )
+
     def test_migrate_config_state_rejects_symlinked_receipt_discovery_through_destination_parent(
             self,
     ) -> None:

@@ -4945,6 +4945,37 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 / proposal.proposal_id
                 / "architecture.json"
             )
+            original_checkpoint = architecture_checkpoint.read_bytes()
+            original_checkpoint_mode = stat.S_IMODE(
+                architecture_checkpoint.stat(follow_symlinks=False).st_mode
+            )
+            mismatched_checkpoint = json.loads(original_checkpoint)
+            mismatched_checkpoint["request_sha256"] = f"sha256:{'f' * 64}"
+            checkpoint_semantic_payload = dict(mismatched_checkpoint)
+            checkpoint_semantic_payload.pop("payload_sha256")
+            mismatched_checkpoint["payload_sha256"] = (
+                _payload_sha256(checkpoint_semantic_payload)
+            )
+            try:
+                architecture_checkpoint.chmod(0o600)
+                architecture_checkpoint.write_bytes(
+                    canonical_json_bytes(mismatched_checkpoint)
+                )
+                architecture_checkpoint.chmod(original_checkpoint_mode)
+                with self.assertRaisesRegex(
+                    AV1ValidationDerivationError,
+                    "checkpoint authority is unavailable",
+                ):
+                    load_av1_validation_derivation_review_envelope(
+                        self.runtime_artifact_root,
+                        plan=self.plan,
+                        proposal=proposal,
+                        claim=claims["architecture"],
+                    )
+            finally:
+                architecture_checkpoint.chmod(0o600)
+                architecture_checkpoint.write_bytes(original_checkpoint)
+                architecture_checkpoint.chmod(original_checkpoint_mode)
             architecture_checkpoint.rename(
                 architecture_checkpoint.with_suffix(".missing")
             )
@@ -5200,6 +5231,121 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             review=review,
             evidence=evidence,
         )
+        checkpoint = load_av1_validation_derivation_review_response_checkpoint(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+        )
+        assert checkpoint is not None
+        checkpoint_digest = checkpoint["payload_sha256"]
+        assert isinstance(checkpoint_digest, str)
+        legacy_recovered_at = "2026-07-28T03:00:04Z"
+        legacy_evidence = build_av1_validation_derivation_review_recovery_evidence(
+            proposal=proposal,
+            claim=claim,
+            reason_code="invalid_durable_response",
+            recovered_at=legacy_recovered_at,
+            response_checkpoint_payload_sha256=checkpoint_digest,
+        )
+        legacy_review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=(
+                f"sha256:{hashlib.sha256(legacy_evidence).hexdigest()}"
+            ),
+            decision="rejected",
+            reviewed_at=legacy_recovered_at,
+        )
+        legacy_envelope = build_av1_validation_derivation_review_envelope(
+            review=legacy_review,
+            evidence=legacy_evidence,
+        )
+        late_legacy_evidence = (
+            build_av1_validation_derivation_review_recovery_evidence(
+                proposal=proposal,
+                claim=claim,
+                reason_code="invalid_durable_response",
+                recovered_at=AFTER_VALID_UNTIL,
+                response_checkpoint_payload_sha256=checkpoint_digest,
+            )
+        )
+        late_legacy_review = build_av1_validation_derivation_review_attestation(
+            proposal=proposal,
+            claim=claim,
+            review_evidence_sha256=(
+                f"sha256:{hashlib.sha256(late_legacy_evidence).hexdigest()}"
+            ),
+            decision="rejected",
+            reviewed_at=AFTER_VALID_UNTIL,
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "legacy invalid-response recovery is outside authorization",
+        ):
+            write_av1_validation_derivation_review_envelope(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+                envelope=build_av1_validation_derivation_review_envelope(
+                    review=late_legacy_review,
+                    evidence=late_legacy_evidence,
+                ),
+            )
+        write_av1_validation_derivation_review_envelope(
+            self.runtime_artifact_root,
+            plan=self.plan,
+            proposal=proposal,
+            claim=claim,
+            envelope=legacy_envelope,
+        )
+        self.assertEqual(
+            load_av1_validation_derivation_review_envelope(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+            ),
+            legacy_envelope,
+        )
+        derivation_module = import_module(
+            "mediaforce.tuning.av1_validation_derivation"
+        )
+        real_publication_check = (
+            derivation_module._assert_owner_only_publication_before
+        )
+
+        def reject_legacy_envelope_after_deadline(
+                path: Path,
+                label: str,
+                *,
+                info: os.stat_result,
+                published_before: str,
+        ) -> None:
+            if label == "derivation review envelope":
+                raise AV1ValidationDerivationPublicationDeadlineError(path, label)
+            real_publication_check(
+                path,
+                label,
+                info=info,
+                published_before=published_before,
+            )
+
+        with (
+            patch.object(
+                derivation_module,
+                "_assert_owner_only_publication_before",
+                side_effect=reject_legacy_envelope_after_deadline,
+            ),
+            self.assertRaises(AV1ValidationDerivationPublicationDeadlineError),
+        ):
+            load_av1_validation_derivation_review_envelope(
+                self.runtime_artifact_root,
+                plan=self.plan,
+                proposal=proposal,
+                claim=claim,
+            )
 
     def test_code_llm_request_contract_and_environment_are_allowlisted(self) -> None:
         runner = Path("/private/trusted-code")
@@ -6194,6 +6340,32 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     proposal=proposal,
                     claim=claim,
                 )
+        serialized_response = json.dumps(response, separators=(",", ":"))
+        decision_member = '"decision":"approved"'
+        self.assertEqual(serialized_response.count(decision_member), 1)
+        duplicate_key_response = serialized_response.replace(
+            decision_member,
+            f'{decision_member},"decision":"rejected"',
+            1,
+        )
+        self.assertEqual(duplicate_key_response.count('"decision":'), 2)
+        with self.assertRaisesRegex(
+            AV1ValidationDerivationError,
+            "response is invalid",
+        ) as duplicate_error:
+            verify_av1_cold_start_preregistration._structured_review_response(
+                duplicate_key_response,
+                proposal=proposal,
+                claim=claim,
+            )
+        self.assertIsInstance(
+            duplicate_error.exception.__cause__,
+            AV1ValidationDerivationError,
+        )
+        self.assertIn(
+            "duplicate JSON keys",
+            str(duplicate_error.exception.__cause__),
+        )
         binding_drift = dict(response)
         binding_drift["lane"] = "adversarial"
         with self.assertRaisesRegex(AV1ValidationDerivationError, "bindings"):
