@@ -596,6 +596,10 @@ def _execute_legacy_sqlite_copy(
                 require_single_link=True,
             ),
         )
+        _assert_legacy_sqlite_migration_source_matches(
+            locked_source,
+            ready_intent,
+        )
         _replace_legacy_sqlite_migration_intent(
             intent_path,
             expected=copying_intent,
@@ -769,6 +773,40 @@ class _LegacySQLiteMigrationDestination:
             raise OSError("legacy SQLite migration destination identity changed")
         self.assert_parent_stable()
 
+    def assert_file_identity(
+            self,
+            name: str,
+            expected: dict[str, object],
+            *,
+            allowed_link_counts: set[int],
+    ) -> None:
+        self.assert_parent_stable()
+        current = _legacy_sqlite_migration_file_snapshot_at(
+            self.directory_descriptor,
+            name,
+            include_sha256=False,
+            require_single_link=False,
+            include_timestamps=False,
+        )
+        if (
+            current.get("link_count") not in allowed_link_counts
+            or any(
+                current.get(key) != expected.get(key)
+                for key in ("device", "inode")
+            )
+        ):
+            raise OSError("legacy SQLite migration destination identity changed")
+        self.assert_parent_stable()
+
+    def assert_database_sidecars_absent(self) -> None:
+        self.assert_parent_stable()
+        for suffix in ("-wal", "-shm", "-journal"):
+            if self.entry_exists(f"{self.path.name}{suffix}"):
+                raise OSError(
+                    "legacy SQLite migration destination sidecar already exists"
+                )
+        self.assert_parent_stable()
+
     def assert_database_valid(self) -> None:
         self.assert_parent_stable()
         pinned_path = _legacy_sqlite_path_for_directory_descriptor(
@@ -784,6 +822,7 @@ class _LegacySQLiteMigrationDestination:
             staging_name: str,
             expected: dict[str, object],
     ) -> None:
+        self.assert_database_sidecars_absent()
         self.assert_file_matches(
             staging_name,
             expected,
@@ -810,6 +849,7 @@ class _LegacySQLiteMigrationDestination:
             expected,
             allowed_link_counts={1},
         )
+        self.assert_database_sidecars_absent()
 
     def assert_retained_staging(
             self,
@@ -1689,6 +1729,8 @@ def _resume_legacy_sqlite_migration_intent(
                     staging_name=staging_path.name,
                     staging_snapshot=staging_snapshot,
                     publication_policy=payload.get("publication_policy"),
+                    require_exact_bytes=False,
+                    require_sidecars_absent=False,
                 )
                 destination_binding.assert_database_valid()
                 _assert_legacy_sqlite_source_cleanup_complete(
@@ -2166,36 +2208,60 @@ def _assert_legacy_sqlite_v5_publication_state(
         staging_name: str,
         staging_snapshot: dict[str, object],
         publication_policy: object,
+        require_exact_bytes: bool = True,
+        require_sidecars_absent: bool = True,
 ) -> None:
+    if require_sidecars_absent:
+        destination_binding.assert_database_sidecars_absent()
+
+    def assert_identity(name: str, *, allowed_link_counts: set[int]) -> None:
+        if require_exact_bytes:
+            destination_binding.assert_file_matches(
+                name,
+                staging_snapshot,
+                allowed_link_counts=allowed_link_counts,
+            )
+        else:
+            destination_binding.assert_file_identity(
+                name,
+                staging_snapshot,
+                allowed_link_counts=allowed_link_counts,
+            )
+
     if publication_policy == _LEGACY_SQLITE_PUBLICATION_EXCLUSIVE:
         if destination_binding.entry_exists(staging_name):
             raise OSError(
                 "legacy SQLite exclusive publication retained a staging entry"
             )
-        destination_binding.assert_file_matches(
+        assert_identity(
             destination_binding.path.name,
-            staging_snapshot,
             allowed_link_counts={1},
         )
-        return
-    if publication_policy == _LEGACY_SQLITE_PUBLICATION_LEGACY_ALIAS:
-        destination_binding.assert_retained_staging(
-            staging_name,
-            staging_snapshot,
-        )
-        return
-    if publication_policy == _LEGACY_SQLITE_PUBLICATION_LEGACY_NO_ALIAS:
+    elif publication_policy == _LEGACY_SQLITE_PUBLICATION_LEGACY_ALIAS:
+        if require_exact_bytes:
+            destination_binding.assert_retained_staging(
+                staging_name,
+                staging_snapshot,
+            )
+        else:
+            assert_identity(staging_name, allowed_link_counts={2})
+            assert_identity(
+                destination_binding.path.name,
+                allowed_link_counts={2},
+            )
+    elif publication_policy == _LEGACY_SQLITE_PUBLICATION_LEGACY_NO_ALIAS:
         if destination_binding.entry_exists(staging_name):
             raise OSError(
                 "legacy SQLite migration staging alias reappeared"
             )
-        destination_binding.assert_file_matches(
+        assert_identity(
             destination_binding.path.name,
-            staging_snapshot,
             allowed_link_counts={1},
         )
-        return
-    raise OSError("legacy SQLite migration publication policy is invalid")
+    else:
+        raise OSError("legacy SQLite migration publication policy is invalid")
+    if require_sidecars_absent:
+        destination_binding.assert_database_sidecars_absent()
 
 
 def _legacy_sqlite_v4_cleanup_absent_prefix(

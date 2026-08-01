@@ -456,6 +456,191 @@ class DatabaseRuntimeTests(unittest.TestCase):
             finally:
                 source_connection.close()
 
+    def test_migrate_config_state_completed_intent_allows_destination_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT NOT NULL)")
+                connection.execute("INSERT INTO migration_rows VALUES ('migrated-row')")
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-complete-mutable-setup"},
+            ):
+                migrate_config_state(config)
+
+            destination_inode = destination_path.stat().st_ino
+            with sqlite3.connect(destination_path) as connection:
+                connection.execute("INSERT INTO migration_rows VALUES ('runtime-row')")
+
+            self.assertEqual(destination_path.stat().st_ino, destination_inode)
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-complete-mutable-restart"},
+            ):
+                migrate_config_state(config)
+
+            self.assertEqual(destination_path.stat().st_ino, destination_inode)
+            with sqlite3.connect(destination_path) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT value FROM migration_rows ORDER BY rowid").fetchall(),
+                    [("migrated-row",), ("runtime-row",)],
+                )
+
+    def test_migrate_config_state_completed_intent_rejects_destination_replacement(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            displaced_path = destination_path.with_suffix(".displaced.sqlite3")
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT NOT NULL)")
+
+            with exclusive_mediaforce_runtime_lock(
+                config,
+                owner_payload={"purpose": "legacy-complete-replacement-setup"},
+            ):
+                migrate_config_state(config)
+
+            destination_path.rename(displaced_path)
+            with sqlite3.connect(destination_path) as connection:
+                connection.execute("CREATE TABLE replacement_rows (value TEXT)")
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-complete-replacement-restart"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "could not be resumed safely",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(displaced_path.is_file())
+            self.assertTrue(destination_path.is_file())
+
+    def test_migrate_config_state_rejects_replaced_staging_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT NOT NULL)")
+                connection.execute("INSERT INTO migration_rows VALUES ('trusted-row')")
+
+            real_snapshot = config_module._legacy_sqlite_migration_file_snapshot
+            replaced = False
+            trusted_staging_path: Path | None = None
+
+            def replace_staging_before_snapshot(
+                    path: Path,
+                    *,
+                    include_sha256: bool,
+                    require_single_link: bool,
+                    include_timestamps: bool = True,
+            ) -> dict[str, object]:
+                nonlocal replaced, trusted_staging_path
+                if (
+                    not replaced
+                    and path.parent == destination_path.parent
+                    and ".migration-" in path.name
+                ):
+                    trusted_staging_path = path.with_name(f"{path.name}.trusted")
+                    path.rename(trusted_staging_path)
+                    with sqlite3.connect(path) as connection:
+                        connection.execute(
+                            "CREATE TABLE replacement_rows (value TEXT NOT NULL)"
+                        )
+                        connection.execute(
+                            "INSERT INTO replacement_rows VALUES ('replacement-row')"
+                        )
+                    replaced = True
+                return real_snapshot(
+                    path,
+                    include_sha256=include_sha256,
+                    require_single_link=require_single_link,
+                    include_timestamps=include_timestamps,
+                )
+
+            with (
+                patch.object(
+                    config_module,
+                    "_legacy_sqlite_migration_file_snapshot",
+                    side_effect=replace_staging_before_snapshot,
+                ),
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-staging-replacement"},
+                ),
+                self.assertRaisesRegex(OSError, "source content diverged"),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(replaced)
+            self.assertIsNotNone(trusted_staging_path)
+            assert trusted_staging_path is not None
+            self.assertTrue(trusted_staging_path.is_file())
+            self.assertTrue(source_path.is_file())
+            self.assertFalse(destination_path.exists())
+
+    def test_migrate_config_state_rejects_preexisting_destination_sidecars(self) -> None:
+        for suffix in ("-wal", "-shm", "-journal"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                source_path = root / "state" / "library.sqlite3"
+                destination_path = root / "configured-state" / "library.sqlite3"
+                sidecar_path = Path(f"{destination_path}{suffix}")
+                config = self._legacy_migration_config(
+                    root,
+                    database_path=destination_path,
+                    name="target",
+                )
+                source_path.parent.mkdir()
+                destination_path.parent.mkdir()
+                with sqlite3.connect(source_path) as connection:
+                    connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                sidecar_path.write_bytes(f"foreign{suffix}".encode("utf-8"))
+
+                with (
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-destination-sidecar"},
+                    ),
+                    self.assertRaisesRegex(OSError, "destination sidecar already exists"),
+                ):
+                    migrate_config_state(config)
+
+                self.assertEqual(
+                    sidecar_path.read_bytes(),
+                    f"foreign{suffix}".encode("utf-8"),
+                )
+                self.assertTrue(source_path.is_file())
+                self.assertFalse(destination_path.exists())
+
     def test_migrate_config_state_gates_wal_writes_before_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

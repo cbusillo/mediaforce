@@ -943,7 +943,10 @@ def _git_config_has_external_authority_directive(payload: bytes) -> bool:
         if (
             (current_section == b"extensions" and key == b"partialclone")
             or (
-                current_section == b"remote"
+                (
+                    current_section == b"remote"
+                    or current_section.startswith(b"remote.")
+                )
                 and key in {b"promisor", b"partialclonefilter"}
             )
             or key == b"extensions.partialclone"

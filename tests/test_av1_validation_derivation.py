@@ -2402,6 +2402,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             for configuration in (
                     "[extensions]\n\tpartialClone = origin\n",
                     "[remote \"origin\"]\n\tpromisor = true\n",
+                    "[remote.origin]\n\tpromisor = true\n",
+                    "[remote.origin]\n\tpartialCloneFilter = blob:none\n",
             ):
                 with self.subTest(
                         config_kind=config_kind,

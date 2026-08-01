@@ -104,14 +104,17 @@ Mediaforce's SQLite schema.
   replaced at the exchange boundary, descriptor/inode checks fail while the
   trusted and replacement artifacts remain present. Finalization is another
   exchange to a durable schema-v5 `complete` intent; the canonical completion
-  record is retained and revalidated on later startups instead of being removed.
+  record is retained instead of being removed. Later startups revalidate the
+  published inode and legacy cleanup namespace while allowing ordinary in-place
+  database writes and runtime SQLite sidecars after the migration handoff.
   Scratch preparation files and interrupted copy files are inert residue: they
   are never deleted by pathname, never become authoritative without an
   exclusive publication step, and a later attempt uses a fresh reserved name.
   The configured destination parent is retained by descriptor. Fresh schema-v5
-  publication exclusively renames the staging inode to the destination, fsyncs
-  the directory, and validates the exact inode and bytes through the
-  platform-pinned directory path. A destination that wins the exclusive rename
+  publication first requires an empty destination WAL/SHM/journal namespace,
+  exclusively renames the staging inode to the destination, fsyncs the
+  directory, and validates the exact inode and bytes plus sidecar absence through
+  the platform-pinned directory path. A destination that wins the exclusive rename
   is preserved alongside the staging file and causes a fail-closed result; there
   is no validation-then-unlink rollback. Older v2-v4 hardlink publications are
   still recognized. A surviving legacy staging alias remains linked to the
