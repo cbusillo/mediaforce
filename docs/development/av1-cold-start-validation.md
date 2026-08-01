@@ -437,9 +437,11 @@ candidate-proposal retry first loads the canonical existing proposal and reuses
 its original `proposed_at`; it never samples a replacement timestamp. A review
 retry accepts only a complete matching immutable lane claim and envelope,
 reuses the envelope's original `reviewed_at`, re-fsyncs the review parent, and
-returns without launching another agent. A claim with no complete matching
-envelope remains terminal and unresolvable, and any conflicting final artifact
-is rejected. A
+returns without launching another agent. If only the claim is complete, retry
+uses its exact durable response checkpoint or publishes a rejected
+`interrupted_before_durable_response` recovery; neither path probes the live
+runner or launches another agent. Review recovery remains deadline-bound, and
+any conflicting final artifact is rejected. A
 normal pre-publication failure durably removes its temporary and surfaces any
 unlink, close, or cleanup-sync failure. A hard interruption before the rename
 leaves only an ignored temporary; after the rename, the canonical name contains
@@ -461,6 +463,11 @@ authoritative JSON artifacts even when no database transaction is involved.
 Reads require one owner-owned link, exact `0400` mode, stable
 descriptor/path identity, and unchanged size, timestamps, and inode before and
 after the complete read.
+These filesystem controls assume the operator account and Mediaforce process
+are trusted. Internal Python builders and writers are implementation details,
+not authorization APIs; code already executing as the artifact owner can replace
+owner-only state and is outside this protocol's threat model. The supported
+write boundary is the locked CLI/runtime workflow described here.
 On the next runtime-lock-held invocation, an orphaned assignment claim is
 terminalized as an unfavorable `interrupted_claim` without rerunning media, and
 a persisted non-review attempt missing its terminal record is idempotently
@@ -919,7 +926,7 @@ digest, and UTF-8 text. Per-blob and total-bundle bounds apply. Code receives no
 repository directory, so an untracked live-worktree file cannot affect the
 review. The
 lane allowlists include the relevant implementation, runtime, verifier, and
-protocol files while remaining bounded to 384 KiB per blob and 512 KiB per
+protocol files while remaining bounded to 384 KiB per blob and 768 KiB per
 request bundle. The
 canonical request binds the proposal, immutable claim, and exact safe bundle to
 that same commit and tree, so later validation cannot reinterpret an approval

@@ -28,6 +28,7 @@ from mediaforce.core.file_integrity import (
     rename_exchange,
     rename_exclusive,
 )
+from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.library.library_settings import configured_library_definitions, library_definition_map, \
     library_production_supported
 
@@ -539,6 +540,7 @@ def _migrate_legacy_sqlite_database(
     receipt_exists = _path_entry_exists(receipt_path)
     source_exists = _path_entry_exists(source)
     destination_exists = _path_entry_exists(destination)
+    live_source_sidecar_exists = _legacy_sqlite_live_source_sidecar_exists(source)
     retired_source_residue_exists = (
         _legacy_sqlite_retired_source_residue_exists(source)
     )
@@ -546,9 +548,11 @@ def _migrate_legacy_sqlite_database(
         intent_exists
         or receipt_exists
         or source_exists
+        or live_source_sidecar_exists
         or retired_source_residue_exists
     ):
         _assert_legacy_sqlite_migration_receipt_outside_destination(
+            config,
             receipt_path,
             destination=destination,
         )
@@ -573,7 +577,15 @@ def _migrate_legacy_sqlite_database(
             "Legacy and configured SQLite databases both exist without a "
             "resumable migration intent"
         )
-    if not source_exists or destination_exists:
+    if not source_exists:
+        if live_source_sidecar_exists:
+            from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+            raise MediaforceRuntimeBusyError(
+                "Legacy SQLite migration source sidecars exist without the main database"
+            )
+        return
+    if destination_exists:
         return
     from mediaforce.web.runtime_lock import exclusive_legacy_sqlite_migration_source
 
@@ -1112,21 +1124,110 @@ def _legacy_sqlite_migration_receipt_path(
 
 
 def _assert_legacy_sqlite_migration_receipt_outside_destination(
+        config: MediaforceConfig,
         receipt_path: Path,
         *,
         destination: Path,
 ) -> None:
-    destination_parent = destination.parent.expanduser().resolve()
-    try:
-        receipt_path.parent.relative_to(destination_parent)
-    except ValueError:
+    discovery_directory = _legacy_sqlite_migration_receipt_discovery_directory(
+        config,
+        fallback=receipt_path.parent,
+    )
+    resolved_directory = receipt_path.parent.expanduser().resolve()
+    destination_parents = (
+        _path_without_resolution(destination.parent),
+        destination.parent.expanduser().resolve(),
+    )
+    if not any(
+        _path_is_at_or_below(receipt_directory, destination_parent)
+        for receipt_directory in (
+            *_path_resolution_candidates(discovery_directory),
+            resolved_directory,
+        )
+        for destination_parent in destination_parents
+    ):
         return
     from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
 
     raise MediaforceRuntimeBusyError(
         "Legacy SQLite migration receipt storage must be outside the "
-        "configured destination parent"
+        "configured destination parent without a path alias through that parent"
     )
+
+
+def _legacy_sqlite_migration_receipt_discovery_directory(
+        config: MediaforceConfig,
+        *,
+        fallback: Path,
+) -> Path:
+    state = config.raw.get("state")
+    configured_value = (
+        state.get("runtime_reservation_dir")
+        if isinstance(state, dict)
+        else None
+    )
+    if isinstance(configured_value, str):
+        configured_path = Path(configured_value).expanduser()
+        if not configured_path.is_absolute():
+            configured_path = config.paths.project_root / configured_path
+        return _path_without_resolution(configured_path)
+    configured_path = getattr(config.paths, "runtime_reservation_dir", None)
+    if configured_path is None:
+        return _path_without_resolution(fallback)
+    return _path_without_resolution(Path(configured_path))
+
+
+def _path_is_at_or_below(path: Path, parent: Path) -> bool:
+    path_key = filesystem_collision_key(_path_without_resolution(path))
+    parent_key = filesystem_collision_key(_path_without_resolution(parent))
+    return path_key == parent_key or path_key.startswith(
+        f"{parent_key.rstrip(os.sep)}{os.sep}"
+    )
+
+
+def _path_resolution_candidates(path: Path) -> tuple[Path, ...]:
+    current = _path_without_resolution(path)
+    candidates = [current]
+    seen = {filesystem_collision_key(current)}
+    for _ in range(40):
+        expanded = _expand_first_path_symlink(current)
+        if expanded is None:
+            return tuple(candidates)
+        collision_key = filesystem_collision_key(expanded)
+        if collision_key in seen:
+            break
+        seen.add(collision_key)
+        candidates.append(expanded)
+        current = expanded
+    from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+    raise MediaforceRuntimeBusyError(
+        "Legacy SQLite migration receipt discovery path is invalid"
+    )
+
+
+def _expand_first_path_symlink(path: Path) -> Path | None:
+    normalized = _path_without_resolution(path)
+    parts = normalized.parts
+    current = Path(normalized.anchor)
+    for index, component in enumerate(parts[1:], start=1):
+        candidate = current / component
+        try:
+            target = Path(os.readlink(candidate))
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, errno.ENOENT, errno.ENOTDIR}:
+                from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+
+                raise MediaforceRuntimeBusyError(
+                    "Legacy SQLite migration receipt discovery path is unavailable"
+                ) from exc
+            current = candidate
+            continue
+        if not target.is_absolute():
+            target = candidate.parent / target
+        remainder = parts[index + 1:]
+        return _path_without_resolution(target.joinpath(*remainder))
+    return None
 
 
 def _legacy_sqlite_migration_receipt_payload(
@@ -1206,6 +1307,13 @@ def _legacy_sqlite_retired_source_residue_exists(source: Path) -> bool:
     finally:
         if directory_descriptor >= 0:
             os.close(directory_descriptor)
+
+
+def _legacy_sqlite_live_source_sidecar_exists(source: Path) -> bool:
+    return any(
+        _path_entry_exists(Path(f"{source}{suffix}"))
+        for suffix in _LEGACY_SQLITE_CLEANUP_SUFFIXES[1:]
+    )
 
 
 def _legacy_sqlite_migration_intent_payload(

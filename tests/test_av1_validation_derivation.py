@@ -42,6 +42,7 @@ from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
     AV1_VALIDATION_DERIVATION_REVIEW_LANES,
     AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
+    AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
     AV1_VALIDATION_DERIVATION_REVIEW_RECOVERY_SCHEMA,
     AV1_VALIDATION_DERIVATION_STRUCTURED_REVIEW_RUN_SCHEMA,
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
@@ -5640,6 +5641,24 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     process_controller=ManagedProcessController(),
                     repository_root=repository,
                 )
+
+    def test_review_bundle_allowlists_fit_current_source_bounds(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        for lane, paths in AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST.items():
+            sizes = []
+            for path in paths:
+                size = (repository_root / path).stat().st_size
+                self.assertLessEqual(
+                    size,
+                    AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BLOB_BYTES,
+                    path,
+                )
+                sizes.append(size)
+            self.assertLessEqual(
+                sum(sizes),
+                AV1_VALIDATION_DERIVATION_REVIEW_MAXIMUM_BUNDLE_BYTES,
+                lane,
+            )
 
     def test_review_bundle_uses_tracked_utf8_allowlist_and_rejects_unsafe_blobs(
             self,

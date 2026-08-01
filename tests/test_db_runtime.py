@@ -1963,6 +1963,99 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 ).exists()
             )
 
+    def test_migrate_config_state_rejects_symlinked_receipt_discovery_through_destination_parent(
+            self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_path = root / "state" / "library.sqlite3"
+            destination_path = root / "configured-state" / "library.sqlite3"
+            outside_reservations = root / "outside-reservations"
+            destination_path.parent.mkdir()
+            outside_reservations.mkdir()
+            outside_reservations.chmod(0o700)
+            destination_link = destination_path.parent / "reservations-link"
+            destination_link.symlink_to(
+                outside_reservations,
+                target_is_directory=True,
+            )
+            reservation_link = root / "reservation-discovery-link"
+            reservation_link.symlink_to(destination_link, target_is_directory=True)
+            config = self._legacy_migration_config(
+                root,
+                database_path=destination_path,
+                name="target",
+                runtime_reservation_dir=reservation_link,
+            )
+            source_path.parent.mkdir()
+            with sqlite3.connect(source_path) as connection:
+                connection.execute("CREATE TABLE migration_rows (value TEXT)")
+                connection.execute(
+                    "INSERT INTO migration_rows VALUES ('aliased-receipt-row')"
+                )
+
+            with (
+                exclusive_mediaforce_runtime_lock(
+                    config,
+                    owner_payload={"purpose": "legacy-aliased-receipt"},
+                ),
+                self.assertRaisesRegex(
+                    MediaforceRuntimeBusyError,
+                    "path alias through that parent",
+                ),
+            ):
+                migrate_config_state(config)
+
+            self.assertTrue(source_path.is_file())
+            self.assertFalse(destination_path.exists())
+            self.assertTrue(reservation_link.is_symlink())
+            self.assertTrue(destination_link.is_symlink())
+            self.assertFalse(
+                config_module._legacy_sqlite_migration_intent_path(
+                    destination_path
+                ).exists()
+            )
+
+    def test_migrate_config_state_rejects_live_sidecar_without_legacy_main(
+            self,
+    ) -> None:
+        for suffix in ("-wal", "-shm", "-journal"):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                source_path = root / "state" / "library.sqlite3"
+                destination_path = root / "configured-state" / "library.sqlite3"
+                config = self._legacy_migration_config(
+                    root,
+                    database_path=destination_path,
+                    name="target",
+                )
+                source_path.parent.mkdir()
+                sidecar_path = Path(f"{source_path}{suffix}")
+                sidecar_path.write_bytes(b"orphaned-legacy-sidecar")
+
+                with (
+                    exclusive_mediaforce_runtime_lock(
+                        config,
+                        owner_payload={"purpose": "legacy-orphaned-sidecar"},
+                    ),
+                    self.assertRaisesRegex(
+                        MediaforceRuntimeBusyError,
+                        "sidecars exist without the main database",
+                    ),
+                ):
+                    migrate_config_state(config)
+
+                self.assertEqual(
+                    sidecar_path.read_bytes(),
+                    b"orphaned-legacy-sidecar",
+                )
+                self.assertFalse(destination_path.exists())
+                self.assertFalse(
+                    config_module._legacy_sqlite_migration_intent_path(
+                        destination_path
+                    ).exists()
+                )
+
     def test_migrate_config_state_publishes_receipt_before_v4_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

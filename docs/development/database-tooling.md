@@ -138,17 +138,25 @@ Mediaforce's SQLite schema.
   stops cleanup before the legacy main is retired. Before completion becomes
   authoritative, Mediaforce also publishes an immutable migration receipt in
   the machine-local runtime-reservation namespace, outside the replaceable
-  destination parent. A configuration that places that reservation namespace
-  at or below the destination parent is rejected before migration or recovery
-  can mutate either location. Startup checks migration authority even after the
+  destination parent. The configured reservation namespace must remain
+  independently discoverable: neither its configured path nor any symlink
+  expansion may pass through an entry hidden by destination replacement. A
+  configuration that places that namespace at or below the destination parent,
+  directly or through an alias, is rejected before migration or recovery can
+  mutate either location. Startup checks migration authority even after the
   legacy `state/` directory has become empty: a surviving receipt or retired-source
   quarantine without the canonical destination intent fails closed instead of
   permitting a replacement database to be created or adopted. This also
   upgrades the parent-v4 all-absent cleanup case on its first verified startup.
+  A live legacy WAL, SHM, or journal sidecar without its main database and
+  without migration authority is likewise ambiguous residue and blocks startup;
+  Mediaforce never treats that state as permission to create a replacement
+  database.
   Unsafe custom layouts are intentionally not grandfathered. Before upgrading
   such an installation, stop Mediaforce, move the complete reservation
-  directory atomically to a path outside the destination parent, update
-  `state.runtime_reservation_dir`, and preserve every migration receipt.
+  directory atomically to a direct non-symlink path outside the destination
+  parent, update `state.runtime_reservation_dir`, and preserve every migration
+  receipt.
   Cleanup claims the exact legacy main first with an exclusive rename to an
   identity-derived quarantine name, syncs that namespace transition, and
   validates the claimed inode. It retains that exact quarantine as authorized
