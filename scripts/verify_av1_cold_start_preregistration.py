@@ -1689,7 +1689,6 @@ def _canonical_system_git_binary(platform: str) -> str:
 def _preregistration_executable_rejection_reasons(
         *,
         owner_uid: int,
-        owner_gid: int,
         mode: int,
         current_uid: int,
 ) -> tuple[str, ...]:
@@ -1703,7 +1702,7 @@ def _preregistration_executable_rejection_reasons(
         reasons.append("executable_world_write")
     if mode & (bootstrap_stat.S_ISUID | bootstrap_stat.S_ISGID):
         reasons.append("executable_set_id")
-    if mode & bootstrap_stat.S_IWGRP and owner_gid != 0:
+    if mode & bootstrap_stat.S_IWGRP:
         reasons.append("executable_group_write")
     return tuple(reasons)
 
@@ -1711,13 +1710,11 @@ def _preregistration_executable_rejection_reasons(
 def _preregistration_executable_is_trusted(
         *,
         owner_uid: int,
-        owner_gid: int,
         mode: int,
         current_uid: int,
 ) -> bool:
     return not _preregistration_executable_rejection_reasons(
         owner_uid=owner_uid,
-        owner_gid=owner_gid,
         mode=mode,
         current_uid=current_uid,
     )
@@ -2346,7 +2343,6 @@ def _assert_preregistration_import_tree_clean(
                 executable_rejection_reasons.extend(
                     _preregistration_executable_rejection_reasons(
                         owner_uid=descriptor_info.st_uid,
-                        owner_gid=descriptor_info.st_gid,
                         mode=descriptor_info.st_mode,
                         current_uid=bootstrap_os.getuid(),
                     )

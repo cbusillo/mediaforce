@@ -338,10 +338,8 @@ the canonical checkout's `.venv` site-packages, requires the running interpreter
 to use an approved `.venv/bin/python*` launcher whose opened binary is the same
 inode as canonical `.venv/bin/python` and the interpreter's base executable.
 That executable must be owned by the invoking account or root, must not be
-world-writable, and must not carry set-ID bits. Group write is accepted only for
-a trusted-owner executable in the root/wheel group, matching system Python
-installations and their owner-local package extraction. The bootstrap requires
-any `VIRTUAL_ENV` declaration to match that environment and explicitly binds the
+group/world-writable, and must not carry set-ID bits. The bootstrap requires any
+`VIRTUAL_ENV` declaration to match that environment and explicitly binds the
 canonical `mediaforce` source snapshot. Under the owner-local threat
 model, that canonical `.venv`/site-packages installation and the external Every
 Code binary remain trusted; the verifier does not broaden its scope by hashing

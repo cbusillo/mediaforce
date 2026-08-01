@@ -2646,43 +2646,27 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         current_uid = 501
         regular_mode = stat.S_IFREG | 0o755
         cases = (
-            ("current owner", current_uid, 20, regular_mode, True),
-            ("root owner", 0, 0, regular_mode, True),
-            ("root wheel group writable", 0, 0, stat.S_IFREG | 0o775, True),
-            (
-                "current owner wheel group writable",
-                current_uid,
-                0,
-                stat.S_IFREG | 0o775,
-                True,
-            ),
-            (
-                "root foreign group writable",
-                0,
-                20,
-                stat.S_IFREG | 0o775,
-                False,
-            ),
+            ("current owner", current_uid, regular_mode, True),
+            ("root owner", 0, regular_mode, True),
+            ("root group writable", 0, stat.S_IFREG | 0o775, False),
             (
                 "current owner group writable",
                 current_uid,
-                20,
                 stat.S_IFREG | 0o775,
                 False,
             ),
-            ("foreign owner", current_uid + 1, 20, regular_mode, False),
-            ("world writable", current_uid, 20, stat.S_IFREG | 0o757, False),
-            ("setuid", 0, 0, stat.S_IFREG | 0o4755, False),
-            ("setgid", 0, 0, stat.S_IFREG | 0o2755, False),
-            ("not regular", current_uid, 20, stat.S_IFDIR | 0o755, False),
+            ("foreign owner", current_uid + 1, regular_mode, False),
+            ("world writable", current_uid, stat.S_IFREG | 0o757, False),
+            ("setuid", 0, stat.S_IFREG | 0o4755, False),
+            ("setgid", 0, stat.S_IFREG | 0o2755, False),
+            ("not regular", current_uid, stat.S_IFDIR | 0o755, False),
         )
-        for label, owner_uid, owner_gid, mode, expected in cases:
+        for label, owner_uid, mode, expected in cases:
             with self.subTest(label=label):
                 self.assertEqual(
                     verify_av1_cold_start_preregistration
                     ._preregistration_executable_is_trusted(
                         owner_uid=owner_uid,
-                        owner_gid=owner_gid,
                         mode=mode,
                         current_uid=current_uid,
                     ),
@@ -2692,7 +2676,6 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             verify_av1_cold_start_preregistration
             ._preregistration_executable_rejection_reasons(
                 owner_uid=current_uid + 1,
-                owner_gid=20,
                 mode=stat.S_IFREG | 0o6777,
                 current_uid=current_uid,
             ),
