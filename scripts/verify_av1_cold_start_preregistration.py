@@ -2544,6 +2544,7 @@ from mediaforce.tuning.av1_validation_v2 import (
 )
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
+    AV1_VALIDATION_DERIVATION_REASON_CODES,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
@@ -3176,6 +3177,7 @@ def _run_derivation_action_body(
                 "attempt_id": attempt.attempt_id,
                 "attempt_sha256": attempt.payload_sha256,
                 "status": attempt.status,
+                "reason_code": attempt.reason_code,
                 "review_required": attempt.status == "review_pending",
                 "holdout_execution_authorized": False,
                 "public_bundle_activation_allowed": False,
@@ -3309,6 +3311,26 @@ def _run_derivation_action_body(
             status: sum(record.status == status for record in records)
             for status in ("observed", "failed", "excluded", "stopped")
         }
+        attempt_reason_code_counts = {
+            reason_code: count
+            for reason_code in sorted(AV1_VALIDATION_DERIVATION_REASON_CODES)
+            if (
+                count := sum(
+                    attempt.reason_code == reason_code
+                    for attempt in attempts
+                )
+            )
+        }
+        terminal_reason_code_counts = {
+            reason_code: count
+            for reason_code in sorted(AV1_VALIDATION_DERIVATION_REASON_CODES)
+            if (
+                count := sum(
+                    record.reason_code == reason_code
+                    for record in records
+                )
+            )
+        }
         _print_partition_payload(
             {
                 "plan_id": plan.plan_id,
@@ -3341,6 +3363,8 @@ def _run_derivation_action_body(
                 "recovery_required": recovery_required,
                 **{f"attempt_{key}_count": value for key, value in attempt_counts.items()},
                 **{f"terminal_{key}_count": value for key, value in record_counts.items()},
+                "attempt_reason_code_counts": attempt_reason_code_counts,
+                "terminal_reason_code_counts": terminal_reason_code_counts,
                 "holdout_execution_authorized": False,
                 "public_bundle_activation_allowed": False,
             },

@@ -234,11 +234,15 @@ class _AV1ValidationDerivationAuthorizationExpired(AV1ValidationDerivationError)
 def _authorization_guarded_call(
         assert_active: Callable[[], None],
         function: Any,
+        *,
+        before_call: Callable[[], None] | None = None,
 ) -> Any:
     if function is None:
         return None
 
     def guarded(*args: Any, **kwargs: Any) -> Any:
+        if before_call is not None:
+            before_call()
         assert_active()
         return function(*args, **kwargs)
 
@@ -1520,44 +1524,59 @@ def _run_av1_validation_derivation_assignment_locked(
         before_publish=assert_assignment_claim_publishable,
         published_before=plan.authorization.valid_until,
     )
+    runtime_failure_reason_code = "runtime_preflight_failure"
+
+    def set_runtime_failure_reason_code(reason_code: str) -> None:
+        nonlocal runtime_failure_reason_code
+        runtime_failure_reason_code = reason_code
+
+    def attributed_call(reason_code: str, function: Any) -> Any:
+        return _authorization_guarded_call(
+            assert_fresh_execution_context,
+            function,
+            before_call=(
+                lambda: set_runtime_failure_reason_code(reason_code)
+            ),
+        )
+
     controller = process_controller or ManagedProcessController()
     run_deps = deps or build_av1_validation_derivation_calibration_deps()
     run_deps = replace(
         run_deps,
-        quality_toolchain_identity=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        quality_toolchain_identity=attributed_call(
+            "runtime_toolchain_failure",
             run_deps.quality_toolchain_identity,
         ),
-        detect_video_crop=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        detect_video_crop=attributed_call(
+            "runtime_crop_detection_failure",
             run_deps.detect_video_crop,
         ),
-        search_quality_for_source=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        search_quality_for_source=attributed_call(
+            "runtime_quality_search_failure",
             run_deps.search_quality_for_source,
         ),
-        run_sample_encode=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        run_sample_encode=attributed_call(
+            "runtime_sample_encode_failure",
             run_deps.run_sample_encode,
         ),
-        recommend_review_moments=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        recommend_review_moments=attributed_call(
+            "runtime_review_generation_failure",
             run_deps.recommend_review_moments,
         ),
-        recommend_review_timestamps=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        recommend_review_timestamps=attributed_call(
+            "runtime_review_generation_failure",
             run_deps.recommend_review_timestamps,
         ),
-        encode_preview_clips=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        encode_preview_clips=attributed_call(
+            "runtime_review_generation_failure",
             run_deps.encode_preview_clips,
         ),
-        render_source_review_clips=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        render_source_review_clips=attributed_call(
+            "runtime_review_generation_failure",
             run_deps.render_source_review_clips,
         ),
-        generate_compare_clips_from_review_pairs=_authorization_guarded_call(
-            assert_fresh_execution_context,
+        generate_compare_clips_from_review_pairs=attributed_call(
+            "runtime_review_generation_failure",
             run_deps.generate_compare_clips_from_review_pairs,
         ),
         select_quality_metric=(
@@ -1568,12 +1587,14 @@ def _run_av1_validation_derivation_assignment_locked(
         ),
     )
     activity_guard = controller.activity_guard(assert_fresh_execution_context)
-    activity_guard.__enter__()
+    activity_guard_entered = False
     attempt: AV1ValidationDerivationAttempt | None = None
     staged_snapshot: dict[str, Any] | None = None
     staged_snapshot_taken = False
     sample_item: dict[str, Any] | None = None
     try:
+        activity_guard.__enter__()
+        activity_guard_entered = True
         assert_fresh_execution_context()
         if (
             shutil.disk_usage(config.paths.review_dir.parent).free
@@ -1617,7 +1638,8 @@ def _run_av1_validation_derivation_assignment_locked(
         calibration_config = _config_with_review_directory(config, review_root)
         run_deps = replace(
             run_deps,
-            secure_review_artifacts=(
+            secure_review_artifacts=attributed_call(
+                "runtime_review_generation_failure",
                 lambda preview_clips, source_clips, compare_clips: (
                     _secure_and_fingerprint_derivation_review_clips(
                         review_root=review_root,
@@ -1627,9 +1649,10 @@ def _run_av1_validation_derivation_assignment_locked(
                             compare_clips=compare_clips,
                         ),
                     )
-                )
+                ),
             ),
         )
+        set_runtime_failure_reason_code("runtime_source_snapshot_failure")
         with _pinned_derivation_source(
             artifact_root=artifact_root,
             assignment_id=assignment.assignment_id,
@@ -1648,7 +1671,8 @@ def _run_av1_validation_derivation_assignment_locked(
             with _owner_only_umask():
                 assert_fresh_execution_context()
                 assert_live_repository_identity()
-                payload, _ = run_sampled_calibration(
+                set_runtime_failure_reason_code("runtime_preflight_failure")
+                calibration_result = run_sampled_calibration(
                     config=calibration_config,
                     prefix=prefix,
                     action="av1_derivation",
@@ -1665,6 +1689,8 @@ def _run_av1_validation_derivation_assignment_locked(
                         lambda *_args, **_kwargs: assert_fresh_execution_context()
                     ),
                 )
+                set_runtime_failure_reason_code("runtime_result_validation_failure")
+                payload, _ = calibration_result
                 assert_live_repository_identity()
         assert_fresh_execution_context()
         assert_av1_validation_derivation_execution_contract(
@@ -1731,6 +1757,16 @@ def _run_av1_validation_derivation_assignment_locked(
             completed_at=clock(),
             status="failed",
             reason_code="authorization_expired",
+        )
+    except ProcessDeadlineEnforcementError:
+        attempt = _failed_attempt(
+            plan=plan,
+            partition=partition,
+            assignment_id=assignment.assignment_id,
+            started_at=started_at,
+            completed_at=clock(),
+            status="stopped",
+            reason_code="safety_stop",
         )
     except ProcessCancelledError:
         attempt = _failed_attempt(
@@ -1800,38 +1836,42 @@ def _run_av1_validation_derivation_assignment_locked(
             started_at=started_at,
             completed_at=clock(),
             status="failed",
-            reason_code="runtime_failure",
+            reason_code=runtime_failure_reason_code,
         )
     finally:
-        try:
-            cleanup_failed = False
-            if staged_snapshot_taken:
-                try:
-                    with open_db(config.paths.db_path) as connection:
-                        restore_staged_artifact(
-                            connection,
-                            assignment.local_item_id,
-                            staged_snapshot,
-                            run_deps.staged_artifact_columns,
-                        )
-                except Exception:
-                    cleanup_failed = True
+        cleanup_failed = False
+        if staged_snapshot_taken:
             try:
-                purge_transient_artifacts(config, force=True)
+                with open_db(config.paths.db_path) as connection:
+                    restore_staged_artifact(
+                        connection,
+                        assignment.local_item_id,
+                        staged_snapshot,
+                        run_deps.staged_artifact_columns,
+                    )
             except Exception:
                 cleanup_failed = True
-            if cleanup_failed:
-                attempt = _failed_attempt(
-                    plan=plan,
-                    partition=partition,
-                    assignment_id=assignment.assignment_id,
-                    started_at=started_at,
-                    completed_at=clock(),
-                    status="failed",
-                    reason_code="runtime_failure",
-                )
-        finally:
-            activity_guard.__exit__(None, None, None)
+        try:
+            purge_transient_artifacts(config, force=True)
+        except Exception:
+            cleanup_failed = True
+        if activity_guard_entered:
+            try:
+                activity_guard.__exit__(None, None, None)
+            except Exception:
+                cleanup_failed = True
+        if cleanup_failed and (
+            attempt is None or attempt.status == "review_pending"
+        ):
+            attempt = _failed_attempt(
+                plan=plan,
+                partition=partition,
+                assignment_id=assignment.assignment_id,
+                started_at=started_at,
+                completed_at=clock(),
+                status="failed",
+                reason_code="runtime_cleanup_failure",
+            )
     if attempt is None:
         raise AV1ValidationDerivationError("AV1 derivation attempt did not reach a terminal state")
 

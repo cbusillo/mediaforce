@@ -37,6 +37,7 @@ from mediaforce.core.process_control import (
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
+    AV1_VALIDATION_DERIVATION_RUNTIME_FAILURE_REASON_CODES,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA,
     AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_SCHEMA_VERSION,
@@ -122,6 +123,7 @@ from mediaforce.tuning.av1_validation_derivation import (
 from mediaforce.web.runtime.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_MINIMUM_FREE_BYTES,
     _AV1_VALIDATION_DERIVATION_IMPLEMENTATION_FIXED_FILES,
+    _AV1ValidationDerivationAssignmentPreflight,
     _AV1ValidationDerivationVerdictSafetyStop,
     _assert_next_assignment,
     _assert_derivation_terminal_observations_current,
@@ -141,6 +143,7 @@ from mediaforce.web.runtime.av1_validation_derivation import (
     assert_av1_validation_derivation_source_snapshot_capacity,
     av1_validation_derivation_execution_environment_sha256,
     av1_validation_derivation_runtime_context_sha256,
+    build_av1_validation_derivation_calibration_deps,
     finalize_av1_validation_derivation_candidate_lock as finalize_runtime_av1_validation_derivation_candidate_lock,
     load_verified_av1_validation_derivation_candidate_lock as load_verified_runtime_av1_validation_derivation_candidate_lock,
     record_av1_validation_derivation_visual_verdict,
@@ -787,6 +790,211 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(list(attempts_directory.glob("*.json")), [])
         self.assertFalse(terminal_records_directory.exists())
         return calibration_ran
+
+    def _run_assignment_with_runtime_and_cleanup_result(
+            self,
+            *,
+            failure_dependency: str | None,
+            cleanup_failure: bool,
+            malformed_result: bool = False,
+            activity_guard_failure: Literal["enter", "exit"] | None = None,
+            preflight_failure: bool = False,
+            source_snapshot_failure: bool = False,
+    ) -> tuple[
+        AV1ValidationDerivationAttempt,
+        AV1ValidationDerivationTerminalRecord,
+    ]:
+        assignment = self.plan.assignments[0]
+        source = next(
+            item
+            for item in self.partition.inventory_sources
+            if item.local_item_id == assignment.local_item_id
+        )
+        source_commitment = av1_validation_derivation_plan_source_commitment(
+            self.plan,
+            assignment.assignment_id,
+        )
+        pinned_source = SimpleNamespace(
+            path=self.runtime_artifact_root / "source-snapshots" / "source.mkv",
+            content_sha256=source_commitment.source_sha256,
+            size_bytes=source_commitment.source_size_bytes,
+            content_version_fingerprint=source.source_identity,
+        )
+        sample_item = {
+            "library_item_id": assignment.local_item_id,
+            "source_size_bytes": SOURCE_SIZE_BYTES,
+            "resolved_policy": {},
+        }
+        attempts_directory = self.runtime_artifact_root / "attempts"
+        terminal_records_directory = self.runtime_artifact_root / "terminal-records"
+        cleanup_call_count = 0
+        calibration_payload = self._review_pending_attempt().calibration_payload()
+
+        def raise_runtime_failure(*_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("private runtime failure detail")
+
+        def run_calibration(**kwargs: object) -> object:
+            if failure_dependency is not None:
+                dependency = getattr(kwargs["deps"], failure_dependency)
+                dependency()
+                raise AssertionError("runtime dependency failure did not propagate")
+            if malformed_result:
+                return (dict(calibration_payload),)
+            return dict(calibration_payload), None
+
+        def purge(*_args: object, **_kwargs: object) -> None:
+            nonlocal cleanup_call_count
+            cleanup_call_count += 1
+            if preflight_failure and cleanup_call_count == 1:
+                raise RuntimeError("private preflight failure detail")
+            if cleanup_failure and cleanup_call_count == 2:
+                raise RuntimeError("private cleanup failure detail")
+
+        deps = build_av1_validation_derivation_calibration_deps()
+        if failure_dependency is not None:
+            deps = replace(
+                deps,
+                **{failure_dependency: raise_runtime_failure},
+            )
+        controller = ManagedProcessController()
+
+        class ActivityGuard:
+            def __enter__(self) -> None:
+                if activity_guard_failure == "enter":
+                    raise RuntimeError("private activity guard enter detail")
+
+            def __exit__(
+                    self,
+                    _exc_type: object,
+                    _exc_value: object,
+                    _traceback: object,
+            ) -> None:
+                if activity_guard_failure == "exit":
+                    raise RuntimeError("private activity guard exit detail")
+
+        activity_guard = (
+            patch.object(
+                controller,
+                "activity_guard",
+                return_value=ActivityGuard(),
+            )
+            if activity_guard_failure is not None
+            else nullcontext()
+        )
+        pinned_source_context = (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._pinned_derivation_source",
+                side_effect=RuntimeError("private source snapshot failure detail"),
+            )
+            if source_snapshot_failure
+            else patch(
+                "mediaforce.web.runtime.av1_validation_derivation._pinned_derivation_source",
+                return_value=nullcontext(pinned_source),
+            )
+        )
+        preflight = _AV1ValidationDerivationAssignmentPreflight(
+            assignment=assignment,
+            artifact_root=self.runtime_artifact_root,
+            clock=lambda: "2026-07-30T01:00:00Z",
+        )
+        with (
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_execution_contract",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.assert_av1_validation_derivation_runtime_context",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.probe_macos_file_integrity",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.shutil.disk_usage",
+                return_value=SimpleNamespace(free=100 * 1024 ** 3),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.purge_transient_artifacts",
+                side_effect=purge,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.open_db",
+                return_value=nullcontext(SimpleNamespace()),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.load_av1_validation_derivation_sample_item",
+                return_value=sample_item,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._bind_derivation_intent",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._validate_bound_sample_item",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.snapshot_staged_artifact",
+                return_value=None,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.restore_staged_artifact",
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.resolve_item_source_path",
+                return_value=Path("/private/source.mkv"),
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._derivation_prefix",
+                return_value="private/derivation",
+            ),
+            pinned_source_context,
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation.run_sampled_calibration",
+                side_effect=run_calibration,
+            ),
+            patch(
+                "mediaforce.web.runtime.av1_validation_derivation._current_derivation_review_artifact_fingerprint",
+                return_value=calibration_payload["review_artifact_fingerprint"],
+            ),
+            activity_guard,
+        ):
+            attempt = _run_av1_validation_derivation_assignment_locked(
+                config=self.runtime_config,
+                manifest=self.manifest,
+                partition=self.partition,
+                token_key=self.token_key,
+                plan=self.plan,
+                repository_identity_resolver=self._matching_repository_identity,
+                assignment_id=assignment.assignment_id,
+                attempts_directory=attempts_directory,
+                terminal_records_directory=terminal_records_directory,
+                process_controller=controller,
+                deps=deps,
+                _preflight=preflight,
+                _source_commitment_guard=lambda: None,
+            )
+
+        terminal = load_av1_validation_derivation_terminal_records(
+            terminal_records_directory
+        )[0]
+        return attempt, terminal
+
+    def _assert_assignment_runtime_dependency_failure(
+            self,
+            *,
+            dependency: str,
+            reason_code: str,
+    ) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=dependency,
+            cleanup_failure=False,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, reason_code)
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, reason_code)
+        self.assertNotIn(
+            "private runtime failure detail",
+            canonical_json_bytes(attempt.to_payload()).decode("utf-8"),
+        )
 
     def _cross_domain_artifact_alias(self) -> tuple[SimpleNamespace, Path]:
         alias_state_root = (
@@ -3192,6 +3400,140 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(payload["attempt_count"], 0)
         self.assertEqual(payload["terminal_record_count"], 0)
 
+    def test_derivation_status_reports_reason_code_counts_separately(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="failed",
+            reason_code="runtime_quality_search_failure",
+        )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+        )
+        write_av1_validation_derivation_attempt(
+            self.runtime_artifact_root / "attempts",
+            attempt,
+        )
+        write_av1_validation_derivation_terminal_record(
+            self.runtime_artifact_root / "terminal-records",
+            terminal,
+        )
+        args = SimpleNamespace(
+            action="derivation-status",
+            config=Path("unused.toml"),
+            plan=self.runtime_artifact_root / "plan.json",
+            json_output=True,
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_canonical_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ) as print_payload,
+        ):
+            exit_code = (
+                verify_av1_cold_start_preregistration._run_derivation_action_body(
+                    args,
+                    locked_config=None,
+                )
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = print_payload.call_args.args[0]
+        self.assertEqual(
+            payload["attempt_reason_code_counts"],
+            {"runtime_quality_search_failure": 1},
+        )
+        self.assertEqual(
+            payload["terminal_reason_code_counts"],
+            {"runtime_quality_search_failure": 1},
+        )
+
+    def test_run_assignment_cli_reports_privacy_safe_reason_code(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="failed",
+            reason_code="runtime_crop_detection_failure",
+        )
+        args = SimpleNamespace(
+            action="run-derivation-assignment",
+            manifest=V2_MANIFEST_PATH,
+            partition=self.runtime_artifact_root / "partition.json",
+            plan=self.runtime_artifact_root / "plan.json",
+            assignment_id=assignment.assignment_id,
+            key=self.runtime_artifact_root / "partition.key",
+            config=Path("unused.toml"),
+            json_output=True,
+        )
+        with (
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_assert_preregistration_bootstrap_authority",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "assert_private_artifact_path",
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_manifest_v2",
+                return_value=self.manifest,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_private_partition",
+                return_value=self.partition,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_load_recovery_capable_derivation_plan",
+                return_value=(self.plan, self.runtime_artifact_root),
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "load_av1_validation_partition_key",
+                return_value=self.token_key,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "run_av1_validation_derivation_assignment",
+                return_value=attempt,
+            ),
+            patch.object(
+                verify_av1_cold_start_preregistration,
+                "_print_partition_payload",
+            ) as print_payload,
+        ):
+            exit_code = (
+                verify_av1_cold_start_preregistration._run_derivation_action_body(
+                    args,
+                    locked_config=None,
+                )
+            )
+
+        self.assertEqual(exit_code, 2)
+        payload = print_payload.call_args.args[0]
+        self.assertEqual(
+            payload["reason_code"],
+            "runtime_crop_detection_failure",
+        )
+        self.assertNotIn("private", canonical_json_bytes(payload).decode("utf-8"))
+
     def test_derivation_status_reports_unresolved_review_claim(self) -> None:
         proposal = self._candidate_proposal()
         write_av1_validation_derivation_candidate_proposal(
@@ -3919,6 +4261,137 @@ class AV1ValidationDerivationTests(unittest.TestCase):
 
         before_publish.assert_not_called()
         after_publish.assert_called_once_with()
+
+    def test_runtime_failure_reason_codes_are_immutable_terminal_evidence(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt_ids: set[str] = set()
+        terminal_ids: set[str] = set()
+
+        for reason_code in sorted(
+            AV1_VALIDATION_DERIVATION_RUNTIME_FAILURE_REASON_CODES
+        ):
+            with self.subTest(reason_code=reason_code):
+                attempt = build_av1_validation_derivation_attempt(
+                    plan=self.plan,
+                    partition=self.partition,
+                    assignment_id=assignment.assignment_id,
+                    started_at="2026-07-28T01:00:00Z",
+                    completed_at="2026-07-28T01:05:00Z",
+                    status="failed",
+                    reason_code=reason_code,
+                )
+                terminal = build_av1_validation_derivation_terminal_record(
+                    plan=self.plan,
+                    partition=self.partition,
+                    attempt=attempt,
+                )
+
+                self.assertEqual(attempt.reason_code, reason_code)
+                self.assertEqual(terminal.reason_code, reason_code)
+                self.assertEqual(terminal.attempt_id, attempt.attempt_id)
+                self.assertEqual(
+                    terminal.attempt_payload_sha256,
+                    attempt.payload_sha256,
+                )
+                attempt_ids.add(attempt.attempt_id)
+                terminal_ids.add(terminal.record_id)
+
+        self.assertEqual(
+            len(attempt_ids),
+            len(AV1_VALIDATION_DERIVATION_RUNTIME_FAILURE_REASON_CODES),
+        )
+        self.assertEqual(
+            len(terminal_ids),
+            len(AV1_VALIDATION_DERIVATION_RUNTIME_FAILURE_REASON_CODES),
+        )
+
+    def test_legacy_runtime_failure_artifacts_remain_byte_exact_v2(self) -> None:
+        assignment = self.plan.assignments[0]
+        attempt = build_av1_validation_derivation_attempt(
+            plan=self.plan,
+            partition=self.partition,
+            assignment_id=assignment.assignment_id,
+            started_at="2026-07-28T01:00:00Z",
+            completed_at="2026-07-28T01:05:00Z",
+            status="failed",
+            reason_code="runtime_failure",
+        )
+        terminal = build_av1_validation_derivation_terminal_record(
+            plan=self.plan,
+            partition=self.partition,
+            attempt=attempt,
+        )
+        self.assertEqual(
+            set(attempt.to_payload()),
+            {
+                "attempt_id",
+                "schema",
+                "schema_version",
+                "contract_version",
+                "plan_id",
+                "authorization_id",
+                "assignment_id",
+                "cell_plan_id",
+                "ordinal",
+                "started_at",
+                "completed_at",
+                "status",
+                "reason_code",
+                "calibration_payload",
+                "calibration_payload_sha256",
+                "payload_sha256",
+            },
+        )
+        self.assertEqual(attempt.to_payload()["schema_version"], 2)
+        self.assertEqual(attempt.to_payload()["contract_version"], "av1vdw2")
+        self.assertEqual(
+            set(terminal.to_payload()),
+            {
+                "record_id",
+                "schema",
+                "schema_version",
+                "contract_version",
+                "plan_id",
+                "authorization_id",
+                "attempt_id",
+                "attempt_payload_sha256",
+                "assignment_id",
+                "cell_plan_id",
+                "ordinal",
+                "started_at",
+                "completed_at",
+                "status",
+                "reason_code",
+                "observation",
+                "payload_sha256",
+            },
+        )
+        self.assertEqual(terminal.to_payload()["schema_version"], 2)
+        self.assertEqual(terminal.to_payload()["contract_version"], "av1vdw2")
+
+        attempts_directory = self.runtime_artifact_root / "legacy-attempts"
+        terminal_directory = self.runtime_artifact_root / "legacy-terminals"
+        write_av1_validation_derivation_attempt(attempts_directory, attempt)
+        write_av1_validation_derivation_terminal_record(
+            terminal_directory,
+            terminal,
+        )
+        self.assertEqual(
+            (attempts_directory / f"{assignment.assignment_id}.json").read_bytes(),
+            canonical_json_bytes(attempt.to_payload()),
+        )
+        self.assertEqual(
+            (terminal_directory / f"{assignment.assignment_id}.json").read_bytes(),
+            canonical_json_bytes(terminal.to_payload()),
+        )
+        self.assertEqual(
+            load_av1_validation_derivation_attempts(attempts_directory),
+            (attempt,),
+        )
+        self.assertEqual(
+            load_av1_validation_derivation_terminal_records(terminal_directory),
+            (terminal,),
+        )
 
     def test_authoritative_attempt_load_requires_parent_durability(self) -> None:
         attempts_directory = self.runtime_config.paths.web_state_dir / "durable-attempts"
@@ -8372,6 +8845,140 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             "terminal-record",
             "source-quiet",
         ])
+
+    def test_assignment_attributes_unexpected_quality_search_failure(self) -> None:
+        self._assert_assignment_runtime_dependency_failure(
+            dependency="search_quality_for_source",
+            reason_code="runtime_quality_search_failure",
+        )
+
+    def test_assignment_attributes_unexpected_crop_detection_failure(self) -> None:
+        self._assert_assignment_runtime_dependency_failure(
+            dependency="detect_video_crop",
+            reason_code="runtime_crop_detection_failure",
+        )
+
+    def test_assignment_attributes_unexpected_toolchain_failure(self) -> None:
+        self._assert_assignment_runtime_dependency_failure(
+            dependency="quality_toolchain_identity",
+            reason_code="runtime_toolchain_failure",
+        )
+
+    def test_assignment_attributes_unexpected_sample_encode_failure(self) -> None:
+        self._assert_assignment_runtime_dependency_failure(
+            dependency="run_sample_encode",
+            reason_code="runtime_sample_encode_failure",
+        )
+
+    def test_assignment_attributes_unexpected_review_generation_failure(self) -> None:
+        self._assert_assignment_runtime_dependency_failure(
+            dependency="encode_preview_clips",
+            reason_code="runtime_review_generation_failure",
+        )
+
+    def test_assignment_attributes_unexpected_preflight_failure(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=False,
+            preflight_failure=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "runtime_preflight_failure")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "runtime_preflight_failure")
+
+    def test_assignment_attributes_unexpected_source_snapshot_failure(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=False,
+            source_snapshot_failure=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(
+            attempt.reason_code,
+            "runtime_source_snapshot_failure",
+        )
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(
+            terminal.reason_code,
+            "runtime_source_snapshot_failure",
+        )
+
+    def test_assignment_preserves_primary_failure_when_cleanup_also_fails(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency="search_quality_for_source",
+            cleanup_failure=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(
+            attempt.reason_code,
+            "runtime_quality_search_failure",
+        )
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(
+            terminal.reason_code,
+            "runtime_quality_search_failure",
+        )
+        self.assertNotIn(
+            "private cleanup failure detail",
+            canonical_json_bytes(attempt.to_payload()).decode("utf-8"),
+        )
+
+    def test_assignment_attributes_cleanup_failure_after_success(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "runtime_cleanup_failure")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "runtime_cleanup_failure")
+
+    def test_assignment_attributes_malformed_calibration_result(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=False,
+            malformed_result=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(
+            attempt.reason_code,
+            "runtime_result_validation_failure",
+        )
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(
+            terminal.reason_code,
+            "runtime_result_validation_failure",
+        )
+
+    def test_assignment_attributes_activity_guard_enter_failure(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=False,
+            activity_guard_failure="enter",
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "runtime_preflight_failure")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "runtime_preflight_failure")
+
+    def test_assignment_attributes_activity_guard_exit_failure(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=False,
+            activity_guard_failure="exit",
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "runtime_cleanup_failure")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "runtime_cleanup_failure")
 
     def test_repository_snapshot_drift_before_media_fails_closed(self) -> None:
         calibration_ran = self._run_assignment_with_repository_drift(

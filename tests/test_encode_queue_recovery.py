@@ -9383,6 +9383,73 @@ raise SystemExit(0)
         run_remote_mock.assert_called_once()
         self.assertEqual(snapshot.commands, ("remote-proc",))
 
+    def test_cleanup_process_snapshot_redacts_nonfatal_remote_warning(self) -> None:
+        host_staging_root = self.root / "remote-staging"
+        self.config.raw["remote_hosts"] = [
+            {
+                "host": "operator@private-host",
+                "label": "Private Worker",
+                "capabilities": ["encode_queue"],
+                "staging_root": str(host_staging_root),
+            }
+        ]
+        outcomes: tuple[tuple[str, object], ...] = (
+            (
+                "exception",
+                RuntimeError("private ssh command and hostname"),
+            ),
+            (
+                "nonzero",
+                subprocess.CompletedProcess(
+                    args=["ssh", "operator@private-host"],
+                    returncode=255,
+                    stdout="",
+                    stderr="private remote failure detail",
+                ),
+            ),
+        )
+
+        for kind, outcome in outcomes:
+            with self.subTest(kind=kind):
+                remote_probe = (
+                    patch(
+                        "mediaforce.state_cleanup.run_remote_command",
+                        side_effect=outcome,
+                    )
+                    if isinstance(outcome, BaseException)
+                    else patch(
+                        "mediaforce.state_cleanup.run_remote_command",
+                        return_value=outcome,
+                    )
+                )
+                with (
+                    patch(
+                        "mediaforce.state_cleanup._local_process_commands",
+                        return_value=[],
+                    ),
+                    remote_probe,
+                    self.assertLogs(
+                        "mediaforce.state_cleanup",
+                        level="WARNING",
+                    ) as captured,
+                ):
+                    snapshot = state_cleanup._cleanup_process_snapshot(
+                        self.config
+                    )
+
+                self.assertEqual(
+                    captured.output,
+                    [
+                        "WARNING:mediaforce.state_cleanup:"
+                        "Nonfatal cleanup reachability warning; "
+                        "remote staging cleanup was skipped"
+                    ],
+                )
+                self.assertEqual(
+                    snapshot.unverified_roots,
+                    (host_staging_root,),
+                )
+
     def test_purge_transient_artifacts_prunes_orphaned_quality_temp_dirs_before_general_retention(self) -> None:
         temp_dir = self.config.paths.web_state_dir / "quality-temp" / ".mediaforce-ab-av1-orphan"
         temp_dir.mkdir(parents=True, exist_ok=True)
