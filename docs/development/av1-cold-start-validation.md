@@ -758,10 +758,33 @@ uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   --config /private/owner-only/mediaforce.toml --json
 ```
 
+The command's privacy-safe result includes the immutable attempt `reason_code`.
+Known outcomes retain their existing categories, including `timeout`,
+`storage_stop`, `metrics_incomplete`, and `safety_stop`. Unexpected future
+failures use an allowlisted stage-specific `runtime_*_failure` code for
+preflight, source snapshot, crop detection, toolchain validation, quality
+search, sample encode, review generation, result validation, or cleanup. The
+legacy `runtime_failure` value remains valid for existing evidence and is never
+retrospectively reclassified. The allowlist is an additive reason vocabulary
+inside the existing exact-key v2 envelope, not a new artifact shape; execution
+plans remain bound to their exact repository identity, so binaries predating
+this vocabulary are not rollback executors for future plans. Reason codes never contain exception text,
+commands, paths, hostnames, or media metadata, and they do not authorize a
+retry or successor cohort.
+
+Remote process-probe failures during transient cleanup emit only a redacted
+`Nonfatal cleanup reachability warning`; the affected remote staging root is
+kept rather than pruned, and that warning is not the attempt's terminal cause.
+A raised local restore, purge, or activity-guard cleanup exception remains a
+terminal `runtime_cleanup_failure` when the main path otherwise succeeded; it
+does not erase an already classified unfavorable terminal cause.
+
 `derivation-status` is a read-only recovery diagnostic. It reports privacy-safe
 counts for assignment claims, attempts, terminal intents and records, verdict
 claims and intents, review claims, plus unresolved counts and
-`recovery_required`. An orphan assignment claim, unaccepted attempt, terminal
+`recovery_required`. It also reports separate aggregate attempt and terminal
+reason-code counts so one copied terminal cannot be mistaken for another
+attempt. An orphan assignment claim, unaccepted attempt, terminal
 intent without its record, verdict claim/intent without a terminal, or review
 claim without its matching envelope sets `recovery_required=true` and returns
 exit status `2`. Late observed terminal intents are counted separately and also

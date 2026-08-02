@@ -277,24 +277,15 @@ def _cleanup_process_snapshot(config: MediaforceConfig) -> CleanupProcessSnapsho
             result = run_remote_command(
                 host, ["ps", "-axo", "command="], REMOTE_PROCESS_PROBE_TIMEOUT_SECONDS
             )
-        except Exception as exc:
+        except Exception:
             LOGGER.warning(
-                "Could not inspect remote processes for cleanup on %s: %s",
-                _host_label(host),
-                exc,
+                "Nonfatal cleanup reachability warning; remote staging cleanup was skipped"
             )
             _add_unique_path(unverified_roots, root)
             continue
         if result.returncode != 0:
-            detail = (
-                result.stderr.strip()
-                or result.stdout.strip()
-                or f"exit {result.returncode}"
-            )
             LOGGER.warning(
-                "Could not inspect remote processes for cleanup on %s: %s",
-                _host_label(host),
-                detail,
+                "Nonfatal cleanup reachability warning; remote staging cleanup was skipped"
             )
             _add_unique_path(unverified_roots, root)
             continue
@@ -375,12 +366,6 @@ def _add_unique_path(paths: list[Path], path: Path) -> None:
     if any(existing == resolved for existing in paths):
         return
     paths.append(resolved)
-
-
-def _host_label(host: dict[str, object]) -> str:
-    return str(
-        host.get("label") or host.get("host") or host.get("key") or "remote host"
-    )
 
 
 def _mtime(path: Path) -> float:

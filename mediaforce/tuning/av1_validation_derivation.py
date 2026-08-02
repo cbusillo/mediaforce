@@ -210,6 +210,17 @@ AV1_VALIDATION_DERIVATION_REVIEW_BUNDLE_ALLOWLIST: Mapping[
         "scripts/verify_av1_cold_start_preregistration.py",
     ),
 }
+AV1_VALIDATION_DERIVATION_RUNTIME_FAILURE_REASON_CODES = frozenset({
+    "runtime_cleanup_failure",
+    "runtime_crop_detection_failure",
+    "runtime_preflight_failure",
+    "runtime_quality_search_failure",
+    "runtime_result_validation_failure",
+    "runtime_review_generation_failure",
+    "runtime_sample_encode_failure",
+    "runtime_source_snapshot_failure",
+    "runtime_toolchain_failure",
+})
 AV1_VALIDATION_DERIVATION_REASON_CODES = frozenset({
     "authorization_expired",
     "compatibility_drift",
@@ -224,7 +235,7 @@ AV1_VALIDATION_DERIVATION_REASON_CODES = frozenset({
     "storage_stop",
     "timeout",
     "toolchain_drift",
-})
+}) | AV1_VALIDATION_DERIVATION_RUNTIME_FAILURE_REASON_CODES
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
