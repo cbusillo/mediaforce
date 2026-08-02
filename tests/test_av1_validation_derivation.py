@@ -8990,6 +8990,18 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(terminal.status, "failed")
         self.assertEqual(terminal.reason_code, "authorization_expired")
 
+    def test_assignment_successful_cleanup_at_deadline_is_authorization_expired(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=False,
+            cleanup_crosses_authorization=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "authorization_expired")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "authorization_expired")
+
     def test_assignment_attributes_malformed_calibration_result(self) -> None:
         attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
             failure_dependency=None,

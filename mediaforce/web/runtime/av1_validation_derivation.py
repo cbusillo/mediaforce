@@ -1875,9 +1875,27 @@ def _run_av1_validation_derivation_assignment_locked(
                     activity_guard.__exit__(None, None, None)
                 except Exception:
                     cleanup_failed = True
-        if cleanup_failed and (
-            attempt is None or attempt.status == "review_pending"
-        ):
+        if attempt is not None and attempt.status == "review_pending":
+            cleanup_completed_at = clock()
+            cleanup_authorization_expired = _authorization_expired(
+                plan,
+                cleanup_completed_at,
+            )
+            if cleanup_failed or cleanup_authorization_expired:
+                attempt = _failed_attempt(
+                    plan=plan,
+                    partition=partition,
+                    assignment_id=assignment.assignment_id,
+                    started_at=started_at,
+                    completed_at=cleanup_completed_at,
+                    status="failed",
+                    reason_code=(
+                        "authorization_expired"
+                        if cleanup_authorization_expired
+                        else "runtime_cleanup_failure"
+                    ),
+                )
+        elif cleanup_failed and attempt is None:
             attempt = _failed_attempt(
                 plan=plan,
                 partition=partition,
