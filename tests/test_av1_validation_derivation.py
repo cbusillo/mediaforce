@@ -796,8 +796,12 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             *,
             failure_dependency: str | None,
             cleanup_failure: bool,
+            failure_after_dependency: str | None = None,
+            cleanup_base_exception: bool = False,
+            cleanup_crosses_authorization: bool = False,
             malformed_result: bool = False,
             activity_guard_failure: Literal["enter", "exit"] | None = None,
+            activity_guard_events: list[str] | None = None,
             preflight_failure: bool = False,
             source_snapshot_failure: bool = False,
     ) -> tuple[
@@ -833,11 +837,19 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         def raise_runtime_failure(*_args: object, **_kwargs: object) -> object:
             raise RuntimeError("private runtime failure detail")
 
+        def succeed_runtime_dependency(*_args: object, **_kwargs: object) -> None:
+            return None
+
         def run_calibration(**kwargs: object) -> object:
             if failure_dependency is not None:
                 dependency = getattr(kwargs["deps"], failure_dependency)
                 dependency()
                 raise AssertionError("runtime dependency failure did not propagate")
+            if failure_after_dependency is not None:
+                kwargs["progress_callback"]("inspecting_source")
+                dependency = getattr(kwargs["deps"], failure_after_dependency)
+                dependency()
+                raise RuntimeError("private interstitial runtime failure detail")
             if malformed_result:
                 return (dict(calibration_payload),)
             return dict(calibration_payload), None
@@ -847,8 +859,15 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             cleanup_call_count += 1
             if preflight_failure and cleanup_call_count == 1:
                 raise RuntimeError("private preflight failure detail")
+            if cleanup_base_exception and cleanup_call_count == 2:
+                raise KeyboardInterrupt
             if cleanup_failure and cleanup_call_count == 2:
                 raise RuntimeError("private cleanup failure detail")
+
+        def clock() -> str:
+            if cleanup_crosses_authorization and cleanup_call_count >= 2:
+                return self.plan.authorization.valid_until
+            return "2026-07-30T01:00:00Z"
 
         deps = build_av1_validation_derivation_calibration_deps()
         if failure_dependency is not None:
@@ -856,10 +875,17 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 deps,
                 **{failure_dependency: raise_runtime_failure},
             )
+        if failure_after_dependency is not None:
+            deps = replace(
+                deps,
+                **{failure_after_dependency: succeed_runtime_dependency},
+            )
         controller = ManagedProcessController()
 
         class ActivityGuard:
             def __enter__(self) -> None:
+                if activity_guard_events is not None:
+                    activity_guard_events.append("enter")
                 if activity_guard_failure == "enter":
                     raise RuntimeError("private activity guard enter detail")
 
@@ -869,6 +895,8 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                     _exc_value: object,
                     _traceback: object,
             ) -> None:
+                if activity_guard_events is not None:
+                    activity_guard_events.append("exit")
                 if activity_guard_failure == "exit":
                     raise RuntimeError("private activity guard exit detail")
 
@@ -878,7 +906,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 "activity_guard",
                 return_value=ActivityGuard(),
             )
-            if activity_guard_failure is not None
+            if activity_guard_failure is not None or activity_guard_events is not None
             else nullcontext()
         )
         pinned_source_context = (
@@ -895,7 +923,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         preflight = _AV1ValidationDerivationAssignmentPreflight(
             assignment=assignment,
             artifact_root=self.runtime_artifact_root,
-            clock=lambda: "2026-07-30T01:00:00Z",
+            clock=clock,
         )
         with (
             patch(
@@ -8927,6 +8955,18 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             canonical_json_bytes(attempt.to_payload()).decode("utf-8"),
         )
 
+    def test_assignment_restores_stage_after_successful_dependency(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            failure_after_dependency="detect_video_crop",
+            cleanup_failure=False,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "runtime_preflight_failure")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "runtime_preflight_failure")
+
     def test_assignment_attributes_cleanup_failure_after_success(self) -> None:
         attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
             failure_dependency=None,
@@ -8937,6 +8977,18 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(attempt.reason_code, "runtime_cleanup_failure")
         self.assertEqual(terminal.status, "failed")
         self.assertEqual(terminal.reason_code, "runtime_cleanup_failure")
+
+    def test_assignment_cleanup_failure_at_deadline_is_authorization_expired(self) -> None:
+        attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
+            failure_dependency=None,
+            cleanup_failure=True,
+            cleanup_crosses_authorization=True,
+        )
+
+        self.assertEqual(attempt.status, "failed")
+        self.assertEqual(attempt.reason_code, "authorization_expired")
+        self.assertEqual(terminal.status, "failed")
+        self.assertEqual(terminal.reason_code, "authorization_expired")
 
     def test_assignment_attributes_malformed_calibration_result(self) -> None:
         attempt, terminal = self._run_assignment_with_runtime_and_cleanup_result(
@@ -8979,6 +9031,19 @@ class AV1ValidationDerivationTests(unittest.TestCase):
         self.assertEqual(attempt.reason_code, "runtime_cleanup_failure")
         self.assertEqual(terminal.status, "failed")
         self.assertEqual(terminal.reason_code, "runtime_cleanup_failure")
+
+    def test_assignment_activity_guard_exits_when_cleanup_is_interrupted(self) -> None:
+        activity_guard_events: list[str] = []
+
+        with self.assertRaises(KeyboardInterrupt):
+            self._run_assignment_with_runtime_and_cleanup_result(
+                failure_dependency=None,
+                cleanup_failure=False,
+                cleanup_base_exception=True,
+                activity_guard_events=activity_guard_events,
+            )
+
+        self.assertEqual(activity_guard_events, ["enter", "exit"])
 
     def test_repository_snapshot_drift_before_media_fails_closed(self) -> None:
         calibration_ran = self._run_assignment_with_repository_drift(

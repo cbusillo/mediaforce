@@ -234,15 +234,11 @@ class _AV1ValidationDerivationAuthorizationExpired(AV1ValidationDerivationError)
 def _authorization_guarded_call(
         assert_active: Callable[[], None],
         function: Any,
-        *,
-        before_call: Callable[[], None] | None = None,
 ) -> Any:
     if function is None:
         return None
 
     def guarded(*args: Any, **kwargs: Any) -> Any:
-        if before_call is not None:
-            before_call()
         assert_active()
         return function(*args, **kwargs)
 
@@ -1531,13 +1527,32 @@ def _run_av1_validation_derivation_assignment_locked(
         runtime_failure_reason_code = reason_code
 
     def attributed_call(reason_code: str, function: Any) -> Any:
-        return _authorization_guarded_call(
+        guarded = _authorization_guarded_call(
             assert_fresh_execution_context,
             function,
-            before_call=(
-                lambda: set_runtime_failure_reason_code(reason_code)
-            ),
         )
+        if guarded is None:
+            return None
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            previous_reason_code = runtime_failure_reason_code
+            set_runtime_failure_reason_code(reason_code)
+            result = guarded(*args, **kwargs)
+            set_runtime_failure_reason_code(previous_reason_code)
+            return result
+
+        return call
+
+    def assert_calibration_progress(stage: str, *_args: Any, **_kwargs: Any) -> None:
+        stage_reason_code = {
+            "searching_target": "runtime_quality_search_failure",
+            "measuring_quality": "runtime_sample_encode_failure",
+            "selecting_review_moments": "runtime_review_generation_failure",
+            "building_review": "runtime_review_generation_failure",
+        }.get(stage)
+        if stage_reason_code is not None:
+            set_runtime_failure_reason_code(stage_reason_code)
+        assert_fresh_execution_context()
 
     controller = process_controller or ManagedProcessController()
     run_deps = deps or build_av1_validation_derivation_calibration_deps()
@@ -1685,9 +1700,7 @@ def _run_av1_validation_derivation_assignment_locked(
                     process_controller=controller,
                     deps=run_deps,
                     source_path_override=pinned_source.path,
-                    progress_callback=(
-                        lambda *_args, **_kwargs: assert_fresh_execution_context()
-                    ),
+                    progress_callback=assert_calibration_progress,
                 )
                 set_runtime_failure_reason_code("runtime_result_validation_failure")
                 payload, _ = calibration_result
@@ -1840,26 +1853,28 @@ def _run_av1_validation_derivation_assignment_locked(
         )
     finally:
         cleanup_failed = False
-        if staged_snapshot_taken:
-            try:
-                with open_db(config.paths.db_path) as connection:
-                    restore_staged_artifact(
-                        connection,
-                        assignment.local_item_id,
-                        staged_snapshot,
-                        run_deps.staged_artifact_columns,
-                    )
-            except Exception:
-                cleanup_failed = True
         try:
-            purge_transient_artifacts(config, force=True)
-        except Exception:
-            cleanup_failed = True
-        if activity_guard_entered:
+            if staged_snapshot_taken:
+                try:
+                    with open_db(config.paths.db_path) as connection:
+                        restore_staged_artifact(
+                            connection,
+                            assignment.local_item_id,
+                            staged_snapshot,
+                            run_deps.staged_artifact_columns,
+                        )
+                except Exception:
+                    cleanup_failed = True
             try:
-                activity_guard.__exit__(None, None, None)
+                purge_transient_artifacts(config, force=True)
             except Exception:
                 cleanup_failed = True
+        finally:
+            if activity_guard_entered:
+                try:
+                    activity_guard.__exit__(None, None, None)
+                except Exception:
+                    cleanup_failed = True
         if cleanup_failed and (
             attempt is None or attempt.status == "review_pending"
         ):

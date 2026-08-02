@@ -765,7 +765,10 @@ failures use an allowlisted stage-specific `runtime_*_failure` code for
 preflight, source snapshot, crop detection, toolchain validation, quality
 search, sample encode, review generation, result validation, or cleanup. The
 legacy `runtime_failure` value remains valid for existing evidence and is never
-retrospectively reclassified. Reason codes never contain exception text,
+retrospectively reclassified. The allowlist is an additive reason vocabulary
+inside the existing exact-key v2 envelope, not a new artifact shape; execution
+plans remain bound to their exact repository identity, so binaries predating
+this vocabulary are not rollback executors for future plans. Reason codes never contain exception text,
 commands, paths, hostnames, or media metadata, and they do not authorize a
 retry or successor cohort.
 
