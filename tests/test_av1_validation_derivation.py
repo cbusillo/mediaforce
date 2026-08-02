@@ -6447,6 +6447,7 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             monitor._nofile_baseline_soft_limit = None
             monitor._original_nofile_soft_limit = None
             monitor._raised_nofile_soft_limit = None
+            monitor._open_descriptor_count = lambda: 10
             return monitor
 
         for external_change in (False, True):
@@ -6468,11 +6469,16 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ):
                     monitor._ensure_descriptor_capacity(300)
                     self.assertEqual(state[0], 557)
-                    monitor._ensure_descriptor_capacity(350)
+                    monitor._darwin_watcher = SimpleNamespace(close=lambda: None)
+                    monitor._descriptors = [-1] * 300
+                    monitor._open_descriptor_count = lambda: 311
+                    monitor._ensure_descriptor_capacity(50)
                     raised_limit = state[0]
                     self.assertEqual(raised_limit, 607)
                     if external_change:
                         state[0] = raised_limit + 1
+                    monitor._darwin_watcher = None
+                    monitor._descriptors = []
                     monitor.close()
 
                 self.assertEqual(set_calls[:2], [(557, 4096), (607, 4096)])
@@ -6521,6 +6527,55 @@ class AV1ValidationDerivationTests(unittest.TestCase):
             monitor._ensure_descriptor_capacity(300)
         monitor.close()
         self.assertEqual(set_calls, [])
+
+        state = [1499, 4096]
+        set_calls = []
+        monitor = monitor_fixture()
+        monitor._open_descriptor_count = lambda: 1458
+        with (
+            patch.object(resource, "getrlimit", side_effect=nested_getrlimit),
+            patch.object(resource, "setrlimit", side_effect=nested_setrlimit),
+        ):
+            monitor._ensure_descriptor_capacity(1293)
+            self.assertEqual(state[0], 2880)
+            monitor.close()
+        self.assertEqual(set_calls, [(2880, 4096), (1499, 4096)])
+        self.assertEqual(state[0], 1499)
+
+        state = [resource.RLIM_INFINITY, resource.RLIM_INFINITY]
+        set_calls = []
+        monitor = monitor_fixture()
+        with (
+            patch.object(resource, "getrlimit", side_effect=nested_getrlimit),
+            patch.object(resource, "setrlimit", side_effect=nested_setrlimit),
+        ):
+            monitor._ensure_descriptor_capacity(1)
+            state[0] = 64
+            monitor._ensure_descriptor_capacity(100)
+            self.assertEqual(state[0], 239)
+            monitor.close()
+        self.assertEqual(
+            set_calls,
+            [(239, resource.RLIM_INFINITY), (64, resource.RLIM_INFINITY)],
+        )
+        self.assertEqual(state[0], 64)
+
+        for error_number in (errno.EMFILE, errno.ENFILE, errno.ENOMEM):
+            with self.subTest(error_number=error_number):
+                monitor = monitor_fixture()
+                monitor._stat = stat
+                source_path = Path(__file__)
+                source_state = monitor._state(source_path.stat())
+                with (
+                    patch.object(
+                        os,
+                        "open",
+                        side_effect=OSError(error_number, "descriptor exhaustion"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "unavailable") as raised,
+                ):
+                    monitor._open_descriptor(str(source_path), source_state)
+                self.assertEqual(raised.exception.__cause__.errno, error_number)
 
     def test_structured_response_and_evidence_reject_binding_decision_and_path_drift(
             self,

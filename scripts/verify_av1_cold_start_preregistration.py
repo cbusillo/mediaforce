@@ -178,20 +178,39 @@ class _RepositoryAuthorityMonitor:
 
     def _ensure_descriptor_capacity(self, additional: int) -> None:
         self._raise_sticky_failure()
-        projected_monitor_descriptors = len(self._descriptors) + additional + 1
         try:
             resource = __import__("resource")
             soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-            if self._nofile_baseline_soft_limit is None:
+            if (
+                self._nofile_baseline_soft_limit is None
+                or (
+                    self._nofile_baseline_soft_limit == resource.RLIM_INFINITY
+                    and soft_limit != resource.RLIM_INFINITY
+                )
+            ):
                 self._nofile_baseline_soft_limit = soft_limit
             baseline_soft_limit = self._nofile_baseline_soft_limit
-            if baseline_soft_limit == resource.RLIM_INFINITY:
+            if soft_limit == resource.RLIM_INFINITY:
                 return
+            new_watcher_descriptor_count = int(
+                self._darwin_watcher is None
+                and self._inotify_descriptor < 0
+            )
+            additional_process_descriptors = (
+                additional + new_watcher_descriptor_count
+            )
+            projected_monitor_descriptors = (
+                len(self._descriptors) + additional + 1
+            )
             minimum_limit = (
-                projected_monitor_descriptors
+                self._open_descriptor_count()
+                + additional_process_descriptors
                 + _PREREGISTRATION_MINIMUM_EXTERNAL_DESCRIPTOR_RESERVE
             )
-            desired_limit = baseline_soft_limit + projected_monitor_descriptors
+            desired_limit = max(
+                baseline_soft_limit + projected_monitor_descriptors,
+                minimum_limit,
+            )
             target_limit = desired_limit
             if hard_limit != resource.RLIM_INFINITY:
                 if hard_limit < minimum_limit:
@@ -223,6 +242,17 @@ class _RepositoryAuthorityMonitor:
             ):
                 self._fail_unavailable()
         except (OSError, ValueError) as exc:
+            self._fail_unavailable(exc)
+
+    def _open_descriptor_count(self) -> int:
+        descriptor_root = (
+            "/dev/fd"
+            if self._sys.platform == "darwin"
+            else "/proc/self/fd"
+        )
+        try:
+            return len(self._os.listdir(descriptor_root))
+        except OSError as exc:
             self._fail_unavailable(exc)
 
     def _start_monitoring(self) -> None:
@@ -341,6 +371,13 @@ class _RepositoryAuthorityMonitor:
         except OSError as exc:
             if descriptor >= 0:
                 self._os.close(descriptor)
+            errno_module = __import__("errno")
+            if exc.errno in {
+                errno_module.EMFILE,
+                errno_module.ENFILE,
+                errno_module.ENOMEM,
+            }:
+                self._fail_unavailable(exc)
             self._fail_changed(exc)
         if (
             (descriptor_info.st_dev, descriptor_info.st_ino)
