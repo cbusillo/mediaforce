@@ -214,10 +214,12 @@ binding is absent, the full authorization, repository, source-quiet, and
 cumulative-capacity gate runs after the binding temporary is fully written and
 fsynced and immediately before its exclusive rename. The protected runner
 preserves the process's incoming descriptor budget while adding capacity for
-its retained Git-authority and twenty-four source/path-chain guards. It raises
-the soft limit only when the host hard limit permits it and restores only the
-limit it owns. Insufficient descriptor capacity fails closed before
-publication. The renamed binding's
+its retained Git-authority and twenty-four source/path-chain guards. Nested
+monitors also count descriptors already held by runtime and source guards, then
+retain a separate 128-descriptor operating reserve. The runner raises the soft
+limit only when the host hard limit permits it and restores only the limit it
+owns. Insufficient descriptor capacity fails closed before publication. The
+renamed binding's
 kernel change time must also remain strictly before the plan authorization
 deadline, and the live source/repository identity is rechecked after the rename;
 a boundary-crossing or drifted binding is rolled back. An existing exact binding
