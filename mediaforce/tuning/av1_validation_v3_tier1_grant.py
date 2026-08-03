@@ -53,6 +53,8 @@ class AV1ValidationV3Tier1ExecutionGrant:
             raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant owner principal is invalid")
         authorized_at = _parse_timestamp(self.authorized_at, "grant timestamp")
         valid_until = _parse_timestamp(self.valid_until, "grant expiration")
+        _require_canonical_utc_timestamp(self.authorized_at, "grant timestamp")
+        _require_canonical_utc_timestamp(self.valid_until, "grant expiration")
         if valid_until <= authorized_at:
             raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant expiration is invalid")
         semantic_payload = self.semantic_payload()
@@ -136,6 +138,11 @@ def assert_av1_validation_v3_tier1_grant_active(
     _assert_request_active(protocol, plan, request, as_of=as_of)
     if grant.request_id != request.request_id or grant.request_payload_sha256 != request.payload_sha256:
         raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant is not bound to its request")
+    if _parse_timestamp(grant.valid_until, "grant expiration") > _parse_timestamp(
+        request.valid_until,
+        "request expiration",
+    ):
+        raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant cannot outlive its request")
     checked_at = _parse_timestamp(as_of, "grant active-check timestamp")
     authorized_at = _parse_timestamp(grant.authorized_at, "grant timestamp")
     valid_until = _parse_timestamp(grant.valid_until, "grant expiration")
@@ -172,6 +179,7 @@ def av1_validation_v3_tier1_grant_from_payload(payload: Mapping[str, Any]) -> AV
     }
     if set(value) != expected_keys:
         raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant keys are invalid")
+    _require_constant_fields(value)
     grant = AV1ValidationV3Tier1ExecutionGrant(
         grant_id=str(value.get("grant_id") or ""),
         request_id=str(value.get("request_id") or ""),
@@ -232,3 +240,34 @@ def _parse_timestamp(value: str, label: str) -> datetime:
     if parsed.tzinfo is None:
         raise AV1ValidationV3Tier1GrantError(f"AV1 v3 Tier 1 {label} must include a timezone")
     return parsed.astimezone(UTC)
+
+
+def _require_canonical_utc_timestamp(value: str, label: str) -> None:
+    if not value.endswith("Z"):
+        raise AV1ValidationV3Tier1GrantError(f"AV1 v3 Tier 1 {label} must use canonical UTC")
+
+
+def _require_constant_fields(value: Mapping[str, Any]) -> None:
+    constants: dict[str, object] = {
+        "schema": AV1_VALIDATION_V3_TIER1_GRANT_SCHEMA,
+        "schema_version": AV1_VALIDATION_V3_TIER1_GRANT_SCHEMA_VERSION,
+        "contract_version": AV1_VALIDATION_V3_TIER1_GRANT_CONTRACT_VERSION,
+        "authority": AV1_VALIDATION_V3_TIER1_GRANT_AUTHORITY,
+        "tier": "tier1",
+        "fixture_scope": "deterministic_synthetic_public_only",
+        "evidence_eligible": False,
+        "tier1_execution_authorized": True,
+        "private_inventory_read_authorized": False,
+        "key_creation_authorized": False,
+        "media_library_read_authorized": False,
+        "tier2_execution_authorized": False,
+        "empirical_authority_conferred": False,
+        "derivation_authorized": False,
+        "holdout_authorized": False,
+        "publication_authorized": False,
+        "activation_authorized": False,
+    }
+    for key, expected in constants.items():
+        actual = value.get(key)
+        if type(actual) is not type(expected) or actual != expected:
+            raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant constants are invalid")

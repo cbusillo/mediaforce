@@ -60,6 +60,10 @@ class AV1ValidationV3Tier1GrantTests(unittest.TestCase):
         payload["tier2_execution_authorized"] = True
         with self.assertRaises(AV1ValidationV3Tier1GrantError):
             av1_validation_v3_tier1_grant_from_payload(payload)
+        payload = grant.to_payload()
+        payload["evidence_eligible"] = 0
+        with self.assertRaises(AV1ValidationV3Tier1GrantError):
+            av1_validation_v3_tier1_grant_from_payload(payload)
 
     def test_grant_cannot_outlive_request(self) -> None:
         with self.assertRaisesRegex(AV1ValidationV3Tier1GrantError, "outlive"):
@@ -70,4 +74,15 @@ class AV1ValidationV3Tier1GrantTests(unittest.TestCase):
                 owner_principal="owner-1234abcd",
                 authorized_at="2026-08-03T14:00:00Z",
                 valid_until="2026-08-03T18:00:01Z",
+            )
+
+    def test_grant_requires_canonical_utc_timestamps(self) -> None:
+        with self.assertRaisesRegex(AV1ValidationV3Tier1GrantError, "canonical UTC"):
+            build_av1_validation_v3_tier1_execution_grant(
+                protocol=self.protocol,
+                plan=self.plan,
+                request=self.request,
+                owner_principal="owner-1234abcd",
+                authorized_at="2026-08-03T14:00:00+00:00",
+                valid_until="2026-08-03T17:00:00Z",
             )
