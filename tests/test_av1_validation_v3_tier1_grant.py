@@ -77,12 +77,18 @@ class AV1ValidationV3Tier1GrantTests(unittest.TestCase):
             )
 
     def test_grant_requires_canonical_utc_timestamps(self) -> None:
-        with self.assertRaisesRegex(AV1ValidationV3Tier1GrantError, "canonical UTC"):
-            build_av1_validation_v3_tier1_execution_grant(
-                protocol=self.protocol,
-                plan=self.plan,
-                request=self.request,
-                owner_principal="owner-1234abcd",
-                authorized_at="2026-08-03T14:00:00+00:00",
-                valid_until="2026-08-03T17:00:00Z",
-            )
+        for authorized_at in (
+            "2026-08-03T14:00:00+00:00",
+            "2026-08-03T14:00:00.000000Z",
+            "20260803T140000Z",
+        ):
+            with self.subTest(authorized_at=authorized_at):
+                with self.assertRaisesRegex(AV1ValidationV3Tier1GrantError, "canonical UTC"):
+                    build_av1_validation_v3_tier1_execution_grant(
+                        protocol=self.protocol,
+                        plan=self.plan,
+                        request=self.request,
+                        owner_principal="owner-1234abcd",
+                        authorized_at=authorized_at,
+                        valid_until="2026-08-03T17:00:00Z",
+                    )

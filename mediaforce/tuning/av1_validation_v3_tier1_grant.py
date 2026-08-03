@@ -51,10 +51,16 @@ class AV1ValidationV3Tier1ExecutionGrant:
             raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant request digest is invalid")
         if not _OWNER_PRINCIPAL_RE.fullmatch(self.owner_principal):
             raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant owner principal is invalid")
-        authorized_at = _parse_timestamp(self.authorized_at, "grant timestamp")
-        valid_until = _parse_timestamp(self.valid_until, "grant expiration")
-        _require_canonical_utc_timestamp(self.authorized_at, "grant timestamp")
-        _require_canonical_utc_timestamp(self.valid_until, "grant expiration")
+        authorized_at = _parse_timestamp(
+            self.authorized_at,
+            "grant timestamp",
+            canonical=True,
+        )
+        valid_until = _parse_timestamp(
+            self.valid_until,
+            "grant expiration",
+            canonical=True,
+        )
         if valid_until <= authorized_at:
             raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant expiration is invalid")
         semantic_payload = self.semantic_payload()
@@ -232,19 +238,17 @@ def _payload_sha256(payload: object) -> str:
     return f"sha256:{stable_json_hash(payload)}"
 
 
-def _parse_timestamp(value: str, label: str) -> datetime:
+def _parse_timestamp(value: str, label: str, *, canonical: bool = False) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise AV1ValidationV3Tier1GrantError(f"AV1 v3 Tier 1 {label} is invalid") from exc
     if parsed.tzinfo is None:
         raise AV1ValidationV3Tier1GrantError(f"AV1 v3 Tier 1 {label} must include a timezone")
-    return parsed.astimezone(UTC)
-
-
-def _require_canonical_utc_timestamp(value: str, label: str) -> None:
-    if not value.endswith("Z"):
+    normalized = parsed.astimezone(UTC)
+    if canonical and normalized.isoformat(timespec="seconds").replace("+00:00", "Z") != value:
         raise AV1ValidationV3Tier1GrantError(f"AV1 v3 Tier 1 {label} must use canonical UTC")
+    return normalized
 
 
 def _require_constant_fields(value: Mapping[str, Any]) -> None:
