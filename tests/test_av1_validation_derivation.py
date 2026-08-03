@@ -267,6 +267,10 @@ def _run_test_git(repository: Path, *arguments: str) -> str:
             "core.hooksPath=/dev/null",
             "-c",
             "init.templateDir=",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
             *arguments,
         ],
         capture_output=True,
@@ -3159,6 +3163,11 @@ class AV1ValidationDerivationTests(unittest.TestCase):
                 ("commit", "-qm", "bound snapshot fixture"),
             ):
                 _run_test_git(repository, *arguments)
+            self.assertEqual(_run_test_git(repository, "config", "--get", "gc.auto"), "0")
+            self.assertEqual(
+                _run_test_git(repository, "config", "--get", "maintenance.auto"),
+                "false",
+            )
 
             canonical_repository = repository.resolve()
             canonical_python = (
