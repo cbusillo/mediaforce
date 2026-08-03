@@ -126,6 +126,24 @@ Canonical loading remains valid for historical audit after expiration. Every
 future gate that can create execution authority must separately call the
 deterministic protocol-active check with its frozen as-of timestamp.
 
+Issue `#303` also defines the non-executing A0/A qualification contracts in
+`mediaforce/tuning/av1_validation_v3_qualification.py`. A qualification plan
+binds the v3 protocol digest, qualification-key ID, eligibility-predicate,
+repository commit/tree, configuration, toolchain, and fixture-matrix digests to
+an explicit validity window. Its attestation requires the complete frozen path
+matrix: Tier 1 success coverage for both candidates; every registered runtime
+failure, non-runtime terminal, and recovery path; plus Tier 2 success coverage
+for both candidates in each frozen stratum. The contract rejects missing,
+duplicated, private fault-injection, stale, re-bound, non-canonical, or
+non-paused/unclean attestations.
+
+These are pure data contracts and public-safe summaries only. They do not load
+private inventory, select a source, create a qualification key, run fixtures,
+or create evidence or empirical authority. Qualification execution remains
+blocked in issues `#304` and `#305`; a future executor must supply separate
+owner authorization and validate both the plan and attestation against the
+frozen protocol at its explicit timestamp.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
