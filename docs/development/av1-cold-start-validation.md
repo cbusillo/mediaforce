@@ -144,6 +144,17 @@ blocked in issues `#304` and `#305`; a future executor must supply separate
 owner authorization and validate both the plan and attestation against the
 frozen protocol at its explicit timestamp.
 
+The first `#304` preparation artifact is a Tier 1 owner-authorization request
+contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a
+future real qualification plan to the exact protocol, commit/tree,
+configuration, toolchain, fixture-matrix, and path-matrix identities while
+declaring deterministic synthetic/public fixtures only. Its canonical payload
+is intentionally **not** a grant: private inventory, key creation, media reads,
+qualification execution, evidence creation, empirical authority, and activation
+are all false, and a separate owner authorization remains required. A request
+must be generated from actual future machine-local inputs outside the repository
+and is invalid when its bound qualification plan changes or expires.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout

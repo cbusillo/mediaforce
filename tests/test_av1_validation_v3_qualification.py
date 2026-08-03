@@ -173,6 +173,21 @@ class AV1ValidationV3QualificationTests(unittest.TestCase):
                         as_of=checked_at,
                     )
 
+    def test_plan_cannot_outlive_its_protocol(self) -> None:
+        with self.assertRaisesRegex(AV1ValidationV3QualificationError, "outlive"):
+            build_av1_validation_v3_qualification_plan(
+                protocol=self.protocol,
+                qualification_key_id=f"av1vqkey3_{'b' * 32}",
+                eligibility_predicate_sha256=SHA256,
+                repository_commit=COMMIT,
+                repository_tree=TREE,
+                config_sha256=SHA256,
+                toolchain_sha256=SHA256,
+                fixture_matrix_sha256=SHA256,
+                frozen_at=FROZEN_AT,
+                valid_until="2027-01-29T16:52:29Z",
+            )
+
     def test_path_shapes_reject_private_fault_coverage_and_incomplete_success_binding(self) -> None:
         with self.assertRaisesRegex(AV1ValidationV3QualificationError, "non-private Tier 1"):
             AV1ValidationV3QualificationPath(
