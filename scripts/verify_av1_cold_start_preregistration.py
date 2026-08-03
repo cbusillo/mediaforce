@@ -2542,6 +2542,12 @@ from mediaforce.tuning.av1_validation_v2 import (
     load_av1_validation_manifest_v2,
     load_av1_validation_v2_eligibility,
 )
+from mediaforce.tuning.av1_validation_v3 import (
+    AV1ValidationProtocolV3,
+    AV1ValidationV3Error,
+    assert_preregistered_av1_validation_protocol_v3,
+    load_av1_validation_protocol_v3,
+)
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
     AV1_VALIDATION_DERIVATION_REASON_CODES,
@@ -2641,7 +2647,9 @@ from mediaforce.tuning.av1_validation_partition_inventory import (
     load_av1_validation_partition_inventory,
 )
 ValidationManifest: TypeAlias = (
-    AV1ColdStartValidationManifestV1 | AV1ValidationManifestV2
+    AV1ColdStartValidationManifestV1
+    | AV1ValidationManifestV2
+    | AV1ValidationProtocolV3
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _CANONICAL_PREREGISTRATION_RUNNER = (
@@ -2931,7 +2939,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_derivation_action(args)
 
         manifest = _load_manifest(args.manifest)
-        if isinstance(manifest, AV1ValidationManifestV2):
+        if isinstance(manifest, AV1ValidationProtocolV3):
+            assert_preregistered_av1_validation_protocol_v3(manifest)
+        elif isinstance(manifest, AV1ValidationManifestV2):
             assert_preregistered_av1_validation_manifest_v2(manifest)
         else:
             assert_preregistered_av1_cold_start_validation_manifest(manifest)
@@ -2939,6 +2949,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _validation_payload(manifest)
             if args.json_output:
                 rendered_payload = json.dumps(payload, indent=2, sort_keys=True)
+            elif isinstance(manifest, AV1ValidationProtocolV3):
+                rendered_payload = (
+                    f"protocol={manifest.protocol_id} state={payload['state']} "
+                    f"candidates={len(manifest.candidate_cells)} "
+                    f"tier2_strata={len(manifest.tier2_strata)} "
+                    "runtime_execution_authorized=false "
+                    "qualification_execution_authorized=false"
+                )
             else:
                 rendered_payload = (
                     f"manifest={manifest.manifest_id} state={payload['state']} "
@@ -2950,6 +2968,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(rendered_payload)
             return 0
 
+        if isinstance(manifest, AV1ValidationProtocolV3):
+            raise AV1ValidationV3Error(
+                "AV1 v3 reports remain blocked until complete independently reviewed holdout evidence exists"
+            )
         if isinstance(manifest, AV1ValidationManifestV2):
             raise AV1ValidationV2Error(
                 "AV1 v2 holdout reports remain blocked until a separate execution authorization exists"
@@ -2979,6 +3001,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         AV1ValidationDerivationError,
         AV1ValidationPartitionError,
         AV1ValidationV2Error,
+        AV1ValidationV3Error,
         json.JSONDecodeError,
     ) as exc:
         print(f"AV1 cold-start validation failed: {exc}", file=sys.stderr)
@@ -5893,6 +5916,8 @@ def _load_manifest(path: Path) -> ValidationManifest:
         raise AV1ColdStartValidationError(
             "AV1 validation manifest must be a JSON object"
         )
+    if payload.get("protocol_version") == 3:
+        return load_av1_validation_protocol_v3(path)
     schema_version = payload.get("schema_version")
     if schema_version == 1:
         return load_av1_cold_start_validation_manifest(path)
@@ -5904,6 +5929,22 @@ def _load_manifest(path: Path) -> ValidationManifest:
 
 
 def _validation_payload(manifest: ValidationManifest) -> dict[str, object]:
+    if isinstance(manifest, AV1ValidationProtocolV3):
+        return {
+            "protocol_id": manifest.protocol_id,
+            "schema_version": 1,
+            "protocol_version": 3,
+            "state": "owner_approved_non_executing",
+            "candidate_cell_count": len(manifest.candidate_cells),
+            "tier2_stratum_count": len(manifest.tier2_strata),
+            "runtime_execution_authorized": False,
+            "qualification_execution_authorized": False,
+            "private_inventory_read_authorized": False,
+            "key_creation_authorized": False,
+            "partition_construction_authorized": False,
+            "derivation_execution_authorized": False,
+            "holdout_execution_authorized": False,
+        }
     if isinstance(manifest, AV1ValidationManifestV2):
         return {
             "manifest_id": manifest.manifest_id,
