@@ -77,6 +77,73 @@ holdout case execution, and public bundle activation. A different, later
 authorization must bind the reviewed candidate locks before any v2 holdout can
 run. The verifier therefore refuses the v2 `report` action at this phase.
 
+## V3 owner-approved protocol
+
+`docs/validation/av1-cold-start-preregistration-v3.json` is the canonical
+non-executing protocol approved through issues `#302` and `#303`. V3 is a new
+experiment, not a repair or reinterpretation of v2. The protocol uses an
+explicit `protocol_version` and experiment identity in every v3 ID and HMAC
+domain while retaining the immutable v2 manifest ID and digest as
+`supersedes_*` provenance.
+
+The checked-in protocol freezes:
+
+- exact `darkness/balanced` and `motion/balanced` powered cells
+- exact `animation/balanced` and `typical/balanced` Tier 2 qualification
+  strata, one private source per stratum, with both candidate configurations
+  traversed only after gate A0
+- a distinct qualification HMAC key/domain that is committed before any Tier 2
+  private inventory read and is never reused for empirical selection
+- twelve required derivation observations plus two ranked reserves per cell, a
+  two-void per-cell cap, and a same-stage global stop on the third void
+- sixteen paired holdouts per cell, the inherited thirteen-hit threshold, the
+  full non-tied sign-test table, and nine-decimal component-power disclosure
+- independent qualification namespace/authority and `evidence_eligible`
+  barriers, with missing eligibility failing closed
+- exact A0/A/B/C/D/E/F chronology, holdout-first one-event partitioning,
+  privacy boundaries, and non-automatic publication/activation
+
+The protocol also freezes the exhaustive terminal disposition over the existing
+derivation reason vocabulary. Only machine-proven pre-measurement failures may
+void an assignment. At-or-post-measurement, operator-controlled, unknown, and
+unproven terminals are cell-fatal; bare `runtime_failure` is v3 protocol
+nonconformance. Failing to reach twelve usable observations inside the fourteen
+frozen assignments is `technically_infeasible` and non-evidentiary.
+
+Validate the canonical protocol without loading runtime config or state:
+
+```bash
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
+  validate docs/validation/av1-cold-start-preregistration-v3.json --json
+```
+
+Validation reports every execution authority as false. The checked-in protocol,
+its builder, synthetic Tier 2 selector tests, chronology checks, evidence
+barriers, and terminal helpers create no private inventory, key, qualification,
+partition, derivation, holdout, publication, or activation authority. Those
+actions remain in separately gated issues `#304` through `#310`.
+Canonical loading remains valid for historical audit after expiration. Every
+future gate that can create execution authority must separately call the
+deterministic protocol-active check with its frozen as-of timestamp.
+
+Issue `#303` also defines the non-executing A0/A qualification contracts in
+`mediaforce/tuning/av1_validation_v3_qualification.py`. A qualification plan
+binds the v3 protocol digest, qualification-key ID, eligibility-predicate,
+repository commit/tree, configuration, toolchain, and fixture-matrix digests to
+an explicit validity window. Its attestation requires the complete frozen path
+matrix: Tier 1 success coverage for both candidates; every registered runtime
+failure, non-runtime terminal, and recovery path; plus Tier 2 success coverage
+for both candidates in each frozen stratum. The contract rejects missing,
+duplicated, private fault-injection, stale, re-bound, non-canonical, or
+non-paused/unclean attestations.
+
+These are pure data contracts and public-safe summaries only. They do not load
+private inventory, select a source, create a qualification key, run fixtures,
+or create evidence or empirical authority. Qualification execution remains
+blocked in issues `#304` and `#305`; a future executor must supply separate
+owner authorization and validate both the plan and attestation against the
+frozen protocol at its explicit timestamp.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
