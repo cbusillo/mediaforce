@@ -294,7 +294,13 @@ class AV1ValidationV3QualificationAttestation:
             "payload_sha256": self.payload_sha256,
         }
 
-    def to_public_summary(self) -> dict[str, Any]:
+    def to_public_summary(
+        self,
+        *,
+        protocol: AV1ValidationProtocolV3,
+        plan: AV1ValidationV3QualificationPlan,
+    ) -> dict[str, Any]:
+        assert_av1_validation_v3_qualification_attestation(protocol, plan, self)
         payload = {
             "qualification_valid": True,
             "tier1_complete": True,

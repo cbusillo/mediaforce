@@ -118,7 +118,7 @@ class AV1ValidationV3QualificationTests(unittest.TestCase):
             attestation,
         )
         self.assertEqual(
-            attestation.to_public_summary(),
+            attestation.to_public_summary(protocol=self.protocol, plan=self.plan),
             {
                 "qualification_valid": True,
                 "tier1_complete": True,
@@ -249,6 +249,8 @@ class AV1ValidationV3QualificationTests(unittest.TestCase):
                 different_plan,
                 attestation,
             )
+        with self.assertRaisesRegex(AV1ValidationV3QualificationError, "bound"):
+            attestation.to_public_summary(protocol=self.protocol, plan=different_plan)
 
     def test_payload_parser_rejects_tampered_attestation_gate(self) -> None:
         attestation = build_av1_validation_v3_qualification_attestation(
