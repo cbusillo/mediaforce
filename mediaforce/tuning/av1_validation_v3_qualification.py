@@ -327,6 +327,13 @@ def build_av1_validation_v3_qualification_plan(
     valid_until: str,
 ) -> AV1ValidationV3QualificationPlan:
     _assert_protocol_active(protocol, as_of=frozen_at)
+    if _parse_timestamp(valid_until, "qualification plan expiration") > _parse_timestamp(
+        protocol.valid_until,
+        "protocol expiration",
+    ):
+        raise AV1ValidationV3QualificationError(
+            "AV1 v3 qualification plan cannot outlive its protocol"
+        )
     expected_path_matrix_sha256 = av1_validation_v3_expected_path_matrix_sha256(protocol)
     semantic_payload = _qualification_plan_semantic_payload(
         protocol_id=protocol.protocol_id,
@@ -774,6 +781,13 @@ def _validate_plan_binding(
     ):
         raise AV1ValidationV3QualificationError(
             "AV1 v3 qualification plan is not bound to the frozen protocol"
+        )
+    if _parse_timestamp(plan.valid_until, "qualification plan expiration") > _parse_timestamp(
+        protocol.valid_until,
+        "protocol expiration",
+    ):
+        raise AV1ValidationV3QualificationError(
+            "AV1 v3 qualification plan cannot outlive its protocol"
         )
 
 
