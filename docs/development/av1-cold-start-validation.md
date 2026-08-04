@@ -182,6 +182,20 @@ the pause lock and provide the shell-free subprocess implementation. Its
 stream incrementally with bounded memory; this contract intentionally carries
 no decoded `stdout` buffer.
 
+`mediaforce/tuning/av1_validation_v3_tier1_runtime.py` is the concrete,
+library-only paused-runtime adapter for that contract. It has no CLI entrypoint
+and does not itself start qualification. A session requires a fresh active Tier
+1 request/grant context, an exact toolchain binding, the frozen matrix, an
+absolute external output directory, and a newly acquired exclusive Mediaforce
+runtime lease. It accepts only the exact generation, probe, and content-hash
+argv derived from the frozen matrix; resolves `ffmpeg` and `ffprobe` to bound
+absolute executables; strips the child environment; bounds probe output and
+diagnostics; incrementally hashes and counts decoded bytes; kills timed-out or
+over-limit process groups; and removes only regular fixture outputs that it
+tracked. The later execution entrypoint must construct this adapter from a
+fresh post-merge qualification plan/request/grant and must not bypass the
+session factory.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
