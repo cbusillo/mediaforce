@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -232,6 +233,38 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(executor.diagnostics[0].outcome, "timed_out")
 
+    def test_timeout_kills_the_child_process_group(self) -> None:
+        pid_path = self.output_root / "grandchild.pid"
+        heartbeat_path = self.output_root / "grandchild-heartbeat"
+        grandchild_script = (
+            "import sys,time;from pathlib import Path;path=Path(sys.argv[1]);"
+            "exec(\"while True:\\n path.write_text(str(time.monotonic()))\\n time.sleep(0.02)\")"
+        )
+        script = (
+            "import subprocess,sys,time;from pathlib import Path;"
+            f"child=subprocess.Popen([sys.executable,'-c',{grandchild_script!r},sys.argv[2]]);"
+            "Path(sys.argv[1]).write_text(str(child.pid));time.sleep(5)"
+        )
+        command = ("ffprobe", "-c", script, str(pid_path), str(heartbeat_path))
+        limits = AV1ValidationV3Tier1RuntimeLimits(
+            timeout_seconds=0.3,
+            max_stdout_bytes=1024,
+            max_stderr_bytes=1024,
+            max_stream_bytes=1024,
+            chunk_bytes=64,
+        )
+        with self._executor(buffered_commands={command}, limits=limits) as executor:
+            result = executor.run(command)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(pid_path.is_file())
+        deadline = time.monotonic() + 1
+        while not heartbeat_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(heartbeat_path.is_file())
+        heartbeat = heartbeat_path.read_text()
+        time.sleep(0.15)
+        self.assertEqual(heartbeat_path.read_text(), heartbeat)
+
     def test_spawn_failure_returns_bounded_diagnostic_result(self) -> None:
         command = ("ffprobe", "-c", "pass")
         with self._executor(buffered_commands={command}) as executor:
@@ -307,6 +340,29 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
             self.assertEqual(executor.cleanup(), ("fixture.nut",))
         self.assertTrue(output.is_symlink())
         self.assertEqual(outside.read_bytes(), b"outside")
+
+    def test_cleanup_refuses_regular_file_substitution(self) -> None:
+        output = self.output_root / "fixture.nut"
+        script = "from pathlib import Path;import sys;Path(sys.argv[1]).write_bytes(b'fixture')"
+        command = ("ffmpeg", "-c", script, str(output))
+        with self._executor(buffered_commands={command}) as executor:
+            self.assertEqual(executor.run(command).returncode, 0)
+            output.unlink()
+            output.write_bytes(b"replacement")
+            self.assertEqual(executor.cleanup(), ("fixture.nut",))
+        self.assertEqual(output.read_bytes(), b"replacement")
+
+    def test_runtime_rejects_output_root_that_contains_repository(self) -> None:
+        with self.assertRaisesRegex(AV1ValidationV3Tier1RuntimeError, "outside"):
+            with paused_av1_validation_v3_tier1_runtime(
+                self.config,
+                context=self.context,
+                matrix=self.matrix,
+                output_directory=Path("/"),
+                repository_root=Path.cwd(),
+                toolchain=self.toolchain,
+            ):
+                pass
 
     def test_runtime_module_has_no_private_media_or_evidence_imports(self) -> None:
         source = Path("mediaforce/tuning/av1_validation_v3_tier1_runtime.py").read_text()

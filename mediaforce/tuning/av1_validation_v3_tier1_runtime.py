@@ -42,6 +42,7 @@ _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _TIMEOUT_RETURN_CODE = -124
 _OUTPUT_LIMIT_RETURN_CODE = -125
 _SPAWN_FAILURE_RETURN_CODE = -126
+_MAX_CHUNK_BYTES = 8 << 20
 
 
 class AV1ValidationV3Tier1RuntimeError(AV1ValidationV3Tier1ExecutorError):
@@ -113,6 +114,7 @@ class AV1ValidationV3Tier1RuntimeLimits:
             or self.max_stream_bytes <= 0
             or self.chunk_bytes <= 0
             or self.chunk_bytes > self.max_stream_bytes
+            or self.chunk_bytes > _MAX_CHUNK_BYTES
         ):
             raise AV1ValidationV3Tier1RuntimeError("AV1 v3 Tier 1 runtime limits are invalid")
 
@@ -146,7 +148,7 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
         self._buffered_commands = buffered_commands
         self._streaming_commands = streaming_commands
         self._diagnostics: list[AV1ValidationV3Tier1CommandDiagnostic] = []
-        self._owned_outputs: set[Path] = set()
+        self._owned_outputs: dict[Path, tuple[int, int] | None] = {}
 
     @property
     def diagnostics(self) -> tuple[AV1ValidationV3Tier1CommandDiagnostic, ...]:
@@ -171,7 +173,7 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
 
     def cleanup(self) -> tuple[str, ...]:
         failures: list[str] = []
-        for path in sorted(self._owned_outputs, key=str):
+        for path, expected_identity in sorted(self._owned_outputs.items(), key=lambda item: str(item[0])):
             try:
                 path_info = path.lstat()
             except FileNotFoundError:
@@ -179,7 +181,11 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
             except OSError:
                 failures.append(path.name)
                 continue
-            if not stat.S_ISREG(path_info.st_mode) or stat.S_ISLNK(path_info.st_mode):
+            if (
+                expected_identity is None
+                or not stat.S_ISREG(path_info.st_mode)
+                or (path_info.st_dev, path_info.st_ino) != expected_identity
+            ):
                 failures.append(path.name)
                 continue
             try:
@@ -196,10 +202,11 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
     ) -> _ProcessResult:
         self._lease.assert_active()
         command, program = self._validated_command(args, streaming=streaming)
+        candidate_output: Path | None = None
         if program.name == "ffmpeg" and command[-1] != "-":
             candidate_output = Path(command[-1])
             if candidate_output.is_absolute():
-                self._owned_outputs.add(candidate_output)
+                self._owned_outputs.setdefault(candidate_output, None)
         try:
             process = subprocess.Popen(
                 command,
@@ -214,6 +221,8 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
                 start_new_session=True,
             )
         except OSError as exc:
+            stderr_raw = str(exc).encode("utf-8", errors="replace")
+            stderr_truncated = len(stderr_raw) > self._limits.max_stderr_bytes
             stderr = _bounded_error_text(str(exc), self._limits.max_stderr_bytes)
             result = _ProcessResult(
                 returncode=_SPAWN_FAILURE_RETURN_CODE,
@@ -222,14 +231,24 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
                 stdout_bytes=0,
                 stderr=stderr,
                 stderr_bytes=len(stderr.encode("utf-8")),
-                stderr_truncated=False,
+                stderr_truncated=stderr_truncated,
                 outcome="spawn_failed",
             )
             self._record_diagnostic(args, result)
             return result
         result = self._collect_process(process, streaming=streaming)
+        if candidate_output is not None:
+            self._capture_output_identity(candidate_output)
         self._record_diagnostic(args, result)
         return result
+
+    def _capture_output_identity(self, path: Path) -> None:
+        try:
+            path_info = path.lstat()
+        except OSError:
+            return
+        if stat.S_ISREG(path_info.st_mode):
+            self._owned_outputs[path] = (path_info.st_dev, path_info.st_ino)
 
     def _validated_command(
         self,
@@ -573,7 +592,11 @@ def _validated_output_root(output_directory: Path, *, repository_root: Path) -> 
         raise AV1ValidationV3Tier1RuntimeError(
             "AV1 v3 Tier 1 runtime output root must be a directory"
         )
-    if output_root == repository or output_root.is_relative_to(repository):
+    if (
+        output_root == repository
+        or output_root.is_relative_to(repository)
+        or repository.is_relative_to(output_root)
+    ):
         raise AV1ValidationV3Tier1RuntimeError(
             "AV1 v3 Tier 1 runtime outputs must remain outside the repository"
         )
@@ -593,15 +616,18 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
         return
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except OSError:
+    except (ProcessLookupError, OSError):
         process.kill()
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         process.kill()
-        process.wait()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise AV1ValidationV3Tier1RuntimeError(
+                "AV1 v3 Tier 1 child process could not be reaped"
+            ) from exc
 
 
 def _bounded_error_text(value: str, limit: int) -> str:
