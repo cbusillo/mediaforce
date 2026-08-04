@@ -148,7 +148,7 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
         self._buffered_commands = buffered_commands
         self._streaming_commands = streaming_commands
         self._diagnostics: list[AV1ValidationV3Tier1CommandDiagnostic] = []
-        self._owned_outputs: dict[Path, tuple[int, int] | None] = {}
+        self._owned_outputs: dict[Path, tuple[int, int, int, int, int] | None] = {}
 
     @property
     def diagnostics(self) -> tuple[AV1ValidationV3Tier1CommandDiagnostic, ...]:
@@ -184,7 +184,7 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
             if (
                 expected_identity is None
                 or not stat.S_ISREG(path_info.st_mode)
-                or (path_info.st_dev, path_info.st_ino) != expected_identity
+                or _file_identity(path_info) != expected_identity
             ):
                 failures.append(path.name)
                 continue
@@ -248,7 +248,7 @@ class AV1ValidationV3Tier1PausedRuntimeExecutor:
         except OSError:
             return
         if stat.S_ISREG(path_info.st_mode):
-            self._owned_outputs[path] = (path_info.st_dev, path_info.st_ino)
+            self._owned_outputs[path] = _file_identity(path_info)
 
     def _validated_command(
         self,
@@ -574,6 +574,16 @@ def _file_sha256(path: Path) -> str:
         while chunk := source.read(1 << 20):
             hasher.update(chunk)
     return f"sha256:{hasher.hexdigest()}"
+
+
+def _file_identity(path_info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        path_info.st_dev,
+        path_info.st_ino,
+        path_info.st_size,
+        path_info.st_mtime_ns,
+        path_info.st_ctime_ns,
+    )
 
 
 def _validated_output_root(output_directory: Path, *, repository_root: Path) -> Path:
