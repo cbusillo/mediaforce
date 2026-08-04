@@ -155,6 +155,11 @@ are all false, and a separate owner authorization remains required. A request
 must be generated from actual future machine-local inputs outside the repository
 and is invalid when its bound qualification plan changes or expires.
 
+Tier 1 uses the checked-in deterministic synthetic fixture matrix at
+`docs/validation/av1-tier1-synthetic-fixture-matrix-v1.json`: flat-field,
+high-motion, high-detail/noise, and scene-change fixtures. It does not use the
+operator media drive, library inventory, or external media sources.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
