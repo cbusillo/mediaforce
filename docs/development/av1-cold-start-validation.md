@@ -160,6 +160,12 @@ Tier 1 uses the checked-in deterministic synthetic fixture matrix at
 high-motion, high-detail/noise, and scene-change fixtures. It does not use the
 operator media drive, library inventory, or external media sources.
 
+The executable successor matrix is
+`docs/validation/av1-tier1-synthetic-fixture-matrix-v2.json`. It preserves v1
+as immutable history while freezing exact Lavfi graphs, FFV1/NUT intermediate
+representation, decoded-frame content hashing, and `ffprobe -count_frames`
+verification. No runner may infer or substitute generator semantics.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
