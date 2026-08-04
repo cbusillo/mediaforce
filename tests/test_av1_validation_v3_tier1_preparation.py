@@ -89,6 +89,8 @@ class AV1ValidationV3Tier1PreparationTests(unittest.TestCase):
         request = build_av1_validation_v3_tier1_prepared_request(
             protocol=self.protocol,
             plan=plan,
+            repository_commit="1" * 40,
+            repository_tree="2" * 40,
             config_bytes=b"[mediaforce]\n",
             toolchain=self.toolchain,
             requested_at="2026-08-04T13:00:00Z",
@@ -112,11 +114,32 @@ class AV1ValidationV3Tier1PreparationTests(unittest.TestCase):
             build_av1_validation_v3_tier1_prepared_request(
                 protocol=self.protocol,
                 plan=plan,
+                repository_commit="1" * 40,
+                repository_tree="2" * 40,
                 config_bytes=b"[changed]\n",
                 toolchain=self.toolchain,
                 requested_at="2026-08-04T13:00:00Z",
                 valid_until="2026-08-04T20:00:00Z",
             )
+        for repository_commit, repository_tree in (
+            ("3" * 40, "2" * 40),
+            ("1" * 40, "4" * 40),
+        ):
+            with self.subTest(
+                repository_commit=repository_commit,
+                repository_tree=repository_tree,
+            ):
+                with self.assertRaises(AV1ValidationV3Tier1PreparationError):
+                    build_av1_validation_v3_tier1_prepared_request(
+                        protocol=self.protocol,
+                        plan=plan,
+                        repository_commit=repository_commit,
+                        repository_tree=repository_tree,
+                        config_bytes=b"[mediaforce]\n",
+                        toolchain=self.toolchain,
+                        requested_at="2026-08-04T13:00:00Z",
+                        valid_until="2026-08-04T20:00:00Z",
+                    )
         drifted_plan = build_av1_validation_v3_qualification_plan(
             protocol=self.protocol,
             qualification_key_id=f"av1vqkey3_{'a' * 32}",
@@ -135,6 +158,8 @@ class AV1ValidationV3Tier1PreparationTests(unittest.TestCase):
             build_av1_validation_v3_tier1_prepared_request(
                 protocol=self.protocol,
                 plan=drifted_plan,
+                repository_commit="1" * 40,
+                repository_tree="2" * 40,
                 config_bytes=b"[mediaforce]\n",
                 toolchain=self.toolchain,
                 requested_at="2026-08-04T13:00:00Z",

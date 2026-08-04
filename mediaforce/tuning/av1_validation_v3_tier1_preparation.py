@@ -110,6 +110,8 @@ def build_av1_validation_v3_tier1_prepared_request(
     *,
     protocol: AV1ValidationProtocolV3,
     plan: AV1ValidationV3QualificationPlan,
+    repository_commit: str,
+    repository_tree: str,
     config_bytes: bytes,
     toolchain: AV1ValidationV3Tier1ToolchainBinding,
     requested_at: str,
@@ -119,6 +121,8 @@ def build_av1_validation_v3_tier1_prepared_request(
         plan.eligibility_predicate_sha256
         != av1_validation_v3_tier1_eligibility_predicate_sha256()
         or plan.fixture_matrix_sha256 != AV1_VALIDATION_V3_TIER1_MATRIX_SHA256
+        or plan.repository_commit != repository_commit
+        or plan.repository_tree != repository_tree
         or plan.config_sha256 != av1_validation_v3_tier1_config_sha256(config_bytes)
         or plan.toolchain_sha256 != toolchain.payload_sha256
     ):
