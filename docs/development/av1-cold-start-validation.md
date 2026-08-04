@@ -205,6 +205,15 @@ activation authority. It can be produced only while the grant is active and
 only when runtime pause and output cleanup both succeeded. The full
 qualification attestation contract does not accept this receipt.
 
+`mediaforce/tuning/av1_validation_v3_tier1_preparation.py` defines the pure,
+non-executing preparation inputs for Tier 1. It freezes a machine-checkable
+eligibility predicate, domain-separated identity for the exact config bytes,
+the canonical fixture matrix digest, and the machine-local toolchain binding
+into the qualification plan. Request construction must be given the config
+bytes and toolchain again and rejects drift before producing the owner-action
+request. This layer performs no filesystem publication, grant creation, runtime
+locking, or subprocess execution.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
