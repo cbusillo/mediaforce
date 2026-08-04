@@ -196,6 +196,15 @@ tracked. The later execution entrypoint must construct this adapter from a
 fresh post-merge qualification plan/request/grant and must not bypass the
 session factory.
 
+`mediaforce/tuning/av1_validation_v3_tier1_coverage.py` defines the canonical
+receipt for one complete synthetic Tier 1 run. The receipt remains at gate A0:
+it records the four fixture outcomes and their plan/request/grant, repository,
+config, toolchain, and matrix bindings, but explicitly claims no qualification
+path coverage, Tier 2 completion, evidence eligibility, publication, or
+activation authority. It can be produced only while the grant is active and
+only when runtime pause and output cleanup both succeeded. The full
+qualification attestation contract does not accept this receipt.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
