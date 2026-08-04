@@ -53,7 +53,7 @@ class AV1ValidationV3Tier1HashResult:
 class AV1ValidationV3Tier1CommandExecutor(Protocol):
     def run(self, args: Sequence[str]) -> AV1ValidationV3Tier1CommandResult: ...
 
-    def run_sha256(self, args: Sequence[str]) -> AV1ValidationV3Tier1HashResult: ...
+    def run_streaming_sha256(self, args: Sequence[str]) -> AV1ValidationV3Tier1HashResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,7 +125,6 @@ def build_av1_validation_v3_tier1_fixture_plans(
         if not fixture_id or not lavfi_graph:
             raise AV1ValidationV3Tier1ExecutorError("AV1 v3 Tier 1 fixture entry is invalid")
         output_path = output_root / f"{fixture_id}.nut"
-        _assert_output_path_available(output_path)
         generate_args = (
             "ffmpeg", "-v", "error", "-n", "-f", "lavfi", "-i", lavfi_graph,
             "-frames:v", str(frame_limit["value"]), "-an", "-c:v",
@@ -243,7 +242,7 @@ def _verify_fixture(
     _assert_execution_authorized(context)
     if not plan.output_path.is_file() or plan.output_path.is_symlink():
         return _failed_outcome(plan, context, "generated_output_invalid")
-    hash_result = executor.run_sha256(plan.content_hash_args)
+    hash_result = executor.run_streaming_sha256(plan.content_hash_args)
     content_sha256 = hash_result.content_sha256
     if hash_result.returncode != 0:
         failures.append("content_hash_failed")
@@ -273,7 +272,13 @@ def _assert_frozen_matrix(matrix: Mapping[str, Any]) -> None:
         or object_dict(matrix.get("frame_spec")).get("frame_count") != _EXPECTED_FRAME_COUNT
     ):
         raise AV1ValidationV3Tier1ExecutorError("AV1 v3 Tier 1 fixture matrix identity is invalid")
-    if f"sha256:{stable_json_hash(matrix)}" != AV1_VALIDATION_V3_TIER1_MATRIX_SHA256:
+    try:
+        digest = f"sha256:{stable_json_hash(matrix)}"
+    except (TypeError, ValueError) as exc:
+        raise AV1ValidationV3Tier1ExecutorError(
+            "AV1 v3 Tier 1 fixture matrix is invalid"
+        ) from exc
+    if digest != AV1_VALIDATION_V3_TIER1_MATRIX_SHA256:
         raise AV1ValidationV3Tier1ExecutorError("AV1 v3 Tier 1 fixture matrix digest is invalid")
 
 

@@ -1,4 +1,5 @@
 import ast
+from dataclasses import fields
 import json
 from pathlib import Path
 import tempfile
@@ -51,7 +52,10 @@ class _Executor:
             Path(args[-1]).touch()
         return result
 
-    def run_sha256(self, args: tuple[str, ...]) -> AV1ValidationV3Tier1HashResult:
+    def run_streaming_sha256(
+        self,
+        args: tuple[str, ...],
+    ) -> AV1ValidationV3Tier1HashResult:
         self.hash_calls.append(args)
         return self.hash_result
 
@@ -112,21 +116,13 @@ class AV1ValidationV3Tier1ExecutorTests(unittest.TestCase):
             self.assertTrue(all("288" in plan.generate_args for plan in plans))
             self.assertTrue(all("-count_frames" in plan.probe_args for plan in plans))
 
-    def test_plan_builder_rejects_repository_and_existing_outputs(self) -> None:
+    def test_plan_builder_rejects_repository_output(self) -> None:
         with self.assertRaises(AV1ValidationV3Tier1ExecutorError):
             build_av1_validation_v3_tier1_fixture_plans(
                 self.matrix,
                 output_directory=Path.cwd(),
                 repository_root=Path.cwd(),
             )
-        with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "tier1_flat_field.nut").touch()
-            with self.assertRaisesRegex(AV1ValidationV3Tier1ExecutorError, "must not already exist"):
-                build_av1_validation_v3_tier1_fixture_plans(
-                    self.matrix,
-                    output_directory=Path(directory),
-                    repository_root=Path.cwd(),
-                )
 
     def test_plan_builder_rejects_symlink_output_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -194,6 +190,35 @@ class AV1ValidationV3Tier1ExecutorTests(unittest.TestCase):
         self.assertEqual(executor.calls, [])
         self.assertEqual(executor.hash_calls, [])
 
+    def test_execute_fixture_rejects_existing_selected_output_before_commands(self) -> None:
+        executor = _passing_executor()
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "tier1_flat_field.nut").touch()
+            with self.assertRaisesRegex(AV1ValidationV3Tier1ExecutorError, "must not already exist"):
+                execute_av1_validation_v3_tier1_fixture(
+                    "tier1_flat_field",
+                    matrix=self.matrix,
+                    output_directory=Path(directory),
+                    repository_root=Path.cwd(),
+                    context=self.context,
+                    executor=executor,
+                )
+        self.assertEqual(executor.calls, [])
+        self.assertEqual(executor.hash_calls, [])
+
+    def test_execute_multiple_fixtures_in_same_output_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for fixture_id in ("tier1_flat_field", "tier1_high_motion"):
+                outcome = execute_av1_validation_v3_tier1_fixture(
+                    fixture_id,
+                    matrix=self.matrix,
+                    output_directory=Path(directory),
+                    repository_root=Path.cwd(),
+                    context=self.context,
+                    executor=_passing_executor(),
+                )
+                self.assertTrue(outcome.passed)
+
     def test_execute_fixture_rejects_empty_or_truncated_decoded_stream(self) -> None:
         for byte_count in (0, EXPECTED_DECODED_BYTE_COUNT - 1):
             with self.subTest(byte_count=byte_count):
@@ -240,6 +265,120 @@ class AV1ValidationV3Tier1ExecutorTests(unittest.TestCase):
         self.assertEqual(outcome.failures, ("generated_output_invalid",))
         self.assertEqual(executor.hash_calls, [])
 
+    def test_execute_fixture_reports_probe_and_hash_failures(self) -> None:
+        cases = (
+            (
+                [
+                    AV1ValidationV3Tier1CommandResult(0, b"", ""),
+                    AV1ValidationV3Tier1CommandResult(1, b"", "probe failed"),
+                ],
+                AV1ValidationV3Tier1HashResult(0, f"sha256:{'e' * 64}", 0, ""),
+                "probe_failed",
+            ),
+            (
+                [
+                    AV1ValidationV3Tier1CommandResult(0, b"", ""),
+                    AV1ValidationV3Tier1CommandResult(0, b"not-json", ""),
+                ],
+                AV1ValidationV3Tier1HashResult(0, f"sha256:{'e' * 64}", 0, ""),
+                "probe_output_invalid",
+            ),
+            (
+                [
+                    AV1ValidationV3Tier1CommandResult(0, b"", ""),
+                    AV1ValidationV3Tier1CommandResult(0, b'{"streams":[]}', ""),
+                ],
+                AV1ValidationV3Tier1HashResult(0, f"sha256:{'e' * 64}", 0, ""),
+                "probe_stream_count_invalid",
+            ),
+            (
+                [
+                    AV1ValidationV3Tier1CommandResult(0, b"", ""),
+                    AV1ValidationV3Tier1CommandResult(0, _valid_probe(), ""),
+                ],
+                AV1ValidationV3Tier1HashResult(1, "", 0, "hash failed"),
+                "content_hash_failed",
+            ),
+            (
+                [
+                    AV1ValidationV3Tier1CommandResult(0, b"", ""),
+                    AV1ValidationV3Tier1CommandResult(0, _valid_probe(), ""),
+                ],
+                AV1ValidationV3Tier1HashResult(
+                    0,
+                    "invalid",
+                    EXPECTED_DECODED_BYTE_COUNT,
+                    "",
+                ),
+                "content_hash_invalid",
+            ),
+        )
+        for results, hash_result, expected_failure in cases:
+            with self.subTest(expected_failure=expected_failure):
+                with tempfile.TemporaryDirectory() as directory:
+                    outcome = execute_av1_validation_v3_tier1_fixture(
+                        "tier1_flat_field",
+                        matrix=self.matrix,
+                        output_directory=Path(directory),
+                        repository_root=Path.cwd(),
+                        context=self.context,
+                        executor=_Executor(results, hash_result),
+                    )
+                self.assertFalse(outcome.passed)
+                self.assertIn(expected_failure, outcome.failures)
+
+    def test_execute_fixture_reports_every_frame_spec_mismatch(self) -> None:
+        mutations = {
+            "width": 1279,
+            "height": 719,
+            "r_frame_rate": "23/1",
+            "pix_fmt": "yuv420p",
+            "color_primaries": "bt2020",
+            "color_transfer": "smpte2084",
+            "color_space": "bt2020nc",
+            "color_range": "pc",
+            "nb_read_frames": "N/A",
+        }
+        for field, value in mutations.items():
+            with self.subTest(field=field):
+                stream = _valid_probe_stream()
+                stream[field] = value
+                executor = _Executor(
+                    [
+                        AV1ValidationV3Tier1CommandResult(0, b"", ""),
+                        AV1ValidationV3Tier1CommandResult(
+                            0,
+                            json.dumps({"streams": [stream]}).encode(),
+                            "",
+                        ),
+                    ],
+                    AV1ValidationV3Tier1HashResult(
+                        0,
+                        f"sha256:{'e' * 64}",
+                        EXPECTED_DECODED_BYTE_COUNT,
+                        "",
+                    ),
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    outcome = execute_av1_validation_v3_tier1_fixture(
+                        "tier1_flat_field",
+                        matrix=self.matrix,
+                        output_directory=Path(directory),
+                        repository_root=Path.cwd(),
+                        context=self.context,
+                        executor=executor,
+                    )
+                expected_failure = (
+                    "frame_rate_mismatch"
+                    if field == "r_frame_rate"
+                    else f"{field}_mismatch"
+                )
+                self.assertIn(expected_failure, outcome.failures)
+
+    def test_hash_result_contract_cannot_buffer_decoded_stdout(self) -> None:
+        field_names = {field.name for field in fields(AV1ValidationV3Tier1HashResult)}
+        self.assertNotIn("stdout", field_names)
+
     def test_execute_fixture_rederives_plan_and_rejects_mismatched_matrix(self) -> None:
         changed = dict(self.matrix)
         changed["fixture_scope"] = "forged"
@@ -277,7 +416,11 @@ class AV1ValidationV3Tier1ExecutorTests(unittest.TestCase):
 
 
 def _valid_probe() -> bytes:
-    return json.dumps({"streams": [{
+    return json.dumps({"streams": [_valid_probe_stream()]}).encode()
+
+
+def _valid_probe_stream() -> dict[str, object]:
+    return {
         "width": 1280,
         "height": 720,
         "r_frame_rate": "24/1",
@@ -287,4 +430,19 @@ def _valid_probe() -> bytes:
         "color_space": "bt709",
         "color_range": "tv",
         "nb_read_frames": "288",
-    }]}).encode()
+    }
+
+
+def _passing_executor() -> _Executor:
+    return _Executor(
+        [
+            AV1ValidationV3Tier1CommandResult(0, b"", ""),
+            AV1ValidationV3Tier1CommandResult(0, _valid_probe(), ""),
+        ],
+        AV1ValidationV3Tier1HashResult(
+            0,
+            f"sha256:{'e' * 64}",
+            EXPECTED_DECODED_BYTE_COUNT,
+            "",
+        ),
+    )

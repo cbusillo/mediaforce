@@ -167,17 +167,20 @@ representation, decoded-frame content hashing, and `ffprobe -count_frames`
 verification. No runner may infer or substitute generator semantics.
 
 `mediaforce/tuning/av1_validation_v3_tier1_executor.py` is the isolated
-matrix-to-command and output-verification boundary. It loads only the frozen v2
+contract-only matrix-to-command and output-verification boundary. It loads only the frozen v2
 matrix, builds argv lists without invoking a shell, validates `ffprobe` output,
 and accepts a streaming SHA-256 result from a dependency-injected command
 executor. It rederives every executable command from the frozen matrix, proves
-the active Tier 1 request/grant chain before each command boundary, rejects
-existing or symlink outputs, and requires the exact decoded-frame byte count.
+the active Tier 1 request/grant chain before each command boundary, rejects an
+existing or symlink output for the selected fixture, and requires the exact
+decoded-frame byte count.
 Outcomes bind the request, grant, repository commit, toolchain, matrix, and
 command-plan identities. It has no database, private inventory, web-runtime,
 v2, derivation, or holdout imports; the later runtime adapter must still prove
-the pause lock and provide the shell-free subprocess and streaming-hash
-implementations.
+the pause lock and provide the shell-free subprocess implementation. Its
+`run_streaming_sha256` implementation must hash and count the same decoded byte
+stream incrementally with bounded memory; this contract intentionally carries
+no decoded `stdout` buffer.
 
 ## Private v2 source partition
 
