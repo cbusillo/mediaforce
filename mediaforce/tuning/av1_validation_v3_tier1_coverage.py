@@ -82,6 +82,10 @@ class AV1ValidationV3Tier1FixtureCoverage:
             raise AV1ValidationV3Tier1CoverageError(
                 "AV1 v3 Tier 1 fixture result contradicts its failures"
             )
+        if self.passed and (not self.content_sha256 or self.content_byte_count <= 0):
+            raise AV1ValidationV3Tier1CoverageError(
+                "AV1 v3 Tier 1 passed fixture content is invalid"
+            )
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -159,6 +163,16 @@ class AV1ValidationV3Tier1CoverageAttestation:
                 "AV1 v3 Tier 1 coverage completion fields are invalid"
             )
         _parse_timestamp(self.completed_at)
+        semantic = self.semantic_payload()
+        if self.attestation_id != av1_validation_v3_id("tier1coverage", semantic):
+            raise AV1ValidationV3Tier1CoverageError(
+                "AV1 v3 Tier 1 coverage attestation ID is invalid"
+            )
+        expected_payload_sha256 = f"sha256:{stable_json_hash({'attestation_id': self.attestation_id, **semantic})}"
+        if self.payload_sha256 != expected_payload_sha256:
+            raise AV1ValidationV3Tier1CoverageError(
+                "AV1 v3 Tier 1 coverage payload digest is invalid"
+            )
 
     def semantic_payload(self) -> dict[str, Any]:
         return _semantic_payload(
@@ -307,6 +321,7 @@ def assert_av1_validation_v3_tier1_coverage_attestation(
         or attestation.config_sha256 != plan.config_sha256
         or attestation.toolchain_sha256 != plan.toolchain_sha256
         or attestation.fixture_matrix_sha256 != plan.fixture_matrix_sha256
+        or attestation.fixture_matrix_sha256 != AV1_VALIDATION_V3_TIER1_MATRIX_SHA256
     ):
         raise AV1ValidationV3Tier1CoverageError(
             "AV1 v3 Tier 1 coverage is not bound to its active run"
@@ -387,7 +402,7 @@ def _coverage_from_outcome(
         content_sha256=outcome.content_sha256,
         content_byte_count=outcome.content_byte_count,
         passed=outcome.passed,
-        failures=tuple(sorted(outcome.failures)),
+        failures=tuple(sorted(set(outcome.failures))),
     )
 
 

@@ -119,6 +119,46 @@ class AV1ValidationV3Tier1CoverageTests(unittest.TestCase):
                 replace(attestation, repository_commit="3" * 40),
             )
 
+    def test_coverage_rejects_inactive_grant_and_records_failed_fixture(self) -> None:
+        with self.assertRaises(ValueError):
+            build_av1_validation_v3_tier1_coverage_attestation(
+                protocol=self.protocol,
+                plan=self.plan,
+                request=self.request,
+                grant=self.grant,
+                outcomes=self._outcomes(),
+                cleanup_passed=True,
+                runtime_paused=True,
+                completed_at=self.grant.valid_until,
+            )
+        outcomes = list(self._outcomes())
+        outcomes[0] = replace(
+            outcomes[0],
+            passed=False,
+            failures=("probe_failed",),
+            content_sha256="",
+            content_byte_count=0,
+        )
+        attestation = self._build(outcomes=tuple(outcomes))
+        self.assertEqual(attestation.to_public_summary()["fixtures_passed"], 3)
+
+    def test_direct_construction_rejects_stale_integrity_fields(self) -> None:
+        attestation = self._build()
+        with self.assertRaisesRegex(AV1ValidationV3Tier1CoverageError, "attestation ID"):
+            replace(
+                attestation,
+                fixtures=tuple(
+                    replace(
+                        fixture,
+                        passed=False,
+                        failures=("probe_failed",),
+                        content_sha256="",
+                        content_byte_count=0,
+                    )
+                    for fixture in attestation.fixtures
+                ),
+            )
+
     def test_coverage_cannot_be_loaded_as_full_qualification_attestation(self) -> None:
         with self.assertRaises(AV1ValidationV3QualificationError):
             av1_validation_v3_qualification_attestation_from_payload(
