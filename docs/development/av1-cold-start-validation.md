@@ -166,6 +166,14 @@ as immutable history while freezing exact Lavfi graphs, FFV1/NUT intermediate
 representation, decoded-frame content hashing, and `ffprobe -count_frames`
 verification. No runner may infer or substitute generator semantics.
 
+`mediaforce/tuning/av1_validation_v3_tier1_executor.py` is the isolated
+matrix-to-command and output-verification boundary. It loads only the frozen v2
+matrix, builds argv lists without invoking a shell, validates `ffprobe` output,
+and hashes decoded frame bytes supplied by a dependency-injected command
+executor. It has no database, private inventory, web-runtime, v2, derivation,
+or holdout imports; the later runtime adapter must prove the live Tier 1 grant
+and pause lock before invoking any generated command.
+
 ## Private v2 source partition
 
 Issue `#286` uses the `av1vsp1` partition contract to freeze all fifty holdout
