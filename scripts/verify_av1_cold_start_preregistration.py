@@ -2557,6 +2557,10 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
 from mediaforce.tuning.av1_validation_v3_tier1_coverage import (
     AV1ValidationV3Tier1CoverageError,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_diagnostics import (
+    AV1ValidationV3Tier1DiagnosticsError,
+    build_av1_validation_v3_tier1_run_diagnostics,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_execution_publication import (
     load_published_av1_validation_v3_tier1_execution_grant,
     publish_av1_validation_v3_tier1_coverage_receipt,
@@ -3354,8 +3358,14 @@ def _run_tier1_synthetic_qualification(args: argparse.Namespace) -> int:
             claim=claim,
             claim_execution=claim_execution,
         )
+        diagnostics = build_av1_validation_v3_tier1_run_diagnostics(
+            attestation=operation.attestation,
+            outcomes=operation.outcomes,
+            diagnostics=operation.diagnostics,
+        )
         receipt = publish_av1_validation_v3_tier1_coverage_receipt(
             attestation=operation.attestation,
+            diagnostics=diagnostics,
             output_root=args.execution_output_root,
             repository_root=REPOSITORY_ROOT,
         )
@@ -3377,6 +3387,7 @@ def _run_tier1_synthetic_qualification(args: argparse.Namespace) -> int:
         AV1ValidationV3QualificationError,
         AV1ValidationV3Tier1ConfigSnapshotError,
         AV1ValidationV3Tier1CoverageError,
+        AV1ValidationV3Tier1DiagnosticsError,
         AV1ValidationV3Tier1ExecutorError,
         AV1ValidationV3Tier1GrantError,
         AV1ValidationV3Tier1OperationError,
