@@ -27,7 +27,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_request import (
 )
 
 
-MATRIX_PATH = Path("docs/validation/av1-tier1-synthetic-fixture-matrix-v2.json")
+MATRIX_PATH = Path("docs/validation/av1-tier1-synthetic-fixture-matrix-v3.json")
 EXPECTED_DECODED_BYTE_COUNT = 1280 * 720 * 3 * 288
 
 
@@ -115,6 +115,17 @@ class AV1ValidationV3Tier1ExecutorTests(unittest.TestCase):
             self.assertTrue(all("-frames:v" in plan.generate_args for plan in plans))
             self.assertTrue(all("288" in plan.generate_args for plan in plans))
             self.assertTrue(all("-count_frames" in plan.probe_args for plan in plans))
+            self.assertTrue(all(plan.output_path.suffix == ".mkv" for plan in plans))
+            self.assertTrue(
+                all(
+                    plan.generate_args[plan.generate_args.index("-color_primaries"):plan.generate_args.index("-f", 10)]
+                    == (
+                        "-color_primaries", "bt709", "-color_trc", "bt709",
+                        "-colorspace", "bt709", "-color_range", "tv",
+                    )
+                    for plan in plans
+                )
+            )
 
     def test_plan_builder_rejects_repository_output(self) -> None:
         with self.assertRaises(AV1ValidationV3Tier1ExecutorError):
@@ -193,7 +204,7 @@ class AV1ValidationV3Tier1ExecutorTests(unittest.TestCase):
     def test_execute_fixture_rejects_existing_selected_output_before_commands(self) -> None:
         executor = _passing_executor()
         with tempfile.TemporaryDirectory() as directory:
-            (Path(directory) / "tier1_flat_field.nut").touch()
+            (Path(directory) / "tier1_flat_field.mkv").touch()
             with self.assertRaisesRegex(AV1ValidationV3Tier1ExecutorError, "must not already exist"):
                 execute_av1_validation_v3_tier1_fixture(
                     "tier1_flat_field",

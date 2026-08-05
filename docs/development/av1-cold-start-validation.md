@@ -166,8 +166,24 @@ as immutable history while freezing exact Lavfi graphs, FFV1/NUT intermediate
 representation, decoded-frame content hashing, and `ffprobe -count_frames`
 verification. No runner may infer or substitute generator semantics.
 
+Matrix v2 and its consumed cohort remain immutable history. The next frozen
+matrix is `docs/validation/av1-tier1-synthetic-fixture-matrix-v3.json`. It keeps
+the four graphs, frame specification, probe, and decoded-stream hash contract
+unchanged, but uses the exact measured-compatible intermediate: FFV1 in
+Matroska with explicit BT.709 primaries, transfer, colorspace, and limited-range
+output flags. Its provenance binds the diagnostic compatibility result that
+showed both NUT variants dropping all four color fields while the selected
+Matroska representation preserved them at stream and first-frame surfaces.
+
+Matrix v3 authoring is non-executing. A separate residual public-synthetic
+diagnostic must still verify all four graphs at 288 frames, including frame
+rate, counted frames, and exact decoded byte count, before any owner may grant a
+Tier 1 matrix-v3 run. Until that contract passes, qualification execution and
+all downstream evidence, derivation, holdout, publication, and activation
+authority remain false.
+
 `mediaforce/tuning/av1_validation_v3_tier1_executor.py` is the isolated
-contract-only matrix-to-command and output-verification boundary. It loads only the frozen v2
+contract-only matrix-to-command and output-verification boundary. It loads only the frozen v3
 matrix, builds argv lists without invoking a shell, validates `ffprobe` output,
 and accepts a streaming SHA-256 result from a dependency-injected command
 executor. It rederives every executable command from the frozen matrix, proves
@@ -225,7 +241,7 @@ The owner-only runner exposes two separate actions. `authorize-tier1-execution`
 loads the exact post-merge protocol, plan, request, effective-config snapshot,
 repository identity, and toolchain before publishing one grant keyed by request
 ID. `run-tier1-synthetic-qualification` safely reloads that grant, acquires the
-pause lease, publishes the single-execution claim, runs only the frozen v2
+pause lease, publishes the single-execution claim, runs only the frozen v3
 synthetic matrix, and publishes the Gate A0 coverage receipt. Neither action
 reads private inventory or media, starts Tier 2, creates empirical evidence, or
 confers derivation, holdout, publication, or activation authority.
