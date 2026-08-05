@@ -13,7 +13,11 @@ from mediaforce.core.file_integrity import (
     rename_exclusive,
 )
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
-from mediaforce.tuning.av1_validation_v3 import AV1ValidationProtocolV3
+from mediaforce.tuning.av1_validation_v3 import (
+    AV1ValidationProtocolV3,
+    AV1ValidationV3Error,
+    av1_validation_v3_qualification_key_id,
+)
 from mediaforce.tuning.av1_validation_v3_qualification import (
     AV1ValidationV3QualificationPlan,
     serialize_av1_validation_v3_qualification_plan,
@@ -50,6 +54,10 @@ AV1_VALIDATION_V3_TIER1_CONFIG_SNAPSHOT_FILENAME = (
 AV1_VALIDATION_V3_TIER1_CONFIG_PUBLICATION_DIRECTORY_PREFIX = (
     "av1-v3-tier1-config-"
 )
+AV1_VALIDATION_V3_QUALIFICATION_KEY_DIRECTORY = (
+    "av1-v3-qualification-key"
+)
+AV1_VALIDATION_V3_QUALIFICATION_KEY_FILENAME = "qualification-key.bin"
 
 AV1_VALIDATION_V3_TIER1_PUBLICATION_REASON_CODES = frozenset({
     "artifact_conflict",
@@ -174,6 +182,133 @@ class AV1ValidationV3Tier1ConfigPublicationResult:
         return summary
 
 
+@dataclass(frozen=True, slots=True)
+class AV1ValidationV3QualificationKeyPublicationResult:
+    directory: Path
+    key_path: Path
+    qualification_key_id: str
+    created: bool
+
+    def to_summary(self) -> dict[str, Any]:
+        summary = {
+            "published": True,
+            "created": self.created,
+            "artifact_kind": "v3_qualification_key",
+            "gate": "A0",
+            "qualification_key_id": self.qualification_key_id,
+            "private_inventory_read_authorized": False,
+            "media_read_authorized": False,
+            "tier2_execution_authorized": False,
+            "runtime_execution_authorized": False,
+            "qualification_execution_authorized": False,
+            "key_creation_authorized": False,
+            "evidence_creation_authorized": False,
+            "evidence_eligible": False,
+            "empirical_authority_conferred": False,
+            "derivation_authorized": False,
+            "holdout_authorized": False,
+            "publication_authorized": False,
+            "public_bundle_activation_allowed": False,
+            "activation_authorized": False,
+            "execution_requires_separate_owner_authorization": True,
+        }
+        assert_av1_cold_start_public_payload_safe(summary)
+        return summary
+
+
+def ensure_av1_validation_v3_qualification_key(
+    *,
+    output_root: Path,
+    repository_root: Path,
+) -> AV1ValidationV3QualificationKeyPublicationResult:
+    normalized_root = _validated_publication_root(
+        output_root,
+        repository_root=repository_root,
+    )
+    output_root_descriptor = -1
+    try:
+        output_root_descriptor = _open_or_create_owner_only_directory(
+            normalized_root
+        )
+        existing_key = _read_existing_qualification_key(
+            output_root_descriptor=output_root_descriptor,
+        )
+        if existing_key is not None:
+            return _qualification_key_publication_result(
+                normalized_root=normalized_root,
+                qualification_key=existing_key,
+                created=False,
+            )
+        qualification_key = secrets.token_bytes(32)
+        expected_members = {
+            AV1_VALIDATION_V3_QUALIFICATION_KEY_FILENAME: qualification_key,
+        }
+        try:
+            created = _publish_single_member_artifact_set(
+                output_root_descriptor=output_root_descriptor,
+                final_name=AV1_VALIDATION_V3_QUALIFICATION_KEY_DIRECTORY,
+                expected_members=expected_members,
+            )
+        except AV1ValidationV3Tier1PublicationError as exc:
+            if exc.reason_code != "artifact_conflict":
+                raise
+            existing_key = _read_existing_qualification_key(
+                output_root_descriptor=output_root_descriptor,
+            )
+            if existing_key is None:
+                raise
+            qualification_key = existing_key
+            created = False
+        return _qualification_key_publication_result(
+            normalized_root=normalized_root,
+            qualification_key=qualification_key,
+            created=created,
+        )
+    except AV1ValidationV3Tier1PublicationError:
+        raise
+    except OSError as exc:
+        reason_code = (
+            "filesystem_capability_missing"
+            if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}
+            else "publication_failed"
+        )
+        raise AV1ValidationV3Tier1PublicationError(
+            reason_code,
+            "AV1 v3 qualification key could not be published safely",
+        ) from exc
+    finally:
+        if output_root_descriptor >= 0:
+            os.close(output_root_descriptor)
+
+
+def load_av1_validation_v3_qualification_key(
+    *,
+    output_root: Path,
+    repository_root: Path,
+) -> bytes:
+    normalized_root = _validated_publication_root(
+        output_root,
+        repository_root=repository_root,
+    )
+    output_root_descriptor = -1
+    try:
+        output_root_descriptor = _open_existing_owner_only_directory(
+            normalized_root
+        )
+        qualification_key = _read_existing_qualification_key(
+            output_root_descriptor=output_root_descriptor,
+        )
+        if qualification_key is None:
+            raise AV1ValidationV3Tier1PublicationError(
+                "artifact_incomplete",
+                "AV1 v3 qualification key is unavailable",
+            )
+        return qualification_key
+    finally:
+        if output_root_descriptor >= 0:
+            os.close(output_root_descriptor)
+
+
 def publish_av1_validation_v3_tier1_config_snapshot(
     *,
     snapshot_bytes: bytes,
@@ -207,7 +342,7 @@ def publish_av1_validation_v3_tier1_config_snapshot(
         )
         if existing is not None:
             return existing
-        created = _publish_config_snapshot_artifact_set(
+        created = _publish_single_member_artifact_set(
             output_root_descriptor=output_root_descriptor,
             final_name=final_name,
             expected_members=expected_members,
@@ -374,6 +509,18 @@ def _validated_publication_root(
 
 
 def _open_or_create_owner_only_directory(path: Path) -> int:
+    return _open_owner_only_directory(path, create_missing=True)
+
+
+def _open_existing_owner_only_directory(path: Path) -> int:
+    return _open_owner_only_directory(path, create_missing=False)
+
+
+def _open_owner_only_directory(
+    path: Path,
+    *,
+    create_missing: bool,
+) -> int:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise AV1ValidationV3Tier1PublicationError(
             "filesystem_capability_missing",
@@ -391,6 +538,11 @@ def _open_or_create_owner_only_directory(path: Path) -> int:
                     dir_fd=descriptor,
                 )
             except FileNotFoundError:
+                if not create_missing:
+                    raise AV1ValidationV3Tier1PublicationError(
+                        "artifact_incomplete",
+                        "AV1 v3 owner-only artifact root is unavailable",
+                    )
                 os.mkdir(component, 0o700, dir_fd=descriptor)
                 os.fsync(descriptor)
                 created = True
@@ -632,7 +784,7 @@ def _existing_config_publication_result(
     )
 
 
-def _publish_config_snapshot_artifact_set(
+def _publish_single_member_artifact_set(
     *,
     output_root_descriptor: int,
     final_name: str,
@@ -774,6 +926,95 @@ def _assert_existing_member_set(
         return True
     finally:
         os.close(descriptor)
+
+
+def _read_existing_qualification_key(
+    *,
+    output_root_descriptor: int,
+) -> bytes | None:
+    try:
+        path_info = os.stat(
+            AV1_VALIDATION_V3_QUALIFICATION_KEY_DIRECTORY,
+            dir_fd=output_root_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(path_info.st_mode):
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_unsafe",
+            "AV1 v3 qualification key target is not a safe directory",
+        )
+    try:
+        descriptor = os.open(
+            AV1_VALIDATION_V3_QUALIFICATION_KEY_DIRECTORY,
+            _DIRECTORY_FLAGS,
+            dir_fd=output_root_descriptor,
+        )
+    except OSError as exc:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_unsafe",
+            "AV1 v3 qualification key directory could not be opened safely",
+        ) from exc
+    try:
+        _assert_directory_binding(
+            parent_descriptor=output_root_descriptor,
+            name=AV1_VALIDATION_V3_QUALIFICATION_KEY_DIRECTORY,
+            descriptor=descriptor,
+        )
+        names = frozenset(os.listdir(descriptor))
+        expected_names = frozenset({
+            AV1_VALIDATION_V3_QUALIFICATION_KEY_FILENAME,
+        })
+        if names != expected_names:
+            reason_code = (
+                "artifact_incomplete"
+                if names < expected_names
+                else "artifact_malformed"
+            )
+            raise AV1ValidationV3Tier1PublicationError(
+                reason_code,
+                "AV1 v3 qualification key artifact set is invalid",
+            )
+        qualification_key = _read_member(
+            descriptor,
+            AV1_VALIDATION_V3_QUALIFICATION_KEY_FILENAME,
+            expected_size=32,
+        )
+        try:
+            av1_validation_v3_qualification_key_id(qualification_key)
+        except AV1ValidationV3Error as exc:
+            raise AV1ValidationV3Tier1PublicationError(
+                "artifact_malformed",
+                "AV1 v3 qualification key is invalid",
+            ) from exc
+        return qualification_key
+    finally:
+        os.close(descriptor)
+
+
+def _qualification_key_publication_result(
+    *,
+    normalized_root: Path,
+    qualification_key: bytes,
+    created: bool,
+) -> AV1ValidationV3QualificationKeyPublicationResult:
+    try:
+        qualification_key_id = av1_validation_v3_qualification_key_id(
+            qualification_key
+        )
+    except AV1ValidationV3Error as exc:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_malformed",
+            "AV1 v3 qualification key is invalid",
+        ) from exc
+    directory = normalized_root / AV1_VALIDATION_V3_QUALIFICATION_KEY_DIRECTORY
+    return AV1ValidationV3QualificationKeyPublicationResult(
+        directory=directory,
+        key_path=directory / AV1_VALIDATION_V3_QUALIFICATION_KEY_FILENAME,
+        qualification_key_id=qualification_key_id,
+        created=created,
+    )
 
 
 def _write_member(

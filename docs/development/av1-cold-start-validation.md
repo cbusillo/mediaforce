@@ -1433,6 +1433,15 @@ media, generate review clips, or run a real-media experiment.
 
 ## V3 Tier 1 Gate A0 artifact publication
 
+`create-qualification-key` creates exactly one durable v3 qualification key in
+an owner-only machine-local directory. The key is 32 random bytes stored as
+`qualification-key.bin`; its public `av1vqkey3_*` identifier is derived through
+the protocol's qualification-key HMAC domain. Re-running the command loads the
+same key and identifier rather than rotating it. The key is not a media,
+encryption, Git, login, or empirical-selection key: it commits the later Tier 2
+qualification ranking before private source selection. The command reads no
+media or inventory, takes no runtime lock, and grants no execution authority.
+
 `mediaforce/tuning/av1_validation_v3_tier1_config_snapshot.py` defines the
 canonical effective-config snapshot used by Gate A0. The snapshot contains the
 fully merged `MediaforceConfig.raw` after checked-in includes, runtime settings,
@@ -1490,6 +1499,11 @@ unsafe mode, or unsafe link fails closed and is never overwritten or repaired.
 ### CLI usage
 
 ```bash
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
+  create-qualification-key \
+  --output-root /path/to/private/qualification-key \
+  --json
+
 uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   write-tier1-config-snapshot \
   --config /path/to/mediaforce-config.toml \
