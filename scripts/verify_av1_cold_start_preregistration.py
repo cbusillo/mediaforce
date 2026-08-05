@@ -2550,6 +2550,7 @@ from mediaforce.tuning.av1_validation_v3 import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_publication import (
     AV1ValidationV3Tier1PublicationError,
+    ensure_av1_validation_v3_qualification_key,
     publish_av1_validation_v3_tier1_config_snapshot,
     publish_av1_validation_v3_tier1_preparation,
 )
@@ -2887,6 +2888,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_CONFIG_PATH,
     )
+
+    create_qualification_key = actions.add_parser(
+        "create-qualification-key",
+        help="Create one owner-only AV1 v3 qualification key without execution authority",
+    )
+    create_qualification_key.add_argument(
+        "--output-root",
+        type=Path,
+        required=True,
+    )
+    create_qualification_key.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+    )
     write_tier1_config.add_argument("--output-root", type=Path, required=True)
     write_tier1_config.add_argument(
         "--json",
@@ -2988,6 +3004,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.action == "write-tier1-config-snapshot":
             return _run_write_tier1_config_snapshot(args)
+
+        if args.action == "create-qualification-key":
+            return _run_create_qualification_key(args)
 
         manifest = _load_manifest(args.manifest)
         if isinstance(manifest, AV1ValidationProtocolV3):
@@ -3148,6 +3167,29 @@ def _run_write_tier1_config_snapshot(args: argparse.Namespace) -> int:
             json_output=args.json_output,
         )
     except (AV1ValidationV3Tier1ConfigSnapshotError, TypeError, ValueError):
+        return _print_tier1_publication_failure(
+            "input_invalid",
+            json_output=args.json_output,
+        )
+    _assert_preregistration_bootstrap_authority()
+    _print_partition_payload(result.to_summary(), json_output=args.json_output)
+    return 0
+
+
+def _run_create_qualification_key(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
+    _assert_canonical_preregistration_runner()
+    try:
+        result = ensure_av1_validation_v3_qualification_key(
+            output_root=args.output_root,
+            repository_root=REPOSITORY_ROOT,
+        )
+    except AV1ValidationV3Tier1PublicationError as exc:
+        return _print_tier1_publication_failure(
+            exc.reason_code,
+            json_output=args.json_output,
+        )
+    except (OSError, TypeError, ValueError):
         return _print_tier1_publication_failure(
             "input_invalid",
             json_output=args.json_output,
