@@ -21,14 +21,18 @@ from mediaforce.tuning.av1_validation_v3_tier1_request import (
 
 
 AV1_VALIDATION_V3_TIER1_MATRIX_SHA256 = (
-    "sha256:faa40e0ee1dfd71715440d413b4d8e138266b27202a1e3c995ddffcf1a370572"
+    "sha256:b624ed891797bfad7e217cadca4272e7b5f1ea1453598ac71b126e7d5a510dcf"
 )
 AV1_VALIDATION_V3_TIER1_MATRIX_SCHEMA = "mediaforce.av1_cold_start_v3_tier1_fixture_matrix"
-AV1_VALIDATION_V3_TIER1_MATRIX_VERSION = 2
+AV1_VALIDATION_V3_TIER1_MATRIX_VERSION = 3
 
 _EXPECTED_FRAME_COUNT = 288
 _EXPECTED_DECODED_BYTE_COUNT = 1280 * 720 * 3 * _EXPECTED_FRAME_COUNT
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_EXPECTED_OUTPUT_COLOR_ARGS = (
+    "-color_primaries", "bt709", "-color_trc", "bt709",
+    "-colorspace", "bt709", "-color_range", "tv",
+)
 
 
 class AV1ValidationV3Tier1ExecutorError(ValueError):
@@ -124,11 +128,13 @@ def build_av1_validation_v3_tier1_fixture_plans(
         lavfi_graph = str(fixture.get("lavfi_graph") or "")
         if not fixture_id or not lavfi_graph:
             raise AV1ValidationV3Tier1ExecutorError("AV1 v3 Tier 1 fixture entry is invalid")
-        output_path = output_root / f"{fixture_id}.nut"
+        output_path = output_root / f"{fixture_id}{intermediate['output_suffix']}"
         generate_args = (
             "ffmpeg", "-v", "error", "-n", "-f", "lavfi", "-i", lavfi_graph,
             "-frames:v", str(frame_limit["value"]), "-an", "-c:v",
-            str(intermediate.get("codec") or ""), "-f",
+            str(intermediate.get("codec") or ""),
+            *(str(value) for value in object_list(intermediate.get("output_color_args"))),
+            "-f",
             str(intermediate.get("container") or ""), str(output_path),
         )
         probe_args = _substitute_path(probe.get("command"), output_path)
@@ -267,9 +273,17 @@ def _assert_frozen_matrix(matrix: Mapping[str, Any]) -> None:
         matrix.get("schema") != AV1_VALIDATION_V3_TIER1_MATRIX_SCHEMA
         or matrix.get("schema_version") != AV1_VALIDATION_V3_TIER1_MATRIX_VERSION
         or matrix.get("fixture_scope") != "deterministic_synthetic_only"
-        or matrix.get("generator_contract") != "mediaforce.synthetic_fixture.v2"
+        or matrix.get("generator_contract") != "mediaforce.synthetic_fixture.v3"
         or object_dict(matrix.get("frame_limit")) != {"method": "frames_v", "value": 288}
         or object_dict(matrix.get("frame_spec")).get("frame_count") != _EXPECTED_FRAME_COUNT
+        or object_dict(matrix.get("intermediate"))
+        != {
+            "codec": "ffv1",
+            "container": "matroska",
+            "file_hash_authoritative": False,
+            "output_color_args": list(_EXPECTED_OUTPUT_COLOR_ARGS),
+            "output_suffix": ".mkv",
+        }
     ):
         raise AV1ValidationV3Tier1ExecutorError("AV1 v3 Tier 1 fixture matrix identity is invalid")
     try:

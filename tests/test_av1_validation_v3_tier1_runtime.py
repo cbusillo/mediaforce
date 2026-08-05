@@ -56,7 +56,7 @@ from mediaforce.web.runtime_lock import (
 )
 
 
-MATRIX_PATH = Path("docs/validation/av1-tier1-synthetic-fixture-matrix-v2.json")
+MATRIX_PATH = Path("docs/validation/av1-tier1-synthetic-fixture-matrix-v3.json")
 COMPAT_MATRIX_PATH = Path("docs/validation/av1-tier1-compat-probe-matrix-v1.json")
 PROTOCOL_PATH = Path("docs/validation/av1-cold-start-preregistration-v3.json")
 

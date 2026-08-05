@@ -3028,7 +3028,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_tier1.add_argument(
         "--matrix",
         type=Path,
-        default=REPOSITORY_ROOT / "docs/validation/av1-tier1-synthetic-fixture-matrix-v2.json",
+        default=REPOSITORY_ROOT / "docs/validation/av1-tier1-synthetic-fixture-matrix-v3.json",
     )
     run_tier1.add_argument("--ffmpeg", type=Path, required=True)
     run_tier1.add_argument("--ffprobe", type=Path, required=True)
