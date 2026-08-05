@@ -160,6 +160,20 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ValidationV3Error, "out-of-scope"):
             self._record(not_ready)
 
+    def test_keyless_assertion_rejects_out_of_scope_nonselected_candidate(self) -> None:
+        record = self._record()
+        object.__setattr__(
+            record,
+            "candidate_sources",
+            (*record.candidate_sources, _source(100, "darkness")),
+        )
+        with self.assertRaisesRegex(AV1ValidationV3Tier2SelectionError, "out-of-scope"):
+            assert_av1_validation_v3_tier2_selection_record(
+                self.protocol,
+                self.plan,
+                record,
+            )
+
     def test_expired_or_unbound_plan_fails_closed(self) -> None:
         with self.assertRaisesRegex(AV1ValidationV3QualificationError, "not active"):
             build_av1_validation_v3_tier2_selection_record(

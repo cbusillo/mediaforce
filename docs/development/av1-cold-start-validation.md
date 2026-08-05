@@ -158,9 +158,10 @@ the record ID. Its public summary exposes only fixed non-executing status,
 protocol/plan identities, and frozen stratum names; it carries no record ID,
 timestamp, fingerprints, ranks, inventory digest/count, paths, titles, or key
 material.
-The contract performs no inventory, database, media, or filesystem scan and
-creates no publication, execution, empirical, derivation, holdout, grant,
-claim, lock, subprocess, or feature-flag authority.
+The contract performs no inventory, database, or media scan; its loader reads
+only the caller-supplied selection-record path. It creates no publication,
+execution, empirical, derivation, holdout, grant, claim, lock, subprocess, or
+feature-flag authority.
 
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a

@@ -338,6 +338,7 @@ def assert_av1_validation_v3_tier2_selection_record(
         plan,
         as_of=record.selected_at,
     )
+    _assert_candidate_sources_in_scope(protocol, record.candidate_sources)
     expected_strata = tuple(stratum.stratum_id for stratum in protocol.tier2_strata)
     actual_strata = tuple(selection.stratum_id for selection in record.selections)
     if actual_strata != expected_strata:
@@ -529,6 +530,31 @@ def _source_payload(source: AV1ValidationV3QualificationSource) -> dict[str, Any
         "exact_traits": list(source.exact_traits),
         "pipeline_ready": source.pipeline_ready,
     }
+
+
+def _assert_candidate_sources_in_scope(
+    protocol: AV1ValidationProtocolV3,
+    sources: Sequence[AV1ValidationV3QualificationSource],
+) -> None:
+    for source in sources:
+        matching_strata = tuple(
+            stratum for stratum in protocol.tier2_strata if stratum.matches(source)
+        )
+        overlaps_powered_cell = any(
+            cell.matches(
+                intent_level=source.intent_level,
+                traits=source.exact_traits,
+            )
+            for cell in protocol.candidate_cells
+        )
+        if (
+            len(matching_strata) != 1
+            or not source.pipeline_ready
+            or overlaps_powered_cell
+        ):
+            raise AV1ValidationV3Tier2SelectionError(
+                "AV1 v3 Tier 2 candidate set contains an out-of-scope source"
+            )
 
 
 def _source_from_payload(
