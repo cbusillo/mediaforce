@@ -27,6 +27,16 @@ from mediaforce.tuning.av1_validation_v3_tier1_compat_probe import (
     build_av1_validation_v3_tier1_compat_probe_plans,
     load_av1_validation_v3_tier1_compat_probe_matrix,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_residual_authorization import (
+    build_av1_validation_v3_tier1_residual_grant,
+    build_av1_validation_v3_tier1_residual_request,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_residual_probe import (
+    AV1_VALIDATION_V3_TIER1_RESIDUAL_MATRIX_SHA256,
+    AV1ValidationV3Tier1ResidualExecutionContext,
+    build_av1_validation_v3_tier1_residual_probe_plans,
+    load_av1_validation_v3_tier1_residual_probe_matrix,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_executor import (
     AV1_VALIDATION_V3_TIER1_MATRIX_SHA256,
     AV1ValidationV3Tier1ExecutionContext,
@@ -48,6 +58,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_runtime import (
     AV1ValidationV3Tier1RuntimeLimits,
     build_av1_validation_v3_tier1_toolchain_binding,
     paused_av1_validation_v3_tier1_compat_runtime,
+    paused_av1_validation_v3_tier1_residual_runtime,
     paused_av1_validation_v3_tier1_runtime,
 )
 from mediaforce.web.runtime_lock import (
@@ -58,6 +69,7 @@ from mediaforce.web.runtime_lock import (
 
 MATRIX_PATH = Path("docs/validation/av1-tier1-synthetic-fixture-matrix-v3.json")
 COMPAT_MATRIX_PATH = Path("docs/validation/av1-tier1-compat-probe-matrix-v1.json")
+RESIDUAL_MATRIX_PATH = Path("docs/validation/av1-tier1-residual-probe-matrix-v1.json")
 PROTOCOL_PATH = Path("docs/validation/av1-cold-start-preregistration-v3.json")
 
 
@@ -103,6 +115,15 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
             COMPAT_MATRIX_PATH
         )
         self.compat_context = _compat_execution_context(
+            self.toolchain.payload_sha256,
+            av1_validation_v3_tier1_config_snapshot_sha256(
+                self.config_snapshot_bytes
+            ),
+        )
+        self.residual_matrix = load_av1_validation_v3_tier1_residual_probe_matrix(
+            RESIDUAL_MATRIX_PATH
+        )
+        self.residual_context = _residual_execution_context(
             self.toolchain.payload_sha256,
             av1_validation_v3_tier1_config_snapshot_sha256(
                 self.config_snapshot_bytes
@@ -183,6 +204,50 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
             assert_mediaforce_runtime_lock_held().assert_active()
             self.assertEqual(active_session.executor._buffered_commands, expected_commands)
             self.assertEqual(active_session.executor._streaming_commands, frozenset())
+            with self.assertRaisesRegex(
+                AV1ValidationV3Tier1RuntimeError,
+                "frozen fixture matrix",
+            ):
+                active_session.executor.run(("ffprobe", "-c", "print('not frozen')"))
+        self.assertIsNotNone(session)
+        self.assertTrue(session.cleanup_passed)
+
+    def test_residual_runtime_allows_exact_buffered_and_streaming_commands(self) -> None:
+        plans = build_av1_validation_v3_tier1_residual_probe_plans(
+            self.residual_matrix,
+            output_directory=self.output_root,
+            repository_root=Path.cwd(),
+        )
+        expected_buffered = frozenset(
+            command
+            for plan in plans
+            for command in (
+                plan.generate_args,
+                *(surface.command_args for surface in plan.surfaces if not surface.streaming),
+            )
+        )
+        expected_streaming = frozenset(
+            surface.command_args
+            for plan in plans
+            for surface in plan.surfaces
+            if surface.streaming
+        )
+        session = None
+        with paused_av1_validation_v3_tier1_residual_runtime(
+            self.config,
+            config_snapshot_bytes=self.config_snapshot_bytes,
+            context=self.residual_context,
+            matrix=self.residual_matrix,
+            output_directory=self.output_root,
+            repository_root=Path.cwd(),
+            toolchain=self.toolchain,
+        ) as active_session:
+            session = active_session
+            assert_mediaforce_runtime_lock_held().assert_active()
+            self.assertEqual(active_session.executor._buffered_commands, expected_buffered)
+            self.assertEqual(active_session.executor._streaming_commands, expected_streaming)
+            self.assertEqual(len(expected_buffered), 12)
+            self.assertEqual(len(expected_streaming), 4)
             with self.assertRaisesRegex(
                 AV1ValidationV3Tier1RuntimeError,
                 "frozen fixture matrix",
@@ -625,6 +690,47 @@ def _compat_execution_context(
         valid_until="2026-08-04T19:00:00Z",
     )
     return AV1ValidationV3Tier1CompatExecutionContext(
+        protocol=protocol,
+        qualification_plan=plan,
+        request=request,
+        grant=grant,
+        as_of="2026-08-04T18:00:00Z",
+    )
+
+
+def _residual_execution_context(
+    toolchain_sha256: str,
+    config_sha256: str,
+) -> AV1ValidationV3Tier1ResidualExecutionContext:
+    protocol = load_av1_validation_protocol_v3(PROTOCOL_PATH)
+    plan = build_av1_validation_v3_qualification_plan(
+        protocol=protocol,
+        qualification_key_id=f"av1vqkey3_{'a' * 32}",
+        eligibility_predicate_sha256=f"sha256:{'b' * 64}",
+        repository_commit="1" * 40,
+        repository_tree="2" * 40,
+        config_sha256=config_sha256,
+        toolchain_sha256=toolchain_sha256,
+        fixture_matrix_sha256=AV1_VALIDATION_V3_TIER1_MATRIX_SHA256,
+        frozen_at="2026-08-03T12:00:00Z",
+        valid_until="2026-08-05T12:00:00Z",
+    )
+    request = build_av1_validation_v3_tier1_residual_request(
+        protocol=protocol,
+        plan=plan,
+        probe_matrix_sha256=AV1_VALIDATION_V3_TIER1_RESIDUAL_MATRIX_SHA256,
+        requested_at="2026-08-03T13:00:00Z",
+        valid_until="2026-08-04T20:00:00Z",
+    )
+    grant = build_av1_validation_v3_tier1_residual_grant(
+        protocol=protocol,
+        plan=plan,
+        request=request,
+        owner_principal="owner-1234abcd",
+        authorized_at="2026-08-03T14:00:00Z",
+        valid_until="2026-08-04T19:00:00Z",
+    )
+    return AV1ValidationV3Tier1ResidualExecutionContext(
         protocol=protocol,
         qualification_plan=plan,
         request=request,

@@ -30,6 +30,14 @@ from mediaforce.tuning.av1_validation_v3_tier1_compat_probe import (
     AV1ValidationV3Tier1CompatExecutionContext,
     build_av1_validation_v3_tier1_compat_probe_plans,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_residual_authorization import (
+    AV1ValidationV3Tier1ResidualAuthorizationError,
+    assert_av1_validation_v3_tier1_residual_grant_active,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_residual_probe import (
+    AV1ValidationV3Tier1ResidualExecutionContext,
+    build_av1_validation_v3_tier1_residual_probe_plans,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_grant import (
     AV1ValidationV3Tier1GrantError,
     assert_av1_validation_v3_tier1_grant_active,
@@ -622,6 +630,107 @@ def paused_av1_validation_v3_tier1_compat_runtime(
             limits=limits or AV1ValidationV3Tier1RuntimeLimits(),
             buffered_commands=buffered_commands,
             streaming_commands=frozenset(),
+        )
+        session = AV1ValidationV3Tier1RuntimeSession(executor)
+        try:
+            yield session
+        finally:
+            session._cleanup()
+
+
+@contextmanager
+def paused_av1_validation_v3_tier1_residual_runtime(
+    config: MediaforceConfig,
+    *,
+    config_snapshot_bytes: bytes,
+    context: AV1ValidationV3Tier1ResidualExecutionContext,
+    matrix: Mapping[str, object],
+    output_directory: Path,
+    repository_root: Path,
+    toolchain: AV1ValidationV3Tier1ToolchainBinding,
+    limits: AV1ValidationV3Tier1RuntimeLimits | None = None,
+) -> Iterator[AV1ValidationV3Tier1RuntimeSession]:
+    try:
+        assert_mediaforce_runtime_lock_held()
+    except MediaforceRuntimeLockOwnershipError:
+        pass
+    else:
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 residual probe requires a newly acquired exclusive pause lease"
+        )
+    output_root = _validated_output_root(
+        output_directory,
+        repository_root=repository_root,
+    )
+    try:
+        assert_av1_validation_v3_tier1_config_snapshot_matches(
+            config,
+            config_snapshot_bytes,
+        )
+    except AV1ValidationV3Tier1ConfigSnapshotError as exc:
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 residual-probe config changed after the snapshot"
+        ) from exc
+    if (
+        context.qualification_plan.config_sha256
+        != av1_validation_v3_tier1_config_snapshot_sha256(config_snapshot_bytes)
+    ):
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 residual-probe config is not bound to the plan"
+        )
+    _assert_toolchain_current(toolchain)
+    if context.qualification_plan.toolchain_sha256 != toolchain.payload_sha256:
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 residual-probe toolchain is not bound to the plan"
+        )
+    try:
+        assert_av1_validation_v3_tier1_residual_grant_active(
+            context.protocol,
+            context.qualification_plan,
+            context.request,
+            context.grant,
+            as_of=context.as_of,
+        )
+    except AV1ValidationV3Tier1ResidualAuthorizationError as exc:
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 residual-probe grant is not active"
+        ) from exc
+    plans = build_av1_validation_v3_tier1_residual_probe_plans(
+        matrix,
+        output_directory=output_root,
+        repository_root=repository_root,
+    )
+    buffered_commands = frozenset(
+        command
+        for plan in plans
+        for command in (
+            plan.generate_args,
+            *(surface.command_args for surface in plan.surfaces if not surface.streaming),
+        )
+    )
+    streaming_commands = frozenset(
+        surface.command_args
+        for plan in plans
+        for surface in plan.surfaces
+        if surface.streaming
+    )
+    with exclusive_mediaforce_runtime_lock(
+        config,
+        owner_payload={
+            "purpose": "av1-v3-tier1-residual-probe",
+            "plan_id": context.qualification_plan.plan_id,
+            "request_id": context.request.request_id,
+            "grant_id": context.grant.grant_id,
+        },
+    ) as lease:
+        lease.assert_active()
+        executor = AV1ValidationV3Tier1PausedRuntimeExecutor(
+            lease=lease,
+            output_root=output_root,
+            toolchain=toolchain,
+            limits=limits or AV1ValidationV3Tier1RuntimeLimits(),
+            buffered_commands=buffered_commands,
+            streaming_commands=streaming_commands,
         )
         session = AV1ValidationV3Tier1RuntimeSession(executor)
         try:
