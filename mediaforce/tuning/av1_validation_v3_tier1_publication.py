@@ -64,6 +64,7 @@ AV1_VALIDATION_V3_TIER1_PUBLICATION_REASON_CODES = frozenset({
     "artifact_incomplete",
     "artifact_malformed",
     "artifact_unsafe",
+    "execution_already_claimed",
     "filesystem_capability_missing",
     "publication_cleanup_failed",
     "publication_failed",
@@ -472,6 +473,115 @@ def publish_av1_validation_v3_tier1_preparation(
             "AV1 v3 Tier 1 preparation could not be published safely",
         ) from exc
     finally:
+        if output_root_descriptor >= 0:
+            os.close(output_root_descriptor)
+
+
+def publish_av1_validation_v3_owner_artifact(
+    *,
+    output_root: Path,
+    repository_root: Path,
+    final_name: str,
+    filename: str,
+    content: bytes,
+    description: str,
+) -> tuple[Path, bool]:
+    normalized_root = _validated_publication_root(
+        output_root,
+        repository_root=repository_root,
+    )
+    expected_members = {filename: content}
+    output_root_descriptor = -1
+    try:
+        output_root_descriptor = _open_or_create_owner_only_directory(
+            normalized_root
+        )
+        created = _publish_single_member_artifact_set(
+            output_root_descriptor=output_root_descriptor,
+            final_name=final_name,
+            expected_members=expected_members,
+        )
+        return normalized_root / final_name, created
+    except AV1ValidationV3Tier1PublicationError:
+        raise
+    except OSError as exc:
+        reason_code = (
+            "filesystem_capability_missing"
+            if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}
+            else "publication_failed"
+        )
+        raise AV1ValidationV3Tier1PublicationError(
+            reason_code,
+            f"AV1 v3 Tier 1 {description} could not be published safely",
+        ) from exc
+    finally:
+        if output_root_descriptor >= 0:
+            os.close(output_root_descriptor)
+
+
+def load_av1_validation_v3_owner_artifact(
+    *,
+    output_root: Path,
+    repository_root: Path,
+    final_name: str,
+    filename: str,
+    maximum_size: int,
+) -> bytes:
+    normalized_root = _validated_publication_root(
+        output_root,
+        repository_root=repository_root,
+    )
+    output_root_descriptor = -1
+    directory_descriptor = -1
+    try:
+        output_root_descriptor = _open_existing_owner_only_directory(
+            normalized_root
+        )
+        directory_descriptor = os.open(
+            final_name,
+            _DIRECTORY_FLAGS,
+            dir_fd=output_root_descriptor,
+        )
+        _assert_directory_binding(
+            parent_descriptor=output_root_descriptor,
+            name=final_name,
+            descriptor=directory_descriptor,
+        )
+        if frozenset(os.listdir(directory_descriptor)) != frozenset({filename}):
+            raise AV1ValidationV3Tier1PublicationError(
+                "artifact_malformed",
+                "AV1 v3 Tier 1 publication artifact set is invalid",
+            )
+        member_info = os.stat(
+            filename,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+        if member_info.st_size <= 0 or member_info.st_size > maximum_size:
+            raise AV1ValidationV3Tier1PublicationError(
+                "artifact_malformed",
+                "AV1 v3 Tier 1 publication artifact size is invalid",
+            )
+        return _read_member(
+            directory_descriptor,
+            filename,
+            expected_size=member_info.st_size,
+        )
+    except FileNotFoundError as exc:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_incomplete",
+            "AV1 v3 Tier 1 publication artifact is unavailable",
+        ) from exc
+    except AV1ValidationV3Tier1PublicationError:
+        raise
+    except OSError as exc:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_unsafe",
+            "AV1 v3 Tier 1 publication artifact could not be opened safely",
+        ) from exc
+    finally:
+        if directory_descriptor >= 0:
+            os.close(directory_descriptor)
         if output_root_descriptor >= 0:
             os.close(output_root_descriptor)
 

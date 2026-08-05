@@ -205,6 +205,23 @@ activation authority. It can be produced only while the grant is active and
 only when runtime pause and output cleanup both succeeded. The full
 qualification attestation contract does not accept this receipt.
 
+`mediaforce/tuning/av1_validation_v3_tier1_operation.py` is the bounded
+orchestrator for that receipt. It enters the existing paused-runtime adapter,
+publishes a durable single-execution claim before the first fixture command,
+runs the four frozen fixture IDs once in canonical order, rechecks grant time at
+each fixture boundary, and builds a receipt only after tracked-output cleanup
+succeeds. A retained claim blocks an automatic retry after interruption or
+failure; recovery requires a separately reviewed successor authorization.
+
+The owner-only runner exposes two separate actions. `authorize-tier1-execution`
+loads the exact post-merge protocol, plan, request, effective-config snapshot,
+repository identity, and toolchain before publishing one grant keyed by request
+ID. `run-tier1-synthetic-qualification` safely reloads that grant, acquires the
+pause lease, publishes the single-execution claim, runs only the frozen v2
+synthetic matrix, and publishes the Gate A0 coverage receipt. Neither action
+reads private inventory or media, starts Tier 2, creates empirical evidence, or
+confers derivation, holdout, publication, or activation authority.
+
 `mediaforce/tuning/av1_validation_v3_tier1_preparation.py` defines the pure,
 non-executing preparation inputs for Tier 1. It freezes a machine-checkable
 eligibility predicate, domain-separated identity for the exact config bytes,

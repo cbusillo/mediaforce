@@ -45,6 +45,8 @@ class AV1ValidationV3Tier1ExecutionGrant:
     payload_sha256: str
 
     def __post_init__(self) -> None:
+        if not self.grant_id.startswith("av1vtier1grant3_"):
+            raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant ID is invalid")
         if not self.request_id.startswith("av1vtier1request3_"):
             raise AV1ValidationV3Tier1GrantError("AV1 v3 Tier 1 grant request ID is invalid")
         if not _SHA256_RE.fullmatch(self.request_payload_sha256):
