@@ -2548,6 +2548,10 @@ from mediaforce.tuning.av1_validation_v3 import (
     assert_preregistered_av1_validation_protocol_v3,
     load_av1_validation_protocol_v3,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_publication import (
+    AV1ValidationV3Tier1PublicationError,
+    publish_av1_validation_v3_tier1_preparation,
+)
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
     AV1_VALIDATION_DERIVATION_REASON_CODES,
@@ -2867,6 +2871,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--runtime-state", choices=("paused", "available"), default="paused"
     )
     report.add_argument("--json", action="store_true", dest="json_output")
+
+    publish_tier1 = actions.add_parser(
+        "publish-tier1-preparation",
+        help="Publish AV1 v3 Tier 1 Gate A0 preparation artifacts (non-executing)",
+    )
+    publish_tier1.add_argument("protocol", type=Path)
+    publish_tier1.add_argument("--qualification-key-id", required=True)
+    publish_tier1.add_argument("--repository-commit", required=True)
+    publish_tier1.add_argument("--repository-tree", required=True)
+    publish_tier1.add_argument("--config-artifact", type=Path, required=True)
+    publish_tier1.add_argument("--ffmpeg", type=Path, required=True)
+    publish_tier1.add_argument("--ffprobe", type=Path, required=True)
+    publish_tier1.add_argument("--output-root", type=Path, required=True)
+    publish_tier1.add_argument("--frozen-at", required=True)
+    publish_tier1.add_argument("--plan-valid-until", required=True)
+    publish_tier1.add_argument("--requested-at", required=True)
+    publish_tier1.add_argument("--request-valid-until", required=True)
+    publish_tier1.add_argument("--json", action="store_true", dest="json_output")
+
     return parser
 
 
@@ -2938,6 +2961,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         }:
             return _run_derivation_action(args)
 
+        if args.action == "publish-tier1-preparation":
+            return _run_publish_tier1_preparation(args)
+
         manifest = _load_manifest(args.manifest)
         if isinstance(manifest, AV1ValidationProtocolV3):
             assert_preregistered_av1_validation_protocol_v3(manifest)
@@ -3002,6 +3028,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         AV1ValidationPartitionError,
         AV1ValidationV2Error,
         AV1ValidationV3Error,
+        AV1ValidationV3Tier1PublicationError,
         json.JSONDecodeError,
     ) as exc:
         print(f"AV1 cold-start validation failed: {exc}", file=sys.stderr)
@@ -3012,6 +3039,103 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+
+def _run_publish_tier1_preparation(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
+    _assert_canonical_preregistration_runner()
+    try:
+        protocol = load_av1_validation_protocol_v3(args.protocol)
+        assert_preregistered_av1_validation_protocol_v3(protocol)
+        _assert_preregistration_bootstrap_authority()
+        try:
+            repository_commit, repository_tree = _live_repository_identity()
+        except AV1ValidationDerivationError:
+            return _print_tier1_publication_failure(
+                "repository_identity_unavailable",
+                json_output=args.json_output,
+            )
+        _assert_preregistration_bootstrap_authority()
+        if (
+            repository_commit != args.repository_commit
+            or repository_tree != args.repository_tree
+        ):
+            return _print_tier1_publication_failure(
+                "repository_identity_mismatch",
+                json_output=args.json_output,
+            )
+        config_bytes = args.config_artifact.read_bytes()
+        result = publish_av1_validation_v3_tier1_preparation(
+            protocol=protocol,
+            qualification_key_id=args.qualification_key_id,
+            repository_commit=repository_commit,
+            repository_tree=repository_tree,
+            config_bytes=config_bytes,
+            ffmpeg_path=args.ffmpeg,
+            ffprobe_path=args.ffprobe,
+            output_root=args.output_root,
+            repository_root=REPOSITORY_ROOT,
+            frozen_at=args.frozen_at,
+            plan_valid_until=args.plan_valid_until,
+            requested_at=args.requested_at,
+            request_valid_until=args.request_valid_until,
+        )
+    except OSError:
+        return _print_tier1_publication_failure(
+            "input_unreadable",
+            json_output=args.json_output,
+        )
+    except AV1ValidationV3Tier1PublicationError as exc:
+        return _print_tier1_publication_failure(
+            exc.reason_code,
+            json_output=args.json_output,
+        )
+    except (AV1ValidationV3Error, TypeError, ValueError):
+        return _print_tier1_publication_failure(
+            "input_invalid",
+            json_output=args.json_output,
+        )
+    _assert_preregistration_bootstrap_authority()
+    _print_partition_payload(result.to_summary(), json_output=args.json_output)
+    return 0
+
+
+def _print_tier1_publication_failure(
+    reason_code: str,
+    *,
+    json_output: bool,
+) -> int:
+    payload = {
+        "published": False,
+        "failure_reason": reason_code,
+        "gate": "A0",
+        "tier": "tier1",
+        "private_inventory_read_authorized": False,
+        "media_read_authorized": False,
+        "tier2_execution_authorized": False,
+        "runtime_execution_authorized": False,
+        "qualification_execution_authorized": False,
+        "key_creation_authorized": False,
+        "evidence_creation_authorized": False,
+        "evidence_eligible": False,
+        "empirical_authority_conferred": False,
+        "derivation_authorized": False,
+        "holdout_authorized": False,
+        "publication_authorized": False,
+        "public_bundle_activation_allowed": False,
+        "activation_authorized": False,
+        "execution_requires_separate_owner_authorization": True,
+    }
+    assert_av1_cold_start_public_payload_safe(payload)
+    _assert_preregistration_bootstrap_authority()
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"AV1 v3 Tier 1 preparation publication failed: {reason_code}",
+            file=sys.stderr,
+        )
+    return 1
 
 
 def _run_partition_action(args: argparse.Namespace) -> int:
