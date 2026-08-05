@@ -1,7 +1,6 @@
 import copy
 import json
 from pathlib import Path
-import tempfile
 import unittest
 
 from mediaforce.tuning.av1_validation_v3 import (
@@ -15,7 +14,7 @@ from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
     AV1ValidationV3Tier2InventoryReadClaim,
     AV1ValidationV3Tier2InventoryReadGrant,
     AV1ValidationV3Tier2InventoryReadRequest,
-    _FALSE_AUTHORITY_FIELDS,
+    AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
     assert_av1_validation_v3_tier2_inventory_read_claim_active,
     assert_av1_validation_v3_tier2_inventory_read_grant_active,
     assert_av1_validation_v3_tier2_inventory_read_request_active,
@@ -25,9 +24,9 @@ from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
     build_av1_validation_v3_tier2_inventory_read_claim,
     build_av1_validation_v3_tier2_inventory_read_grant,
     build_av1_validation_v3_tier2_inventory_read_request,
-    load_av1_validation_v3_tier2_inventory_read_claim,
-    load_av1_validation_v3_tier2_inventory_read_grant,
-    load_av1_validation_v3_tier2_inventory_read_request,
+    deserialize_av1_validation_v3_tier2_inventory_read_claim,
+    deserialize_av1_validation_v3_tier2_inventory_read_grant,
+    deserialize_av1_validation_v3_tier2_inventory_read_request,
     serialize_av1_validation_v3_tier2_inventory_read_claim,
     serialize_av1_validation_v3_tier2_inventory_read_grant,
     serialize_av1_validation_v3_tier2_inventory_read_request,
@@ -86,8 +85,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
             claimed_at=CLAIMED_AT,
         )
 
-    # --- happy path ---
-
     def test_happy_request_grant_claim_chain(self) -> None:
         assert_av1_validation_v3_tier2_inventory_read_request_active(
             self.protocol, self.plan, self.request, as_of=CLAIMED_AT
@@ -98,8 +95,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         assert_av1_validation_v3_tier2_inventory_read_claim_active(
             self.protocol, self.plan, self.request, self.grant, self.claim, as_of=CLAIMED_AT
         )
-
-    # --- deterministic IDs and digests ---
 
     def test_request_is_deterministic(self) -> None:
         rebuilt = build_av1_validation_v3_tier2_inventory_read_request(
@@ -131,28 +126,27 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         )
         self.assertEqual(self.claim, rebuilt)
 
-    # --- authority isolation ---
-
     def test_request_carries_no_authority(self) -> None:
         payload = self.request.to_payload()
         self.assertFalse(payload["private_inventory_read_authorized"])
+        self.assertIs(payload["single_read_requested"], True)
         self.assertTrue(payload["execution_requires_separate_owner_authorization"])
-        for field in _FALSE_AUTHORITY_FIELDS:
+        for field in AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS:
             self.assertIs(payload[field], False, f"{field} must be False in request")
 
     def test_grant_carries_only_private_inventory_read_authority(self) -> None:
         payload = self.grant.to_payload()
         self.assertIs(payload["private_inventory_read_authorized"], True)
-        for field in _FALSE_AUTHORITY_FIELDS:
+        self.assertIs(payload["single_read_authorized"], True)
+        for field in AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS:
             self.assertIs(payload[field], False, f"{field} must be False in grant")
 
     def test_claim_carries_only_private_inventory_read_authority(self) -> None:
         payload = self.claim.to_payload()
         self.assertIs(payload["private_inventory_read_authorized"], True)
-        for field in _FALSE_AUTHORITY_FIELDS:
+        self.assertIs(payload["single_read_claimed"], True)
+        for field in AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS:
             self.assertIs(payload[field], False, f"{field} must be False in claim")
-
-    # --- canonical round trips ---
 
     def test_request_round_trip(self) -> None:
         self.assertEqual(
@@ -179,56 +173,45 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         )
 
     def test_noncanonical_bytes_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "req.json"
-            path.write_bytes(
-                serialize_av1_validation_v3_tier2_inventory_read_request(self.request)
-            )
-            self.assertEqual(
-                load_av1_validation_v3_tier2_inventory_read_request(path), self.request
-            )
-            path.write_text(
-                json.dumps(self.request.to_payload(), indent=2), encoding="utf-8"
-            )
-            with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
-                load_av1_validation_v3_tier2_inventory_read_request(path)
+        canonical = serialize_av1_validation_v3_tier2_inventory_read_request(
+            self.request
+        )
+        self.assertEqual(
+            deserialize_av1_validation_v3_tier2_inventory_read_request(canonical),
+            self.request,
+        )
+        noncanonical = json.dumps(self.request.to_payload(), indent=2).encode()
+        with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
+            deserialize_av1_validation_v3_tier2_inventory_read_request(noncanonical)
 
     def test_grant_noncanonical_bytes_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "grant.json"
-            path.write_bytes(
-                serialize_av1_validation_v3_tier2_inventory_read_grant(self.grant)
-            )
-            self.assertEqual(
-                load_av1_validation_v3_tier2_inventory_read_grant(path), self.grant
-            )
-            path.write_text(
-                json.dumps(self.grant.to_payload(), indent=2), encoding="utf-8"
-            )
-            with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
-                load_av1_validation_v3_tier2_inventory_read_grant(path)
+        canonical = serialize_av1_validation_v3_tier2_inventory_read_grant(self.grant)
+        self.assertEqual(
+            deserialize_av1_validation_v3_tier2_inventory_read_grant(canonical),
+            self.grant,
+        )
+        noncanonical = json.dumps(self.grant.to_payload(), indent=2).encode()
+        with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
+            deserialize_av1_validation_v3_tier2_inventory_read_grant(noncanonical)
 
     def test_claim_noncanonical_bytes_rejected(self) -> None:
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "claim.json"
-            path.write_bytes(
-                serialize_av1_validation_v3_tier2_inventory_read_claim(self.claim)
-            )
-            self.assertEqual(
-                load_av1_validation_v3_tier2_inventory_read_claim(path), self.claim
-            )
-            path.write_text(
-                json.dumps(self.claim.to_payload(), indent=2), encoding="utf-8"
-            )
-            with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
-                load_av1_validation_v3_tier2_inventory_read_claim(path)
-
-    # --- authority tamper rejection ---
+        canonical = serialize_av1_validation_v3_tier2_inventory_read_claim(self.claim)
+        self.assertEqual(
+            deserialize_av1_validation_v3_tier2_inventory_read_claim(canonical),
+            self.claim,
+        )
+        noncanonical = json.dumps(self.claim.to_payload(), indent=2).encode()
+        with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
+            deserialize_av1_validation_v3_tier2_inventory_read_claim(noncanonical)
 
     def test_parser_rejects_authority_flip_in_request(self) -> None:
         for field, value in (
             ("private_inventory_read_authorized", True),
+            ("single_read_requested", False),
             ("tier2_execution_authorized", True),
+            ("tier2_selection_execution_authorized", True),
+            ("qualification_key_read_authorized", True),
+            ("private_inventory_serialization_authorized", True),
             ("key_creation_authorized", True),
             ("media_library_read_authorized", True),
             ("qualification_execution_authorized", True),
@@ -244,6 +227,7 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
     def test_parser_rejects_authority_flip_in_grant(self) -> None:
         for field, value in (
             ("private_inventory_read_authorized", False),
+            ("single_read_authorized", False),
             ("tier1_execution_authorized", True),
             ("tier2_execution_authorized", True),
             ("derivation_authorized", True),
@@ -258,6 +242,7 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
     def test_parser_rejects_authority_flip_in_claim(self) -> None:
         for field, value in (
             ("private_inventory_read_authorized", False),
+            ("single_read_claimed", False),
             ("activation_authorized", True),
             ("publication_authorized", True),
         ):
@@ -266,8 +251,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                 payload[field] = value
                 with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
                     av1_validation_v3_tier2_inventory_read_claim_from_payload(payload)
-
-    # --- foreign plan / key / predicate / repo / config drift ---
 
     def test_foreign_plan_rejected_by_request_assertion(self) -> None:
         different_plan = build_av1_validation_v3_qualification_plan(
@@ -342,8 +325,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                 as_of=CLAIMED_AT,
             )
 
-    # --- chronology / expiry boundaries ---
-
     def test_request_fails_before_issue_and_at_expiry(self) -> None:
         for checked_at in ("2026-08-03T12:59:59Z", REQUEST_VALID_UNTIL):
             with self.subTest(checked_at=checked_at):
@@ -398,7 +379,35 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                 claimed_at=GRANT_VALID_UNTIL,
             )
 
-    # --- owner principal and timestamp formats ---
+    def test_claim_is_not_active_before_claimed_at(self) -> None:
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier2InventoryAuthorizationError, "not active"
+        ):
+            assert_av1_validation_v3_tier2_inventory_read_claim_active(
+                self.protocol,
+                self.plan,
+                self.request,
+                self.grant,
+                self.claim,
+                as_of="2026-08-03T14:59:59Z",
+            )
+
+    def test_request_requires_canonical_utc_timestamps(self) -> None:
+        for requested_at in (
+            "2026-08-03T13:00:00+00:00",
+            "2026-08-03T13:00:00.000000Z",
+            "20260803T130000Z",
+        ):
+            with self.subTest(requested_at=requested_at):
+                with self.assertRaisesRegex(
+                    AV1ValidationV3Tier2InventoryAuthorizationError, "canonical UTC"
+                ):
+                    build_av1_validation_v3_tier2_inventory_read_request(
+                        protocol=self.protocol,
+                        plan=self.plan,
+                        requested_at=requested_at,
+                        valid_until=REQUEST_VALID_UNTIL,
+                    )
 
     def test_grant_requires_canonical_utc_timestamps(self) -> None:
         for authorized_at in (
@@ -444,8 +453,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                         valid_until=GRANT_VALID_UNTIL,
                     )
 
-    # --- extra / missing keys and canonical bytes ---
-
     def test_extra_key_in_request_payload_rejected(self) -> None:
         payload = copy.deepcopy(self.request.to_payload())
         payload["extra"] = "field"
@@ -464,12 +471,7 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
             av1_validation_v3_tier2_inventory_read_claim_from_payload(payload)
 
-    # --- scope / projection drift detection ---
-
     def test_scope_digest_drift_detected(self) -> None:
-        # A request with a mismatched scope digest cannot be constructed validly
-        # (the dataclass validates its own digest), so tampering is caught at
-        # construction time — before the assertion is even reached.
         with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
             AV1ValidationV3Tier2InventoryReadRequest(
                 request_id=self.request.request_id,
@@ -490,8 +492,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
             )
 
     def test_projection_contract_digest_drift_detected(self) -> None:
-        # Same: a request with an altered projection digest fails its own
-        # content-addressed ID/payload check in __post_init__.
         with self.assertRaises(AV1ValidationV3Tier2InventoryAuthorizationError):
             AV1ValidationV3Tier2InventoryReadRequest(
                 request_id=self.request.request_id,
@@ -511,8 +511,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                 payload_sha256=self.request.payload_sha256,
             )
 
-    # --- privacy-safe summaries ---
-
     def test_request_owner_summary_is_privacy_safe(self) -> None:
         summary = self.request.to_owner_summary(
             protocol=self.protocol,
@@ -523,7 +521,7 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         self.assertNotIn("tier2_scope_digest", summary)
         self.assertNotIn("inventory_projection_contract_digest", summary)
         self.assertNotIn("candidate_count", summary)
-        for field in _FALSE_AUTHORITY_FIELDS:
+        for field in AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS:
             self.assertIs(summary[field], False)
 
     def test_grant_owner_summary_is_privacy_safe(self) -> None:
@@ -563,8 +561,6 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                 as_of=expired_at,
             )
 
-    # --- no bytes / key-material API ---
-
     def test_no_key_bytes_in_public_api(self) -> None:
         import inspect
         import mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization as mod
@@ -578,10 +574,9 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                     f"{name}() exposes a key-bytes parameter: {param_name}",
                 )
 
-    # --- static import / isolation ---
-
     def test_module_imports_without_db_or_runtime_deps(self) -> None:
         import importlib
+        import inspect
         import sys
 
         mod_name = (
@@ -589,7 +584,17 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         )
         if mod_name in sys.modules:
             del sys.modules[mod_name]
-        importlib.import_module(mod_name)
+        module = importlib.import_module(mod_name)
+        source = inspect.getsource(module)
+        for forbidden in (
+            "mediaforce.core.db",
+            "subprocess",
+            "secrets",
+            "pathlib",
+            ".read_bytes(",
+            "open(",
+        ):
+            self.assertNotIn(forbidden, source)
 
     def test_dataclass_types(self) -> None:
         self.assertIsInstance(self.request, AV1ValidationV3Tier2InventoryReadRequest)

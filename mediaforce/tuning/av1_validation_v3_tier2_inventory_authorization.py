@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
-from pathlib import Path
 import re
 from typing import Any, Mapping
 
@@ -12,8 +11,6 @@ from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
 from mediaforce.core.type_defs import object_dict
 from mediaforce.tuning.av1_cold_start import assert_av1_cold_start_public_payload_safe
 from mediaforce.tuning.av1_validation_v3 import (
-    AV1_VALIDATION_V3_EXPERIMENT_ID,
-    AV1_VALIDATION_V3_PROTOCOL_VERSION,
     AV1ValidationProtocolV3,
     av1_validation_v3_hmac_domain,
     av1_validation_v3_id,
@@ -53,12 +50,12 @@ _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _KEY_ID_RE = re.compile(r"av1vqkey3_[0-9a-f]{32}\Z")
 
-# All authority bits that must remain False in every artifact emitted by this module.
-# private_inventory_read_authorized is excluded: it flips True in grant and claim.
-_FALSE_AUTHORITY_FIELDS = (
+AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS = (
     "tier1_execution_authorized",
     "tier1_coverage_eligible",
     "tier2_execution_authorized",
+    "tier2_selection_execution_authorized",
+    "runtime_execution_authorized",
     "qualification_execution_authorized",
     "qualification_complete",
     "path_matrix_coverage_claimed",
@@ -71,12 +68,13 @@ _FALSE_AUTHORITY_FIELDS = (
     "activation_authorized",
     "public_bundle_activation_allowed",
     "media_library_read_authorized",
+    "media_read_authorized",
     "key_creation_authorized",
+    "qualification_key_read_authorized",
+    "private_inventory_serialization_authorized",
     "retry_authorized",
 )
 
-# Exclusion counter names tracked by the inventory adapter — frozen here so drift
-# in the adapter vocabulary invalidates previously issued authorizations.
 _EXCLUSION_COUNTER_VOCABULARY = tuple(
     sorted([
         "ambiguous_trait_count",
@@ -155,8 +153,12 @@ class AV1ValidationV3Tier2InventoryReadRequest:
                 raise AV1ValidationV3Tier2InventoryAuthorizationError(
                     f"AV1 v3 Tier 2 inventory read request {label} is invalid"
                 )
-        requested_at = _parse_timestamp(self.requested_at, "request timestamp")
-        valid_until = _parse_timestamp(self.valid_until, "request expiration")
+        requested_at = _parse_timestamp(
+            self.requested_at, "request timestamp", canonical=True
+        )
+        valid_until = _parse_timestamp(
+            self.valid_until, "request expiration", canonical=True
+        )
         if valid_until <= requested_at:
             raise AV1ValidationV3Tier2InventoryAuthorizationError(
                 "AV1 v3 Tier 2 inventory read request expiration is invalid"
@@ -183,6 +185,7 @@ class AV1ValidationV3Tier2InventoryReadRequest:
             "gate": "A0",
             "tier": "tier2",
             "request_state": "owner_action_required",
+            "single_read_requested": True,
             "private_inventory_read_authorized": False,
             "execution_requires_separate_owner_authorization": True,
             **_false_authority_fields(),
@@ -223,6 +226,7 @@ class AV1ValidationV3Tier2InventoryReadRequest:
             "gate": "A0",
             "tier": "tier2",
             "request_state": "owner_action_required",
+            "single_read_requested": True,
             "private_inventory_read_authorized": False,
             "execution_requires_separate_owner_authorization": True,
             **_false_authority_fields(),
@@ -289,6 +293,7 @@ class AV1ValidationV3Tier2InventoryReadGrant:
             "authority": AV1_VALIDATION_V3_TIER2_INVENTORY_READ_AUTHORITY,
             "gate": "A0",
             "tier": "tier2",
+            "single_read_authorized": True,
             "private_inventory_read_authorized": True,
             **_false_authority_fields(),
             "request_id": self.request_id,
@@ -320,6 +325,7 @@ class AV1ValidationV3Tier2InventoryReadGrant:
             "artifact_kind": "tier2_inventory_read_grant",
             "gate": "A0",
             "tier": "tier2",
+            "single_read_authorized": True,
             "private_inventory_read_authorized": True,
             "owner_principal": self.owner_principal,
             **_false_authority_fields(),
@@ -394,6 +400,7 @@ class AV1ValidationV3Tier2InventoryReadClaim:
             "authority": AV1_VALIDATION_V3_TIER2_INVENTORY_READ_AUTHORITY,
             "gate": "A0",
             "tier": "tier2",
+            "single_read_claimed": True,
             "private_inventory_read_authorized": True,
             **_false_authority_fields(),
             "plan_id": self.plan_id,
@@ -429,6 +436,7 @@ class AV1ValidationV3Tier2InventoryReadClaim:
             "artifact_kind": "tier2_inventory_read_claim",
             "gate": "A0",
             "tier": "tier2",
+            "single_read_claimed": True,
             "private_inventory_read_authorized": True,
             "owner_principal": self.owner_principal,
             **_false_authority_fields(),
@@ -491,21 +499,13 @@ def assert_av1_validation_v3_tier2_inventory_read_request_active(
     as_of: str,
 ) -> None:
     assert_av1_validation_v3_qualification_plan_active(protocol, plan, as_of=as_of)
-    expected_scope = _compute_tier2_scope_digest(protocol)
-    expected_projection = _compute_inventory_projection_contract_digest()
-    if (
-        request.protocol_id != protocol.protocol_id
-        or request.protocol_payload_sha256 != protocol.payload_sha256
-        or request.qualification_plan_id != plan.plan_id
-        or request.qualification_plan_payload_sha256 != plan.payload_sha256
-        or request.qualification_key_id != plan.qualification_key_id
-        or request.eligibility_predicate_sha256 != plan.eligibility_predicate_sha256
-        or request.repository_commit != plan.repository_commit
-        or request.repository_tree != plan.repository_tree
-        or request.config_sha256 != plan.config_sha256
-        or request.tier2_scope_digest != expected_scope
-        or request.inventory_projection_contract_digest != expected_projection
-    ):
+    expected_request = build_av1_validation_v3_tier2_inventory_read_request(
+        protocol=protocol,
+        plan=plan,
+        requested_at=request.requested_at,
+        valid_until=request.valid_until,
+    )
+    if request != expected_request:
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
             "AV1 v3 Tier 2 inventory read request is not bound to its plan"
         )
@@ -638,11 +638,16 @@ def assert_av1_validation_v3_tier2_inventory_read_claim_active(
             "AV1 v3 Tier 2 inventory read claim is not bound to its grant chain"
         )
     claimed_at = _parse_timestamp(claim.claimed_at, "claim timestamp")
+    checked_at = _parse_timestamp(as_of, "claim active-check timestamp")
     if claimed_at < _parse_timestamp(
         grant.authorized_at, "grant timestamp"
     ) or claimed_at >= _parse_timestamp(grant.valid_until, "grant expiration"):
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
             "AV1 v3 Tier 2 inventory read claim was not made within its grant window"
+        )
+    if checked_at < claimed_at:
+        raise AV1ValidationV3Tier2InventoryAuthorizationError(
+            "AV1 v3 Tier 2 inventory read claim is not active"
         )
 
 
@@ -664,13 +669,12 @@ def serialize_av1_validation_v3_tier2_inventory_read_claim(
     return canonical_json_bytes(claim.to_payload()) + b"\n"
 
 
-def load_av1_validation_v3_tier2_inventory_read_request(
-    path: Path,
+def deserialize_av1_validation_v3_tier2_inventory_read_request(
+    raw: bytes,
 ) -> AV1ValidationV3Tier2InventoryReadRequest:
-    raw = path.read_bytes()
     try:
         request = av1_validation_v3_tier2_inventory_read_request_from_payload(
-            object_dict(json.loads(raw.decode("utf-8")))
+            object_dict(json.loads(raw.decode()))
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
@@ -683,13 +687,12 @@ def load_av1_validation_v3_tier2_inventory_read_request(
     return request
 
 
-def load_av1_validation_v3_tier2_inventory_read_grant(
-    path: Path,
+def deserialize_av1_validation_v3_tier2_inventory_read_grant(
+    raw: bytes,
 ) -> AV1ValidationV3Tier2InventoryReadGrant:
-    raw = path.read_bytes()
     try:
         grant = av1_validation_v3_tier2_inventory_read_grant_from_payload(
-            object_dict(json.loads(raw.decode("utf-8")))
+            object_dict(json.loads(raw.decode()))
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
@@ -702,13 +705,12 @@ def load_av1_validation_v3_tier2_inventory_read_grant(
     return grant
 
 
-def load_av1_validation_v3_tier2_inventory_read_claim(
-    path: Path,
+def deserialize_av1_validation_v3_tier2_inventory_read_claim(
+    raw: bytes,
 ) -> AV1ValidationV3Tier2InventoryReadClaim:
-    raw = path.read_bytes()
     try:
         claim = av1_validation_v3_tier2_inventory_read_claim_from_payload(
-            object_dict(json.loads(raw.decode("utf-8")))
+            object_dict(json.loads(raw.decode()))
         )
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
@@ -736,9 +738,10 @@ def av1_validation_v3_tier2_inventory_read_request_from_payload(
             "gate",
             "tier",
             "request_state",
+            "single_read_requested",
             "private_inventory_read_authorized",
             "execution_requires_separate_owner_authorization",
-            *_FALSE_AUTHORITY_FIELDS,
+            *AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
             "protocol_id",
             "protocol_payload_sha256",
             "qualification_plan_id",
@@ -799,8 +802,9 @@ def av1_validation_v3_tier2_inventory_read_grant_from_payload(
             "authority",
             "gate",
             "tier",
+            "single_read_authorized",
             "private_inventory_read_authorized",
-            *_FALSE_AUTHORITY_FIELDS,
+            *AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
             "request_id",
             "request_payload_sha256",
             "owner_principal",
@@ -841,8 +845,9 @@ def av1_validation_v3_tier2_inventory_read_claim_from_payload(
             "authority",
             "gate",
             "tier",
+            "single_read_claimed",
             "private_inventory_read_authorized",
-            *_FALSE_AUTHORITY_FIELDS,
+            *AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
             "plan_id",
             "plan_payload_sha256",
             "request_id",
@@ -892,6 +897,7 @@ def _request_semantic(
         "gate": "A0",
         "tier": "tier2",
         "request_state": "owner_action_required",
+        "single_read_requested": True,
         "private_inventory_read_authorized": False,
         "execution_requires_separate_owner_authorization": True,
         **_false_authority_fields(),
@@ -925,6 +931,7 @@ def _grant_semantic(
         "authority": AV1_VALIDATION_V3_TIER2_INVENTORY_READ_AUTHORITY,
         "gate": "A0",
         "tier": "tier2",
+        "single_read_authorized": True,
         "private_inventory_read_authorized": True,
         **_false_authority_fields(),
         "request_id": request.request_id,
@@ -949,6 +956,7 @@ def _claim_semantic(
         "authority": AV1_VALIDATION_V3_TIER2_INVENTORY_READ_AUTHORITY,
         "gate": "A0",
         "tier": "tier2",
+        "single_read_claimed": True,
         "private_inventory_read_authorized": True,
         **_false_authority_fields(),
         "plan_id": plan.plan_id,
@@ -1006,7 +1014,10 @@ def _compute_inventory_projection_contract_digest() -> str:
 
 
 def _false_authority_fields() -> dict[str, bool]:
-    return dict.fromkeys(_FALSE_AUTHORITY_FIELDS, False)
+    return dict.fromkeys(
+        AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
+        False,
+    )
 
 
 def _require_request_constants(value: Mapping[str, Any]) -> None:
@@ -1018,6 +1029,7 @@ def _require_request_constants(value: Mapping[str, Any]) -> None:
         "gate": "A0",
         "tier": "tier2",
         "request_state": "owner_action_required",
+        "single_read_requested": True,
         "private_inventory_read_authorized": False,
         "execution_requires_separate_owner_authorization": True,
         **_false_authority_fields(),
@@ -1033,6 +1045,7 @@ def _require_grant_constants(value: Mapping[str, Any]) -> None:
         "authority": AV1_VALIDATION_V3_TIER2_INVENTORY_READ_AUTHORITY,
         "gate": "A0",
         "tier": "tier2",
+        "single_read_authorized": True,
         "private_inventory_read_authorized": True,
         **_false_authority_fields(),
     }
@@ -1047,6 +1060,7 @@ def _require_claim_constants(value: Mapping[str, Any]) -> None:
         "authority": AV1_VALIDATION_V3_TIER2_INVENTORY_READ_AUTHORITY,
         "gate": "A0",
         "tier": "tier2",
+        "single_read_claimed": True,
         "private_inventory_read_authorized": True,
         **_false_authority_fields(),
     }

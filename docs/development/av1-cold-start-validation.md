@@ -205,14 +205,18 @@ fingerprint-collision failure, `pipeline_ready` semantics, and the frozen
 exclusion-counter vocabulary.
 
 The request carries `private_inventory_read_authorized: False`. The grant binds
-the request digest, owner principal, and authorization window; it is the only
-artifact that sets `private_inventory_read_authorized: True`. The claim binds
+the request digest, owner principal, and authorization window; the grant and
+claim are the only artifacts that set `private_inventory_read_authorized: True`.
+The claim binds
 the full plan/request/grant chain and a `claimed_at` timestamp that must fall
-within the grant window. All other authority bits — Tier 1/2 execution, selection,
-media-library read, key creation/loading, qualification/Tier1/Tier2 execution,
-evidence, retry, derivation, holdout, publication, activation, and public-bundle
+within the grant window. The request, grant, and claim explicitly bind one read;
+durable single-consumption enforcement remains part of the later publisher
+slice. All other authority bits — Tier 1/2 execution, selection, runtime,
+raw-media read, key creation/loading, private-inventory serialization, evidence,
+retry, derivation, holdout, publication, activation, and public-bundle
 activation — remain constant `False` and are parser-validated. No key bytes are
-accepted or stored by any public API.
+accepted or stored by any public API, and this module performs no filesystem
+I/O.
 
 **This slice grants no live database or media read by itself.** A future
 enforcement/publisher slice must require a valid active claim before the adapter
