@@ -51,7 +51,9 @@ AV1_VALIDATION_V3_TIER1_RESIDUAL_VARIANT_IDS = tuple(
 )
 
 _EXPECTED_FRAME_COUNT = 288
-_EXPECTED_DECODED_BYTE_COUNT = 1280 * 720 * 3 * _EXPECTED_FRAME_COUNT
+AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT = (
+    1280 * 720 * 3 * _EXPECTED_FRAME_COUNT
+)
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _EXPECTED_OUTPUT_COLOR_ARGS = (
     "-color_primaries",
@@ -313,7 +315,7 @@ def _hash_outcome(
     elif not _SHA256_RE.fullmatch(content_sha256):
         failures.append("content_hash_invalid")
         content_sha256 = ""
-    if result.byte_count != _EXPECTED_DECODED_BYTE_COUNT:
+    if result.byte_count != AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT:
         failures.append("content_byte_count_mismatch")
     return _outcome(
         plan,

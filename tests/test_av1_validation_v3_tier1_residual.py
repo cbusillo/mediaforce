@@ -38,6 +38,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_residual_authorization import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_residual_operation import (
     AV1ValidationV3Tier1ResidualOperationError,
+    av1_validation_v3_tier1_residual_result_from_payload,
     build_av1_validation_v3_tier1_residual_claim,
     load_av1_validation_v3_tier1_residual_result,
     run_av1_validation_v3_tier1_residual_probe,
@@ -274,6 +275,33 @@ class AV1ValidationV3Tier1ResidualTests(unittest.TestCase):
             path = Path(directory) / "result.json"
             path.write_bytes(serialize_av1_validation_v3_tier1_residual_result(result))
             self.assertEqual(load_av1_validation_v3_tier1_residual_result(path), result)
+
+    def test_result_rejects_wrong_representation_binding(self) -> None:
+        payload = self._result().to_payload()
+        payload["variants"][0]["representation_id"] = "residual_wrong_representation"
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier1ResidualOperationError,
+            "representation binding",
+        ):
+            av1_validation_v3_tier1_residual_result_from_payload(payload)
+
+    def test_result_rejects_passed_hash_with_wrong_byte_count(self) -> None:
+        payload = self._result().to_payload()
+        payload["variants"][2]["content_byte_count"] = 796_262_399
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier1ResidualOperationError,
+            "hash record",
+        ):
+            av1_validation_v3_tier1_residual_result_from_payload(payload)
+
+    def test_result_rejects_partial_passed_probe_observation(self) -> None:
+        payload = self._result().to_payload()
+        payload["variants"][0]["observation"].pop("color_range")
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier1ResidualOperationError,
+            "observation fields",
+        ):
+            av1_validation_v3_tier1_residual_result_from_payload(payload)
 
     def test_owner_publication_replays_and_claim_is_single_use(self) -> None:
         result = self._result()

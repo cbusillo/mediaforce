@@ -20,7 +20,9 @@ from mediaforce.tuning.av1_validation_v3_tier1_residual_authorization import (
     assert_av1_validation_v3_tier1_residual_grant_active,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_residual_probe import (
+    AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT,
     AV1_VALIDATION_V3_TIER1_RESIDUAL_MATRIX_SHA256,
+    AV1_VALIDATION_V3_TIER1_RESIDUAL_REPRESENTATION_ID,
     AV1_VALIDATION_V3_TIER1_RESIDUAL_VARIANT_IDS,
     AV1ValidationV3Tier1ResidualExecutionContext,
     AV1ValidationV3Tier1ResidualVariantOutcome,
@@ -56,6 +58,11 @@ _OBSERVATION_KEYS = frozenset({
     "nb_read_frames",
 })
 _MAX_COMMAND_RECORDS = 16
+_STREAM_OBSERVATION_KEYS = frozenset(_OBSERVATION_KEYS)
+_FRAME_OBSERVATION_KEYS = _STREAM_OBSERVATION_KEYS - {
+    "r_frame_rate",
+    "nb_read_frames",
+}
 
 
 class AV1ValidationV3Tier1ResidualOperationError(ValueError):
@@ -155,6 +162,10 @@ class AV1ValidationV3Tier1ResidualVariantRecord:
             raise AV1ValidationV3Tier1ResidualOperationError(
                 "AV1 v3 Tier 1 residual result variant is invalid"
             )
+        if self.representation_id != AV1_VALIDATION_V3_TIER1_RESIDUAL_REPRESENTATION_ID:
+            raise AV1ValidationV3Tier1ResidualOperationError(
+                "AV1 v3 Tier 1 residual representation binding is invalid"
+            )
         if not _SHA256_RE.fullmatch(self.command_plan_sha256):
             raise AV1ValidationV3Tier1ResidualOperationError(
                 "AV1 v3 Tier 1 residual result command digest is invalid"
@@ -168,13 +179,35 @@ class AV1ValidationV3Tier1ResidualVariantRecord:
                 "AV1 v3 Tier 1 residual content byte count is invalid"
             )
         if self.surface_id == "residual_probe_hash":
-            if self.observation or (self.passed and not self.content_sha256):
+            if self.observation or (
+                self.passed
+                and (
+                    not self.content_sha256
+                    or self.content_byte_count
+                    != AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT
+                )
+            ):
                 raise AV1ValidationV3Tier1ResidualOperationError(
                     "AV1 v3 Tier 1 residual hash record is invalid"
                 )
         elif self.content_sha256 or self.content_byte_count:
             raise AV1ValidationV3Tier1ResidualOperationError(
                 "AV1 v3 Tier 1 residual probe record hash fields are invalid"
+            )
+        expected_observation_keys = (
+            _STREAM_OBSERVATION_KEYS
+            if self.surface_id == "residual_probe_stream"
+            else _FRAME_OBSERVATION_KEYS
+            if self.surface_id == "residual_probe_frame"
+            else frozenset()
+        )
+        if self.observation and set(self.observation) != expected_observation_keys:
+            raise AV1ValidationV3Tier1ResidualOperationError(
+                "AV1 v3 Tier 1 residual observation fields are incomplete"
+            )
+        if self.passed and self.surface_id != "residual_probe_hash" and not self.observation:
+            raise AV1ValidationV3Tier1ResidualOperationError(
+                "AV1 v3 Tier 1 residual passed probe observation is missing"
             )
         if not set(self.observation) <= _OBSERVATION_KEYS:
             raise AV1ValidationV3Tier1ResidualOperationError(
