@@ -1430,3 +1430,80 @@ The runtime remains paused until the private selection mapping and every
 candidate lock have been independently reviewed and the bound execution
 authorization has been created. This change does not start a cohort, discover
 media, generate review clips, or run a real-media experiment.
+
+## V3 Tier 1 Gate A0 artifact publication
+
+`mediaforce/tuning/av1_validation_v3_tier1_publication.py` implements
+non-executing artifact publication for Gate A0 of the AV1 v3 Tier 1 cold-start
+qualification protocol. It produces two owner-only artifacts inside one
+request-addressed directory under the caller-supplied output root:
+
+- `qualification-plan.json` — the frozen `AV1ValidationV3QualificationPlan`
+  that binds protocol, key ID, repository identity, config digest, toolchain
+  digest, fixture matrix digest, and eligibility predicate digest.
+- `tier1-authorization-request.json` — the corresponding
+  `AV1ValidationV3Tier1AuthorizationRequest` that binds the plan and adds a
+  request timestamp and validity window.
+
+Neither file grants execution authority. The directory name is
+`av1-v3-tier1-preparation-<request_id>`, making the output content-addressed.
+
+### Security properties
+
+- The output root is absolute, mode `0o700`, owner-owned, and neither equal to,
+  below, nor above the repository. Every lexical path component is opened with
+  no-follow semantics; a symlink anywhere in the path is rejected.
+- Each artifact is written through a randomly named staging directory
+  (`secrets.token_hex(12)`) and promoted to its final name with
+  `rename_exclusive`, which fails atomically if a destination already exists.
+- Staging and final directories re-verify type, owner, mode, and
+  `(st_dev, st_ino)`. Artifact members additionally re-verify `st_nlink` and
+  `st_size` to detect TOCTOU races.
+- A second toolchain fingerprint is computed immediately before publication to
+  detect toolchain drift between plan construction and write.
+- The output root must not overlap the repository root (no containment in
+  either direction).
+
+### Idempotency
+
+If the final directory already exists,
+`publish_av1_validation_v3_tier1_preparation` reads both stored files and
+compares them byte-for-byte against the freshly computed content. An exact
+match returns `created=False`; a conflict, incomplete pair, unexpected member,
+unsafe mode, or unsafe link fails closed and is never overwritten or repaired.
+
+### CLI usage
+
+```bash
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
+  publish-tier1-preparation \
+  docs/validation/av1-cold-start-preregistration-v3.json \
+  --qualification-key-id av1vqkey3_<32 hex chars> \
+  --repository-commit <exact clean commit> \
+  --repository-tree <exact clean tree> \
+  --config-artifact /path/to/exact-tier1-config-artifact \
+  --ffmpeg /path/to/ffmpeg \
+  --ffprobe /path/to/ffprobe \
+  --output-root /path/to/private/artifacts \
+  --frozen-at YYYY-MM-DDTHH:MM:SSZ \
+  --plan-valid-until YYYY-MM-DDTHH:MM:SSZ \
+  --requested-at YYYY-MM-DDTHH:MM:SSZ \
+  --request-valid-until YYYY-MM-DDTHH:MM:SSZ \
+  --json
+```
+
+The owner-supplied repository `(commit, tree)` is cross-checked against the
+runner's clean live identity before any artifact is written. The config
+artifact is read once as opaque exact bytes; this action does not call the
+normal config loader or merge includes and runtime settings. The same exact
+bytes must be supplied to the later separately authorized execution boundary.
+The summary contains no machine-local paths and reports Gate A0, Tier 1,
+created/no-op state, and every execution, media, Tier 2, evidence, empirical,
+derivation, holdout, public-publication, and activation authority as false.
+
+The command remains on the owner-only preregistration runner rather than the
+normal `mediaforce` operator CLI. It creates no grant, takes no Mediaforce
+runtime lock, opens no database or private inventory, and does not execute
+`ffmpeg` or `ffprobe`; the binaries are only inspected and hashed for the
+machine-local toolchain binding. Grant issuance and fixture execution remain
+separate later owner decisions.
