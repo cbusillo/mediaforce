@@ -181,6 +181,44 @@ runtime state are not stored, hashed, opened, or published.
 and stream-budget projection is candidate-feasible; it makes no claim about
 current runtime or tool availability and grants no execution authority.
 
+The third bounded `#305` slice adds
+`mediaforce/tuning/av1_validation_v3_tier2_inventory_authorization.py`, a
+pure owner-only private inventory read authorization contract. It defines three
+frozen/slots dataclasses — request, grant, and claim — plus one exception type
+(`AV1ValidationV3Tier2InventoryAuthorizationError`). All artifacts carry
+content-addressed IDs and payload digests computed with `av1_validation_v3_id`
+and `stable_json_hash`.
+
+The request binds the exact protocol and qualification plan IDs/digests, the
+plan's `qualification_key_id` and `eligibility_predicate_sha256`, repository
+commit/tree, config SHA, a recomputed frozen Tier 2 scope/ranking digest, and a
+recomputed inventory-projection-contract digest; `requested_at` and `valid_until`
+must fall within the plan window. The scope digest covers the exact Tier 2
+strata, candidate powered cells excluded by the adapter, total slot count and
+per-stratum slot expectations, and the HMAC ranking algorithm and domain already
+frozen by the selection contract. The projection-contract digest is a pure
+constant that binds the adapter's eligibility rules: fingerprint domain, strict
+40-hex identity contract, dominant-cohort tie-break rule, required balanced
+intent, exact Tier 2 stratum, no powered overlap, complete quality contract,
+feasible stream budget, no candidate cap, duplicate-identity drop-all semantics,
+fingerprint-collision failure, `pipeline_ready` semantics, and the frozen
+exclusion-counter vocabulary.
+
+The request carries `private_inventory_read_authorized: False`. The grant binds
+the request digest, owner principal, and authorization window; it is the only
+artifact that sets `private_inventory_read_authorized: True`. The claim binds
+the full plan/request/grant chain and a `claimed_at` timestamp that must fall
+within the grant window. All other authority bits — Tier 1/2 execution, selection,
+media-library read, key creation/loading, qualification/Tier1/Tier2 execution,
+evidence, retry, derivation, holdout, publication, activation, and public-bundle
+activation — remain constant `False` and are parser-validated. No key bytes are
+accepted or stored by any public API.
+
+**This slice grants no live database or media read by itself.** A future
+enforcement/publisher slice must require a valid active claim before the adapter
+can run. Owner authorization remains a later explicit action separate from
+constructing the claim.
+
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a
 future real qualification plan to the exact protocol, commit/tree,
