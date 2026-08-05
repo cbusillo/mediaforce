@@ -230,6 +230,29 @@ synthetic matrix, and publishes the Gate A0 coverage receipt. Neither action
 reads private inventory or media, starts Tier 2, creates empirical evidence, or
 confers derivation, holdout, publication, or activation authority.
 
+The consumed Tier 1 cohort showed that generation, decode, byte-count, content
+hashing, and cleanup completed while the FFV1/NUT intermediate did not expose
+the expected BT.709 color description. The successor compatibility probe is a
+separate, non-evidentiary diagnostic contract. Its frozen matrix at
+`docs/validation/av1-tier1-compat-probe-matrix-v1.json` creates one two-frame
+public flat field in three representations: baseline FFV1/NUT, explicit-color
+FFV1/NUT, and explicit-color FFV1/Matroska. It records stream-level and
+first-frame `ffprobe` observations for each representation. It does not repeat
+content hashing, rerun the consumed cohort, or qualify any candidate.
+
+The compatibility workflow uses structurally disjoint request, grant, claim,
+and result schemas and artifact directories. `publish-tier1-compat-request`
+binds the diagnostic matrix to an active exact-machine qualification plan but
+confers no execution authority. `authorize-tier1-compat-probe` grants only the
+bounded public-synthetic diagnostic. `run-tier1-compat-probe` acquires the same
+fresh pause lease, durably consumes one claim before the first command, executes
+the three representations once, removes tracked outputs, and publishes six
+observations plus bounded command metadata. A retained claim forbids retry.
+Every compatibility artifact declares Tier 1/Tier 2 qualification, evidence,
+derivation, holdout, publication, and activation authority false. Measured
+results require a separate reviewed matrix successor before qualification can
+continue.
+
 `mediaforce/tuning/av1_validation_v3_tier1_preparation.py` defines the pure,
 non-executing preparation inputs for Tier 1. It freezes a machine-checkable
 eligibility predicate, domain-separated identity for the exact config bytes,

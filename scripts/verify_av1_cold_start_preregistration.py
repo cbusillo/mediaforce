@@ -2557,6 +2557,31 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
 from mediaforce.tuning.av1_validation_v3_tier1_coverage import (
     AV1ValidationV3Tier1CoverageError,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_compat_authorization import (
+    AV1ValidationV3Tier1CompatAuthorizationError,
+    AV1ValidationV3Tier1CompatRequest,
+    assert_av1_validation_v3_tier1_compat_request_active,
+    build_av1_validation_v3_tier1_compat_grant,
+    build_av1_validation_v3_tier1_compat_request,
+    load_av1_validation_v3_tier1_compat_request,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_compat_operation import (
+    AV1ValidationV3Tier1CompatOperationError,
+    build_av1_validation_v3_tier1_compat_claim,
+    run_av1_validation_v3_tier1_compat_probe,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_compat_probe import (
+    AV1_VALIDATION_V3_TIER1_COMPAT_MATRIX_SHA256,
+    AV1ValidationV3Tier1CompatProbeError,
+    load_av1_validation_v3_tier1_compat_probe_matrix,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_compat_publication import (
+    load_published_av1_validation_v3_tier1_compat_grant,
+    publish_av1_validation_v3_tier1_compat_claim,
+    publish_av1_validation_v3_tier1_compat_grant,
+    publish_av1_validation_v3_tier1_compat_request,
+    publish_av1_validation_v3_tier1_compat_result,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_diagnostics import (
     AV1ValidationV3Tier1DiagnosticsError,
     build_av1_validation_v3_tier1_run_diagnostics,
@@ -3012,6 +3037,69 @@ def build_parser() -> argparse.ArgumentParser:
     run_tier1.add_argument("--fixture-output-root", type=Path, required=True)
     run_tier1.add_argument("--json", action="store_true", dest="json_output")
 
+    publish_compat = actions.add_parser(
+        "publish-tier1-compat-request",
+        help="Publish one non-executing AV1 v3 Tier 1 compatibility-probe request",
+    )
+    publish_compat.add_argument("protocol", type=Path)
+    publish_compat.add_argument("--plan-artifact", type=Path, required=True)
+    publish_compat.add_argument("--config-artifact", type=Path, required=True)
+    publish_compat.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    publish_compat.add_argument(
+        "--probe-matrix",
+        type=Path,
+        default=REPOSITORY_ROOT / "docs/validation/av1-tier1-compat-probe-matrix-v1.json",
+    )
+    publish_compat.add_argument("--ffmpeg", type=Path, required=True)
+    publish_compat.add_argument("--ffprobe", type=Path, required=True)
+    publish_compat.add_argument("--requested-at", required=True)
+    publish_compat.add_argument("--request-valid-until", required=True)
+    publish_compat.add_argument("--output-root", type=Path, required=True)
+    publish_compat.add_argument("--json", action="store_true", dest="json_output")
+
+    authorize_compat = actions.add_parser(
+        "authorize-tier1-compat-probe",
+        help="Publish one owner-only AV1 v3 Tier 1 compatibility-probe grant",
+    )
+    authorize_compat.add_argument("protocol", type=Path)
+    authorize_compat.add_argument("--plan-artifact", type=Path, required=True)
+    authorize_compat.add_argument("--request-artifact", type=Path, required=True)
+    authorize_compat.add_argument("--config-artifact", type=Path, required=True)
+    authorize_compat.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    authorize_compat.add_argument(
+        "--probe-matrix",
+        type=Path,
+        default=REPOSITORY_ROOT / "docs/validation/av1-tier1-compat-probe-matrix-v1.json",
+    )
+    authorize_compat.add_argument("--ffmpeg", type=Path, required=True)
+    authorize_compat.add_argument("--ffprobe", type=Path, required=True)
+    authorize_compat.add_argument("--owner-principal", required=True)
+    authorize_compat.add_argument("--authorized-at", required=True)
+    authorize_compat.add_argument("--valid-until", required=True)
+    authorize_compat.add_argument("--output-root", type=Path, required=True)
+    authorize_compat.add_argument("--json", action="store_true", dest="json_output")
+
+    run_compat = actions.add_parser(
+        "run-tier1-compat-probe",
+        help="Run one claimed non-evidentiary AV1 v3 Tier 1 compatibility probe",
+    )
+    run_compat.add_argument("protocol", type=Path)
+    run_compat.add_argument("--plan-artifact", type=Path, required=True)
+    run_compat.add_argument("--request-artifact", type=Path, required=True)
+    run_compat.add_argument("--config-artifact", type=Path, required=True)
+    run_compat.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    run_compat.add_argument(
+        "--probe-matrix",
+        type=Path,
+        default=REPOSITORY_ROOT / "docs/validation/av1-tier1-compat-probe-matrix-v1.json",
+    )
+    run_compat.add_argument("--ffmpeg", type=Path, required=True)
+    run_compat.add_argument("--ffprobe", type=Path, required=True)
+    run_compat.add_argument("--grant-root", type=Path, required=True)
+    run_compat.add_argument("--execution-output-root", type=Path, required=True)
+    run_compat.add_argument("--variant-output-root", type=Path, required=True)
+    run_compat.add_argument("--json", action="store_true", dest="json_output")
+
     return parser
 
 
@@ -3097,6 +3185,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.action == "run-tier1-synthetic-qualification":
             return _run_tier1_synthetic_qualification(args)
+
+        if args.action == "publish-tier1-compat-request":
+            return _run_publish_tier1_compat_request(args)
+
+        if args.action == "authorize-tier1-compat-probe":
+            return _run_authorize_tier1_compat_probe(args)
+
+        if args.action == "run-tier1-compat-probe":
+            return _run_tier1_compat_probe(args)
 
         manifest = _load_manifest(args.manifest)
         if isinstance(manifest, AV1ValidationProtocolV3):
@@ -3421,6 +3518,339 @@ def _run_tier1_synthetic_qualification(args: argparse.Namespace) -> int:
     return 0 if operation.passed else 2
 
 
+def _run_publish_tier1_compat_request(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
+    _assert_canonical_preregistration_runner()
+    try:
+        (
+            protocol,
+            plan,
+            _,
+            _,
+            _,
+        ) = _load_tier1_compat_base_inputs(args, as_of=args.requested_at)
+        request = build_av1_validation_v3_tier1_compat_request(
+            protocol=protocol,
+            plan=plan,
+            probe_matrix_sha256=AV1_VALIDATION_V3_TIER1_COMPAT_MATRIX_SHA256,
+            requested_at=args.requested_at,
+            valid_until=args.request_valid_until,
+        )
+        result = publish_av1_validation_v3_tier1_compat_request(
+            request=request,
+            output_root=args.output_root,
+            repository_root=REPOSITORY_ROOT,
+        )
+    except OSError:
+        return _print_tier1_compat_failure(
+            "input_unreadable",
+            claimed=False,
+            json_output=args.json_output,
+        )
+    except AV1ValidationV3Tier1PublicationError as exc:
+        return _print_tier1_compat_failure(
+            exc.reason_code,
+            claimed=False,
+            json_output=args.json_output,
+        )
+    except (
+        AV1ValidationDerivationError,
+        AV1ValidationV3Error,
+        AV1ValidationV3QualificationError,
+        AV1ValidationV3Tier1CompatAuthorizationError,
+        AV1ValidationV3Tier1CompatOperationError,
+        AV1ValidationV3Tier1CompatProbeError,
+        AV1ValidationV3Tier1ConfigSnapshotError,
+        AV1ValidationV3Tier1RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return _print_tier1_compat_failure(
+            "input_invalid",
+            claimed=False,
+            json_output=args.json_output,
+        )
+    _assert_preregistration_bootstrap_authority()
+    _print_partition_payload(
+        result.to_summary(artifact_kind="compat_request"),
+        json_output=args.json_output,
+    )
+    return 0
+
+
+def _run_authorize_tier1_compat_probe(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
+    _assert_canonical_preregistration_runner()
+    try:
+        (
+            protocol,
+            plan,
+            request,
+            _,
+            _,
+            _,
+        ) = _load_tier1_compat_execution_inputs(args, as_of=args.authorized_at)
+        grant = build_av1_validation_v3_tier1_compat_grant(
+            protocol=protocol,
+            plan=plan,
+            request=request,
+            owner_principal=args.owner_principal,
+            authorized_at=args.authorized_at,
+            valid_until=args.valid_until,
+        )
+        result = publish_av1_validation_v3_tier1_compat_grant(
+            grant=grant,
+            output_root=args.output_root,
+            repository_root=REPOSITORY_ROOT,
+        )
+    except OSError:
+        return _print_tier1_compat_failure(
+            "input_unreadable",
+            claimed=False,
+            json_output=args.json_output,
+        )
+    except AV1ValidationV3Tier1PublicationError as exc:
+        return _print_tier1_compat_failure(
+            exc.reason_code,
+            claimed=False,
+            json_output=args.json_output,
+        )
+    except (
+        AV1ValidationDerivationError,
+        AV1ValidationV3Error,
+        AV1ValidationV3QualificationError,
+        AV1ValidationV3Tier1CompatAuthorizationError,
+        AV1ValidationV3Tier1CompatOperationError,
+        AV1ValidationV3Tier1CompatProbeError,
+        AV1ValidationV3Tier1ConfigSnapshotError,
+        AV1ValidationV3Tier1RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        return _print_tier1_compat_failure(
+            "input_invalid",
+            claimed=False,
+            json_output=args.json_output,
+        )
+    _assert_preregistration_bootstrap_authority()
+    _print_partition_payload(
+        result.to_summary(artifact_kind="compat_grant"),
+        json_output=args.json_output,
+    )
+    return 0
+
+
+def _run_tier1_compat_probe(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
+    _assert_canonical_preregistration_runner()
+    claim_created = False
+    claim_exists = False
+    claimed_at = _now_iso()
+    try:
+        (
+            protocol,
+            plan,
+            request,
+            config,
+            config_snapshot_bytes,
+            toolchain,
+        ) = _load_tier1_compat_execution_inputs(args, as_of=claimed_at)
+        matrix_payload = load_av1_validation_v3_tier1_compat_probe_matrix(
+            args.probe_matrix
+        )
+        grant = load_published_av1_validation_v3_tier1_compat_grant(
+            output_root=args.grant_root,
+            repository_root=REPOSITORY_ROOT,
+            request_id=request.request_id,
+        )
+        claim = build_av1_validation_v3_tier1_compat_claim(
+            protocol=protocol,
+            plan=plan,
+            request=request,
+            grant=grant,
+            claimed_at=claimed_at,
+        )
+
+        def claim_execution() -> str:
+            nonlocal claim_created, claim_exists
+            try:
+                claim_result = publish_av1_validation_v3_tier1_compat_claim(
+                    claim=claim,
+                    output_root=args.execution_output_root,
+                    repository_root=REPOSITORY_ROOT,
+                )
+            except AV1ValidationV3Tier1PublicationError as exc:
+                if exc.reason_code in {
+                    "execution_already_claimed",
+                    "publication_cleanup_failed",
+                }:
+                    claim_exists = True
+                raise
+            claim_exists = True
+            claim_created = claim_result.created
+            if not claim_result.created:
+                raise AV1ValidationV3Tier1CompatOperationError(
+                    "AV1 v3 Tier 1 compatibility-probe execution was already claimed"
+                )
+            return claim.claim_id
+
+        operation = run_av1_validation_v3_tier1_compat_probe(
+            config,
+            protocol=protocol,
+            plan=plan,
+            request=request,
+            grant=grant,
+            claim=claim,
+            config_snapshot_bytes=config_snapshot_bytes,
+            matrix=matrix_payload,
+            output_directory=args.variant_output_root,
+            repository_root=REPOSITORY_ROOT,
+            toolchain=toolchain,
+            claim_execution=claim_execution,
+        )
+        result_publication = publish_av1_validation_v3_tier1_compat_result(
+            result=operation,
+            output_root=args.execution_output_root,
+            repository_root=REPOSITORY_ROOT,
+        )
+    except OSError:
+        return _print_tier1_compat_failure(
+            "execution_failed" if claim_created else "input_unreadable",
+            claimed=claim_exists or claim_created,
+            json_output=args.json_output,
+        )
+    except AV1ValidationV3Tier1PublicationError as exc:
+        return _print_tier1_compat_failure(
+            exc.reason_code,
+            claimed=claim_exists,
+            json_output=args.json_output,
+        )
+    except (
+        AV1ValidationDerivationError,
+        AV1ValidationV3Error,
+        AV1ValidationV3QualificationError,
+        AV1ValidationV3Tier1CompatAuthorizationError,
+        AV1ValidationV3Tier1CompatOperationError,
+        AV1ValidationV3Tier1CompatProbeError,
+        AV1ValidationV3Tier1ConfigSnapshotError,
+        AV1ValidationV3Tier1RuntimeError,
+        MediaforceRuntimeBusyError,
+        MediaforceRuntimeLockOwnershipError,
+        TypeError,
+        ValueError,
+    ):
+        return _print_tier1_compat_failure(
+            (
+                "execution_already_claimed"
+                if claim_exists and not claim_created
+                else "execution_failed"
+                if claim_created
+                else "input_invalid"
+            ),
+            claimed=claim_exists,
+            json_output=args.json_output,
+        )
+    _assert_preregistration_bootstrap_authority()
+    payload = {
+        **operation.to_public_summary(),
+        **result_publication.to_summary(artifact_kind="compat_result"),
+        "claim_id": claim.claim_id,
+        "grant_id": grant.grant_id,
+        "single_execution_claimed": True,
+        "retry_authorized": False,
+    }
+    _print_partition_payload(payload, json_output=args.json_output)
+    return 0
+
+
+def _load_tier1_compat_base_inputs(
+    args: argparse.Namespace,
+    *,
+    as_of: str,
+) -> tuple[
+    AV1ValidationProtocolV3,
+    AV1ValidationV3QualificationPlan,
+    MediaforceConfig,
+    bytes,
+    AV1ValidationV3Tier1ToolchainBinding,
+]:
+    repository_commit, repository_tree = _live_repository_identity()
+    protocol = load_av1_validation_protocol_v3(args.protocol)
+    assert_preregistered_av1_validation_protocol_v3(protocol)
+    plan = load_av1_validation_v3_qualification_plan(args.plan_artifact)
+    config_snapshot_bytes = args.config_artifact.read_bytes()
+    validate_av1_validation_v3_tier1_config_snapshot(config_snapshot_bytes)
+    config = load_config(args.config)
+    assert_av1_validation_v3_tier1_config_snapshot_matches(
+        config,
+        config_snapshot_bytes,
+    )
+    toolchain = build_av1_validation_v3_tier1_toolchain_binding(
+        ffmpeg_path=args.ffmpeg,
+        ffprobe_path=args.ffprobe,
+    )
+    load_av1_validation_v3_tier1_compat_probe_matrix(args.probe_matrix)
+    if (
+        plan.repository_commit != repository_commit
+        or plan.repository_tree != repository_tree
+        or plan.config_sha256
+        != av1_validation_v3_tier1_config_snapshot_sha256(config_snapshot_bytes)
+        or plan.toolchain_sha256 != toolchain.payload_sha256
+    ):
+        raise AV1ValidationV3Tier1CompatOperationError(
+            "AV1 v3 Tier 1 compatibility-probe inputs drifted after preparation"
+        )
+    assert_av1_validation_v3_qualification_plan_active(
+        protocol,
+        plan,
+        as_of=as_of,
+    )
+    return protocol, plan, config, config_snapshot_bytes, toolchain
+
+
+def _load_tier1_compat_execution_inputs(
+    args: argparse.Namespace,
+    *,
+    as_of: str,
+) -> tuple[
+    AV1ValidationProtocolV3,
+    AV1ValidationV3QualificationPlan,
+    AV1ValidationV3Tier1CompatRequest,
+    MediaforceConfig,
+    bytes,
+    AV1ValidationV3Tier1ToolchainBinding,
+]:
+    protocol, plan, config, config_snapshot_bytes, toolchain = (
+        _load_tier1_compat_base_inputs(args, as_of=as_of)
+    )
+    request = load_av1_validation_v3_tier1_compat_request(args.request_artifact)
+    if (
+        request.repository_commit != plan.repository_commit
+        or request.repository_tree != plan.repository_tree
+        or request.config_sha256 != plan.config_sha256
+        or request.toolchain_sha256 != plan.toolchain_sha256
+        or request.probe_matrix_sha256
+        != AV1_VALIDATION_V3_TIER1_COMPAT_MATRIX_SHA256
+    ):
+        raise AV1ValidationV3Tier1CompatOperationError(
+            "AV1 v3 Tier 1 compatibility-probe request inputs drifted after publication"
+        )
+    assert_av1_validation_v3_tier1_compat_request_active(
+        protocol,
+        plan,
+        request,
+        as_of=as_of,
+    )
+    return (
+        protocol,
+        plan,
+        request,
+        config,
+        config_snapshot_bytes,
+        toolchain,
+    )
+
+
 def _load_tier1_execution_inputs(
     args: argparse.Namespace,
     *,
@@ -3611,6 +4041,48 @@ def _print_tier1_execution_failure(
     else:
         print(
             f"AV1 v3 Tier 1 synthetic execution failed: {reason_code}",
+            file=sys.stderr,
+        )
+    return 1
+
+
+def _print_tier1_compat_failure(
+    reason_code: str,
+    *,
+    claimed: bool,
+    json_output: bool,
+) -> int:
+    payload = {
+        "executed": False,
+        "published": False,
+        "failure_reason": reason_code,
+        "gate": "A0",
+        "tier": "none",
+        "diagnostic_only": True,
+        "single_execution_claimed": claimed,
+        "retry_authorized": False,
+        "compat_probe_execution_authorized": False,
+        "private_inventory_read_authorized": False,
+        "media_read_authorized": False,
+        "tier1_execution_authorized": False,
+        "tier2_execution_authorized": False,
+        "runtime_execution_authorized": False,
+        "qualification_execution_authorized": False,
+        "evidence_creation_authorized": False,
+        "evidence_eligible": False,
+        "empirical_authority_conferred": False,
+        "derivation_authorized": False,
+        "holdout_authorized": False,
+        "publication_authorized": False,
+        "activation_authorized": False,
+    }
+    assert_av1_cold_start_public_payload_safe(payload)
+    _assert_preregistration_bootstrap_authority()
+    if json_output:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        print(
+            f"AV1 v3 Tier 1 compatibility probe failed: {reason_code}",
             file=sys.stderr,
         )
     return 1
