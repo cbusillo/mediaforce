@@ -175,16 +175,21 @@ output flags. Its provenance binds the diagnostic compatibility result that
 showed both NUT variants dropping all four color fields while the selected
 Matroska representation preserved them at stream and first-frame surfaces.
 
-Matrix v3 authoring is non-executing. A separate residual public-synthetic
-diagnostic must still verify all four graphs at 288 frames, including frame
-rate, counted frames, and exact decoded byte count, before any owner may grant a
-Tier 1 matrix-v3 run. Until that contract passes, qualification execution and
-all downstream evidence, derivation, holdout, publication, and activation
-authority remain false.
+Matrix v3 authoring is non-executing. The separate residual public-synthetic
+diagnostic is frozen at
+`docs/validation/av1-tier1-residual-probe-matrix-v1.json`. It copies the four
+matrix-v3 Lavfi fixtures byte-for-byte and in the same order, uses exactly the
+selected explicit-color FFV1/Matroska representation, and verifies each
+288-frame fixture through stream probing, first-frame probing, and streamed
+decoded rawvideo SHA-256 byte counting. The residual matrix is
+diagnostic-only, evidence-ineligible, and binds the matrix-v3 digest in
+`informed_by`; it does not create Tier 1 coverage or qualify any candidate by
+itself.
 
 `mediaforce/tuning/av1_validation_v3_tier1_executor.py` is the isolated
-contract-only matrix-to-command and output-verification boundary. It loads only the frozen v3
-matrix, builds argv lists without invoking a shell, validates `ffprobe` output,
+contract-only matrix-to-command and output-verification boundary. It loads only
+the frozen v3 matrix, builds argv lists without invoking a shell, validates
+`ffprobe` output,
 and accepts a streaming SHA-256 result from a dependency-injected command
 executor. It rederives every executable command from the frozen matrix, proves
 the active Tier 1 request/grant chain before each command boundary, rejects an
@@ -268,6 +273,20 @@ Every compatibility artifact declares Tier 1/Tier 2 qualification, evidence,
 derivation, holdout, publication, and activation authority false. Measured
 results require a separate reviewed matrix successor before qualification can
 continue.
+
+The residual workflow mirrors the compatibility workflow with distinct request,
+grant, claim, result schemas and artifact directories.
+`publish-tier1-residual-request` binds the residual matrix to the active
+exact-machine qualification plan and confers no execution authority.
+`authorize-tier1-residual-probe` grants only the bounded public-synthetic
+residual diagnostic. `run-tier1-residual-probe` acquires the fresh pause lease,
+publishes one durable no-retry claim, executes the four fixture plans once in
+canonical order, and publishes exactly twelve variant records in stream,
+first-frame, then hash order for each fixture. The runtime allowlist contains
+twelve buffered commands and four streaming hash commands, all derived from the
+frozen residual matrix. Every residual artifact declares Tier 1/Tier 2
+qualification, coverage, evidence, derivation, holdout, publication, and
+activation authority false.
 
 `mediaforce/tuning/av1_validation_v3_tier1_preparation.py` defines the pure,
 non-executing preparation inputs for Tier 1. It freezes a machine-checkable
