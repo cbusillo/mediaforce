@@ -2550,7 +2550,13 @@ from mediaforce.tuning.av1_validation_v3 import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_publication import (
     AV1ValidationV3Tier1PublicationError,
+    publish_av1_validation_v3_tier1_config_snapshot,
     publish_av1_validation_v3_tier1_preparation,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    AV1ValidationV3Tier1ConfigSnapshotError,
+    build_av1_validation_v3_tier1_config_snapshot,
+    validate_av1_validation_v3_tier1_config_snapshot,
 )
 from mediaforce.tuning.av1_validation_derivation import (
     AV1_VALIDATION_DERIVATION_ARTIFACT_DIRECTORY,
@@ -2872,6 +2878,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--json", action="store_true", dest="json_output")
 
+    write_tier1_config = actions.add_parser(
+        "write-tier1-config-snapshot",
+        help="Write one owner-only effective-config snapshot for AV1 v3 Tier 1",
+    )
+    write_tier1_config.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+    )
+    write_tier1_config.add_argument("--output-root", type=Path, required=True)
+    write_tier1_config.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+    )
+
     publish_tier1 = actions.add_parser(
         "publish-tier1-preparation",
         help="Publish AV1 v3 Tier 1 Gate A0 preparation artifacts (non-executing)",
@@ -2963,6 +2985,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.action == "publish-tier1-preparation":
             return _run_publish_tier1_preparation(args)
+
+        if args.action == "write-tier1-config-snapshot":
+            return _run_write_tier1_config_snapshot(args)
 
         manifest = _load_manifest(args.manifest)
         if isinstance(manifest, AV1ValidationProtocolV3):
@@ -3065,6 +3090,7 @@ def _run_publish_tier1_preparation(args: argparse.Namespace) -> int:
                 json_output=args.json_output,
             )
         config_bytes = args.config_artifact.read_bytes()
+        validate_av1_validation_v3_tier1_config_snapshot(config_bytes)
         result = publish_av1_validation_v3_tier1_preparation(
             protocol=protocol,
             qualification_key_id=args.qualification_key_id,
@@ -3091,6 +3117,37 @@ def _run_publish_tier1_preparation(args: argparse.Namespace) -> int:
             json_output=args.json_output,
         )
     except (AV1ValidationV3Error, TypeError, ValueError):
+        return _print_tier1_publication_failure(
+            "input_invalid",
+            json_output=args.json_output,
+        )
+    _assert_preregistration_bootstrap_authority()
+    _print_partition_payload(result.to_summary(), json_output=args.json_output)
+    return 0
+
+
+def _run_write_tier1_config_snapshot(args: argparse.Namespace) -> int:
+    _assert_preregistration_bootstrap_authority()
+    _assert_canonical_preregistration_runner()
+    try:
+        config = load_config(args.config)
+        snapshot_bytes = build_av1_validation_v3_tier1_config_snapshot(config)
+        result = publish_av1_validation_v3_tier1_config_snapshot(
+            snapshot_bytes=snapshot_bytes,
+            output_root=args.output_root,
+            repository_root=REPOSITORY_ROOT,
+        )
+    except OSError:
+        return _print_tier1_publication_failure(
+            "input_unreadable",
+            json_output=args.json_output,
+        )
+    except AV1ValidationV3Tier1PublicationError as exc:
+        return _print_tier1_publication_failure(
+            exc.reason_code,
+            json_output=args.json_output,
+        )
+    except (AV1ValidationV3Tier1ConfigSnapshotError, TypeError, ValueError):
         return _print_tier1_publication_failure(
             "input_invalid",
             json_output=args.json_output,

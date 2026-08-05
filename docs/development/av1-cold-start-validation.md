@@ -1433,6 +1433,21 @@ media, generate review clips, or run a real-media experiment.
 
 ## V3 Tier 1 Gate A0 artifact publication
 
+`mediaforce/tuning/av1_validation_v3_tier1_config_snapshot.py` defines the
+canonical effective-config snapshot used by Gate A0. The snapshot contains the
+fully merged `MediaforceConfig.raw` after checked-in includes, runtime settings,
+and local folder-policy overrides, plus every resolved `ConfigPaths` value. It
+is private machine-local material: paths and local settings may appear in the
+snapshot, but only its domain-separated digest may enter public-safe summaries.
+
+The owner-only `write-tier1-config-snapshot` action writes that canonical JSON
+as `tier1-effective-config-snapshot.json` in a content-addressed `0o700`
+directory with a `0o600` file. The later Tier 1 runtime rebuilds the snapshot
+from the live loaded config, compares it byte-for-byte, and requires the same
+snapshot digest in the qualification plan before acquiring the runtime lock.
+Changing an include, runtime setting, local override, or resolved state path
+therefore invalidates the plan rather than silently changing qualification.
+
 `mediaforce/tuning/av1_validation_v3_tier1_publication.py` implements
 non-executing artifact publication for Gate A0 of the AV1 v3 Tier 1 cold-start
 qualification protocol. It produces two owner-only artifacts inside one
@@ -1476,6 +1491,12 @@ unsafe mode, or unsafe link fails closed and is never overwritten or repaired.
 
 ```bash
 uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
+  write-tier1-config-snapshot \
+  --config /path/to/mediaforce-config.toml \
+  --output-root /path/to/private/config-snapshots \
+  --json
+
+uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
   publish-tier1-preparation \
   docs/validation/av1-cold-start-preregistration-v3.json \
   --qualification-key-id av1vqkey3_<32 hex chars> \
@@ -1493,13 +1514,13 @@ uv run python -I -S scripts/verify_av1_cold_start_preregistration.py \
 ```
 
 The owner-supplied repository `(commit, tree)` is cross-checked against the
-runner's clean live identity before any artifact is written. The config
-artifact is read once as opaque exact bytes; this action does not call the
-normal config loader or merge includes and runtime settings. The same exact
-bytes must be supplied to the later separately authorized execution boundary.
-The summary contains no machine-local paths and reports Gate A0, Tier 1,
-created/no-op state, and every execution, media, Tier 2, evidence, empirical,
-derivation, holdout, public-publication, and activation authority as false.
+runner's clean live identity before any preparation artifact is written. The
+config artifact must pass the canonical effective-config snapshot contract and
+is read exactly once. The same exact bytes must be supplied to the later
+separately authorized execution boundary. Summaries contain no machine-local
+paths and report Gate A0, Tier 1, created/no-op state, and every execution,
+media, Tier 2, evidence, empirical, derivation, holdout, public-publication, and
+activation authority as false.
 
 The command remains on the owner-only preregistration runner rather than the
 normal `mediaforce` operator CLI. It creates no grant, takes no Mediaforce

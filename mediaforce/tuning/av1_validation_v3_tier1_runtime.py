@@ -26,6 +26,11 @@ from mediaforce.tuning.av1_validation_v3_tier1_grant import (
     AV1ValidationV3Tier1GrantError,
     assert_av1_validation_v3_tier1_grant_active,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    AV1ValidationV3Tier1ConfigSnapshotError,
+    av1_validation_v3_tier1_config_snapshot_sha256,
+    assert_av1_validation_v3_tier1_config_snapshot_matches,
+)
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeLease,
     MediaforceRuntimeLockOwnershipError,
@@ -433,6 +438,7 @@ def build_av1_validation_v3_tier1_toolchain_binding(
 def paused_av1_validation_v3_tier1_runtime(
     config: MediaforceConfig,
     *,
+    config_snapshot_bytes: bytes,
     context: AV1ValidationV3Tier1ExecutionContext,
     matrix: Mapping[str, object],
     output_directory: Path,
@@ -452,6 +458,22 @@ def paused_av1_validation_v3_tier1_runtime(
         output_directory,
         repository_root=repository_root,
     )
+    try:
+        assert_av1_validation_v3_tier1_config_snapshot_matches(
+            config,
+            config_snapshot_bytes,
+        )
+    except AV1ValidationV3Tier1ConfigSnapshotError as exc:
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 runtime effective config changed after the snapshot"
+        ) from exc
+    if (
+        context.qualification_plan.config_sha256
+        != av1_validation_v3_tier1_config_snapshot_sha256(config_snapshot_bytes)
+    ):
+        raise AV1ValidationV3Tier1RuntimeError(
+            "AV1 v3 Tier 1 runtime config snapshot is not bound to the qualification plan"
+        )
     _assert_toolchain_current(toolchain)
     if context.qualification_plan.toolchain_sha256 != toolchain.payload_sha256:
         raise AV1ValidationV3Tier1RuntimeError(

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.tuning.av1_validation_v3 import load_av1_validation_protocol_v3
 from mediaforce.tuning.av1_validation_v3_qualification import (
     load_av1_validation_v3_qualification_plan,
@@ -23,6 +24,9 @@ from mediaforce.tuning.av1_validation_v3_tier1_publication import (
     AV1ValidationV3Tier1PublicationError,
     AV1ValidationV3Tier1PublicationResult,
     publish_av1_validation_v3_tier1_preparation,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    build_av1_validation_v3_tier1_config_snapshot,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_request import (
     load_av1_validation_v3_tier1_authorization_request,
@@ -38,7 +42,6 @@ _PROTOCOL_PATH = Path("docs/validation/av1-cold-start-preregistration-v3.json")
 _KEY_ID = f"av1vqkey3_{'a' * 32}"
 _REPOSITORY_COMMIT = "1" * 40
 _REPOSITORY_TREE = "2" * 40
-_CONFIG_BYTES = b"[tier1]\nfixture_scope = \"synthetic\"\n"
 _FROZEN_AT = "2026-08-04T12:00:00Z"
 _PLAN_VALID_UNTIL = "2026-08-05T12:00:00Z"
 _REQUESTED_AT = "2026-08-04T13:00:00Z"
@@ -56,6 +59,9 @@ class AV1ValidationV3Tier1PublicationTests(unittest.TestCase):
         self.repository_root.mkdir(mode=0o700)
         self.output_root = self.temporary_root / "published"
         self.protocol = load_av1_validation_protocol_v3(_PROTOCOL_PATH)
+        self.config_snapshot_bytes = build_av1_validation_v3_tier1_config_snapshot(
+            _config(self.temporary_root)
+        )
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -69,7 +75,7 @@ class AV1ValidationV3Tier1PublicationTests(unittest.TestCase):
             "qualification_key_id": _KEY_ID,
             "repository_commit": _REPOSITORY_COMMIT,
             "repository_tree": _REPOSITORY_TREE,
-            "config_bytes": _CONFIG_BYTES,
+            "config_bytes": self.config_snapshot_bytes,
             "ffmpeg_path": Path(sys.executable),
             "ffprobe_path": Path(sys.executable),
             "output_root": self.output_root,
@@ -333,7 +339,11 @@ class AV1ValidationV3Tier1PublicationRunnerTests(unittest.TestCase):
         self.temporary_root = Path(self.temporary_directory.name)
         self.output_root = self.temporary_root / "published"
         self.config_artifact = self.temporary_root / "tier1-config.toml"
-        self.config_artifact.write_bytes(_CONFIG_BYTES)
+        self.config_artifact.write_bytes(
+            build_av1_validation_v3_tier1_config_snapshot(
+                _config(self.temporary_root)
+            )
+        )
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -463,3 +473,22 @@ class AV1ValidationV3Tier1PublicationRunnerTests(unittest.TestCase):
             "input_unreadable",
         )
         self.assertEqual(stderr.getvalue(), "")
+
+
+def _config(root: Path) -> MediaforceConfig:
+    return MediaforceConfig(
+        raw={
+            "config": {"include_files": ["folder-defaults.toml"]},
+            "video": {"codec": "av1"},
+        },
+        paths=ConfigPaths(
+            project_root=root,
+            config_path=root / "config.toml",
+            db_path=root / "mediaforce.sqlite3",
+            run_manifest_dir=root / "manifests",
+            web_state_dir=root / "web-state",
+            review_dir=root / "review",
+            runtime_settings_path=root / "runtime-settings.json",
+            runtime_reservation_dir=root / "runtime-reservations",
+        ),
+    )
