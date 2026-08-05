@@ -183,6 +183,14 @@ class AV1ValidationV3Tier1PublicationTests(unittest.TestCase):
             self._publish()
         self.assertEqual(raised.exception.reason_code, "artifact_malformed")
 
+    def test_existing_fifo_member_fails_without_blocking(self) -> None:
+        result = self._publish()
+        result.plan_path.unlink()
+        os.mkfifo(result.plan_path, 0o600)
+        with self.assertRaises(AV1ValidationV3Tier1PublicationError) as raised:
+            self._publish()
+        self.assertEqual(raised.exception.reason_code, "artifact_unsafe")
+
     def test_publication_root_rejects_unsafe_relationships_and_symlinks(self) -> None:
         cases = {
             "relative": Path("relative"),

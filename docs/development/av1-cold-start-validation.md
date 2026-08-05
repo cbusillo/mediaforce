@@ -1454,10 +1454,11 @@ Neither file grants execution authority. The directory name is
   below, nor above the repository. Every lexical path component is opened with
   no-follow semantics; a symlink anywhere in the path is rejected.
 - Each artifact is written through a randomly named staging directory
-  (`secrets.token_hex(16)`) and promoted to its final name with
+  (`secrets.token_hex(12)`) and promoted to its final name with
   `rename_exclusive`, which fails atomically if a destination already exists.
-- After staging and after rename, `st_uid`, `st_mode`, `st_nlink`, `st_size`,
-  and `(st_dev, st_ino)` are re-verified to detect TOCTOU races.
+- Staging and final directories re-verify type, owner, mode, and
+  `(st_dev, st_ino)`. Artifact members additionally re-verify `st_nlink` and
+  `st_size` to detect TOCTOU races.
 - A second toolchain fingerprint is computed immediately before publication to
   detect toolchain drift between plan construction and write.
 - The output root must not overlap the repository root (no containment in

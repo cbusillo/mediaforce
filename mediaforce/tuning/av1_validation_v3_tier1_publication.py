@@ -67,6 +67,7 @@ _DIRECTORY_FLAGS = (
 _READ_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NONBLOCK", 0)
     | getattr(os, "O_NOFOLLOW", 0)
 )
 _WRITE_FLAGS = (
