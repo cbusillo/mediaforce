@@ -144,6 +144,23 @@ blocked in issues `#304` and `#305`; a future executor must supply separate
 owner authorization and validate both the plan and attestation against the
 frozen protocol at its explicit timestamp.
 
+Issue `#305` begins with the pure Tier 2 selection-record contract in
+`mediaforce/tuning/av1_validation_v3_tier2_selection.py`. The builder accepts
+only caller-supplied synthetic `AV1ValidationV3QualificationSource` records,
+an active qualification plan, the already committed qualification-key ID, and
+an in-memory key; it stores no key and delegates the actual choice to the
+frozen `select_av1_validation_v3_tier2_sources` selector. The owner-only
+record commits to the complete sorted deduplicated candidate source records,
+candidate count, canonical selections, selected timestamp, record ID, and
+payload digest. Loading requires exact canonical bytes, and source validation
+redraws the record from the supplied candidates so candidate-set drift changes
+the record ID. Its public summary exposes only fixed non-executing status,
+protocol/plan/record identities, timestamp, and stratum names; it carries no
+fingerprints, ranks, inventory digest/count, paths, titles, or key material.
+The contract performs no inventory, database, media, or filesystem scan and
+creates no publication, execution, empirical, derivation, holdout, grant,
+claim, lock, subprocess, or feature-flag authority.
+
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a
 future real qualification plan to the exact protocol, commit/tree,
@@ -988,9 +1005,9 @@ legacy `runtime_failure` value remains valid for existing evidence and is never
 retrospectively reclassified. The allowlist is an additive reason vocabulary
 inside the existing exact-key v2 envelope, not a new artifact shape; execution
 plans remain bound to their exact repository identity, so binaries predating
-this vocabulary are not rollback executors for future plans. Reason codes never contain exception text,
-commands, paths, hostnames, or media metadata, and they do not authorize a
-retry or successor cohort.
+this vocabulary are not rollback executors for future plans. Reason codes never
+contain exception text, commands, paths, hostnames, or media metadata, and they
+do not authorize a retry or successor cohort.
 
 Remote process-probe failures during transient cleanup emit only a redacted
 `Nonfatal cleanup reachability warning`; the affected remote staging root is
