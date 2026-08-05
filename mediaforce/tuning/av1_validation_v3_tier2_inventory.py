@@ -174,10 +174,10 @@ def load_av1_validation_v3_tier2_inventory(
         if evidence_cohorts
         else None
     )
-    counts: dict[str, int] = Counter()
+    counts: Counter[str] = Counter()
     counts["measured_row_count"] = len(rows)
     rows_by_identity: dict[str, list[Mapping[str, Any]]] = {}
-    unique_identity_rows: list[Mapping[str, Any]] = []
+    unique_identity_rows: list[tuple[str, Mapping[str, Any]]] = []
 
     for row in rows:
         source_identity = _source_identity(row)
@@ -186,7 +186,7 @@ def load_av1_validation_v3_tier2_inventory(
             continue
         rows_by_identity.setdefault(source_identity, []).append(row)
 
-    for identity_rows in rows_by_identity.values():
+    for source_identity, identity_rows in rows_by_identity.items():
         if len(identity_rows) > 1:
             counts["duplicate_source_identity_row_count"] += len(identity_rows)
         else:
@@ -195,13 +195,14 @@ def load_av1_validation_v3_tier2_inventory(
             if expected_evidence is None or evidence != expected_evidence:
                 counts["incompatible_evidence_count"] += 1
                 continue
-            unique_identity_rows.append(row)
+            unique_identity_rows.append((source_identity, row))
 
     entries: list[_AV1ValidationV3Tier2InventoryEntry] = []
     fingerprint_identities: dict[str, str] = {}
-    for row in unique_identity_rows:
+    for source_identity, row in unique_identity_rows:
         entry = _entry_from_row(
             row,
+            source_identity=source_identity,
             config=config,
             protocol=protocol,
             counts=counts,
@@ -250,14 +251,11 @@ def load_av1_validation_v3_tier2_inventory(
 def _entry_from_row(
     row: Mapping[str, Any],
     *,
+    source_identity: str,
     config: MediaforceConfig,
     protocol: AV1ValidationProtocolV3,
-    counts: dict[str, int],
+    counts: Counter[str],
 ) -> _AV1ValidationV3Tier2InventoryEntry | None:
-    source_identity = _source_identity(row)
-    if source_identity is None:
-        counts["malformed_identity_count"] += 1
-        return None
     evidence_summary_sha256 = str(row.get("summary_sha256") or "").strip()
     if not _SHA256_RE.fullmatch(evidence_summary_sha256):
         counts["missing_evidence_summary_count"] += 1

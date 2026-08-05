@@ -177,6 +177,9 @@ domain-separated from a canonical JSON payload containing only v3 protocol
 identity and the content-version fingerprint; paths, titles, series, group
 identity, v2 history, qualification keys, selection output, files, media, and
 runtime state are not stored, hashed, opened, or published.
+`pipeline_ready` in this adapter means only that the persisted policy, quality,
+and stream-budget projection is candidate-feasible; it makes no claim about
+current runtime or tool availability and grants no execution authority.
 
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a

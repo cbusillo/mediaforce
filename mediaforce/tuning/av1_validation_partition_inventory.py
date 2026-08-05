@@ -221,6 +221,7 @@ def av1_validation_partition_source_sha256_resolver(
         source_path = resolve_item_source_path(
             config,
             dict(row),
+            host=None,
             host_media_access_for_host=host_media_access_for_host,
         )
         if not hasattr(os, "O_NOFOLLOW"):
@@ -506,7 +507,7 @@ def _source_from_row(
         projection = project_av1_cold_start_fingerprint_summary(
             summaries.fingerprint_summary
         )
-    except AV1ColdStartTraitProjectionError:
+    except (AV1ColdStartTraitProjectionError, TypeError, ValueError):
         return None
 
     resolved_policy = config.resolve_policy(rel_path)

@@ -89,18 +89,25 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
 
     def test_deterministic_and_read_only(self) -> None:
         _insert_item(self.connection, 1, "typical", "0" * 39 + "1")
-        before = self.connection.exec_driver_sql(
+        item_count_before = self.connection.exec_driver_sql(
             "select count(*) from library_items"
+        ).scalar_one()
+        evidence_count_before = self.connection.exec_driver_sql(
+            "select count(*) from library_item_evidence_state"
         ).scalar_one()
 
         first = self._inventory()
         second = self._inventory()
-        after = self.connection.exec_driver_sql(
+        item_count_after = self.connection.exec_driver_sql(
             "select count(*) from library_items"
+        ).scalar_one()
+        evidence_count_after = self.connection.exec_driver_sql(
+            "select count(*) from library_item_evidence_state"
         ).scalar_one()
 
         self.assertEqual(first, second)
-        self.assertEqual(before, after)
+        self.assertEqual(item_count_before, item_count_after)
+        self.assertEqual(evidence_count_before, evidence_count_after)
 
     def test_source_token_is_independent_of_path_and_uses_only_identity(self) -> None:
         identity = "0" * 39 + "1"
@@ -125,6 +132,14 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
 
         self.assertEqual(original, changed_path)
         self.assertEqual(original, _expected_source_fingerprint(identity))
+        self.assertEqual(
+            AV1_VALIDATION_V3_TIER2_INVENTORY_FINGERPRINT_DOMAIN,
+            "mediaforce:av1:v3:tier2-qualification-source:v1",
+        )
+        self.assertEqual(
+            original,
+            "sha256:b4bd4d23318a662b3be0135cfdc556c571a72e5741b73152948280206bde62f5",
+        )
 
     def test_inventory_entries_store_no_path_or_title_fields(self) -> None:
         _insert_item(self.connection, 1, "animation", "0" * 39 + "1")
@@ -227,6 +242,27 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
 
         self.assertEqual(len(inventory.entries), 0)
         self.assertEqual(inventory.duplicate_source_identity_row_count, 2)
+        self.assertEqual(inventory.incompatible_evidence_count, 0)
+
+    def test_inventory_has_no_candidate_cap(self) -> None:
+        for item_id in range(1, 65):
+            _insert_item(
+                self.connection,
+                item_id,
+                "animation" if item_id % 2 else "typical",
+                f"{item_id:040x}",
+            )
+
+        inventory = self._inventory()
+
+        self.assertEqual(len(inventory.entries), 64)
+        self.assertEqual(
+            sum(
+                count.private_candidate_count
+                for count in inventory.frozen_stratum_private_counts
+            ),
+            64,
+        )
 
     def test_duplicate_identity_drops_rows_across_evidence_cohorts(self) -> None:
         identity = "0" * 39 + "1"
