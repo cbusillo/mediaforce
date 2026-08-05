@@ -334,6 +334,10 @@ Guidance:
   - read-only in-memory Tier 2 private-ineligible candidate projection from
     current measured fingerprints, with no keys, selector call, serialization,
     publication, filesystem/media access, or runtime authority
+- `av1_validation_v3_tier2_inventory_authorization.py`
+  - pure owner-only A0 request, grant, and claim contracts for one future
+    private inventory read, with no database, filesystem, key, selection,
+    publication, media, runtime, or downstream execution authority
 - `av1_validation_v3_tier2_selection.py`
   - pure owner-only v3 Tier 2 typed-source selection records, canonical
     candidate/set commitments, and privacy-safe non-authorizing summaries
