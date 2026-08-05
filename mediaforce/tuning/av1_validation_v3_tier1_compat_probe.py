@@ -292,7 +292,12 @@ def _validated_output_root(output_directory: Path, *, repository_root: Path) -> 
         raise AV1ValidationV3Tier1CompatProbeError(
             "AV1 v3 Tier 1 compatibility-probe paths are invalid"
         ) from exc
-    if not output_root.is_dir() or output_root == repository or output_root.is_relative_to(repository):
+    if (
+        not output_root.is_dir()
+        or output_root == repository
+        or output_root.is_relative_to(repository)
+        or repository.is_relative_to(output_root)
+    ):
         raise AV1ValidationV3Tier1CompatProbeError(
             "AV1 v3 Tier 1 compatibility-probe outputs must remain outside the repository"
         )

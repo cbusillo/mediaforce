@@ -142,6 +142,10 @@ class AV1ValidationV3Tier1CompatVariantRecord:
     failures: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        if self.variant_id != f"{self.representation_id}:{self.surface_id}":
+            raise AV1ValidationV3Tier1CompatOperationError(
+                "AV1 v3 Tier 1 compatibility variant binding is invalid"
+            )
         if self.variant_id not in AV1_VALIDATION_V3_TIER1_COMPAT_VARIANT_IDS:
             raise AV1ValidationV3Tier1CompatOperationError(
                 "AV1 v3 Tier 1 compatibility result variant is invalid"
@@ -237,6 +241,8 @@ class AV1ValidationV3Tier1CompatResult:
             "gate": "A0",
             "tier": "none",
             "diagnostic_only": True,
+            "single_execution_claimed": True,
+            "retry_authorized": False,
             "qualification_complete": False,
             "path_matrix_coverage_claimed": False,
             **_false_authority_fields(),
@@ -553,6 +559,8 @@ def _result_semantic(
         "gate": "A0",
         "tier": "none",
         "diagnostic_only": True,
+        "single_execution_claimed": True,
+        "retry_authorized": False,
         "qualification_complete": False,
         "path_matrix_coverage_claimed": False,
         **_false_authority_fields(),

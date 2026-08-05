@@ -26,6 +26,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_compat_authorization import (
 from mediaforce.tuning.av1_validation_v3_tier1_compat_operation import (
     AV1ValidationV3Tier1CompatOperationError,
     AV1ValidationV3Tier1CompatResult,
+    av1_validation_v3_tier1_compat_result_from_payload,
     build_av1_validation_v3_tier1_compat_claim,
     load_av1_validation_v3_tier1_compat_result,
     run_av1_validation_v3_tier1_compat_probe,
@@ -660,10 +661,39 @@ class AV1ValidationV3Tier1CompatTests(unittest.TestCase):
             "private_inventory_read_authorized",
             "media_library_read_authorized",
             "key_creation_authorized",
+            "retry_authorized",
         }
         for payload in (self.claim.to_payload(), self._result().to_payload()):
             for field in authority_fields:
                 self.assertIs(payload[field], False, field)
+        result_payload = self._result().to_payload()
+        self.assertIs(result_payload["single_execution_claimed"], True)
+
+    def test_result_rejects_mismatched_composite_variant_identity(self) -> None:
+        payload = self._result().to_payload()
+        payload["variants"][0]["representation_id"] = (
+            AV1_VALIDATION_V3_TIER1_COMPAT_REPRESENTATION_IDS[1]
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier1CompatOperationError,
+            "variant binding",
+        ):
+            av1_validation_v3_tier1_compat_result_from_payload(payload)
+
+    def test_probe_output_root_cannot_contain_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            repository_root = output_root / "repository"
+            repository_root.mkdir()
+            with self.assertRaisesRegex(
+                AV1ValidationV3Tier1CompatProbeError,
+                "outside the repository",
+            ):
+                build_av1_validation_v3_tier1_compat_probe_plans(
+                    self.matrix,
+                    output_directory=output_root,
+                    repository_root=repository_root,
+                )
 
     def _context(self) -> AV1ValidationV3Tier1CompatExecutionContext:
         return AV1ValidationV3Tier1CompatExecutionContext(

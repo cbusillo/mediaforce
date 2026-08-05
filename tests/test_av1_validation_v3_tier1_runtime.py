@@ -17,6 +17,16 @@ from mediaforce.tuning.av1_validation_v3 import load_av1_validation_protocol_v3
 from mediaforce.tuning.av1_validation_v3_qualification import (
     build_av1_validation_v3_qualification_plan,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_compat_authorization import (
+    build_av1_validation_v3_tier1_compat_grant,
+    build_av1_validation_v3_tier1_compat_request,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_compat_probe import (
+    AV1_VALIDATION_V3_TIER1_COMPAT_MATRIX_SHA256,
+    AV1ValidationV3Tier1CompatExecutionContext,
+    build_av1_validation_v3_tier1_compat_probe_plans,
+    load_av1_validation_v3_tier1_compat_probe_matrix,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_executor import (
     AV1_VALIDATION_V3_TIER1_MATRIX_SHA256,
     AV1ValidationV3Tier1ExecutionContext,
@@ -37,6 +47,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_runtime import (
     AV1ValidationV3Tier1RuntimeError,
     AV1ValidationV3Tier1RuntimeLimits,
     build_av1_validation_v3_tier1_toolchain_binding,
+    paused_av1_validation_v3_tier1_compat_runtime,
     paused_av1_validation_v3_tier1_runtime,
 )
 from mediaforce.web.runtime_lock import (
@@ -46,6 +57,7 @@ from mediaforce.web.runtime_lock import (
 
 
 MATRIX_PATH = Path("docs/validation/av1-tier1-synthetic-fixture-matrix-v2.json")
+COMPAT_MATRIX_PATH = Path("docs/validation/av1-tier1-compat-probe-matrix-v1.json")
 PROTOCOL_PATH = Path("docs/validation/av1-cold-start-preregistration-v3.json")
 
 
@@ -82,6 +94,15 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         )
         self.matrix = load_av1_validation_v3_tier1_fixture_matrix(MATRIX_PATH)
         self.context = _execution_context(
+            self.toolchain.payload_sha256,
+            av1_validation_v3_tier1_config_snapshot_sha256(
+                self.config_snapshot_bytes
+            ),
+        )
+        self.compat_matrix = load_av1_validation_v3_tier1_compat_probe_matrix(
+            COMPAT_MATRIX_PATH
+        )
+        self.compat_context = _compat_execution_context(
             self.toolchain.payload_sha256,
             av1_validation_v3_tier1_config_snapshot_sha256(
                 self.config_snapshot_bytes
@@ -130,6 +151,42 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
             session = active_session
             assert_mediaforce_runtime_lock_held().assert_active()
             with self.assertRaisesRegex(AV1ValidationV3Tier1RuntimeError, "frozen fixture matrix"):
+                active_session.executor.run(("ffprobe", "-c", "print('not frozen')"))
+        self.assertIsNotNone(session)
+        self.assertTrue(session.cleanup_passed)
+
+    def test_compat_runtime_allows_only_frozen_buffered_commands(self) -> None:
+        plans = build_av1_validation_v3_tier1_compat_probe_plans(
+            self.compat_matrix,
+            output_directory=self.output_root,
+            repository_root=Path.cwd(),
+        )
+        expected_commands = frozenset(
+            command
+            for plan in plans
+            for command in (
+                plan.generate_args,
+                *(surface.probe_args for surface in plan.surfaces),
+            )
+        )
+        session = None
+        with paused_av1_validation_v3_tier1_compat_runtime(
+            self.config,
+            config_snapshot_bytes=self.config_snapshot_bytes,
+            context=self.compat_context,
+            matrix=self.compat_matrix,
+            output_directory=self.output_root,
+            repository_root=Path.cwd(),
+            toolchain=self.toolchain,
+        ) as active_session:
+            session = active_session
+            assert_mediaforce_runtime_lock_held().assert_active()
+            self.assertEqual(active_session.executor._buffered_commands, expected_commands)
+            self.assertEqual(active_session.executor._streaming_commands, frozenset())
+            with self.assertRaisesRegex(
+                AV1ValidationV3Tier1RuntimeError,
+                "frozen fixture matrix",
+            ):
                 active_session.executor.run(("ffprobe", "-c", "print('not frozen')"))
         self.assertIsNotNone(session)
         self.assertTrue(session.cleanup_passed)
@@ -527,6 +584,47 @@ def _execution_context(
         valid_until="2026-08-04T19:00:00Z",
     )
     return AV1ValidationV3Tier1ExecutionContext(
+        protocol=protocol,
+        qualification_plan=plan,
+        request=request,
+        grant=grant,
+        as_of="2026-08-04T18:00:00Z",
+    )
+
+
+def _compat_execution_context(
+    toolchain_sha256: str,
+    config_sha256: str,
+) -> AV1ValidationV3Tier1CompatExecutionContext:
+    protocol = load_av1_validation_protocol_v3(PROTOCOL_PATH)
+    plan = build_av1_validation_v3_qualification_plan(
+        protocol=protocol,
+        qualification_key_id=f"av1vqkey3_{'a' * 32}",
+        eligibility_predicate_sha256=f"sha256:{'b' * 64}",
+        repository_commit="1" * 40,
+        repository_tree="2" * 40,
+        config_sha256=config_sha256,
+        toolchain_sha256=toolchain_sha256,
+        fixture_matrix_sha256=AV1_VALIDATION_V3_TIER1_MATRIX_SHA256,
+        frozen_at="2026-08-03T12:00:00Z",
+        valid_until="2026-08-05T12:00:00Z",
+    )
+    request = build_av1_validation_v3_tier1_compat_request(
+        protocol=protocol,
+        plan=plan,
+        probe_matrix_sha256=AV1_VALIDATION_V3_TIER1_COMPAT_MATRIX_SHA256,
+        requested_at="2026-08-03T13:00:00Z",
+        valid_until="2026-08-04T20:00:00Z",
+    )
+    grant = build_av1_validation_v3_tier1_compat_grant(
+        protocol=protocol,
+        plan=plan,
+        request=request,
+        owner_principal="owner-1234abcd",
+        authorized_at="2026-08-03T14:00:00Z",
+        valid_until="2026-08-04T19:00:00Z",
+    )
+    return AV1ValidationV3Tier1CompatExecutionContext(
         protocol=protocol,
         qualification_plan=plan,
         request=request,
