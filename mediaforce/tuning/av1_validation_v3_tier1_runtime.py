@@ -35,9 +35,14 @@ from mediaforce.tuning.av1_validation_v3_tier1_residual_authorization import (
     assert_av1_validation_v3_tier1_residual_grant_active,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_residual_probe import (
+    AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT,
     AV1ValidationV3Tier1ResidualExecutionContext,
     build_av1_validation_v3_tier1_residual_probe_plans,
 )
+
+_DEFAULT_MAX_STREAM_BYTES = 800_000_000
+if AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT > _DEFAULT_MAX_STREAM_BYTES:
+    raise RuntimeError("AV1 v3 Tier 1 residual output exceeds the default stream limit")
 from mediaforce.tuning.av1_validation_v3_tier1_grant import (
     AV1ValidationV3Tier1GrantError,
     assert_av1_validation_v3_tier1_grant_active,
@@ -124,7 +129,7 @@ class AV1ValidationV3Tier1RuntimeLimits:
     timeout_seconds: float = 300.0
     max_stdout_bytes: int = 1 << 20
     max_stderr_bytes: int = 1 << 16
-    max_stream_bytes: int = 800_000_000
+    max_stream_bytes: int = _DEFAULT_MAX_STREAM_BYTES
     chunk_bytes: int = 1 << 20
 
     def __post_init__(self) -> None:

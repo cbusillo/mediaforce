@@ -21,8 +21,10 @@ from mediaforce.tuning.av1_validation_v3_tier1_residual_authorization import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_residual_probe import (
     AV1_VALIDATION_V3_TIER1_RESIDUAL_EXPECTED_DECODED_BYTE_COUNT,
+    AV1_VALIDATION_V3_TIER1_RESIDUAL_FIXTURE_IDS,
     AV1_VALIDATION_V3_TIER1_RESIDUAL_MATRIX_SHA256,
     AV1_VALIDATION_V3_TIER1_RESIDUAL_REPRESENTATION_ID,
+    AV1_VALIDATION_V3_TIER1_RESIDUAL_SURFACE_IDS,
     AV1_VALIDATION_V3_TIER1_RESIDUAL_VARIANT_IDS,
     AV1ValidationV3Tier1ResidualExecutionContext,
     AV1ValidationV3Tier1ResidualVariantOutcome,
@@ -57,7 +59,9 @@ _OBSERVATION_KEYS = frozenset({
     "color_range",
     "nb_read_frames",
 })
-_MAX_COMMAND_RECORDS = 16
+_MAX_COMMAND_RECORDS = len(AV1_VALIDATION_V3_TIER1_RESIDUAL_FIXTURE_IDS) * (
+    1 + len(AV1_VALIDATION_V3_TIER1_RESIDUAL_SURFACE_IDS)
+)
 _STREAM_OBSERVATION_KEYS = frozenset(_OBSERVATION_KEYS)
 _FRAME_OBSERVATION_KEYS = _STREAM_OBSERVATION_KEYS - {
     "r_frame_rate",
@@ -679,6 +683,8 @@ def _false_authority_fields() -> dict[str, bool]:
         "tier1_coverage_eligible": False,
         "tier2_execution_authorized": False,
         "qualification_execution_authorized": False,
+        "qualification_complete": False,
+        "path_matrix_coverage_claimed": False,
         "evidence_creation_authorized": False,
         "evidence_eligible": False,
         "empirical_authority_conferred": False,
@@ -690,6 +696,7 @@ def _false_authority_fields() -> dict[str, bool]:
         "private_inventory_read_authorized": False,
         "media_library_read_authorized": False,
         "key_creation_authorized": False,
+        "retry_authorized": False,
     }
 
 
