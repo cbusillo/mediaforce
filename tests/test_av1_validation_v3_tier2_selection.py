@@ -66,7 +66,6 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
             plan=self.plan,
             sources=self.sources if sources is None else sources,
             qualification_key=self.key,
-            expected_key_id=self.key_id,
             selected_at=SELECTED_AT,
         )
 
@@ -82,12 +81,12 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
             tuple(stratum.name for stratum in self.protocol.tier2_strata),
         )
         payload = forward.to_payload()
-        self.assertFalse(payload["runtime_execution_authorized"])
+        self.assertFalse(payload["tier2_execution_authorized"])
         self.assertFalse(payload["qualification_execution_authorized"])
         self.assertFalse(payload["private_inventory_read_authorized"])
-        self.assertFalse(payload["empirical_execution_authorized"])
-        self.assertFalse(payload["derivation_execution_authorized"])
-        self.assertFalse(payload["holdout_execution_authorized"])
+        self.assertFalse(payload["empirical_authority_conferred"])
+        self.assertFalse(payload["derivation_authorized"])
+        self.assertFalse(payload["holdout_authorized"])
         self.assertFalse(payload["publication_authorized"])
         self.assertNotIn("qualification_key", payload)
 
@@ -115,7 +114,7 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
             ):
                 load_av1_validation_v3_tier2_selection_record(path)
 
-    def test_builder_rejects_wrong_key_and_plan_key_mismatch(self) -> None:
+    def test_builder_rejects_wrong_key(self) -> None:
         wrong_key = b"r" * 32
         with self.assertRaisesRegex(AV1ValidationV3Tier2SelectionError, "key"):
             build_av1_validation_v3_tier2_selection_record(
@@ -123,16 +122,6 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
                 plan=self.plan,
                 sources=self.sources,
                 qualification_key=wrong_key,
-                expected_key_id=self.key_id,
-                selected_at=SELECTED_AT,
-            )
-        with self.assertRaisesRegex(AV1ValidationV3Tier2SelectionError, "bound"):
-            build_av1_validation_v3_tier2_selection_record(
-                protocol=self.protocol,
-                plan=self.plan,
-                sources=self.sources,
-                qualification_key=self.key,
-                expected_key_id=av1_validation_v3_qualification_key_id(wrong_key),
                 selected_at=SELECTED_AT,
             )
 
@@ -178,8 +167,18 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
                 plan=self.plan,
                 sources=self.sources,
                 qualification_key=self.key,
-                expected_key_id=self.key_id,
                 selected_at=VALID_UNTIL,
+            )
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier2SelectionError,
+            "canonical UTC",
+        ):
+            build_av1_validation_v3_tier2_selection_record(
+                protocol=self.protocol,
+                plan=self.plan,
+                sources=self.sources,
+                qualification_key=self.key,
+                selected_at="2026-08-03T13:00:00+00:00",
             )
         unbound_plan = build_av1_validation_v3_qualification_plan(
             protocol=self.protocol,
@@ -207,7 +206,7 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
             av1_validation_v3_tier2_selection_record_from_payload(payload)
 
         payload = copy.deepcopy(self._record().to_payload())
-        payload["runtime_execution_authorized"] = True
+        payload["tier2_execution_authorized"] = True
         with self.assertRaisesRegex(AV1ValidationV3Tier2SelectionError, "contract"):
             av1_validation_v3_tier2_selection_record_from_payload(payload)
 
@@ -236,28 +235,28 @@ class AV1ValidationV3Tier2SelectionTests(unittest.TestCase):
             protocol=self.protocol,
             plan=self.plan,
         )
-        serialized = json.dumps(summary, sort_keys=True)
         for forbidden in (
             "candidate_count",
+            "candidate_sources",
             "candidate_set_sha256",
-            "fingerprint",
             "inventory_count",
             "inventory_digest",
             "inventory_sha256",
-            "key",
-            "path",
-            "rank",
+            "qualification_key_id",
+            "selected_at",
+            "selections",
+            "selection_payload_sha256",
+            "selection_record_id",
             "source_fingerprint",
-            "title",
         ):
-            self.assertNotIn(forbidden, serialized)
+            self.assertNotIn(forbidden, summary)
         for field in (
-            "runtime_execution_authorized",
+            "tier2_execution_authorized",
             "qualification_execution_authorized",
             "private_inventory_read_authorized",
-            "empirical_execution_authorized",
-            "derivation_execution_authorized",
-            "holdout_execution_authorized",
+            "empirical_authority_conferred",
+            "derivation_authorized",
+            "holdout_authorized",
             "publication_authorized",
             "evidence_eligible",
         ):

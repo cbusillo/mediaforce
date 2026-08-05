@@ -23,7 +23,6 @@ from mediaforce.tuning.av1_validation_v3 import (
     select_av1_validation_v3_tier2_sources,
 )
 from mediaforce.tuning.av1_validation_v3_qualification import (
-    AV1_VALIDATION_V3_QUALIFICATION_AUTHORITY,
     AV1_VALIDATION_V3_QUALIFICATION_NAMESPACE,
     AV1ValidationV3QualificationPlan,
     assert_av1_validation_v3_qualification_plan_active,
@@ -35,6 +34,7 @@ AV1_VALIDATION_V3_TIER2_SELECTION_SCHEMA = (
 )
 AV1_VALIDATION_V3_TIER2_SELECTION_SCHEMA_VERSION = 1
 AV1_VALIDATION_V3_TIER2_SELECTION_CONTRACT_VERSION = "av1vt2sel1"
+AV1_VALIDATION_V3_TIER2_SELECTION_AUTHORITY = "av1_v3_tier2_qualification_selection"
 AV1_VALIDATION_V3_TIER2_SELECTION_PAYLOAD_DOMAIN = (
     "mediaforce:av1:v3:tier2-selection-record-payload:v1"
 )
@@ -46,6 +46,26 @@ AV1_VALIDATION_V3_TIER2_SELECTION_SELECTION_DOMAIN = (
 )
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_FALSE_AUTHORITY_FIELDS = (
+    "tier1_execution_authorized",
+    "tier1_coverage_eligible",
+    "tier2_execution_authorized",
+    "qualification_execution_authorized",
+    "qualification_complete",
+    "path_matrix_coverage_claimed",
+    "evidence_creation_authorized",
+    "evidence_eligible",
+    "empirical_authority_conferred",
+    "derivation_authorized",
+    "holdout_authorized",
+    "publication_authorized",
+    "activation_authorized",
+    "public_bundle_activation_allowed",
+    "private_inventory_read_authorized",
+    "media_library_read_authorized",
+    "key_creation_authorized",
+    "retry_authorized",
+)
 
 
 class AV1ValidationV3Tier2SelectionError(ValueError):
@@ -133,6 +153,16 @@ class AV1ValidationV3Tier2SelectionRecord:
             raise AV1ValidationV3Tier2SelectionError(
                 "AV1 v3 Tier 2 selections reuse a source"
             )
+        candidate_fingerprints = {
+            source.source_fingerprint for source in self.candidate_sources
+        }
+        if any(
+            selection.source_fingerprint not in candidate_fingerprints
+            for selection in self.selections
+        ):
+            raise AV1ValidationV3Tier2SelectionError(
+                "AV1 v3 Tier 2 selection is not present in the candidate set"
+            )
         if self.selection_set_sha256 != _domain_payload_sha256(
             AV1_VALIDATION_V3_TIER2_SELECTION_SELECTION_DOMAIN,
             [selection.to_owner_payload() for selection in self.selections],
@@ -163,16 +193,9 @@ class AV1ValidationV3Tier2SelectionRecord:
             "protocol_version": AV1_VALIDATION_V3_PROTOCOL_VERSION,
             "experiment_id": AV1_VALIDATION_V3_EXPERIMENT_ID,
             "contract_version": AV1_VALIDATION_V3_TIER2_SELECTION_CONTRACT_VERSION,
-            "authority": AV1_VALIDATION_V3_QUALIFICATION_AUTHORITY,
+            "authority": AV1_VALIDATION_V3_TIER2_SELECTION_AUTHORITY,
             "artifact_namespace": AV1_VALIDATION_V3_QUALIFICATION_NAMESPACE,
-            "evidence_eligible": False,
-            "runtime_execution_authorized": False,
-            "qualification_execution_authorized": False,
-            "private_inventory_read_authorized": False,
-            "empirical_execution_authorized": False,
-            "derivation_execution_authorized": False,
-            "holdout_execution_authorized": False,
-            "publication_authorized": False,
+            **_false_authority_fields(),
             "protocol_id": self.protocol_id,
             "protocol_payload_sha256": self.protocol_payload_sha256,
             "plan_id": self.plan_id,
@@ -208,24 +231,17 @@ class AV1ValidationV3Tier2SelectionRecord:
         assert_av1_validation_v3_tier2_selection_record(protocol, plan, self)
         payload = {
             "tier2_selection_record_valid": True,
+            "artifact_kind": "tier2_selection_record",
+            "gate": "A0",
+            "tier": "tier2",
             "protocol_id": self.protocol_id,
             "protocol_payload_sha256": self.protocol_payload_sha256,
             "plan_id": self.plan_id,
             "plan_payload_sha256": self.plan_payload_sha256,
-            "selection_record_id": self.selection_record_id,
-            "selection_payload_sha256": self.payload_sha256,
-            "selected_at": self.selected_at,
             "selected_strata": [
                 selection.stratum_name for selection in self.selections
             ],
-            "evidence_eligible": False,
-            "runtime_execution_authorized": False,
-            "qualification_execution_authorized": False,
-            "private_inventory_read_authorized": False,
-            "empirical_execution_authorized": False,
-            "derivation_execution_authorized": False,
-            "holdout_execution_authorized": False,
-            "publication_authorized": False,
+            **_false_authority_fields(),
         }
         _assert_public_summary_safe(payload)
         return payload
@@ -237,7 +253,6 @@ def build_av1_validation_v3_tier2_selection_record(
     plan: AV1ValidationV3QualificationPlan,
     sources: Sequence[AV1ValidationV3QualificationSource],
     qualification_key: bytes,
-    expected_key_id: str,
     selected_at: str,
 ) -> AV1ValidationV3Tier2SelectionRecord:
     assert_av1_validation_v3_qualification_plan_active(
@@ -245,11 +260,8 @@ def build_av1_validation_v3_tier2_selection_record(
         plan,
         as_of=selected_at,
     )
-    if plan.qualification_key_id != expected_key_id:
-        raise AV1ValidationV3Tier2SelectionError(
-            "AV1 v3 Tier 2 selection key ID is not bound to the plan"
-        )
-    if av1_validation_v3_qualification_key_id(qualification_key) != expected_key_id:
+    qualification_key_id = av1_validation_v3_qualification_key_id(qualification_key)
+    if qualification_key_id != plan.qualification_key_id:
         raise AV1ValidationV3Tier2SelectionError(
             "AV1 v3 Tier 2 selection key does not match its commitment"
         )
@@ -261,7 +273,7 @@ def build_av1_validation_v3_tier2_selection_record(
         protocol=protocol,
         sources=candidate_sources,
         qualification_key=qualification_key,
-        expected_key_id=expected_key_id,
+        expected_key_id=plan.qualification_key_id,
     )
     selection_payloads = [selection.to_owner_payload() for selection in selections]
     candidate_set_sha256 = _domain_payload_sha256(
@@ -289,7 +301,7 @@ def build_av1_validation_v3_tier2_selection_record(
         protocol_payload_sha256=protocol.payload_sha256,
         plan_id=plan.plan_id,
         plan_payload_sha256=plan.payload_sha256,
-        qualification_key_id=expected_key_id,
+        qualification_key_id=qualification_key_id,
         eligibility_predicate_sha256=plan.eligibility_predicate_sha256,
         selected_at=selected_at,
         candidate_sources=candidate_sources,
@@ -332,6 +344,22 @@ def assert_av1_validation_v3_tier2_selection_record(
         raise AV1ValidationV3Tier2SelectionError(
             "AV1 v3 Tier 2 selection record does not cover the frozen strata"
         )
+    candidates_by_fingerprint = {
+        source.source_fingerprint: source for source in record.candidate_sources
+    }
+    for stratum, selection in zip(
+        protocol.tier2_strata, record.selections, strict=True
+    ):
+        source = candidates_by_fingerprint[selection.source_fingerprint]
+        if (
+            selection.stratum_name != stratum.name
+            or source.intent_level != stratum.intent_level
+            or source.exact_traits != stratum.exact_traits
+            or not source.pipeline_ready
+        ):
+            raise AV1ValidationV3Tier2SelectionError(
+                "AV1 v3 Tier 2 selection does not match its frozen stratum"
+            )
 
 
 def validate_av1_validation_v3_tier2_selection_record_sources(
@@ -347,7 +375,6 @@ def validate_av1_validation_v3_tier2_selection_record_sources(
         plan=plan,
         sources=sources,
         qualification_key=qualification_key,
-        expected_key_id=record.qualification_key_id,
         selected_at=record.selected_at,
     )
     if rebuilt != record:
@@ -369,14 +396,7 @@ def av1_validation_v3_tier2_selection_record_from_payload(
         "contract_version",
         "authority",
         "artifact_namespace",
-        "evidence_eligible",
-        "runtime_execution_authorized",
-        "qualification_execution_authorized",
-        "private_inventory_read_authorized",
-        "empirical_execution_authorized",
-        "derivation_execution_authorized",
-        "holdout_execution_authorized",
-        "publication_authorized",
+        *_FALSE_AUTHORITY_FIELDS,
         "protocol_id",
         "protocol_payload_sha256",
         "plan_id",
@@ -468,16 +488,9 @@ def _selection_record_semantic_payload(
         "protocol_version": AV1_VALIDATION_V3_PROTOCOL_VERSION,
         "experiment_id": AV1_VALIDATION_V3_EXPERIMENT_ID,
         "contract_version": AV1_VALIDATION_V3_TIER2_SELECTION_CONTRACT_VERSION,
-        "authority": AV1_VALIDATION_V3_QUALIFICATION_AUTHORITY,
+        "authority": AV1_VALIDATION_V3_TIER2_SELECTION_AUTHORITY,
         "artifact_namespace": AV1_VALIDATION_V3_QUALIFICATION_NAMESPACE,
-        "evidence_eligible": False,
-        "runtime_execution_authorized": False,
-        "qualification_execution_authorized": False,
-        "private_inventory_read_authorized": False,
-        "empirical_execution_authorized": False,
-        "derivation_execution_authorized": False,
-        "holdout_execution_authorized": False,
-        "publication_authorized": False,
+        **_false_authority_fields(),
         "protocol_id": protocol.protocol_id,
         "protocol_payload_sha256": protocol.payload_sha256,
         "plan_id": plan.plan_id,
@@ -573,16 +586,9 @@ def _require_selection_contract(value: Mapping[str, Any]) -> None:
         or value.get("experiment_id") != AV1_VALIDATION_V3_EXPERIMENT_ID
         or value.get("contract_version")
         != AV1_VALIDATION_V3_TIER2_SELECTION_CONTRACT_VERSION
-        or value.get("authority") != AV1_VALIDATION_V3_QUALIFICATION_AUTHORITY
+        or value.get("authority") != AV1_VALIDATION_V3_TIER2_SELECTION_AUTHORITY
         or value.get("artifact_namespace") != AV1_VALIDATION_V3_QUALIFICATION_NAMESPACE
-        or value.get("evidence_eligible") is not False
-        or value.get("runtime_execution_authorized") is not False
-        or value.get("qualification_execution_authorized") is not False
-        or value.get("private_inventory_read_authorized") is not False
-        or value.get("empirical_execution_authorized") is not False
-        or value.get("derivation_execution_authorized") is not False
-        or value.get("holdout_execution_authorized") is not False
-        or value.get("publication_authorized") is not False
+        or any(value.get(field) is not False for field in _FALSE_AUTHORITY_FIELDS)
         or value.get("gate") != "A0"
     ):
         raise AV1ValidationV3Tier2SelectionError(
@@ -616,11 +622,16 @@ def _parse_timestamp(value: str, label: str) -> datetime:
         raise AV1ValidationV3Tier2SelectionError(
             f"AV1 v3 Tier 2 selection {label} is invalid"
         ) from exc
-    if parsed.tzinfo is None:
+    canonical = parsed.astimezone(UTC)
+    if (
+        parsed.utcoffset() != UTC.utcoffset(None)
+        or canonical.microsecond != 0
+        or value != canonical.isoformat().replace("+00:00", "Z")
+    ):
         raise AV1ValidationV3Tier2SelectionError(
-            f"AV1 v3 Tier 2 selection {label} must include a timezone"
+            f"AV1 v3 Tier 2 selection {label} must use canonical UTC"
         )
-    return parsed.astimezone(UTC)
+    return canonical
 
 
 def _require_exact_keys(
@@ -650,41 +661,14 @@ def _required_bool(value: object) -> bool:
     return value
 
 
+def _false_authority_fields() -> dict[str, bool]:
+    return dict.fromkeys(_FALSE_AUTHORITY_FIELDS, False)
+
+
 def _assert_public_summary_safe(payload: Mapping[str, Any]) -> None:
-    private_terms = {
-        "candidate_count",
-        "candidate_set_sha256",
-        "fingerprint",
-        "inventory_count",
-        "inventory_digest",
-        "inventory_sha256",
-        "key",
-        "path",
-        "rank",
-        "source_fingerprint",
-        "title",
-    }
-    if any(
-        _public_summary_contains_private_term(payload, term) for term in private_terms
-    ):
-        raise AV1ValidationV3Tier2SelectionError(
-            "AV1 v3 Tier 2 public selection summary contains private data"
-        )
     try:
         assert_av1_cold_start_public_payload_safe(payload)
     except ValueError as exc:
         raise AV1ValidationV3Tier2SelectionError(
             "AV1 v3 Tier 2 public selection summary contains private data"
         ) from exc
-
-
-def _public_summary_contains_private_term(value: object, term: str) -> bool:
-    if isinstance(value, Mapping):
-        return any(
-            term in str(key).lower()
-            or _public_summary_contains_private_term(item, term)
-            for key, item in value.items()
-        )
-    if isinstance(value, list):
-        return any(_public_summary_contains_private_term(item, term) for item in value)
-    return isinstance(value, str) and term in value.lower()

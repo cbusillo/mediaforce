@@ -139,24 +139,25 @@ non-paused/unclean attestations.
 
 These are pure data contracts and public-safe summaries only. They do not load
 private inventory, select a source, create a qualification key, run fixtures,
-or create evidence or empirical authority. Qualification execution remains
-blocked in issues `#304` and `#305`; a future executor must supply separate
+or create evidence or empirical authority. Tier 2 qualification execution remains
+blocked in issue `#305`; a future executor must supply separate
 owner authorization and validate both the plan and attestation against the
 frozen protocol at its explicit timestamp.
 
 Issue `#305` begins with the pure Tier 2 selection-record contract in
 `mediaforce/tuning/av1_validation_v3_tier2_selection.py`. The builder accepts
-only caller-supplied synthetic `AV1ValidationV3QualificationSource` records,
-an active qualification plan, the already committed qualification-key ID, and
-an in-memory key; it stores no key and delegates the actual choice to the
+only caller-supplied typed `AV1ValidationV3QualificationSource` records, an
+active qualification plan, and the already committed in-memory qualification
+key; it stores no key and delegates the actual choice to the
 frozen `select_av1_validation_v3_tier2_sources` selector. The owner-only
 record commits to the complete sorted deduplicated candidate source records,
 candidate count, canonical selections, selected timestamp, record ID, and
 payload digest. Loading requires exact canonical bytes, and source validation
 redraws the record from the supplied candidates so candidate-set drift changes
 the record ID. Its public summary exposes only fixed non-executing status,
-protocol/plan/record identities, timestamp, and stratum names; it carries no
-fingerprints, ranks, inventory digest/count, paths, titles, or key material.
+protocol/plan identities, and frozen stratum names; it carries no record ID,
+timestamp, fingerprints, ranks, inventory digest/count, paths, titles, or key
+material.
 The contract performs no inventory, database, media, or filesystem scan and
 creates no publication, execution, empirical, derivation, holdout, grant,
 claim, lock, subprocess, or feature-flag authority.
