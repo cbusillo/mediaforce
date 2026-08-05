@@ -330,6 +330,9 @@ Guidance:
 - `av1_validation_partition_inventory.py`
   - read-only current fingerprint/config projection into private partition
     candidates without runtime, observation, authorization, or encode authority
+- `av1_validation_v3_tier2_selection.py`
+  - pure owner-only v3 Tier 2 typed-source selection records, canonical
+    candidate/set commitments, and privacy-safe non-authorizing summaries
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
