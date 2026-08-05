@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import ast
 from dataclasses import replace
 import hashlib
@@ -7,10 +9,10 @@ from pathlib import Path
 import sys
 import tempfile
 import time
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.tuning.av1_validation_v3 import load_av1_validation_protocol_v3
 from mediaforce.tuning.av1_validation_v3_qualification import (
     build_av1_validation_v3_qualification_plan,
@@ -22,6 +24,10 @@ from mediaforce.tuning.av1_validation_v3_tier1_executor import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_grant import (
     build_av1_validation_v3_tier1_execution_grant,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    av1_validation_v3_tier1_config_snapshot_sha256,
+    build_av1_validation_v3_tier1_config_snapshot,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_request import (
     build_av1_validation_v3_tier1_authorization_request,
@@ -51,19 +57,36 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         self.output_root = self.runtime_root / "outputs"
         self.output_root.mkdir()
         self.output_root = self.output_root.resolve()
-        self.config = SimpleNamespace(
-            paths=SimpleNamespace(
+        self.config = MediaforceConfig(
+            raw={
+                "config": {"include_files": []},
+                "video": {"codec": "av1"},
+            },
+            paths=ConfigPaths(
+                project_root=self.runtime_root,
                 config_path=self.runtime_root / "config.toml",
                 db_path=self.runtime_root / "mediaforce.sqlite3",
+                run_manifest_dir=self.runtime_root / "manifests",
                 web_state_dir=self.runtime_root / "state",
-            )
+                review_dir=self.runtime_root / "review",
+                runtime_settings_path=self.runtime_root / "runtime-settings.json",
+                runtime_reservation_dir=self.runtime_root / "runtime-reservations",
+            ),
+        )
+        self.config_snapshot_bytes = build_av1_validation_v3_tier1_config_snapshot(
+            self.config
         )
         self.toolchain = build_av1_validation_v3_tier1_toolchain_binding(
             ffmpeg_path=Path(sys.executable),
             ffprobe_path=Path(sys.executable),
         )
         self.matrix = load_av1_validation_v3_tier1_fixture_matrix(MATRIX_PATH)
-        self.context = _execution_context(self.toolchain.payload_sha256)
+        self.context = _execution_context(
+            self.toolchain.payload_sha256,
+            av1_validation_v3_tier1_config_snapshot_sha256(
+                self.config_snapshot_bytes
+            ),
+        )
 
     def test_toolchain_binding_is_canonical_and_detects_changes(self) -> None:
         self.assertEqual(
@@ -97,6 +120,7 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         session = None
         with paused_av1_validation_v3_tier1_runtime(
             self.config,
+            config_snapshot_bytes=self.config_snapshot_bytes,
             context=self.context,
             matrix=self.matrix,
             output_directory=self.output_root,
@@ -118,6 +142,7 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(AV1ValidationV3Tier1RuntimeError, "newly acquired"):
                 with paused_av1_validation_v3_tier1_runtime(
                     self.config,
+                    config_snapshot_bytes=self.config_snapshot_bytes,
                     context=self.context,
                     matrix=self.matrix,
                     output_directory=self.output_root,
@@ -125,10 +150,16 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
                     toolchain=self.toolchain,
                 ):
                     pass
-        mismatched_context = _execution_context(f"sha256:{'f' * 64}")
+        mismatched_context = _execution_context(
+            f"sha256:{'f' * 64}",
+            av1_validation_v3_tier1_config_snapshot_sha256(
+                self.config_snapshot_bytes
+            ),
+        )
         with self.assertRaisesRegex(AV1ValidationV3Tier1RuntimeError, "not bound"):
             with paused_av1_validation_v3_tier1_runtime(
                 self.config,
+                config_snapshot_bytes=self.config_snapshot_bytes,
                 context=mismatched_context,
                 matrix=self.matrix,
                 output_directory=self.output_root,
@@ -142,7 +173,50 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ValidationV3Tier1RuntimeError, "grant is not active"):
             with paused_av1_validation_v3_tier1_runtime(
                 self.config,
+                config_snapshot_bytes=self.config_snapshot_bytes,
                 context=inactive_context,
+                matrix=self.matrix,
+                output_directory=self.output_root,
+                repository_root=Path.cwd(),
+                toolchain=self.toolchain,
+            ):
+                pass
+
+    def test_runtime_rejects_live_config_drift_and_unbound_snapshot(self) -> None:
+        changed_config = replace(
+            self.config,
+            raw={
+                **self.config.raw,
+                "video": {"codec": "changed"},
+            },
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier1RuntimeError,
+            "effective config changed",
+        ):
+            with paused_av1_validation_v3_tier1_runtime(
+                changed_config,
+                config_snapshot_bytes=self.config_snapshot_bytes,
+                context=self.context,
+                matrix=self.matrix,
+                output_directory=self.output_root,
+                repository_root=Path.cwd(),
+                toolchain=self.toolchain,
+            ):
+                pass
+
+        unbound_context = _execution_context(
+            self.toolchain.payload_sha256,
+            f"sha256:{'f' * 64}",
+        )
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier1RuntimeError,
+            "config snapshot is not bound",
+        ):
+            with paused_av1_validation_v3_tier1_runtime(
+                self.config,
+                config_snapshot_bytes=self.config_snapshot_bytes,
+                context=unbound_context,
                 matrix=self.matrix,
                 output_directory=self.output_root,
                 repository_root=Path.cwd(),
@@ -356,6 +430,7 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ValidationV3Tier1RuntimeError, "outside"):
             with paused_av1_validation_v3_tier1_runtime(
                 self.config,
+                config_snapshot_bytes=self.config_snapshot_bytes,
                 context=self.context,
                 matrix=self.matrix,
                 output_directory=Path("/"),
@@ -387,7 +462,7 @@ class AV1ValidationV3Tier1RuntimeTests(unittest.TestCase):
         buffered_commands: set[tuple[str, ...]] | None = None,
         streaming_commands: set[tuple[str, ...]] | None = None,
         limits: AV1ValidationV3Tier1RuntimeLimits | None = None,
-    ):
+    ) -> _ExecutorContext:
         lock = exclusive_mediaforce_runtime_lock(
             self.config,
             owner_payload={"purpose": "tier1-runtime-executor-test"},
@@ -420,7 +495,10 @@ class _ExecutorContext:
         self.lock.__exit__(exc_type, exc, traceback)
 
 
-def _execution_context(toolchain_sha256: str) -> AV1ValidationV3Tier1ExecutionContext:
+def _execution_context(
+    toolchain_sha256: str,
+    config_sha256: str,
+) -> AV1ValidationV3Tier1ExecutionContext:
     protocol = load_av1_validation_protocol_v3(PROTOCOL_PATH)
     plan = build_av1_validation_v3_qualification_plan(
         protocol=protocol,
@@ -428,7 +506,7 @@ def _execution_context(toolchain_sha256: str) -> AV1ValidationV3Tier1ExecutionCo
         eligibility_predicate_sha256=f"sha256:{'b' * 64}",
         repository_commit="1" * 40,
         repository_tree="2" * 40,
-        config_sha256=f"sha256:{'c' * 64}",
+        config_sha256=config_sha256,
         toolchain_sha256=toolchain_sha256,
         fixture_matrix_sha256=AV1_VALIDATION_V3_TIER1_MATRIX_SHA256,
         frozen_at="2026-08-03T12:00:00Z",

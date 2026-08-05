@@ -19,8 +19,12 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
     serialize_av1_validation_v3_qualification_plan,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_preparation import (
+    av1_validation_v3_tier1_config_sha256,
     build_av1_validation_v3_tier1_prepared_plan,
     build_av1_validation_v3_tier1_prepared_request,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    validate_av1_validation_v3_tier1_config_snapshot,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_request import (
     AV1ValidationV3Tier1AuthorizationRequest,
@@ -39,6 +43,12 @@ AV1_VALIDATION_V3_TIER1_REQUEST_FILENAME = (
 )
 AV1_VALIDATION_V3_TIER1_PUBLICATION_DIRECTORY_PREFIX = (
     "av1-v3-tier1-preparation-"
+)
+AV1_VALIDATION_V3_TIER1_CONFIG_SNAPSHOT_FILENAME = (
+    "tier1-effective-config-snapshot.json"
+)
+AV1_VALIDATION_V3_TIER1_CONFIG_PUBLICATION_DIRECTORY_PREFIX = (
+    "av1-v3-tier1-config-"
 )
 
 AV1_VALIDATION_V3_TIER1_PUBLICATION_REASON_CODES = frozenset({
@@ -129,6 +139,106 @@ class AV1ValidationV3Tier1PublicationResult:
         return summary
 
 
+@dataclass(frozen=True, slots=True)
+class AV1ValidationV3Tier1ConfigPublicationResult:
+    directory: Path
+    snapshot_path: Path
+    config_sha256: str
+    created: bool
+
+    def to_summary(self) -> dict[str, Any]:
+        summary = {
+            "published": True,
+            "created": self.created,
+            "artifact_kind": "tier1_effective_config_snapshot",
+            "gate": "A0",
+            "tier": "tier1",
+            "config_sha256": self.config_sha256,
+            "private_inventory_read_authorized": False,
+            "media_read_authorized": False,
+            "tier2_execution_authorized": False,
+            "runtime_execution_authorized": False,
+            "qualification_execution_authorized": False,
+            "key_creation_authorized": False,
+            "evidence_creation_authorized": False,
+            "evidence_eligible": False,
+            "empirical_authority_conferred": False,
+            "derivation_authorized": False,
+            "holdout_authorized": False,
+            "publication_authorized": False,
+            "public_bundle_activation_allowed": False,
+            "activation_authorized": False,
+            "execution_requires_separate_owner_authorization": True,
+        }
+        assert_av1_cold_start_public_payload_safe(summary)
+        return summary
+
+
+def publish_av1_validation_v3_tier1_config_snapshot(
+    *,
+    snapshot_bytes: bytes,
+    output_root: Path,
+    repository_root: Path,
+) -> AV1ValidationV3Tier1ConfigPublicationResult:
+    validate_av1_validation_v3_tier1_config_snapshot(snapshot_bytes)
+    config_sha256 = av1_validation_v3_tier1_config_sha256(snapshot_bytes)
+    normalized_root = _validated_publication_root(
+        output_root,
+        repository_root=repository_root,
+    )
+    final_name = (
+        f"{AV1_VALIDATION_V3_TIER1_CONFIG_PUBLICATION_DIRECTORY_PREFIX}"
+        f"{config_sha256.removeprefix('sha256:')}"
+    )
+    expected_members = {
+        AV1_VALIDATION_V3_TIER1_CONFIG_SNAPSHOT_FILENAME: snapshot_bytes,
+    }
+    output_root_descriptor = -1
+    try:
+        output_root_descriptor = _open_or_create_owner_only_directory(
+            normalized_root
+        )
+        existing = _existing_config_publication_result(
+            output_root_descriptor=output_root_descriptor,
+            normalized_root=normalized_root,
+            final_name=final_name,
+            expected_members=expected_members,
+            config_sha256=config_sha256,
+        )
+        if existing is not None:
+            return existing
+        created = _publish_config_snapshot_artifact_set(
+            output_root_descriptor=output_root_descriptor,
+            final_name=final_name,
+            expected_members=expected_members,
+        )
+        return AV1ValidationV3Tier1ConfigPublicationResult(
+            directory=normalized_root / final_name,
+            snapshot_path=(
+                normalized_root
+                / final_name
+                / AV1_VALIDATION_V3_TIER1_CONFIG_SNAPSHOT_FILENAME
+            ),
+            config_sha256=config_sha256,
+            created=created,
+        )
+    except AV1ValidationV3Tier1PublicationError:
+        raise
+    except OSError as exc:
+        reason_code = (
+            "filesystem_capability_missing"
+            if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}
+            else "publication_failed"
+        )
+        raise AV1ValidationV3Tier1PublicationError(
+            reason_code,
+            "AV1 v3 Tier 1 config snapshot could not be published safely",
+        ) from exc
+    finally:
+        if output_root_descriptor >= 0:
+            os.close(output_root_descriptor)
+
+
 def publish_av1_validation_v3_tier1_preparation(
     *,
     protocol: AV1ValidationProtocolV3,
@@ -145,6 +255,7 @@ def publish_av1_validation_v3_tier1_preparation(
     requested_at: str,
     request_valid_until: str,
 ) -> AV1ValidationV3Tier1PublicationResult:
+    validate_av1_validation_v3_tier1_config_snapshot(config_bytes)
     normalized_root = _validated_publication_root(
         output_root,
         repository_root=repository_root,
@@ -495,6 +606,176 @@ def _publish_new_artifact_set(
             os.close(staging_descriptor)
 
 
+def _existing_config_publication_result(
+    *,
+    output_root_descriptor: int,
+    normalized_root: Path,
+    final_name: str,
+    expected_members: dict[str, bytes],
+    config_sha256: str,
+) -> AV1ValidationV3Tier1ConfigPublicationResult | None:
+    if not _assert_existing_member_set(
+        output_root_descriptor=output_root_descriptor,
+        final_name=final_name,
+        expected_members=expected_members,
+    ):
+        return None
+    return AV1ValidationV3Tier1ConfigPublicationResult(
+        directory=normalized_root / final_name,
+        snapshot_path=(
+            normalized_root
+            / final_name
+            / AV1_VALIDATION_V3_TIER1_CONFIG_SNAPSHOT_FILENAME
+        ),
+        config_sha256=config_sha256,
+        created=False,
+    )
+
+
+def _publish_config_snapshot_artifact_set(
+    *,
+    output_root_descriptor: int,
+    final_name: str,
+    expected_members: dict[str, bytes],
+) -> bool:
+    staging_name = f".{final_name}.{secrets.token_hex(12)}.tmp"
+    staging_descriptor = -1
+    staging_created = False
+    renamed = False
+    try:
+        os.mkdir(staging_name, 0o700, dir_fd=output_root_descriptor)
+        staging_created = True
+        os.fsync(output_root_descriptor)
+        staging_descriptor = os.open(
+            staging_name,
+            _DIRECTORY_FLAGS,
+            dir_fd=output_root_descriptor,
+        )
+        staging_identity = _assert_directory_binding(
+            parent_descriptor=output_root_descriptor,
+            name=staging_name,
+            descriptor=staging_descriptor,
+        )
+        for filename in sorted(expected_members):
+            _write_member(
+                staging_descriptor,
+                filename,
+                expected_members[filename],
+            )
+        os.fsync(staging_descriptor)
+        _assert_member_set(staging_descriptor, expected_members)
+        try:
+            rename_exclusive(
+                source_directory_descriptor=output_root_descriptor,
+                source_name=staging_name,
+                destination_directory_descriptor=output_root_descriptor,
+                destination_name=final_name,
+            )
+        except FileExistsError:
+            _remove_known_directory(
+                parent_descriptor=output_root_descriptor,
+                directory_descriptor=staging_descriptor,
+                name=staging_name,
+                expected_filenames=frozenset(expected_members),
+            )
+            staging_created = False
+            if not _assert_existing_member_set(
+                output_root_descriptor=output_root_descriptor,
+                final_name=final_name,
+                expected_members=expected_members,
+            ):
+                raise AV1ValidationV3Tier1PublicationError(
+                    "publication_failed",
+                    "AV1 v3 Tier 1 config publication race could not be reconciled",
+                )
+            return False
+        renamed = True
+        staging_created = False
+        os.fsync(output_root_descriptor)
+        final_identity = _assert_directory_binding(
+            parent_descriptor=output_root_descriptor,
+            name=final_name,
+            descriptor=staging_descriptor,
+        )
+        if final_identity != staging_identity:
+            raise AV1ValidationV3Tier1PublicationError(
+                "publication_failed",
+                "AV1 v3 Tier 1 config directory changed during publication",
+            )
+        _assert_member_set(staging_descriptor, expected_members)
+        return True
+    except BaseException:
+        cleanup_error: OSError | AV1ValidationV3Tier1PublicationError | None = None
+        if staging_descriptor >= 0 and (staging_created or renamed):
+            cleanup_name = final_name if renamed else staging_name
+            try:
+                _remove_known_directory(
+                    parent_descriptor=output_root_descriptor,
+                    directory_descriptor=staging_descriptor,
+                    name=cleanup_name,
+                    expected_filenames=frozenset(expected_members),
+                )
+            except (OSError, AV1ValidationV3Tier1PublicationError) as error:
+                cleanup_error = error
+        elif staging_created:
+            try:
+                os.rmdir(staging_name, dir_fd=output_root_descriptor)
+                os.fsync(output_root_descriptor)
+            except OSError as error:
+                cleanup_error = error
+        if cleanup_error is not None:
+            raise AV1ValidationV3Tier1PublicationError(
+                "publication_cleanup_failed",
+                "AV1 v3 Tier 1 config publication cleanup failed",
+            ) from cleanup_error
+        raise
+    finally:
+        if staging_descriptor >= 0:
+            os.close(staging_descriptor)
+
+
+def _assert_existing_member_set(
+    *,
+    output_root_descriptor: int,
+    final_name: str,
+    expected_members: dict[str, bytes],
+) -> bool:
+    try:
+        path_info = os.stat(
+            final_name,
+            dir_fd=output_root_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(path_info.st_mode):
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_unsafe",
+            "AV1 v3 Tier 1 config publication target is not a safe directory",
+        )
+    try:
+        descriptor = os.open(
+            final_name,
+            _DIRECTORY_FLAGS,
+            dir_fd=output_root_descriptor,
+        )
+    except OSError as exc:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_unsafe",
+            "AV1 v3 Tier 1 config publication target could not be opened safely",
+        ) from exc
+    try:
+        _assert_directory_binding(
+            parent_descriptor=output_root_descriptor,
+            name=final_name,
+            descriptor=descriptor,
+        )
+        _assert_member_set(descriptor, expected_members)
+        return True
+    finally:
+        os.close(descriptor)
+
+
 def _write_member(
     directory_descriptor: int,
     filename: str,
@@ -600,10 +881,11 @@ def _assert_member_set(
     expected_members: dict[str, bytes],
 ) -> None:
     names = frozenset(os.listdir(directory_descriptor))
-    if names != _ARTIFACT_FILENAMES:
+    expected_names = frozenset(expected_members)
+    if names != expected_names:
         reason_code = (
             "artifact_incomplete"
-            if names < _ARTIFACT_FILENAMES
+            if names < expected_names
             else "artifact_malformed"
         )
         raise AV1ValidationV3Tier1PublicationError(
@@ -735,14 +1017,15 @@ def _remove_known_directory(
     parent_descriptor: int,
     directory_descriptor: int,
     name: str,
+    expected_filenames: frozenset[str] = _ARTIFACT_FILENAMES,
 ) -> None:
     names = frozenset(os.listdir(directory_descriptor))
-    if not names <= _ARTIFACT_FILENAMES:
+    if not names <= expected_filenames:
         raise AV1ValidationV3Tier1PublicationError(
             "publication_cleanup_failed",
             "AV1 v3 Tier 1 publication directory contains unexpected entries",
         )
-    for filename in sorted(_ARTIFACT_FILENAMES):
+    for filename in sorted(expected_filenames):
         try:
             os.unlink(filename, dir_fd=directory_descriptor)
         except FileNotFoundError:

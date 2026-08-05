@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -12,6 +11,10 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_executor import (
     AV1_VALIDATION_V3_TIER1_MATRIX_SHA256,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    AV1ValidationV3Tier1ConfigSnapshotError,
+    av1_validation_v3_tier1_config_snapshot_sha256,
 )
 from mediaforce.tuning.av1_validation_v3_tier1_request import (
     AV1ValidationV3Tier1AuthorizationRequest,
@@ -66,17 +69,12 @@ def av1_validation_v3_tier1_eligibility_predicate_sha256() -> str:
 
 
 def av1_validation_v3_tier1_config_sha256(config_bytes: bytes) -> str:
-    if type(config_bytes) is not bytes or not config_bytes:
+    try:
+        return av1_validation_v3_tier1_config_snapshot_sha256(config_bytes)
+    except AV1ValidationV3Tier1ConfigSnapshotError as exc:
         raise AV1ValidationV3Tier1PreparationError(
             "AV1 v3 Tier 1 config bytes are invalid"
-        )
-    identity = {
-        "schema": "mediaforce.av1_cold_start_v3_tier1_config_identity",
-        "schema_version": 1,
-        "byte_length": len(config_bytes),
-        "config_bytes_sha256": f"sha256:{hashlib.sha256(config_bytes).hexdigest()}",
-    }
-    return f"sha256:{stable_json_hash(identity)}"
+        ) from exc
 
 
 def build_av1_validation_v3_tier1_prepared_plan(
