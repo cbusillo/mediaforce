@@ -1,4 +1,5 @@
 import copy
+from dataclasses import fields
 import json
 from pathlib import Path
 import unittest
@@ -14,6 +15,8 @@ from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
     AV1ValidationV3Tier2InventoryReadClaim,
     AV1ValidationV3Tier2InventoryReadGrant,
     AV1ValidationV3Tier2InventoryReadRequest,
+    AV1_VALIDATION_V3_TIER2_INVENTORY_EXCLUSION_COUNTER_FIELDS,
+    AV1_VALIDATION_V3_TIER2_INVENTORY_SOURCE_FINGERPRINT_DOMAIN,
     AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
     assert_av1_validation_v3_tier2_inventory_read_claim_active,
     assert_av1_validation_v3_tier2_inventory_read_grant_active,
@@ -440,6 +443,17 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                 claimed_at="2026-08-03T15:00:00+00:00",
             )
 
+    def test_active_checks_require_canonical_utc_timestamp(self) -> None:
+        with self.assertRaisesRegex(
+            AV1ValidationV3Tier2InventoryAuthorizationError, "canonical UTC"
+        ):
+            assert_av1_validation_v3_tier2_inventory_read_request_active(
+                self.protocol,
+                self.plan,
+                self.request,
+                as_of="2026-08-03T15:00:00+00:00",
+            )
+
     def test_owner_principal_format_rejected(self) -> None:
         for bad_principal in ("owner-short", "user-1234abcd", "owner-UPPERCASE"):
             with self.subTest(principal=bad_principal):
@@ -574,7 +588,7 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
                     f"{name}() exposes a key-bytes parameter: {param_name}",
                 )
 
-    def test_module_imports_without_db_or_runtime_deps(self) -> None:
+    def test_module_source_has_no_db_or_runtime_dependencies(self) -> None:
         import importlib
         import inspect
         import sys
@@ -591,10 +605,31 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
             "subprocess",
             "secrets",
             "pathlib",
+            "av1_validation_v3_tier2_inventory import",
             ".read_bytes(",
             "open(",
         ):
             self.assertNotIn(forbidden, source)
+
+    def test_projection_counter_vocabulary_matches_inventory(self) -> None:
+        from mediaforce.tuning.av1_validation_v3_tier2_inventory import (
+            AV1_VALIDATION_V3_TIER2_INVENTORY_FINGERPRINT_DOMAIN,
+            AV1ValidationV3Tier2Inventory,
+        )
+
+        inventory_counter_fields = {
+            field.name
+            for field in fields(AV1ValidationV3Tier2Inventory)
+            if field.name.endswith("_count") and field.name != "measured_row_count"
+        }
+        self.assertEqual(
+            set(AV1_VALIDATION_V3_TIER2_INVENTORY_EXCLUSION_COUNTER_FIELDS),
+            inventory_counter_fields,
+        )
+        self.assertEqual(
+            AV1_VALIDATION_V3_TIER2_INVENTORY_SOURCE_FINGERPRINT_DOMAIN,
+            AV1_VALIDATION_V3_TIER2_INVENTORY_FINGERPRINT_DOMAIN,
+        )
 
     def test_dataclass_types(self) -> None:
         self.assertIsInstance(self.request, AV1ValidationV3Tier2InventoryReadRequest)

@@ -19,11 +19,6 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
     AV1ValidationV3QualificationPlan,
     assert_av1_validation_v3_qualification_plan_active,
 )
-from mediaforce.tuning.av1_validation_v3_tier2_inventory import (
-    AV1_VALIDATION_V3_TIER2_INVENTORY_FINGERPRINT_DOMAIN,
-)
-
-
 AV1_VALIDATION_V3_TIER2_INVENTORY_READ_REQUEST_SCHEMA = (
     "mediaforce.av1_cold_start_v3_tier2_inventory_read_request"
 )
@@ -43,6 +38,9 @@ AV1_VALIDATION_V3_TIER2_INVENTORY_SCOPE_DIGEST_DOMAIN = (
 )
 AV1_VALIDATION_V3_TIER2_INVENTORY_PROJECTION_CONTRACT_DOMAIN = (
     "mediaforce:av1:v3:tier2-inventory-projection-contract:v1"
+)
+AV1_VALIDATION_V3_TIER2_INVENTORY_SOURCE_FINGERPRINT_DOMAIN = (
+    "mediaforce:av1:v3:tier2-qualification-source:v1"
 )
 
 _OWNER_PRINCIPAL_RE = re.compile(r"owner-[a-z0-9]{8,32}\Z")
@@ -75,7 +73,7 @@ AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS = (
     "retry_authorized",
 )
 
-_EXCLUSION_COUNTER_VOCABULARY = tuple(
+AV1_VALIDATION_V3_TIER2_INVENTORY_EXCLUSION_COUNTER_FIELDS = tuple(
     sorted([
         "ambiguous_trait_count",
         "duplicate_source_identity_row_count",
@@ -509,7 +507,11 @@ def assert_av1_validation_v3_tier2_inventory_read_request_active(
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
             "AV1 v3 Tier 2 inventory read request is not bound to its plan"
         )
-    checked_at = _parse_timestamp(as_of, "request active-check timestamp")
+    checked_at = _parse_timestamp(
+        as_of,
+        "request active-check timestamp",
+        canonical=True,
+    )
     if checked_at < _parse_timestamp(
         request.requested_at, "request timestamp"
     ) or checked_at >= _parse_timestamp(request.valid_until, "request expiration"):
@@ -572,7 +574,11 @@ def assert_av1_validation_v3_tier2_inventory_read_grant_active(
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
             "AV1 v3 Tier 2 inventory read grant is not bound to its request"
         )
-    checked_at = _parse_timestamp(as_of, "grant active-check timestamp")
+    checked_at = _parse_timestamp(
+        as_of,
+        "grant active-check timestamp",
+        canonical=True,
+    )
     if checked_at < _parse_timestamp(
         grant.authorized_at, "grant timestamp"
     ) or checked_at >= _parse_timestamp(grant.valid_until, "grant expiration"):
@@ -638,7 +644,11 @@ def assert_av1_validation_v3_tier2_inventory_read_claim_active(
             "AV1 v3 Tier 2 inventory read claim is not bound to its grant chain"
         )
     claimed_at = _parse_timestamp(claim.claimed_at, "claim timestamp")
-    checked_at = _parse_timestamp(as_of, "claim active-check timestamp")
+    checked_at = _parse_timestamp(
+        as_of,
+        "claim active-check timestamp",
+        canonical=True,
+    )
     if claimed_at < _parse_timestamp(
         grant.authorized_at, "grant timestamp"
     ) or claimed_at >= _parse_timestamp(grant.valid_until, "grant expiration"):
@@ -992,7 +1002,9 @@ def _compute_tier2_scope_digest(protocol: AV1ValidationProtocolV3) -> str:
 
 def _compute_inventory_projection_contract_digest() -> str:
     contract = {
-        "source_fingerprint_domain": AV1_VALIDATION_V3_TIER2_INVENTORY_FINGERPRINT_DOMAIN,
+        "source_fingerprint_domain": (
+            AV1_VALIDATION_V3_TIER2_INVENTORY_SOURCE_FINGERPRINT_DOMAIN
+        ),
         "source_identity_contract": "40_hex_content_version_fingerprint_strict",
         "dominant_evidence_cohort_selection": (
             "most_frequent_cohort_tie_break_compatibility_sort_key"
@@ -1006,7 +1018,9 @@ def _compute_inventory_projection_contract_digest() -> str:
         "duplicate_source_identity_rows_all_dropped": True,
         "fingerprint_collision_is_fatal": True,
         "pipeline_ready_semantics": "all_emitted_sources_always_true",
-        "exclusion_counter_vocabulary": list(_EXCLUSION_COUNTER_VOCABULARY),
+        "exclusion_counter_vocabulary": list(
+            AV1_VALIDATION_V3_TIER2_INVENTORY_EXCLUSION_COUNTER_FIELDS
+        ),
     }
     return _domain_payload_sha256(
         AV1_VALIDATION_V3_TIER2_INVENTORY_PROJECTION_CONTRACT_DOMAIN, contract
