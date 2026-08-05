@@ -228,6 +228,26 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
         self.assertEqual(len(inventory.entries), 0)
         self.assertEqual(inventory.duplicate_source_identity_row_count, 2)
 
+    def test_duplicate_identity_drops_rows_across_evidence_cohorts(self) -> None:
+        identity = "0" * 39 + "1"
+        _insert_item(self.connection, 1, "animation", identity)
+        _insert_item(
+            self.connection,
+            2,
+            "typical",
+            identity,
+            analyzer_policy_digest="sha256:minority",
+        )
+        _insert_item(self.connection, 3, "typical", "0" * 39 + "2")
+
+        inventory = self._inventory()
+
+        self.assertEqual(
+            [entry.source_identity for entry in inventory.entries],
+            ["0" * 39 + "2"],
+        )
+        self.assertEqual(inventory.duplicate_source_identity_row_count, 2)
+
     def test_malformed_identity_is_rejected_and_counted(self) -> None:
         _insert_item(self.connection, 1, "animation", "not-a-git-sha")
 

@@ -37,7 +37,7 @@ from mediaforce.tuning.stream_budget import (
 
 
 AV1_VALIDATION_V3_TIER2_INVENTORY_FINGERPRINT_DOMAIN = (
-    "mediaforce:av1:v3:tier2-private-ineligible-inventory-source:v1"
+    "mediaforce:av1:v3:tier2-qualification-source:v1"
 )
 _CONTENT_VERSION_RE = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -180,10 +180,6 @@ def load_av1_validation_v3_tier2_inventory(
     unique_identity_rows: list[Mapping[str, Any]] = []
 
     for row in rows:
-        evidence = av1_validation_evidence_compatibility(row)
-        if expected_evidence is None or evidence != expected_evidence:
-            counts["incompatible_evidence_count"] += 1
-            continue
         source_identity = _source_identity(row)
         if source_identity is None:
             counts["malformed_identity_count"] += 1
@@ -194,7 +190,12 @@ def load_av1_validation_v3_tier2_inventory(
         if len(identity_rows) > 1:
             counts["duplicate_source_identity_row_count"] += len(identity_rows)
         else:
-            unique_identity_rows.append(identity_rows[0])
+            row = identity_rows[0]
+            evidence = av1_validation_evidence_compatibility(row)
+            if expected_evidence is None or evidence != expected_evidence:
+                counts["incompatible_evidence_count"] += 1
+                continue
+            unique_identity_rows.append(row)
 
     entries: list[_AV1ValidationV3Tier2InventoryEntry] = []
     fingerprint_identities: dict[str, str] = {}
