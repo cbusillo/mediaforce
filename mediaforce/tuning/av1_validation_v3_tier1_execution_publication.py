@@ -11,6 +11,10 @@ from mediaforce.tuning.av1_validation_v3_tier1_coverage import (
     AV1ValidationV3Tier1CoverageAttestation,
     serialize_av1_validation_v3_tier1_coverage_attestation,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_diagnostics import (
+    AV1ValidationV3Tier1RunDiagnostics,
+    serialize_av1_validation_v3_tier1_run_diagnostics,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_grant import (
     AV1ValidationV3Tier1ExecutionGrant,
     av1_validation_v3_tier1_grant_from_payload,
@@ -24,6 +28,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_publication import (
     AV1ValidationV3Tier1PublicationError,
     load_av1_validation_v3_owner_artifact,
     publish_av1_validation_v3_owner_artifact,
+    publish_av1_validation_v3_owner_artifacts,
 )
 
 
@@ -32,6 +37,7 @@ AV1_VALIDATION_V3_TIER1_GRANT_DIRECTORY_PREFIX = "av1-v3-tier1-grant-"
 AV1_VALIDATION_V3_TIER1_CLAIM_FILENAME = "tier1-execution-claim.json"
 AV1_VALIDATION_V3_TIER1_CLAIM_DIRECTORY_PREFIX = "av1-v3-tier1-run-"
 AV1_VALIDATION_V3_TIER1_RECEIPT_FILENAME = "tier1-coverage-receipt.json"
+AV1_VALIDATION_V3_TIER1_DIAGNOSTICS_FILENAME = "tier1-run-diagnostics.json"
 AV1_VALIDATION_V3_TIER1_RECEIPT_DIRECTORY_PREFIX = "av1-v3-tier1-coverage-"
 
 
@@ -81,6 +87,7 @@ class AV1ValidationV3Tier1ClaimPublicationResult:
 class AV1ValidationV3Tier1ReceiptPublicationResult:
     directory: Path
     receipt_path: Path
+    diagnostics_path: Path
     attestation: AV1ValidationV3Tier1CoverageAttestation
     created: bool
 
@@ -190,20 +197,37 @@ def publish_av1_validation_v3_tier1_execution_claim(
 def publish_av1_validation_v3_tier1_coverage_receipt(
     *,
     attestation: AV1ValidationV3Tier1CoverageAttestation,
+    diagnostics: AV1ValidationV3Tier1RunDiagnostics,
     output_root: Path,
     repository_root: Path,
 ) -> AV1ValidationV3Tier1ReceiptPublicationResult:
-    directory, created = publish_av1_validation_v3_owner_artifact(
+    if (
+        diagnostics.attestation_id != attestation.attestation_id
+        or diagnostics.attestation_payload_sha256 != attestation.payload_sha256
+        or diagnostics.grant_id != attestation.grant_id
+    ):
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_malformed",
+            "AV1 v3 Tier 1 diagnostics are not bound to the coverage receipt",
+        )
+    directory, created = publish_av1_validation_v3_owner_artifacts(
         output_root=output_root,
         repository_root=repository_root,
         final_name=f"{AV1_VALIDATION_V3_TIER1_RECEIPT_DIRECTORY_PREFIX}{attestation.grant_id}",
-        filename=AV1_VALIDATION_V3_TIER1_RECEIPT_FILENAME,
-        content=serialize_av1_validation_v3_tier1_coverage_attestation(attestation),
+        members={
+            AV1_VALIDATION_V3_TIER1_RECEIPT_FILENAME: (
+                serialize_av1_validation_v3_tier1_coverage_attestation(attestation)
+            ),
+            AV1_VALIDATION_V3_TIER1_DIAGNOSTICS_FILENAME: (
+                serialize_av1_validation_v3_tier1_run_diagnostics(diagnostics)
+            ),
+        },
         description="coverage receipt",
     )
     return AV1ValidationV3Tier1ReceiptPublicationResult(
         directory=directory,
         receipt_path=directory / AV1_VALIDATION_V3_TIER1_RECEIPT_FILENAME,
+        diagnostics_path=directory / AV1_VALIDATION_V3_TIER1_DIAGNOSTICS_FILENAME,
         attestation=attestation,
         created=created,
     )

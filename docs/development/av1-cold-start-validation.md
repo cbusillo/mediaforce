@@ -205,6 +205,14 @@ activation authority. It can be produced only while the grant is active and
 only when runtime pause and output cleanup both succeeded. The full
 qualification attestation contract does not accept this receipt.
 
+Future receipt publications atomically include a private-safe companion
+`tier1-run-diagnostics.json`. It binds to the receipt and records only a closed
+allowlist of scalar probe observations plus bounded command metadata (program,
+argv digest, outcome, return code, byte counts, and truncation state). It never
+stores stderr text, paths, private media data, or additional authority. The
+coverage-receipt schema remains unchanged so historical Gate A0 receipts stay
+canonically loadable.
+
 `mediaforce/tuning/av1_validation_v3_tier1_operation.py` is the bounded
 orchestrator for that receipt. It enters the existing paused-runtime adapter,
 publishes a durable single-execution claim before the first fixture command,

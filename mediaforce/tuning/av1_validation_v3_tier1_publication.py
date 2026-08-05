@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
-from typing import Any
+from typing import Any, Mapping
 
 from mediaforce.core.file_integrity import (
     fsync_durable_file,
@@ -486,11 +486,33 @@ def publish_av1_validation_v3_owner_artifact(
     content: bytes,
     description: str,
 ) -> tuple[Path, bool]:
+    return publish_av1_validation_v3_owner_artifacts(
+        output_root=output_root,
+        repository_root=repository_root,
+        final_name=final_name,
+        members={filename: content},
+        description=description,
+    )
+
+
+def publish_av1_validation_v3_owner_artifacts(
+    *,
+    output_root: Path,
+    repository_root: Path,
+    final_name: str,
+    members: Mapping[str, bytes],
+    description: str,
+) -> tuple[Path, bool]:
     normalized_root = _validated_publication_root(
         output_root,
         repository_root=repository_root,
     )
-    expected_members = {filename: content}
+    expected_members = dict(members)
+    if not expected_members:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_malformed",
+            "AV1 v3 Tier 1 publication artifact set is empty",
+        )
     output_root_descriptor = -1
     try:
         output_root_descriptor = _open_or_create_owner_only_directory(

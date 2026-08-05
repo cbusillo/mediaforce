@@ -18,6 +18,11 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
 from mediaforce.tuning.av1_validation_v3_tier1_coverage import (
     build_av1_validation_v3_tier1_coverage_attestation,
 )
+from mediaforce.tuning.av1_validation_v3_tier1_diagnostics import (
+    AV1ValidationV3Tier1DiagnosticsError,
+    build_av1_validation_v3_tier1_run_diagnostics,
+    load_av1_validation_v3_tier1_run_diagnostics,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_execution_publication import (
     load_published_av1_validation_v3_tier1_execution_grant,
     publish_av1_validation_v3_tier1_coverage_receipt,
@@ -42,6 +47,9 @@ from mediaforce.tuning.av1_validation_v3_tier1_publication import (
 )
 from mediaforce.tuning.av1_validation_v3_tier1_request import (
     build_av1_validation_v3_tier1_authorization_request,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_runtime import (
+    AV1ValidationV3Tier1CommandDiagnostic,
 )
 from scripts import verify_av1_cold_start_preregistration
 
@@ -169,13 +177,20 @@ class AV1ValidationV3Tier1OperationTests(unittest.TestCase):
                 output_root=output,
                 repository_root=repository,
             )
+            diagnostics = build_av1_validation_v3_tier1_run_diagnostics(
+                attestation=attestation,
+                outcomes=self._outcomes(),
+                diagnostics=(self._command_diagnostic(),),
+            )
             first_receipt = publish_av1_validation_v3_tier1_coverage_receipt(
                 attestation=attestation,
+                diagnostics=diagnostics,
                 output_root=output,
                 repository_root=repository,
             )
             second_receipt = publish_av1_validation_v3_tier1_coverage_receipt(
                 attestation=attestation,
+                diagnostics=diagnostics,
                 output_root=output,
                 repository_root=repository,
             )
@@ -184,6 +199,14 @@ class AV1ValidationV3Tier1OperationTests(unittest.TestCase):
             self.assertFalse(second_claim.created)
             self.assertTrue(first_receipt.created)
             self.assertFalse(second_receipt.created)
+            self.assertEqual(
+                load_av1_validation_v3_tier1_run_diagnostics(
+                    first_receipt.diagnostics_path
+                ),
+                diagnostics,
+            )
+            self.assertEqual(diagnostics.fixtures[0].observation["color_space"], "")
+            self.assertEqual(diagnostics.commands[0].program, "ffprobe")
 
             later_claim = build_av1_validation_v3_tier1_execution_claim(
                 protocol=self.protocol,
@@ -219,6 +242,26 @@ class AV1ValidationV3Tier1OperationTests(unittest.TestCase):
                     repository_root=Path("/repository"),
                 )
         self.assertEqual(raised.exception.reason_code, "artifact_unsafe")
+
+    def test_diagnostics_reject_unknown_observation_fields(self) -> None:
+        outcomes = list(self._outcomes())
+        outcomes[0] = replace(outcomes[0], observation={"private_path": "/tmp"})
+        attestation = build_av1_validation_v3_tier1_coverage_attestation(
+            protocol=self.protocol,
+            plan=self.plan,
+            request=self.request,
+            grant=self.grant,
+            outcomes=outcomes,
+            cleanup_passed=True,
+            runtime_paused=True,
+            completed_at="2026-08-05T16:00:00Z",
+        )
+        with self.assertRaises(AV1ValidationV3Tier1DiagnosticsError):
+            build_av1_validation_v3_tier1_run_diagnostics(
+                attestation=attestation,
+                outcomes=outcomes,
+                diagnostics=(),
+            )
 
     def test_operation_runs_each_fixture_once_and_builds_receipt_after_cleanup(
         self,
@@ -641,9 +684,31 @@ class AV1ValidationV3Tier1OperationTests(unittest.TestCase):
                 content_byte_count=796_262_400,
                 passed=True,
                 failures=(),
-                observation={},
+                observation={
+                    "width": 1280,
+                    "height": 720,
+                    "r_frame_rate": "24/1",
+                    "pix_fmt": "yuv420p10le",
+                    "color_primaries": "",
+                    "color_transfer": "",
+                    "color_space": "",
+                    "color_range": "",
+                    "nb_read_frames": 288,
+                },
             )
             for index, fixture_id in enumerate(fixture_ids)
+        )
+
+    @staticmethod
+    def _command_diagnostic() -> AV1ValidationV3Tier1CommandDiagnostic:
+        return AV1ValidationV3Tier1CommandDiagnostic(
+            program="ffprobe",
+            argv_sha256=f"sha256:{'f' * 64}",
+            outcome="completed",
+            returncode=0,
+            stdout_bytes=512,
+            stderr_bytes=0,
+            stderr_truncated=False,
         )
 
 
