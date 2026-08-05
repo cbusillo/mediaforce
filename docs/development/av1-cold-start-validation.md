@@ -163,6 +163,24 @@ only the caller-supplied selection-record path. It creates no publication,
 execution, empirical, derivation, holdout, grant, claim, lock, subprocess, or
 feature-flag authority.
 
+The second bounded `#305` slice adds
+`mediaforce/tuning/av1_validation_v3_tier2_inventory.py`, a read-only private
+inventory projection adapter for Tier 2 private-ineligible candidates. It
+directly reads current measured fingerprint rows, keeps only the dominant
+compatible evidence cohort, validates strict 40-hex content-version identities,
+drops duplicate identity groups, confirms `balanced` compression intent,
+projects exact traits, and requires one frozen Tier 2 stratum with no powered
+candidate-cell overlap and a feasible stream budget. Its in-memory private
+entries contain only local item ID, content-version identity, current evidence
+digest, and the v3 qualification source. The derived source fingerprint is
+domain-separated from a canonical JSON payload containing only v3 protocol
+identity and the content-version fingerprint; paths, titles, series, group
+identity, v2 history, qualification keys, selection output, files, media, and
+runtime state are not stored, hashed, opened, or published.
+`pipeline_ready` in this adapter means only that the persisted policy, quality,
+and stream-budget projection is candidate-feasible; it makes no claim about
+current runtime or tool availability and grants no execution authority.
+
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a
 future real qualification plan to the exact protocol, commit/tree,

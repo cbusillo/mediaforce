@@ -61,8 +61,48 @@ class AV1ValidationPartitionInventory:
     sources: tuple[AV1ValidationPartitionSource, ...]
 
 
+def av1_validation_measured_fingerprint_rows(
+    connection: DBClient,
+) -> tuple[Mapping[str, Any], ...]:
+    return tuple(
+        connection.execute(
+            select(
+                library_items.c.id,
+                library_items.c.rel_path,
+                library_items.c.fingerprint,
+                library_items.c.content_version_fingerprint,
+                library_items.c.size_bytes,
+                library_items.c.video_bitrate,
+                library_items.c.duration_seconds,
+                library_items.c.container,
+                library_items.c.audio_summary_json,
+                library_items.c.subtitle_summary_json,
+                library_items.c.attachment_summary_json,
+                library_items.c.media_fingerprint_json,
+                library_item_evidence_state.c.summary_sha256,
+                library_item_evidence_state.c.summary_schema_version,
+                library_item_evidence_state.c.analyzer_name,
+                library_item_evidence_state.c.analyzer_version,
+                library_item_evidence_state.c.analyzer_runtime_version,
+                library_item_evidence_state.c.policy_hash,
+            )
+            .join(
+                library_item_evidence_state,
+                library_item_evidence_state.c.library_item_id == library_items.c.id,
+            )
+            .where(
+                library_items.c.status != "missing",
+                library_item_evidence_state.c.evidence_kind
+                == MEDIA_FINGERPRINT_EVIDENCE_KIND,
+                library_item_evidence_state.c.state == "current",
+                library_item_evidence_state.c.decision_status == "measured",
+            )
+        ).mappings()
+    )
+
+
 @dataclass(frozen=True, slots=True)
-class _EvidenceCompatibility:
+class AV1ValidationEvidenceCompatibility:
     summary_schema_version: int
     analyzer_name: str
     analyzer_version: str
@@ -77,6 +117,14 @@ class _EvidenceCompatibility:
             "analyzer_runtime_version": self.analyzer_runtime_version,
             "analyzer_policy_digest": self.analyzer_policy_digest,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _AV1ValidationMeasuredFingerprintSummaries:
+    fingerprint_summary: dict[str, Any]
+    audio_summary: Any
+    subtitle_summary: Any
+    attachment_summary: Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,45 +419,11 @@ def load_av1_validation_partition_inventory(
     *,
     config: MediaforceConfig,
 ) -> AV1ValidationPartitionInventory:
-    rows = list(
-        connection.execute(
-            select(
-                library_items.c.id,
-                library_items.c.rel_path,
-                library_items.c.fingerprint,
-                library_items.c.content_version_fingerprint,
-                library_items.c.size_bytes,
-                library_items.c.video_bitrate,
-                library_items.c.duration_seconds,
-                library_items.c.container,
-                library_items.c.audio_summary_json,
-                library_items.c.subtitle_summary_json,
-                library_items.c.attachment_summary_json,
-                library_items.c.media_fingerprint_json,
-                library_item_evidence_state.c.summary_sha256,
-                library_item_evidence_state.c.summary_schema_version,
-                library_item_evidence_state.c.analyzer_name,
-                library_item_evidence_state.c.analyzer_version,
-                library_item_evidence_state.c.analyzer_runtime_version,
-                library_item_evidence_state.c.policy_hash,
-            )
-            .join(
-                library_item_evidence_state,
-                library_item_evidence_state.c.library_item_id == library_items.c.id,
-            )
-            .where(
-                library_items.c.status != "missing",
-                library_item_evidence_state.c.evidence_kind
-                == MEDIA_FINGERPRINT_EVIDENCE_KIND,
-                library_item_evidence_state.c.state == "current",
-                library_item_evidence_state.c.decision_status == "measured",
-            )
-        ).mappings()
-    )
+    rows = list(av1_validation_measured_fingerprint_rows(connection))
     compatible_evidence = [
         evidence
         for row in rows
-        if (evidence := _evidence_compatibility(row)) is not None
+        if (evidence := av1_validation_evidence_compatibility(row)) is not None
     ]
     evidence_cohorts = Counter(compatible_evidence)
     if not evidence_cohorts:
@@ -418,9 +432,12 @@ def load_av1_validation_partition_inventory(
         )
     expected_evidence = min(
         evidence_cohorts,
-        key=lambda cohort: (-evidence_cohorts[cohort], _compatibility_sort_key(cohort)),
+        key=lambda cohort: (
+            -evidence_cohorts[cohort],
+            av1_validation_compatibility_sort_key(cohort),
+        ),
     )
-    default_policy = _partition_policy(
+    default_policy = av1_validation_normalized_policy(
         {
             "video": config.video,
             "audio": config.audio,
@@ -435,7 +452,7 @@ def load_av1_validation_partition_inventory(
 
     sources = []
     for row in rows:
-        evidence = _evidence_compatibility(row)
+        evidence = av1_validation_evidence_compatibility(row)
         if evidence is None:
             continue
         source = _source_from_row(
@@ -445,14 +462,16 @@ def load_av1_validation_partition_inventory(
         )
         if source is not None:
             sources.append(source)
-    source_counts = Counter(source.source_identity for source in sources)
+    source_counts = Counter(candidate.source_identity for candidate in sources)
     unambiguous_sources = [
-        source for source in sources if source_counts[source.source_identity] == 1
+        candidate
+        for candidate in sources
+        if source_counts[candidate.source_identity] == 1
     ]
     return AV1ValidationPartitionInventory(
         expectations=expectations,
         sources=tuple(
-            sorted(unambiguous_sources, key=lambda source: source.local_item_id)
+            sorted(unambiguous_sources, key=lambda candidate: candidate.local_item_id)
         ),
     )
 
@@ -461,7 +480,7 @@ def _source_from_row(
     row: Mapping[str, Any],
     *,
     config: MediaforceConfig,
-    evidence: _EvidenceCompatibility,
+    evidence: AV1ValidationEvidenceCompatibility,
 ) -> AV1ValidationPartitionSource | None:
     rel_path = normalize_scope_prefix(str(row.get("rel_path") or ""))
     content_version = str(row.get("content_version_fingerprint") or "").strip()
@@ -481,26 +500,19 @@ def _source_from_row(
     series_prefix = (
         series_scope.prefix if series_scope is not None else group_scope.prefix
     )
+    summaries = _av1_validation_fingerprint_summaries(row)
+    if summaries is None:
+        return None
     try:
-        fingerprint_summary = object_dict(
-            json.loads(str(row.get("media_fingerprint_json") or "{}"))
+        projection = project_av1_cold_start_fingerprint_summary(
+            summaries.fingerprint_summary
         )
-        projection = project_av1_cold_start_fingerprint_summary(fingerprint_summary)
-        audio_summary = json.loads(str(row.get("audio_summary_json") or "[]"))
-        subtitle_summary = json.loads(str(row.get("subtitle_summary_json") or "[]"))
-        attachment_raw = row.get("attachment_summary_json")
-        attachment_summary = json.loads(str(attachment_raw)) if attachment_raw else None
-    except (
-        AV1ColdStartTraitProjectionError,
-        json.JSONDecodeError,
-        TypeError,
-        ValueError,
-    ):
+    except (AV1ColdStartTraitProjectionError, TypeError, ValueError):
         return None
 
     resolved_policy = config.resolve_policy(rel_path)
-    normalized_policy = _partition_policy(resolved_policy)
-    quality_contract = _quality_contract(normalized_policy)
+    normalized_policy = av1_validation_normalized_policy(resolved_policy)
+    quality_contract = av1_validation_quality_contract(normalized_policy)
     if quality_contract is None:
         return None
     quality_metric, quality_target, minimum_quality_score = quality_contract
@@ -514,9 +526,9 @@ def _source_from_row(
         "container": str(row.get("container") or ""),
         "output_container": config.output_container,
         "resolved_policy": resolved_policy,
-        "audio_summary": audio_summary,
-        "subtitle_summary": subtitle_summary,
-        "attachment_summary": attachment_summary,
+        "audio_summary": summaries.audio_summary,
+        "subtitle_summary": summaries.subtitle_summary,
+        "attachment_summary": summaries.attachment_summary,
     }
     try:
         ledger = resolve_stream_budget_ledger(
@@ -559,9 +571,9 @@ def _expectations(
     *,
     config: MediaforceConfig,
     policy: Mapping[str, Any],
-    evidence: _EvidenceCompatibility,
+    evidence: AV1ValidationEvidenceCompatibility,
 ) -> AV1ValidationPartitionExpectations:
-    quality_contract = _quality_contract(policy)
+    quality_contract = av1_validation_quality_contract(policy)
     if quality_contract is None:
         raise AV1ValidationPartitionError(
             "AV1 partition default quality contract is incomplete"
@@ -579,7 +591,7 @@ def _expectations(
     )
 
 
-def _partition_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
+def av1_validation_normalized_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
     normalized = {
         "video": dict(object_dict(policy.get("video"))),
         "audio": dict(object_dict(policy.get("audio"))),
@@ -608,7 +620,7 @@ def _base_policy_signature(policy: Mapping[str, Any]) -> str:
 def _compatibility_signature(
     *,
     config: MediaforceConfig,
-    evidence: _EvidenceCompatibility,
+    evidence: AV1ValidationEvidenceCompatibility,
 ) -> str:
     video = config.video
     payload = {
@@ -635,7 +647,9 @@ def _compatibility_signature(
     return f"av1vcompat1_{stable_json_hash(payload)[:32]}"
 
 
-def _quality_contract(policy: Mapping[str, Any]) -> tuple[str, float, float] | None:
+def av1_validation_quality_contract(
+    policy: Mapping[str, Any],
+) -> tuple[str, float, float] | None:
     video = object_dict(policy.get("video"))
     metric = str(video.get("quality_metric") or "").strip().lower()
     if metric == "vmaf":
@@ -651,7 +665,35 @@ def _quality_contract(policy: Mapping[str, Any]) -> tuple[str, float, float] | N
     return metric, target, minimum
 
 
-def _evidence_compatibility(row: Mapping[str, Any]) -> _EvidenceCompatibility | None:
+def _av1_validation_fingerprint_summaries(
+    row: Mapping[str, Any],
+) -> _AV1ValidationMeasuredFingerprintSummaries | None:
+    try:
+        return _AV1ValidationMeasuredFingerprintSummaries(
+            fingerprint_summary=object_dict(
+                json.loads(str(row.get("media_fingerprint_json") or "{}"))
+            ),
+            audio_summary=json.loads(str(row.get("audio_summary_json") or "[]")),
+            subtitle_summary=json.loads(
+                str(row.get("subtitle_summary_json") or "[]")
+            ),
+            attachment_summary=_optional_json_summary(
+                row.get("attachment_summary_json")
+            ),
+        )
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def _optional_json_summary(value: Any) -> Any:
+    if not value:
+        return None
+    return json.loads(str(value))
+
+
+def av1_validation_evidence_compatibility(
+    row: Mapping[str, Any],
+) -> AV1ValidationEvidenceCompatibility | None:
     summary_schema_version = int(row.get("summary_schema_version") or 0)
     analyzer_name = str(row.get("analyzer_name") or "").strip()
     analyzer_version = str(row.get("analyzer_version") or "").strip()
@@ -665,7 +707,7 @@ def _evidence_compatibility(row: Mapping[str, Any]) -> _EvidenceCompatibility | 
         or not analyzer_policy_digest
     ):
         return None
-    return _EvidenceCompatibility(
+    return AV1ValidationEvidenceCompatibility(
         summary_schema_version=summary_schema_version,
         analyzer_name=analyzer_name,
         analyzer_version=analyzer_version,
@@ -674,7 +716,9 @@ def _evidence_compatibility(row: Mapping[str, Any]) -> _EvidenceCompatibility | 
     )
 
 
-def _compatibility_sort_key(cohort: _EvidenceCompatibility) -> tuple[object, ...]:
+def av1_validation_compatibility_sort_key(
+    cohort: AV1ValidationEvidenceCompatibility,
+) -> tuple[object, ...]:
     return (
         cohort.summary_schema_version,
         cohort.analyzer_name,
@@ -688,7 +732,7 @@ def _normalized_identity(value: str) -> str:
     return unicodedata.normalize("NFC", normalize_scope_prefix(value)).casefold()
 
 
-def _finite_number(value: object) -> float | None:
+def _finite_number(value: Any) -> float | None:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
