@@ -245,4 +245,3 @@ def _publish(
         artifact_id=artifact_id,
         created=created,
     )
-
