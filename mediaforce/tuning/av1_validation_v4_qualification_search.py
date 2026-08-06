@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 import math
 from pathlib import Path
 import re
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart
 from mediaforce.tuning.av1_cold_start import (
+    AV1ColdStartConfidence,
     assert_av1_cold_start_public_payload_safe,
     unavailable_av1_cold_start_prediction,
 )
@@ -26,14 +28,19 @@ AV1_VALIDATION_V4_QUALIFICATION_SEARCH_SCHEMA = (
 _V4_BYPASS_REASON = "cold_start_planner_bypassed_for_v4_qualification"
 _V3_HARNESS_SOURCE = "av1_validation_harness"
 _ACCEPTED_WARM_STATUSES = frozenset({"accepted", "rejected_fallback"})
-_RESERVED_SEARCH_KWARGS = frozenset({
-    "_allow_validation_warm_start",
-    "stream_budget_ledger",
-    "warm_start",
-    "expected_search_signature_id",
+_ALLOWED_SEARCH_KWARGS = frozenset({
+    "cadence_decision",
+    "cadence_evidence",
+    "cadence_source_fingerprint",
+    "detected_crop",
+    "height",
+    "host",
+    "quality_temp_dir",
+    "source_codec",
+    "width",
 })
 _SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{7,191}\Z")
-_CONFIDENCE_LEVELS = frozenset({"low", "moderate", "high"})
+_CONFIDENCE_LEVELS = frozenset(get_args(AV1ColdStartConfidence))
 
 V4QualificationMode = Literal["baseline", "guided"]
 
@@ -76,11 +83,20 @@ def run_v4_qualification_search(
     _require_balanced_intent(video_policy)
     _validate_mode_contract(mode, warm_start)
     _validate_guided_policy_bounds(mode, warm_start, video_policy)
+    normalized_search_kwargs = _normalize_extra_search_kwargs(extra_search_kwargs or {})
     invocation_sha256 = av1_validation_v4_qualification_search_invocation_sha256(
+        source_path=source_path,
+        video_policy=video_policy,
         mode=mode,
         warm_start=warm_start,
+        extra_search_kwargs=normalized_search_kwargs,
     )
-    search_kwargs = _build_search_kwargs(mode, stream_budget_ledger, warm_start, extra_search_kwargs or {})
+    search_kwargs = _build_search_kwargs(
+        mode,
+        stream_budget_ledger,
+        warm_start,
+        normalized_search_kwargs,
+    )
     quality_result = search_quality_for_source(
         source_path,
         dict(video_policy),
@@ -91,6 +107,7 @@ def run_v4_qualification_search(
             "V4 qualification search returned an invalid result"
         )
     target_size_trace = _require_target_size_trace(quality_result)
+    _validate_target_size_trace_mode(mode, target_size_trace)
     mirror = _build_cold_start_prior_mirror(target_size_trace)
     _validate_mirror(mode, mirror, warm_start)
     return V4QualificationOperationResult(
@@ -104,10 +121,18 @@ def run_v4_qualification_search(
 
 def av1_validation_v4_qualification_search_invocation_payload(
     *,
+    source_path: Path,
+    video_policy: Mapping[str, Any],
     mode: V4QualificationMode,
     warm_start: QualitySearchWarmStart | None,
+    extra_search_kwargs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if not isinstance(source_path, Path) or not source_path.is_absolute():
+        raise V4QualificationContractError(
+            "V4 qualification invocation source path must be an absolute pathlib.Path"
+        )
     _validate_mode_contract(mode, warm_start)
+    normalized_search_kwargs = _normalize_extra_search_kwargs(extra_search_kwargs or {})
     return {
         "schema": AV1_VALIDATION_V4_QUALIFICATION_SEARCH_SCHEMA,
         "schema_version": 1,
@@ -117,6 +142,9 @@ def av1_validation_v4_qualification_search_invocation_payload(
         "mode": mode,
         "planner_bypassed": True,
         "stream_budget_target_size_path_required": True,
+        "source_path": str(source_path),
+        "video_policy": deepcopy(dict(video_policy)),
+        "search_kwargs": _search_kwargs_invocation_payload(normalized_search_kwargs),
         "warm_start": (
             {
                 "requested_crf": warm_start.requested_crf,
@@ -137,12 +165,15 @@ def av1_validation_v4_qualification_search_invocation_payload(
 
 def av1_validation_v4_qualification_search_invocation_sha256(
     *,
+    source_path: Path,
+    video_policy: Mapping[str, Any],
     mode: V4QualificationMode,
     warm_start: QualitySearchWarmStart | None,
+    extra_search_kwargs: Mapping[str, Any] | None = None,
 ) -> str:
     return (
         "sha256:"
-        f"{stable_json_hash(av1_validation_v4_qualification_search_invocation_payload(mode=mode, warm_start=warm_start))}"
+        f"{stable_json_hash(av1_validation_v4_qualification_search_invocation_payload(source_path=source_path, video_policy=video_policy, mode=mode, warm_start=warm_start, extra_search_kwargs=extra_search_kwargs))}"
     )
 
 
@@ -272,11 +303,6 @@ def _build_search_kwargs(
     warm_start: QualitySearchWarmStart | None,
     extra_search_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    reserved_found = _RESERVED_SEARCH_KWARGS.intersection(extra_search_kwargs)
-    if reserved_found:
-        raise V4QualificationContractError(
-            f"Reserved search kwargs must not be supplied: {sorted(reserved_found)}"
-        )
     search_kwargs = dict(extra_search_kwargs)
     search_kwargs["stream_budget_ledger"] = stream_budget_ledger
     search_kwargs["warm_start"] = warm_start
@@ -288,6 +314,66 @@ def _build_search_kwargs(
     return search_kwargs
 
 
+def _normalize_extra_search_kwargs(
+    extra_search_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    invalid_keys = [
+        key
+        for key in extra_search_kwargs
+        if not isinstance(key, str) or key not in _ALLOWED_SEARCH_KWARGS
+    ]
+    if invalid_keys:
+        raise V4QualificationContractError(
+            "Unsupported search kwargs must not be supplied: "
+            f"{sorted(str(key) for key in invalid_keys)}"
+        )
+    normalized = dict(extra_search_kwargs)
+    for dimension in ("width", "height"):
+        value = normalized.get(dimension)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        ):
+            raise V4QualificationContractError(
+                f"Qualification search kwarg {dimension} must be a positive integer"
+            )
+    for text_key in (
+        "source_codec",
+        "detected_crop",
+        "cadence_source_fingerprint",
+    ):
+        value = normalized.get(text_key)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise V4QualificationContractError(
+                f"Qualification search kwarg {text_key} must be a nonempty string"
+            )
+    for mapping_key in ("cadence_decision", "cadence_evidence", "host"):
+        value = normalized.get(mapping_key)
+        if value is not None and not isinstance(value, Mapping):
+            raise V4QualificationContractError(
+                f"Qualification search kwarg {mapping_key} must be a mapping"
+            )
+        if value is not None:
+            normalized[mapping_key] = deepcopy(dict(value))
+    quality_temp_dir = normalized.get("quality_temp_dir")
+    if quality_temp_dir is not None and (
+        not isinstance(quality_temp_dir, Path) or not quality_temp_dir.is_absolute()
+    ):
+        raise V4QualificationContractError(
+            "Qualification search kwarg quality_temp_dir must be an absolute pathlib.Path"
+        )
+    return normalized
+
+
+def _search_kwargs_invocation_payload(
+    search_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = deepcopy(dict(search_kwargs))
+    quality_temp_dir = payload.get("quality_temp_dir")
+    if isinstance(quality_temp_dir, Path):
+        payload["quality_temp_dir"] = str(quality_temp_dir)
+    return payload
+
+
 def _require_target_size_trace(quality_result: QualitySearchResult) -> dict[str, Any]:
     trace = object_dict(quality_result.target_size_trace) if quality_result.target_size_trace else None
     if not trace:
@@ -297,10 +383,21 @@ def _require_target_size_trace(quality_result: QualitySearchResult) -> dict[str,
     return dict(trace)
 
 
+def _validate_target_size_trace_mode(
+    mode: V4QualificationMode,
+    target_size_trace: Mapping[str, Any],
+) -> None:
+    if mode == "baseline" and "warm_start" in target_size_trace:
+        raise V4QualificationContractError(
+            "Baseline result must not contain a warm-start execution trace key"
+        )
+
+
 def _build_cold_start_prior_mirror(target_size_trace: dict[str, Any]) -> dict[str, Any]:
     prediction = unavailable_av1_cold_start_prediction(_V4_BYPASS_REASON)
     mirror = prediction.to_payload()
-    execution = object_dict(target_size_trace.get("warm_start")) or None
+    execution_payload = object_dict(target_size_trace.get("warm_start")) or None
+    execution = deepcopy(execution_payload) if execution_payload is not None else None
     mirror["execution"] = execution
     return mirror
 

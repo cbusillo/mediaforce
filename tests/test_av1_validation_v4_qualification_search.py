@@ -79,7 +79,10 @@ def _baseline_quality_result() -> QualitySearchResult:
     )
 
 
-def _guided_quality_result(warm_status: str) -> QualitySearchResult:
+def _guided_quality_result(
+    warm_status: str,
+    **trace_overrides: Any,
+) -> QualitySearchResult:
     warm_start_trace: dict[str, Any] = {
         "schema_version": 1,
         "status": warm_status,
@@ -99,6 +102,7 @@ def _guided_quality_result(warm_status: str) -> QualitySearchResult:
         "error_type": None,
         "candidate": None,
     }
+    warm_start_trace.update(trace_overrides)
     return QualitySearchResult(
         crf=28.0,
         metric="vmaf",
@@ -143,7 +147,7 @@ class TestBaselinePath(unittest.TestCase):
             mode="baseline",
             stream_budget_ledger=ledger,
             warm_start=None,
-            extra_search_kwargs={"extra_flag": True},
+            extra_search_kwargs={"source_codec": "h264"},
         )
 
         self.assertEqual(mock_search.call_count, 1)
@@ -151,7 +155,7 @@ class TestBaselinePath(unittest.TestCase):
         self.assertEqual(call_args[0][0], _SOURCE_PATH)
         self.assertEqual(call_args[0][1], _BALANCED_POLICY)
         self.assertIs(call_args[1]["stream_budget_ledger"], ledger)
-        self.assertTrue(call_args[1]["extra_flag"])
+        self.assertEqual(call_args[1]["source_codec"], "h264")
         self.assertIsNone(call_args[1]["warm_start"])
         self.assertIsNone(call_args[1]["expected_search_signature_id"])
         self.assertNotIn("_allow_validation_warm_start", call_args[1])
@@ -168,6 +172,25 @@ class TestBaselinePath(unittest.TestCase):
         )
 
         self.assertIsNone(result.cold_start_prior_mirror.get("execution"))
+
+    def test_baseline_rejects_any_warm_start_trace_key(self) -> None:
+        for warm_start_value in ({}, "accepted", None):
+            with self.subTest(warm_start_value=warm_start_value):
+                quality_result = _baseline_quality_result()
+                quality_result.target_size_trace["warm_start"] = warm_start_value
+                mock_search = MagicMock(return_value=quality_result)
+                with self.assertRaisesRegex(
+                    V4QualificationContractError,
+                    "must not contain",
+                ):
+                    run_v4_qualification_search(
+                        mock_search,
+                        _SOURCE_PATH,
+                        _BALANCED_POLICY,
+                        mode="baseline",
+                        stream_budget_ledger=_mock_ledger(),
+                        warm_start=None,
+                    )
 
 
 class TestGuidedPath(unittest.TestCase):
@@ -276,48 +299,60 @@ class TestGuidedPath(unittest.TestCase):
         self.assertEqual(execution["candidate_crf"], warm_start.candidate_crf)
         self.assertEqual(execution["requested_crf"], warm_start.requested_crf)
 
-    def test_guided_mirror_mismatch_raises(self) -> None:
+    def test_guided_mirror_identity_mismatches_raise(self) -> None:
         warm_start = _v4_warm_start()
-        mock_search = MagicMock(return_value=QualitySearchResult(
-            crf=28.0,
-            metric="vmaf",
-            target=93.0,
-            score=93.1,
-            stdout="",
-            target_size_trace={
-                "schema_version": 1,
-                "status": "selected",
-                "warm_start": {
-                    "schema_version": 1,
-                    "status": "accepted",
-                    "attempted": True,
-                    "requested_crf": 28.0,
-                    "candidate_crf": 28,
-                    "search_signature_id": "acss1_DIFFERENT",  # mismatch
-                    "cohort_id": _COHORT_ID,
-                    "source": AV1_VALIDATION_V4_QUALIFICATION_SOURCE,
-                    "confidence": None,
-                    "provenance_id": None,
-                    "review_risks": [],
-                    "candidate_count": 0,
-                    "duration_seconds": 0.001,
-                    "fallback_used": False,
-                    "fallback_reason": None,
-                    "error_type": None,
-                    "candidate": None,
-                },
-            },
-        ))
-        with self.assertRaises(V4QualificationContractError) as ctx:
+        mismatches: dict[str, Any] = {
+            "search_signature_id": "acss1_DIFFERENT",
+            "cohort_id": "acsh1_DIFFERENT",
+            "candidate_crf": 27,
+            "requested_crf": 27.5,
+            "source": "av1_cold_start_other",
+            "confidence": "limited",
+            "provenance_id": "acprov1_DIFFERENT",
+            "review_risks": ["different_risk"],
+        }
+        for field, value in mismatches.items():
+            with self.subTest(field=field):
+                mock_search = MagicMock(
+                    return_value=_guided_quality_result("accepted", **{field: value})
+                )
+                with self.assertRaisesRegex(V4QualificationContractError, "identity"):
+                    run_v4_qualification_search(
+                        mock_search,
+                        _SOURCE_PATH,
+                        _BALANCED_POLICY,
+                        mode="guided",
+                        stream_budget_ledger=_mock_ledger(),
+                        warm_start=warm_start,
+                    )
+
+    def test_guided_attempted_false_raises(self) -> None:
+        mock_search = MagicMock(
+            return_value=_guided_quality_result("accepted", attempted=False)
+        )
+        with self.assertRaisesRegex(V4QualificationContractError, "attempted=True"):
             run_v4_qualification_search(
                 mock_search,
                 _SOURCE_PATH,
                 _BALANCED_POLICY,
                 mode="guided",
                 stream_budget_ledger=_mock_ledger(),
-                warm_start=warm_start,
+                warm_start=_v4_warm_start(),
             )
-        self.assertIn("identity", str(ctx.exception))
+
+    def test_guided_mirror_does_not_alias_search_trace(self) -> None:
+        quality_result = _guided_quality_result("accepted")
+        result = run_v4_qualification_search(
+            MagicMock(return_value=quality_result),
+            _SOURCE_PATH,
+            _BALANCED_POLICY,
+            mode="guided",
+            stream_budget_ledger=_mock_ledger(),
+            warm_start=_v4_warm_start(),
+        )
+
+        quality_result.target_size_trace["warm_start"]["status"] = "mutated"
+        self.assertEqual(result.cold_start_prior_mirror["execution"]["status"], "accepted")
 
     def test_guided_unexpected_status_raises(self) -> None:
         warm_start = _v4_warm_start()
@@ -523,6 +558,90 @@ class TestGuardFailures(unittest.TestCase):
         self.assertIn("cohort_id", str(ctx.exception))
         mock_search.assert_not_called()
 
+    def test_invalid_signature_prefix_rejected(self) -> None:
+        mock_search = MagicMock(return_value=_guided_quality_result("accepted"))
+        with self.assertRaisesRegex(V4QualificationContractError, "search_signature_id"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(search_signature_id="wrong_abc123"),
+            )
+        mock_search.assert_not_called()
+
+    def test_invalid_cohort_prefix_rejected(self) -> None:
+        mock_search = MagicMock(return_value=_guided_quality_result("accepted"))
+        with self.assertRaisesRegex(V4QualificationContractError, "cohort_id"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(cohort_id="wrong_xyz789"),
+            )
+        mock_search.assert_not_called()
+
+    def test_authoritative_confidence_levels_are_accepted(self) -> None:
+        for confidence in ("none", "limited", "moderate", "high"):
+            with self.subTest(confidence=confidence):
+                warm_start = _v4_warm_start(confidence=confidence)
+                mock_search = MagicMock(
+                    return_value=_guided_quality_result(
+                        "accepted",
+                        confidence=confidence,
+                    )
+                )
+                run_v4_qualification_search(
+                    mock_search,
+                    _SOURCE_PATH,
+                    _BALANCED_POLICY,
+                    mode="guided",
+                    stream_budget_ledger=_mock_ledger(),
+                    warm_start=warm_start,
+                )
+
+    def test_non_authoritative_confidence_rejected(self) -> None:
+        mock_search = MagicMock(return_value=_guided_quality_result("accepted"))
+        with self.assertRaisesRegex(V4QualificationContractError, "confidence"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(confidence="low"),
+            )
+        mock_search.assert_not_called()
+
+    def test_invalid_provenance_id_rejected(self) -> None:
+        mock_search = MagicMock(return_value=_guided_quality_result("accepted"))
+        with self.assertRaisesRegex(V4QualificationContractError, "provenance_id"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(provenance_id="bad id"),
+            )
+        mock_search.assert_not_called()
+
+    def test_invalid_review_risk_rejected(self) -> None:
+        mock_search = MagicMock(return_value=_guided_quality_result("accepted"))
+        with self.assertRaisesRegex(V4QualificationContractError, "review_risks"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(review_risks=("bad risk",)),
+            )
+        mock_search.assert_not_called()
+
     def test_invalid_requested_crf_rejected(self) -> None:
         mock_search = MagicMock(return_value=_guided_quality_result("accepted"))
         with self.assertRaisesRegex(V4QualificationContractError, "requested_crf"):
@@ -632,7 +751,7 @@ class TestGuardFailures(unittest.TestCase):
         mock_search.assert_not_called()
 
 
-class TestReservedKwargRejection(unittest.TestCase):
+class TestSearchKwargAllowlist(unittest.TestCase):
     def test_stream_budget_ledger_in_extra_kwargs_rejected(self) -> None:
         mock_search = MagicMock(return_value=_baseline_quality_result())
         with self.assertRaisesRegex(V4QualificationContractError, "stream_budget_ledger"):
@@ -690,6 +809,34 @@ class TestReservedKwargRejection(unittest.TestCase):
                 extra_search_kwargs={"expected_search_signature_id": _SIG_ID},
             )
         self.assertIn("expected_search_signature_id", str(ctx.exception))
+        mock_search.assert_not_called()
+
+    def test_resolved_plan_cannot_override_validated_policy(self) -> None:
+        mock_search = MagicMock(return_value=_baseline_quality_result())
+        with self.assertRaisesRegex(V4QualificationContractError, "resolved_plan"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="baseline",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=None,
+                extra_search_kwargs={"resolved_plan": object()},
+            )
+        mock_search.assert_not_called()
+
+    def test_unknown_kwarg_rejected(self) -> None:
+        mock_search = MagicMock(return_value=_baseline_quality_result())
+        with self.assertRaisesRegex(V4QualificationContractError, "extra_flag"):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="baseline",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=None,
+                extra_search_kwargs={"extra_flag": True},
+            )
         mock_search.assert_not_called()
 
 
@@ -829,16 +976,75 @@ class TestDeterministicInvocation(unittest.TestCase):
 
     def test_baseline_and_guided_invocation_digests_differ(self) -> None:
         baseline = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy=_BALANCED_POLICY,
             mode="baseline",
             warm_start=None,
         )
         guided = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy=_BALANCED_POLICY,
             mode="guided",
             warm_start=_v4_warm_start(),
         )
         self.assertNotEqual(baseline, guided)
         self.assertRegex(baseline, r"sha256:[0-9a-f]{64}")
         self.assertRegex(guided, r"sha256:[0-9a-f]{64}")
+
+    def test_material_search_inputs_change_invocation_digest(self) -> None:
+        baseline = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy=_BALANCED_POLICY,
+            mode="baseline",
+            warm_start=None,
+            extra_search_kwargs={"source_codec": "h264"},
+        )
+        changed_codec = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy=_BALANCED_POLICY,
+            mode="baseline",
+            warm_start=None,
+            extra_search_kwargs={"source_codec": "hevc"},
+        )
+        changed_policy = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy={**_BALANCED_POLICY, "min_crf": 11},
+            mode="baseline",
+            warm_start=None,
+            extra_search_kwargs={"source_codec": "h264"},
+        )
+        changed_source = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=Path("/does/not/exist-other.mp4"),
+            video_policy=_BALANCED_POLICY,
+            mode="baseline",
+            warm_start=None,
+            extra_search_kwargs={"source_codec": "h264"},
+        )
+
+        self.assertEqual(len({baseline, changed_codec, changed_policy, changed_source}), 4)
+
+    def test_invocation_digests_are_pinned(self) -> None:
+        baseline = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy=_BALANCED_POLICY,
+            mode="baseline",
+            warm_start=None,
+        )
+        guided = av1_validation_v4_qualification_search_invocation_sha256(
+            source_path=_SOURCE_PATH,
+            video_policy=_BALANCED_POLICY,
+            mode="guided",
+            warm_start=_v4_warm_start(),
+        )
+
+        self.assertEqual(
+            baseline,
+            "sha256:f3ec9f1946b895eece28aa13b982e7e2d239f75b803b8a3cd4cd8120f0c17c6c",
+        )
+        self.assertEqual(
+            guided,
+            "sha256:f8dc2a285d4c48cefc9ed1bbaeacf60332f6fbc11a0afa8336e2cc8eb9cd2028",
+        )
 
     def test_v4_ids_distinct_from_v3(self) -> None:
         from mediaforce.tuning.av1_validation_v4_qualification_search import (

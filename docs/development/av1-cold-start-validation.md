@@ -1748,8 +1748,6 @@ runtime lock, opens no database or private inventory, and does not execute
 `ffmpeg` or `ffprobe`; the binaries are only inspected and hashed for the
 machine-local toolchain binding. Grant issuance and fixture execution remain
 separate later owner decisions.
-machine-local toolchain binding. Grant issuance and fixture execution remain
-separate later owner decisions.
 
 ---
 
@@ -1800,11 +1798,13 @@ because `plan_av1_cold_start` is deliberately bypassed; the seam calls
    string. `search_signature_id`, `cohort_id`, CRF values, confidence,
    provenance, and review-risk tokens are validated before the callable runs.
 
-4. **Reserved kwargs** — `_allow_validation_warm_start`,
-   `stream_budget_ledger`, `warm_start`, and `expected_search_signature_id` are
-   reserved and must not appear in
-   `extra_search_kwargs`. The v3 harness flag `_allow_validation_warm_start=True`
-   is never set by this seam; v4 uses a distinct source string instead.
+4. **Search-input allowlist** — `extra_search_kwargs` accepts only the production
+   source/cadence/host/temp-directory inputs that cannot replace the resolved
+   quality plan. `resolved_plan`, `_allow_validation_warm_start`,
+   `stream_budget_ledger`, `warm_start`, `expected_search_signature_id`, and all
+   unknown keys are rejected. The v3 harness flag
+   `_allow_validation_warm_start=True` is never set by this seam; v4 uses a
+   distinct source string instead.
 
 ### Invariants enforced after search returns
 
@@ -1834,9 +1834,9 @@ The mirror is built to match what `calibration_runtime.py` constructs at line 91
 cold_start_payload["execution"] = object_dict(target_size_trace.get("warm_start")) or None
 ```
 
-For baseline this is always `None`. For guided it is the warm-start sub-dict from
-the search trace, which is the exact same structure the runtime embeds in
-`av1_cold_start_prior`.
+For baseline this is always `None`. For guided it is a deep copy of the
+warm-start sub-dict from the search trace, preserving the exact runtime payload
+shape without retaining a mutable alias to the search result.
 
 ### Privacy contract
 
@@ -1863,5 +1863,7 @@ trace internals, or quality metric scores.
 
 The exact v4 source identifier is distinct from every v3 harness and packaged
 prediction source. The module also exposes a deterministic invocation payload
-and SHA-256 so a later manifest can prove baseline and guided invocation
-identities differ while the base config SHA remains identical.
+and SHA-256 that bind the source path, frozen video policy, allowlisted search
+inputs, and exact baseline or guided warm-start identity. A later manifest can
+therefore prove baseline and guided invocation identities differ while the base
+config SHA remains identical.
