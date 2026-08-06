@@ -13,6 +13,7 @@ from mediaforce.tuning.av1_validation_v3_tier1_publication import (
     publish_av1_validation_v3_owner_artifact,
 )
 from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
+    AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
     AV1ValidationV3Tier2InventoryReadClaim,
     AV1ValidationV3Tier2InventoryReadGrant,
     AV1ValidationV3Tier2InventoryReadRequest,
@@ -45,6 +46,13 @@ AV1_VALIDATION_V3_TIER2_INVENTORY_READ_CLAIM_DIRECTORY_PREFIX = (
 )
 
 
+def _false_authority_fields() -> dict[str, bool]:
+    return dict.fromkeys(
+        AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
+        False,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class AV1ValidationV3Tier2InventoryReadRequestPublicationResult:
     directory: Path
@@ -64,6 +72,7 @@ class AV1ValidationV3Tier2InventoryReadRequestPublicationResult:
             "single_read_requested": True,
             "private_inventory_read_authorized": False,
             "execution_requires_separate_owner_authorization": True,
+            **_false_authority_fields(),
         }
         assert_av1_cold_start_public_payload_safe(summary)
         return summary
@@ -90,15 +99,7 @@ class AV1ValidationV3Tier2InventoryReadGrantPublicationResult:
             "single_read_authorized": True,
             "private_inventory_read_authorized": True,
             "execution_requires_separate_owner_authorization": True,
-            "tier2_execution_authorized": False,
-            "media_read_authorized": False,
-            "evidence_creation_authorized": False,
-            "evidence_eligible": False,
-            "empirical_authority_conferred": False,
-            "derivation_authorized": False,
-            "holdout_authorized": False,
-            "publication_authorized": False,
-            "activation_authorized": False,
+            **_false_authority_fields(),
         }
         assert_av1_cold_start_public_payload_safe(summary)
         return summary
@@ -125,15 +126,7 @@ class AV1ValidationV3Tier2InventoryReadClaimPublicationResult:
             "single_read_claimed": True,
             "private_inventory_read_authorized": True,
             "execution_requires_separate_owner_authorization": True,
-            "tier2_execution_authorized": False,
-            "media_read_authorized": False,
-            "evidence_creation_authorized": False,
-            "evidence_eligible": False,
-            "empirical_authority_conferred": False,
-            "derivation_authorized": False,
-            "holdout_authorized": False,
-            "publication_authorized": False,
-            "activation_authorized": False,
+            **_false_authority_fields(),
         }
         assert_av1_cold_start_public_payload_safe(summary)
         return summary
@@ -196,6 +189,11 @@ def load_published_av1_validation_v3_tier2_inventory_read_request(
             "artifact_malformed",
             "AV1 v3 Tier 2 inventory read request bytes are not canonical",
         )
+    if request.request_id != request_id:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_malformed",
+            "AV1 v3 Tier 2 inventory read request identity is invalid",
+        )
     return request
 
 
@@ -255,6 +253,11 @@ def load_published_av1_validation_v3_tier2_inventory_read_grant(
         raise AV1ValidationV3Tier1PublicationError(
             "artifact_malformed",
             "AV1 v3 Tier 2 inventory read grant bytes are not canonical",
+        )
+    if grant.request_id != request_id:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_malformed",
+            "AV1 v3 Tier 2 inventory read grant identity is invalid",
         )
     return grant
 
@@ -323,5 +326,10 @@ def load_published_av1_validation_v3_tier2_inventory_read_claim(
         raise AV1ValidationV3Tier1PublicationError(
             "artifact_malformed",
             "AV1 v3 Tier 2 inventory read claim bytes are not canonical",
+        )
+    if claim.grant_id != grant_id:
+        raise AV1ValidationV3Tier1PublicationError(
+            "artifact_malformed",
+            "AV1 v3 Tier 2 inventory read claim identity is invalid",
         )
     return claim

@@ -231,9 +231,11 @@ hardened owner-only artifact helpers for request, grant, and claim artifacts.
 Request and grant artifacts are idempotent by request ID; claim consumption is
 exclusive by grant ID, so identical replay is idempotent and a distinct claim
 for the same grant fails with read-specific `inventory_read_already_claimed`.
-The operation wrapper publishes/consumes the claim before calling the adapter
-and exposes only a privacy-safe public summary with coarse counts and authority
-bits. It still performs no live private DB/media read in tests and adds no
+The operation wrapper validates the full read boundary, publishes/consumes the
+claim, and then calls the adapter, retaining the private inventory only in
+memory while exposing a privacy-safe public summary with opaque artifact IDs
+and authority bits but no inventory counts. It still performs no live private
+DB/media read in tests and adds no
 selection, CLI, subprocess, ffmpeg, inventory serialization, execution,
 evidence, retry, or downstream authority.
 

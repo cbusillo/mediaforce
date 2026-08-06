@@ -89,43 +89,14 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         self.config = _config(self.root)
-        self.config_snapshot_bytes = build_av1_validation_v3_tier1_config_snapshot(
+        self.protocol = load_av1_validation_protocol_v3(V3_PROTOCOL_PATH)
+        self.config_snapshot_bytes, self.read_context = self._read_context_for_config(
             self.config
         )
-        self.protocol = load_av1_validation_protocol_v3(V3_PROTOCOL_PATH)
-        self.plan = _plan(
-            self.protocol,
-            config_sha256=av1_validation_v3_tier1_config_sha256(
-                self.config_snapshot_bytes
-            ),
-        )
-        self.request = build_av1_validation_v3_tier2_inventory_read_request(
-            protocol=self.protocol,
-            plan=self.plan,
-            requested_at=REQUESTED_AT,
-            valid_until=REQUEST_VALID_UNTIL,
-        )
-        self.grant = build_av1_validation_v3_tier2_inventory_read_grant(
-            protocol=self.protocol,
-            plan=self.plan,
-            request=self.request,
-            owner_principal=OWNER,
-            authorized_at=AUTHORIZED_AT,
-            valid_until=GRANT_VALID_UNTIL,
-        )
-        self.claim = build_av1_validation_v3_tier2_inventory_read_claim(
-            protocol=self.protocol,
-            plan=self.plan,
-            request=self.request,
-            grant=self.grant,
-            claimed_at=CLAIMED_AT,
-        )
-        self.read_context = AV1ValidationV3Tier2InventoryReadContext(
-            plan=self.plan,
-            request=self.request,
-            grant=self.grant,
-            claim=self.claim,
-        )
+        self.plan = self.read_context.plan
+        self.request = self.read_context.request
+        self.grant = self.read_context.grant
+        self.claim = self.read_context.claim
         self.engine = create_engine("sqlite+pysqlite:///:memory:")
         metadata.create_all(self.engine)
         self.connection = self.engine.connect()
@@ -544,7 +515,10 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
         self.assertEqual(events, ["claim", "adapter"])
         summary = result.to_public_summary()
         self.assertTrue(summary["read_claim_published"])
+        self.assertIsInstance(result.inventory, AV1ValidationV3Tier2Inventory)
         self.assertNotIn("candidate_sources", summary)
+        self.assertNotIn("measured_row_count", summary)
+        self.assertNotIn("frozen_stratum_count", summary)
         self.assertFalse(summary["private_inventory_serialization_authorized"])
 
     def test_wrong_claim_id_makes_zero_reads(self) -> None:
@@ -583,7 +557,7 @@ class AV1ValidationV3Tier2InventoryTests(unittest.TestCase):
                     config_snapshot_bytes=self.config_snapshot_bytes,
                     output_root=output,
                     repository_root=repository,
-                    clock=lambda: READ_AT,
+                    clock=lambda: "2026-08-03T15:01:01Z",
                     adapter=adapter,
                 )
 

@@ -167,7 +167,7 @@ def load_av1_validation_v3_tier2_inventory(
     config_snapshot_bytes: bytes,
     clock: Callable[[], str],
 ) -> AV1ValidationV3Tier2Inventory:
-    _assert_authorized_inventory_read(
+    assert_av1_validation_v3_tier2_inventory_read_authorized(
         config=config,
         protocol=protocol,
         read_context=read_context,
@@ -266,7 +266,7 @@ def load_av1_validation_v3_tier2_inventory(
     )
 
 
-def _assert_authorized_inventory_read(
+def assert_av1_validation_v3_tier2_inventory_read_authorized(
     *,
     config: MediaforceConfig,
     protocol: AV1ValidationProtocolV3,
