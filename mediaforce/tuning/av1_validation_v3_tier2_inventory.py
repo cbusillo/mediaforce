@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
 import re
@@ -28,6 +29,14 @@ from mediaforce.tuning.av1_validation_v3 import (
     AV1ValidationProtocolV3,
     AV1ValidationV3QualificationSource,
     assert_preregistered_av1_validation_protocol_v3,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_config_snapshot import (
+    assert_av1_validation_v3_tier1_config_snapshot_matches,
+    av1_validation_v3_tier1_config_snapshot_sha256,
+)
+from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
+    AV1ValidationV3Tier2InventoryReadContext,
+    assert_av1_validation_v3_tier2_inventory_read_context,
 )
 from mediaforce.tuning.compression_intent import compression_intent_from_policy
 from mediaforce.tuning.stream_budget import (
@@ -154,8 +163,17 @@ def load_av1_validation_v3_tier2_inventory(
     *,
     config: MediaforceConfig,
     protocol: AV1ValidationProtocolV3,
+    read_context: AV1ValidationV3Tier2InventoryReadContext,
+    config_snapshot_bytes: bytes,
+    clock: Callable[[], str],
 ) -> AV1ValidationV3Tier2Inventory:
-    assert_preregistered_av1_validation_protocol_v3(protocol)
+    assert_av1_validation_v3_tier2_inventory_read_authorized(
+        config=config,
+        protocol=protocol,
+        read_context=read_context,
+        config_snapshot_bytes=config_snapshot_bytes,
+        as_of=clock(),
+    )
     rows = tuple(av1_validation_measured_fingerprint_rows(connection))
     compatible = [
         evidence
@@ -246,6 +264,33 @@ def load_av1_validation_v3_tier2_inventory(
         ],
         infeasible_stream_budget_count=counts["infeasible_stream_budget_count"],
     )
+
+
+def assert_av1_validation_v3_tier2_inventory_read_authorized(
+    *,
+    config: MediaforceConfig,
+    protocol: AV1ValidationProtocolV3,
+    read_context: AV1ValidationV3Tier2InventoryReadContext,
+    config_snapshot_bytes: bytes,
+    as_of: str,
+) -> None:
+    assert_preregistered_av1_validation_protocol_v3(protocol)
+    assert_av1_validation_v3_tier2_inventory_read_context(
+        protocol,
+        read_context,
+        as_of=as_of,
+    )
+    assert_av1_validation_v3_tier1_config_snapshot_matches(
+        config,
+        config_snapshot_bytes,
+    )
+    if (
+        read_context.plan.config_sha256
+        != av1_validation_v3_tier1_config_snapshot_sha256(config_snapshot_bytes)
+    ):
+        raise AV1ValidationV3Tier2InventoryError(
+            "AV1 v3 Tier 2 inventory read config is not bound to the plan"
+        )
 
 
 def _entry_from_row(

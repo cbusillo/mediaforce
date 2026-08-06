@@ -66,6 +66,7 @@ AV1_VALIDATION_V3_TIER1_PUBLICATION_REASON_CODES = frozenset({
     "artifact_unsafe",
     "execution_already_claimed",
     "filesystem_capability_missing",
+    "inventory_read_already_claimed",
     "publication_cleanup_failed",
     "publication_failed",
     "publication_root_unsafe",
@@ -861,7 +862,7 @@ def _publish_new_artifact_set(
             request=request,
             created=True,
         )
-    except BaseException as exc:
+    except BaseException:
         cleanup_error: OSError | AV1ValidationV3Tier1PublicationError | None = None
         if staging_descriptor >= 0 and (staging_created or renamed):
             cleanup_name = final_name if renamed else staging_name

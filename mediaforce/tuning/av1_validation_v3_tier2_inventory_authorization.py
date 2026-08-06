@@ -443,6 +443,57 @@ class AV1ValidationV3Tier2InventoryReadClaim:
         return summary
 
 
+@dataclass(frozen=True, slots=True)
+class AV1ValidationV3Tier2InventoryReadContext:
+    plan: AV1ValidationV3QualificationPlan
+    request: AV1ValidationV3Tier2InventoryReadRequest
+    grant: AV1ValidationV3Tier2InventoryReadGrant
+    claim: AV1ValidationV3Tier2InventoryReadClaim
+
+    def __post_init__(self) -> None:
+        if type(self.plan) is not AV1ValidationV3QualificationPlan:
+            raise AV1ValidationV3Tier2InventoryAuthorizationError(
+                "AV1 v3 Tier 2 inventory read context plan is invalid"
+            )
+        if type(self.request) is not AV1ValidationV3Tier2InventoryReadRequest:
+            raise AV1ValidationV3Tier2InventoryAuthorizationError(
+                "AV1 v3 Tier 2 inventory read context request is invalid"
+            )
+        if type(self.grant) is not AV1ValidationV3Tier2InventoryReadGrant:
+            raise AV1ValidationV3Tier2InventoryAuthorizationError(
+                "AV1 v3 Tier 2 inventory read context grant is invalid"
+            )
+        if type(self.claim) is not AV1ValidationV3Tier2InventoryReadClaim:
+            raise AV1ValidationV3Tier2InventoryAuthorizationError(
+                "AV1 v3 Tier 2 inventory read context claim is invalid"
+            )
+
+    def to_owner_summary(
+        self,
+        *,
+        protocol: AV1ValidationProtocolV3,
+        as_of: str,
+    ) -> dict[str, Any]:
+        assert_av1_validation_v3_tier2_inventory_read_context(
+            protocol,
+            self,
+            as_of=as_of,
+        )
+        summary: dict[str, Any] = {
+            "artifact_kind": "tier2_inventory_read_context",
+            "gate": "A0",
+            "tier": "tier2",
+            "request_id": self.request.request_id,
+            "grant_id": self.grant.grant_id,
+            "claim_id": self.claim.claim_id,
+            "single_read_claimed": True,
+            "private_inventory_read_authorized": True,
+            **_false_authority_fields(),
+        }
+        _assert_public_summary_safe(summary)
+        return summary
+
+
 def build_av1_validation_v3_tier2_inventory_read_request(
     *,
     protocol: AV1ValidationProtocolV3,
@@ -661,6 +712,22 @@ def assert_av1_validation_v3_tier2_inventory_read_claim_active(
         )
 
 
+def assert_av1_validation_v3_tier2_inventory_read_context(
+    protocol: AV1ValidationProtocolV3,
+    context: AV1ValidationV3Tier2InventoryReadContext,
+    *,
+    as_of: str,
+) -> None:
+    assert_av1_validation_v3_tier2_inventory_read_claim_active(
+        protocol,
+        context.plan,
+        context.request,
+        context.grant,
+        context.claim,
+        as_of=as_of,
+    )
+
+
 def serialize_av1_validation_v3_tier2_inventory_read_request(
     request: AV1ValidationV3Tier2InventoryReadRequest,
 ) -> bytes:
@@ -771,25 +838,27 @@ def av1_validation_v3_tier2_inventory_read_request_from_payload(
     )
     _require_request_constants(value)
     request = AV1ValidationV3Tier2InventoryReadRequest(
-        request_id=str(value.get("request_id") or ""),
-        protocol_id=str(value.get("protocol_id") or ""),
-        protocol_payload_sha256=str(value.get("protocol_payload_sha256") or ""),
-        qualification_plan_id=str(value.get("qualification_plan_id") or ""),
-        qualification_plan_payload_sha256=str(
-            value.get("qualification_plan_payload_sha256") or ""
+        request_id=_string_field(value, "request_id"),
+        protocol_id=_string_field(value, "protocol_id"),
+        protocol_payload_sha256=_string_field(value, "protocol_payload_sha256"),
+        qualification_plan_id=_string_field(value, "qualification_plan_id"),
+        qualification_plan_payload_sha256=_string_field(
+            value, "qualification_plan_payload_sha256"
         ),
-        qualification_key_id=str(value.get("qualification_key_id") or ""),
-        eligibility_predicate_sha256=str(value.get("eligibility_predicate_sha256") or ""),
-        repository_commit=str(value.get("repository_commit") or ""),
-        repository_tree=str(value.get("repository_tree") or ""),
-        config_sha256=str(value.get("config_sha256") or ""),
-        tier2_scope_digest=str(value.get("tier2_scope_digest") or ""),
-        inventory_projection_contract_digest=str(
-            value.get("inventory_projection_contract_digest") or ""
+        qualification_key_id=_string_field(value, "qualification_key_id"),
+        eligibility_predicate_sha256=_string_field(
+            value, "eligibility_predicate_sha256"
         ),
-        requested_at=str(value.get("requested_at") or ""),
-        valid_until=str(value.get("valid_until") or ""),
-        payload_sha256=str(value.get("payload_sha256") or ""),
+        repository_commit=_string_field(value, "repository_commit"),
+        repository_tree=_string_field(value, "repository_tree"),
+        config_sha256=_string_field(value, "config_sha256"),
+        tier2_scope_digest=_string_field(value, "tier2_scope_digest"),
+        inventory_projection_contract_digest=_string_field(
+            value, "inventory_projection_contract_digest"
+        ),
+        requested_at=_string_field(value, "requested_at"),
+        valid_until=_string_field(value, "valid_until"),
+        payload_sha256=_string_field(value, "payload_sha256"),
     )
     if value != request.to_payload():
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
@@ -1103,6 +1172,13 @@ def _require_exact_keys(
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
             f"AV1 v3 Tier 2 inventory read {label} keys are invalid"
         )
+
+
+def _string_field(value: Mapping[str, Any], field_name: str) -> str:
+    field = value.get(field_name)
+    if not isinstance(field, str):
+        return ""
+    return field
 
 
 def _domain_payload_sha256(domain: str, payload: object) -> str:
