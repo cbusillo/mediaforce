@@ -1748,3 +1748,123 @@ runtime lock, opens no database or private inventory, and does not execute
 `ffmpeg` or `ffprobe`; the binaries are only inspected and hashed for the
 machine-local toolchain binding. Grant issuance and fixture execution remain
 separate later owner decisions.
+
+---
+
+## Phase 2 — V4 Qualification Search Seam (non-live implementation)
+
+**Module:** `mediaforce/tuning/av1_validation_v4_qualification_search.py`
+**Tests:** `tests/test_av1_validation_v4_qualification_search.py`
+**Contract version:** `av1vq4s1`
+**Source identifier:** `av1_cold_start_v4_qualification`
+
+### Purpose
+
+Phase 2 adds a narrow, typed, qualification-only seam that wires the production
+`search_quality_for_source` callable into the v4 cold-start evaluation workflow.
+The seam can invoke only the production search callable supplied explicitly by a
+future qualification executor. This implementation slice and its tests execute
+no media and access no database. The module is not imported by any web or
+operator runtime; no implicit access to runtime state is possible.
+
+### Two invocation modes
+
+**Baseline** — explicit `warm_start=None` and
+`expected_search_signature_id=None`. The production search runs without any
+warm-start hint. The resulting `av1_cold_start_prior` execution mirror has
+`execution=null`.
+
+**Guided** — `warm_start=QualitySearchWarmStart(source="av1_cold_start_v4_qualification", ...)`.
+The production search runs with a frozen, manifest-supplied warm-start hint plus
+the matching `expected_search_signature_id`. The execution mirror carries the
+same payload shape as the `target_size_trace["warm_start"]` sub-dict without
+retaining a mutable alias to the search result.
+
+Both modes report `status="no_recommendation"` in the cold-start prior mirror
+because `plan_av1_cold_start` is deliberately bypassed; the seam calls
+`unavailable_av1_cold_start_prediction` to construct the base payload.
+
+### Invariants enforced before calling search
+
+1. **Confirmed balanced intent** — compression intent must be `level="balanced"` and
+   `confirmed=True`. Legacy, unconfirmed, or non-balanced policies raise
+   `V4QualificationContractError` and the search callable is never invoked.
+
+2. **Typed target-size route** — source identity is represented by a `Path`, and
+   a non-null typed `StreamBudgetLedger` is mandatory.
+
+3. **Guided source contract** — `warm_start.source` must equal
+   `"av1_cold_start_v4_qualification"`. The v3 harness source
+   (`"av1_validation_harness"`) is explicitly rejected, as is any other source
+   string. `search_signature_id`, `cohort_id`, CRF values, confidence,
+   provenance, and review-risk tokens are validated before the callable runs.
+
+4. **Search-input allowlist** — `extra_search_kwargs` accepts only the production
+   source/cadence/host/temp-directory inputs that cannot replace the resolved
+   quality plan. `resolved_plan`, `_allow_validation_warm_start`,
+   `stream_budget_ledger`, `warm_start`, `expected_search_signature_id`, and all
+   unknown keys are rejected. The v3 harness flag
+   `_allow_validation_warm_start=True` is never set by this seam; v4 uses a
+   distinct source string instead.
+
+### Invariants enforced after search returns
+
+5. **Trace presence** — the callable must return a typed `QualitySearchResult`
+   with a non-null `target_size_trace`.
+
+6. **Baseline trace purity** — `target_size_trace` must not contain a `"warm_start"`
+   key for baseline mode.
+
+7. **Guided trace validity** — `target_size_trace["warm_start"]` must exist,
+   have `attempted=True`, and carry `status` in `{"accepted", "rejected_fallback"}`.
+   No v4-specific quality, ratio, or size threshold is applied to either status.
+
+8. **Identity match** — The guided execution trace's source, signature, cohort,
+   CRFs, confidence, provenance, and review risks must match the frozen
+   `QualitySearchWarmStart` input exactly. Any mismatch raises
+   `V4QualificationContractError`.
+
+9. **Mirror status** — The cold-start prior mirror must carry
+   `status="no_recommendation"`.
+
+### The cold-start prior execution mirror
+
+The mirror is built to match what `calibration_runtime.py` constructs at line 914:
+
+```python
+cold_start_payload["execution"] = object_dict(target_size_trace.get("warm_start")) or None
+```
+
+For baseline this is always `None`. For guided it is a deep copy of the
+warm-start sub-dict from the search trace, preserving the exact runtime payload
+shape without retaining a mutable alias to the search result.
+
+### Privacy contract
+
+The public summary returned by `V4QualificationOperationResult.public_summary`
+contains only:
+
+- `schema_version`, `contract_version`, `mode`
+- `planner_bypassed: True`
+- `execution_attempted` (bool)
+- `execution_status` (`"accepted"` | `"rejected_fallback"` | `null`)
+- false evidence, inventory/media, empirical, derivation, holdout, publication,
+  activation, and retry authority fields
+
+It never exposes source path, CRF values, signature ID, cohort ID, provenance ID,
+trace internals, or quality metric scores.
+
+### V4 vs V3 identity separation
+
+| Constant | V3 harness | V4 seam |
+|---|---|---|
+| Source string | `av1_validation_harness` | `av1_cold_start_v4_qualification` |
+| Contract version | `av1vh1` | `av1vq4s1` |
+| Harness flag | `_allow_validation_warm_start=True` | never set |
+
+The exact v4 source identifier is distinct from every v3 harness and packaged
+prediction source. The module also exposes a deterministic invocation payload
+and SHA-256 that bind the source path, frozen video policy, allowlisted search
+inputs, and exact baseline or guided warm-start identity. A later manifest can
+therefore prove baseline and guided invocation identities differ while the base
+config SHA remains identical.
