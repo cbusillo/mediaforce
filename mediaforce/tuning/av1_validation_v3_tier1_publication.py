@@ -70,6 +70,7 @@ AV1_VALIDATION_V3_TIER1_PUBLICATION_REASON_CODES = frozenset({
     "publication_cleanup_failed",
     "publication_failed",
     "publication_root_unsafe",
+    "tier2_selection_already_claimed",
     "toolchain_drifted",
     "toolchain_invalid",
 })

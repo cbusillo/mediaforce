@@ -84,6 +84,10 @@ def run_av1_validation_v3_tier2_inventory_read(
         output_root=output_root,
         repository_root=repository_root,
     )
+    if not claim_publication.created:
+        raise AV1ValidationV3Tier2InventoryOperationError(
+            "AV1 v3 Tier 2 inventory read claim replay is not permitted"
+        )
     inventory = adapter(
         connection,
         config=config,

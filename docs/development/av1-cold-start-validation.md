@@ -229,8 +229,10 @@ scope/projection contract, config snapshot bytes, and plan config SHA before
 the first measured-fingerprint DB row can be requested. The publisher reuses the
 hardened owner-only artifact helpers for request, grant, and claim artifacts.
 Request and grant artifacts are idempotent by request ID; claim consumption is
-exclusive by grant ID, so identical replay is idempotent and a distinct claim
-for the same grant fails with read-specific `inventory_read_already_claimed`.
+exclusive by grant ID. The publisher can reconcile identical claim bytes, but
+the operation rejects any non-new claim before entering the adapter; a distinct
+claim for the same grant fails with read-specific
+`inventory_read_already_claimed`.
 The operation wrapper validates the full read boundary, publishes/consumes the
 claim, and then calls the adapter, retaining the private inventory only in
 memory while exposing a privacy-safe public summary with opaque artifact IDs
@@ -238,6 +240,32 @@ and authority bits but no inventory counts. It still performs no live private
 DB/media read in tests and adds no
 selection, CLI, subprocess, ffmpeg, inventory serialization, execution,
 evidence, retry, or downstream authority.
+
+The fifth bounded `#305` slice adds
+`mediaforce/tuning/av1_validation_v3_tier2_selection_authorization.py`,
+`mediaforce/tuning/av1_validation_v3_tier2_selection_publication.py`, and
+`mediaforce/tuning/av1_validation_v3_tier2_selection_operation.py`. It composes
+the unchanged one-read inventory chain with a separate owner grant for exactly
+one qualification-key read and one HMAC selection. The outer request binds the
+same protocol, plan, repository, config, Tier 2 scope, inventory projection,
+selection algorithm, committed key ID, and inner inventory request. Its claim
+also binds the inner inventory claim, and cross-chain validation requires the
+same plan and owner. The outer artifacts never confer private-inventory or media
+read authority; the inner artifacts never confer key-read or selection
+authority.
+
+The combined operation validates both chains before private I/O, consumes the
+outer selection claim, consumes the inner inventory claim, performs one
+read-only inventory projection, loads and verifies the committed qualification
+key, applies the frozen selector in memory, and publishes the canonical full
+selection record through owner-only artifact helpers. The returned operation
+result retains neither the inventory nor key bytes, and its public summary
+contains no candidate count, fingerprint, rank, key ID, record identity,
+digest, or path. Any replay, missing or mismatched key, unfillable stratum, or
+publication failure is terminal for those claims; no retry is authorized. This
+slice uses synthetic SQLite and temporary artifact roots only and adds no CLI,
+live execution, media access, encoding, evidence, empirical partitioning,
+derivation, holdout, publication, or activation authority.
 
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a

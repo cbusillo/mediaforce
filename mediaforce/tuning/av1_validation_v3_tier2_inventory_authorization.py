@@ -1222,3 +1222,13 @@ def _assert_public_summary_safe(payload: Mapping[str, Any]) -> None:
         raise AV1ValidationV3Tier2InventoryAuthorizationError(
             "AV1 v3 Tier 2 inventory authorization public summary contains private data"
         ) from exc
+
+
+def av1_validation_v3_tier2_inventory_scope_digest(
+    protocol: AV1ValidationProtocolV3,
+) -> str:
+    return _compute_tier2_scope_digest(protocol)
+
+
+def av1_validation_v3_tier2_inventory_projection_contract_digest() -> str:
+    return _compute_inventory_projection_contract_digest()
