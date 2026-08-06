@@ -1777,7 +1777,8 @@ warm-start hint. The resulting `av1_cold_start_prior` execution mirror has
 **Guided** — `warm_start=QualitySearchWarmStart(source="av1_cold_start_v4_qualification", ...)`.
 The production search runs with a frozen, manifest-supplied warm-start hint plus
 the matching `expected_search_signature_id`. The execution mirror carries the
-`target_size_trace["warm_start"]` sub-dict verbatim.
+same payload shape as the `target_size_trace["warm_start"]` sub-dict without
+retaining a mutable alias to the search result.
 
 Both modes report `status="no_recommendation"` in the cold-start prior mirror
 because `plan_av1_cold_start` is deliberately bypassed; the seam calls
