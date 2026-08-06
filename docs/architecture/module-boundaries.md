@@ -331,13 +331,20 @@ Guidance:
   - read-only current fingerprint/config projection into private partition
     candidates without runtime, observation, authorization, or encode authority
 - `av1_validation_v3_tier2_inventory.py`
-  - read-only in-memory Tier 2 private-ineligible candidate projection from
-    current measured fingerprints, with no keys, selector call, serialization,
-    publication, filesystem/media access, or runtime authority
+  - claim-context-gated read-only in-memory Tier 2 private-ineligible candidate
+    projection from current measured fingerprints, with no keys, selector call,
+    serialization, publication, filesystem/media access, or runtime authority
 - `av1_validation_v3_tier2_inventory_authorization.py`
-  - pure owner-only A0 request, grant, and claim contracts for one future
+  - pure owner-only A0 request, grant, claim, and read-context contracts for one
     private inventory read, with no database, filesystem, key, selection,
     publication, media, runtime, or downstream execution authority
+- `av1_validation_v3_tier2_inventory_publication.py`
+  - owner-only request/grant/claim artifact publication using hardened artifact
+    helpers, including grant-ID-exclusive read-claim consumption and
+    read-specific conflict signaling
+- `av1_validation_v3_tier2_inventory_operation.py`
+  - claim-consuming wrapper that publishes the read claim before invoking the
+    inventory adapter and returns only a privacy-safe non-serializing summary
 - `av1_validation_v3_tier2_selection.py`
   - pure owner-only v3 Tier 2 typed-source selection records, canonical
     candidate/set commitments, and privacy-safe non-authorizing summaries

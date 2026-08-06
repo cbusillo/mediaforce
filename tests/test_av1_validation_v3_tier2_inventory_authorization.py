@@ -1,7 +1,10 @@
 import copy
 from dataclasses import fields
 import json
+import os
 from pathlib import Path
+import stat
+import tempfile
 import unittest
 
 from mediaforce.tuning.av1_validation_v3 import (
@@ -13,12 +16,14 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
 from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
     AV1ValidationV3Tier2InventoryAuthorizationError,
     AV1ValidationV3Tier2InventoryReadClaim,
+    AV1ValidationV3Tier2InventoryReadContext,
     AV1ValidationV3Tier2InventoryReadGrant,
     AV1ValidationV3Tier2InventoryReadRequest,
     AV1_VALIDATION_V3_TIER2_INVENTORY_EXCLUSION_COUNTER_FIELDS,
     AV1_VALIDATION_V3_TIER2_INVENTORY_SOURCE_FINGERPRINT_DOMAIN,
     AV1_VALIDATION_V3_TIER2_INVENTORY_FALSE_AUTHORITY_FIELDS,
     assert_av1_validation_v3_tier2_inventory_read_claim_active,
+    assert_av1_validation_v3_tier2_inventory_read_context,
     assert_av1_validation_v3_tier2_inventory_read_grant_active,
     assert_av1_validation_v3_tier2_inventory_read_request_active,
     av1_validation_v3_tier2_inventory_read_claim_from_payload,
@@ -33,6 +38,17 @@ from mediaforce.tuning.av1_validation_v3_tier2_inventory_authorization import (
     serialize_av1_validation_v3_tier2_inventory_read_claim,
     serialize_av1_validation_v3_tier2_inventory_read_grant,
     serialize_av1_validation_v3_tier2_inventory_read_request,
+)
+from mediaforce.tuning.av1_validation_v3_tier1_publication import (
+    AV1ValidationV3Tier1PublicationError,
+)
+from mediaforce.tuning.av1_validation_v3_tier2_inventory_publication import (
+    load_published_av1_validation_v3_tier2_inventory_read_claim,
+    load_published_av1_validation_v3_tier2_inventory_read_grant,
+    load_published_av1_validation_v3_tier2_inventory_read_request,
+    publish_av1_validation_v3_tier2_inventory_read_claim,
+    publish_av1_validation_v3_tier2_inventory_read_grant,
+    publish_av1_validation_v3_tier2_inventory_read_request,
 )
 
 
@@ -89,6 +105,12 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         )
 
     def test_happy_request_grant_claim_chain(self) -> None:
+        context = AV1ValidationV3Tier2InventoryReadContext(
+            plan=self.plan,
+            request=self.request,
+            grant=self.grant,
+            claim=self.claim,
+        )
         assert_av1_validation_v3_tier2_inventory_read_request_active(
             self.protocol, self.plan, self.request, as_of=CLAIMED_AT
         )
@@ -97,6 +119,122 @@ class AV1ValidationV3Tier2InventoryAuthorizationTests(unittest.TestCase):
         )
         assert_av1_validation_v3_tier2_inventory_read_claim_active(
             self.protocol, self.plan, self.request, self.grant, self.claim, as_of=CLAIMED_AT
+        )
+        assert_av1_validation_v3_tier2_inventory_read_context(
+            self.protocol,
+            context,
+            as_of=CLAIMED_AT,
+        )
+
+    def test_owner_artifact_publication_integrity_and_idempotence(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        ) as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir(mode=0o700)
+            output = root / "artifacts"
+
+            first_request = publish_av1_validation_v3_tier2_inventory_read_request(
+                request=self.request,
+                output_root=output,
+                repository_root=repository,
+            )
+            second_request = publish_av1_validation_v3_tier2_inventory_read_request(
+                request=self.request,
+                output_root=output,
+                repository_root=repository,
+            )
+            first_grant = publish_av1_validation_v3_tier2_inventory_read_grant(
+                grant=self.grant,
+                output_root=output,
+                repository_root=repository,
+            )
+            second_grant = publish_av1_validation_v3_tier2_inventory_read_grant(
+                grant=self.grant,
+                output_root=output,
+                repository_root=repository,
+            )
+            first_claim = publish_av1_validation_v3_tier2_inventory_read_claim(
+                claim=self.claim,
+                output_root=output,
+                repository_root=repository,
+            )
+            second_claim = publish_av1_validation_v3_tier2_inventory_read_claim(
+                claim=self.claim,
+                output_root=output,
+                repository_root=repository,
+            )
+
+            self.assertTrue(first_request.created)
+            self.assertFalse(second_request.created)
+            self.assertTrue(first_grant.created)
+            self.assertFalse(second_grant.created)
+            self.assertTrue(first_claim.created)
+            self.assertFalse(second_claim.created)
+            self.assertEqual(
+                load_published_av1_validation_v3_tier2_inventory_read_request(
+                    output_root=output,
+                    repository_root=repository,
+                    request_id=self.request.request_id,
+                ),
+                self.request,
+            )
+            self.assertEqual(
+                load_published_av1_validation_v3_tier2_inventory_read_grant(
+                    output_root=output,
+                    repository_root=repository,
+                    request_id=self.request.request_id,
+                ),
+                self.grant,
+            )
+            self.assertEqual(
+                load_published_av1_validation_v3_tier2_inventory_read_claim(
+                    output_root=output,
+                    repository_root=repository,
+                    grant_id=self.grant.grant_id,
+                ),
+                self.claim,
+            )
+            for path in (
+                first_request.request_path,
+                first_grant.grant_path,
+                first_claim.claim_path,
+            ):
+                self.assertEqual(path.stat().st_uid, os.getuid())
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertNotIn(str(output), json.dumps(first_claim.to_summary()))
+
+    def test_distinct_claim_conflict_is_read_specific(self) -> None:
+        later_claim = build_av1_validation_v3_tier2_inventory_read_claim(
+            protocol=self.protocol,
+            plan=self.plan,
+            request=self.request,
+            grant=self.grant,
+            claimed_at="2026-08-03T15:01:00Z",
+        )
+        with tempfile.TemporaryDirectory(
+            dir=Path(tempfile.gettempdir()).resolve()
+        ) as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir(mode=0o700)
+            output = root / "artifacts"
+            publish_av1_validation_v3_tier2_inventory_read_claim(
+                claim=self.claim,
+                output_root=output,
+                repository_root=repository,
+            )
+            with self.assertRaises(AV1ValidationV3Tier1PublicationError) as raised:
+                publish_av1_validation_v3_tier2_inventory_read_claim(
+                    claim=later_claim,
+                    output_root=output,
+                    repository_root=repository,
+                )
+
+        self.assertEqual(
+            raised.exception.reason_code,
+            "inventory_read_already_claimed",
         )
 
     def test_request_is_deterministic(self) -> None:

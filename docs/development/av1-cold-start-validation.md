@@ -210,18 +210,32 @@ claim are the only artifacts that set `private_inventory_read_authorized: True`.
 The claim binds
 the full plan/request/grant chain and a `claimed_at` timestamp that must fall
 within the grant window. The request, grant, and claim explicitly bind one read;
-durable single-consumption enforcement remains part of the later publisher
-slice. All other authority bits — Tier 1/2 execution, selection, runtime,
+the fourth bounded `#305` slice adds the durable publisher and adapter guard
+that enforce that one-read claim before the inventory adapter can query the
+database. All other authority bits — Tier 1/2 execution, selection, runtime,
 raw-media read, key creation/loading, private-inventory serialization, evidence,
 retry, derivation, holdout, publication, activation, and public-bundle
 activation — remain constant `False` and are parser-validated. No key bytes are
 accepted or stored by any public API, and this module performs no filesystem
 I/O.
 
-**This slice grants no live database or media read by itself.** A future
-enforcement/publisher slice must require a valid active claim before the adapter
-can run. Owner authorization remains a later explicit action separate from
-constructing the claim.
+The fourth bounded `#305` slice adds
+`mediaforce/tuning/av1_validation_v3_tier2_inventory_publication.py` and
+`mediaforce/tuning/av1_validation_v3_tier2_inventory_operation.py`, and updates
+`load_av1_validation_v3_tier2_inventory(...)` to require a pure read context,
+the exact frozen config snapshot bytes, and an injectable clock. The adapter
+validates the current timestamp, full plan/request/grant/claim chain, protocol
+scope/projection contract, config snapshot bytes, and plan config SHA before
+the first measured-fingerprint DB row can be requested. The publisher reuses the
+hardened owner-only artifact helpers for request, grant, and claim artifacts.
+Request and grant artifacts are idempotent by request ID; claim consumption is
+exclusive by grant ID, so identical replay is idempotent and a distinct claim
+for the same grant fails with read-specific `inventory_read_already_claimed`.
+The operation wrapper publishes/consumes the claim before calling the adapter
+and exposes only a privacy-safe public summary with coarse counts and authority
+bits. It still performs no live private DB/media read in tests and adds no
+selection, CLI, subprocess, ffmpeg, inventory serialization, execution,
+evidence, retry, or downstream authority.
 
 The first `#304` preparation artifact is a Tier 1 owner-authorization request
 contract in `mediaforce/tuning/av1_validation_v3_tier1_request.py`. It binds a
