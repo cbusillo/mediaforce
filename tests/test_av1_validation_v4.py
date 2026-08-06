@@ -234,6 +234,59 @@ class AV1ValidationV4Tests(unittest.TestCase):
                     discovery_public_path=path,
                 )
 
+    def test_standalone_discovery_loader_binds_exact_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "discovery.json"
+            mutated = copy.deepcopy(self.discovery)
+            mutated["rights_notes"]["redistribution"] += " mutated"
+            path.write_text(
+                json.dumps(mutated, sort_keys=True, separators=(",", ":")) + "\n"
+            )
+            with self.assertRaisesRegex(AV1ValidationV4Error, "SHA-256"):
+                load_av1_validation_v4_discovery_public(path)
+
+    def test_missing_source_identity_uses_contract_error(self) -> None:
+        payload = copy.deepcopy(self.manifest)
+        payload["sources"][0].pop("asset_id")
+        with self.assertRaises(AV1ValidationV4Error):
+            assert_av1_validation_manifest_v4(payload)
+
+    def test_isolated_validator_negative_paths_return_json_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            directory_path = Path(directory)
+            cases: list[tuple[str, bytes]] = []
+            cases.append(("noncanonical", json.dumps(self.manifest, indent=2).encode()))
+            missing_state = copy.deepcopy(self.manifest)
+            missing_state.pop("state")
+            cases.append((
+                "missing-state",
+                json.dumps(missing_state, sort_keys=True, separators=(",", ":")).encode()
+                + b"\n",
+            ))
+            for name, content in cases:
+                with self.subTest(name=name):
+                    manifest_path = directory_path / f"{name}.json"
+                    manifest_path.write_bytes(content)
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-S",
+                            "scripts/verify_av1_v4_manifest.py",
+                            str(manifest_path),
+                            str(DISCOVERY_PATH),
+                            "--json",
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertEqual(completed.stderr, "")
+                    result = json.loads(completed.stdout)
+                    self.assertFalse(result["ok"])
+                    self.assertTrue(result["error"])
+
     def test_public_files_contain_no_machine_local_paths(self) -> None:
         for path in (MANIFEST_PATH, DISCOVERY_PATH):
             content = path.read_text()

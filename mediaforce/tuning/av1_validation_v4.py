@@ -35,6 +35,20 @@ AV1_VALIDATION_V4_SOURCE_IDS = (
     "av1v4_live_action_primary_tears_of_steel",
     "av1v4_live_action_confirmation_nasa_earth_views",
 )
+AV1_VALIDATION_V4_SOURCE_LAYOUT = (
+    ("av1v4_animation_primary_sintel", "animation_content", "primary"),
+    (
+        "av1v4_animation_confirmation_cosmos_laundromat",
+        "animation_content",
+        "confirmation",
+    ),
+    ("av1v4_live_action_primary_tears_of_steel", "live_action_content", "primary"),
+    (
+        "av1v4_live_action_confirmation_nasa_earth_views",
+        "live_action_content",
+        "confirmation",
+    ),
+)
 AV1_VALIDATION_V4_CONFIGURATIONS = (
     "balanced_full_search_baseline",
     "balanced_frozen_search_hint",
@@ -111,6 +125,10 @@ def load_av1_validation_manifest_v4(
 
 def load_av1_validation_v4_discovery_public(path: Path) -> dict[str, Any]:
     payload = _load_canonical_payload(path, "AV1 v4 discovery projection")
+    if _sha256_bytes(path.read_bytes()) != AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256:
+        raise AV1ValidationV4Error(
+            "AV1 v4 discovery projection SHA-256 is not frozen"
+        )
     _assert_discovery_public(payload)
     return payload
 
@@ -248,17 +266,18 @@ def _assert_sources(payload: Mapping[str, Any]) -> None:
     materialized = [object_dict(source) for source in sources]
     if any(not source for source in materialized):
         raise AV1ValidationV4Error("AV1 v4 source payload is invalid")
-    if tuple(str(source["asset_id"]) for source in materialized) != source_order:
+    if tuple(str(source.get("asset_id") or "") for source in materialized) != source_order:
         raise AV1ValidationV4Error("AV1 v4 source array order does not match")
-    expected_pairs = {
-        ("animation_content", "primary"),
-        ("animation_content", "confirmation"),
-        ("live_action_content", "primary"),
-        ("live_action_content", "confirmation"),
-    }
-    actual_pairs = {(source.get("class"), source.get("role")) for source in materialized}
-    if actual_pairs != expected_pairs:
-        raise AV1ValidationV4Error("AV1 v4 class/role coverage is incomplete")
+    actual_layout = tuple(
+        (
+            str(source.get("asset_id") or ""),
+            source.get("class"),
+            source.get("role"),
+        )
+        for source in materialized
+    )
+    if actual_layout != AV1_VALIDATION_V4_SOURCE_LAYOUT:
+        raise AV1ValidationV4Error("AV1 v4 source layout is not frozen")
     for order, source in enumerate(materialized):
         if source.get("order") != order:
             raise AV1ValidationV4Error("AV1 v4 source ordinal is invalid")
@@ -342,11 +361,17 @@ def _assert_matrix(payload: Mapping[str, Any]) -> None:
     ):
         if matrix.get(flag) is not False:
             raise AV1ValidationV4Error(f"AV1 v4 matrix {flag} must be false")
-    expected_assets = (
-        AV1_VALIDATION_V4_SOURCE_IDS[0],
-        AV1_VALIDATION_V4_SOURCE_IDS[2],
-        AV1_VALIDATION_V4_SOURCE_IDS[1],
-        AV1_VALIDATION_V4_SOURCE_IDS[3],
+    sources = [object_dict(value) for value in object_list(payload.get("sources"))]
+    role_rank = {"primary": 0, "confirmation": 1}
+    expected_assets = tuple(
+        str(source.get("asset_id") or "")
+        for source in sorted(
+            sources,
+            key=lambda source: (
+                role_rank.get(str(source.get("role") or ""), 99),
+                str(source.get("class") or ""),
+            ),
+        )
     )
     expected = [
         (ordinal, asset_id, configuration)
@@ -500,7 +525,9 @@ def _assert_no_private_paths(payload: Mapping[str, Any]) -> None:
         elif isinstance(value, list):
             for child in value:
                 visit(child)
-        elif isinstance(value, str) and value.startswith(_FORBIDDEN_PATH_PREFIXES):
+        elif isinstance(value, str) and any(
+            prefix in value for prefix in _FORBIDDEN_PATH_PREFIXES
+        ):
             raise AV1ValidationV4Error("AV1 v4 payload exposes a machine-local path")
 
     visit(payload)
