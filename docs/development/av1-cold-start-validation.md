@@ -2130,3 +2130,48 @@ pre-existing foreign artifact. Neither success nor failure grants manifest freez
 execution, evidence, publication, activation, retry, or dogfood authority. A
 fresh owner grant bound to the merged runner commit is required before using
 this operation against the real machine-local source paths.
+
+---
+
+## Phase 10 — V4 Owner Manifest Freeze (non-executing)
+
+`mediaforce/tuning/av1_validation_v4_freeze.py` defines the canonical external
+owner freeze artifact for manifest revision `2`.
+`mediaforce/tuning/av1_validation_v4_freeze_operation.py` and
+`scripts/materialize_av1_v4_manifest_freeze.py` materialize it once in an
+owner-only machine-local registry.
+
+The checked-in manifest remains byte-identical with state `draft_unapproved`.
+Changing that field would change the manifest ID and payload digest and would
+invalidate the reviewed rights, grant, claim, config, preparation, and
+measurement chain. The external freeze instead binds that exact immutable
+manifest plus every reviewed artifact ID/digest, the three distinct config
+identities, the reviewed repository commit/tree, the clean materializer
+repository commit/tree, owner principal, and a canonical decision timestamp.
+
+The freeze may be materialized only after a successful `prepared_unfrozen`
+record and `measured_success` preparation measurement with zero media bytes
+read. The decision must occur after preparation completion, within the frozen
+manifest window, and no more than 24 hours after preparation. The preparation
+grant window bounds only the preparation operation and may expire before the
+freeze decision.
+
+Exactly one narrow field,
+`manifest_revision_2_owner_freeze_approved=true`, records the owner decision.
+The broader `manifest_freeze_authorized` field remains false because the owner
+has not delegated freeze authority to another bearer. Every media-read,
+qualification-execution, evidence, publication, activation, retry, dogfood,
+and execution-grant-creation authority also remains false.
+
+Materialization measures the current clean Git repository identity, requires
+the canonical manifest at its exact repository location, and writes a fixed
+revision-keyed file by fully writing and syncing a unique temporary file before
+atomically hard-linking it to the singleton destination. The final artifact
+uses no-follow semantics, mode `0600`, one hard link, and file plus
+parent-directory durability. A crash after the link can be reconciled only when
+the existing canonical artifact binds the same reviewed bundle and exact
+materializer repository; linked temporary names are then removed. A different
+decision for revision `2` cannot be materialized in the same registry. The freeze artifact contains
+no source paths, registry path, key bytes, media data, or executable handle.
+It authorizes no qualification traversal; a later request/grant/claim/runner
+must establish that authority independently.
