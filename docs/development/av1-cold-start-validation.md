@@ -2393,3 +2393,65 @@ preflights are accepted without changing bytes; conflicting or timestamp-invalid
 singletons fail closed and preserve existing bytes. The CLI emits path-safe JSON
 only, both on success and failure, and reports no registry paths, source paths,
 private text, key material, or invocation-private source strings.
+
+## Manifest revision 3 — invocation-closure contract
+
+`mediaforce/tuning/av1_validation_v4r3_invocation_closure.py` is the
+revision-scoped public contract for protocol v4 manifest revision `3`. It
+imports no media, filesystem, subprocess, database, web, or runtime execution
+surface. Production code in the module performs no I/O; tests may compare its
+hardcoded public facts against the checked-in revision-2 manifest.
+
+Revision 3 does not claim that revision 2 froze the target-size value. Revision
+2 froze the target-size path intent. The owner-approved r3 change is to use the
+existing checked-in production profile as the complete public production policy
+for qualification closure.
+
+The frozen r3 video policy equals `[video]` in `config/defaults.toml` with the
+revision-2 CRF bounds (`min_crf=10`, `max_crf=45`) and owner-confirmed
+`compression_intent_source=operator` preserved. That includes encoder,
+`crf_search`, preset, pixel format, VMAF/XPSNR targets and minimums, relax steps,
+size goal and tolerances, sample cadence, max encoded cap, grain, `thorough`,
+`max_height`/resolution intent, decision/engine fields, and
+`target_search_max_crf=63`. `size_goal_source` remains `config_default` because
+the owner approved the checked-in production size profile for revision 3. The
+guided warm start remains CRF `28` but receives new revision-3 domain-separated
+signature and cohort IDs.
+
+For all four public sources, r3 defines deterministic resolved size-goal
+payloads with sample and final bounds:
+
+| Source | Target bytes | Sample bounds | Final bounds |
+|--------|--------------|---------------|--------------|
+| `av1v4_animation_primary_sintel` | `98_670_222` | `88_803_200..108_537_244` | `93_736_711..103_603_733` |
+| `av1v4_animation_confirmation_cosmos_laundromat` | `81_118_815` | `73_006_934..89_230_696` | `77_062_874..85_174_756` |
+| `av1v4_live_action_primary_tears_of_steel` | `81_574_074` | `73_416_667..89_731_481` | `77_495_370..85_652_778` |
+| `av1v4_live_action_confirmation_nasa_earth_views` | `22_305_618` | `20_075_056..24_536_180` | `21_190_337..23_420_899` |
+
+The transform plan is exactly the production
+`build_target_size_transform_plan` payload for null cadence and the derived
+video filter: schema version `1`, all cadence fields `null`, `video_filter=null`,
+and `transform_plan_id=tp1_b6993b64ab9b07f59569cf48fe8a47ea`. Because all four
+sources are already at or below the production `max_height=1080`, the derived
+video filter is `null`.
+
+The public stream/ledger closure is intentionally unresolved:
+`execution_ready=false`, `binding_state=requires_private_preparation`, output
+container `mkv`, all non-video streams excluded, non-video bytes zero, source
+bytes and duration known, and source video bitrate explicitly `null`. It never
+invents a production stream plan ID. Production source identity, production
+stream-plan identity, stream-budget ledger identity, quality-temp key ID, and
+quality-temp HMAC ID remain required private preparation bindings.
+
+A later qualification adapter must build and pass the production stream-budget
+ledger, pass the identity-bound quality temp directory, and call the existing
+`mediaforce.execution.search_quality_for_source` seam. That seam supplies real
+sample-encode support and derives the transform plan internally through
+`mediaforce.encoding.quality_search._transform_plan_payload`. The adapter must
+verify the returned trace carries the frozen transform-plan ID, the bound ledger
+identity, and a real `target_size_trace` before accepting the traversal result.
+
+Every public r3 payload sets all v4 authority fields to `false`. The contract is
+protocol v4 because the experiment ID, source set, source public facts,
+qualification traversal order, target-size path intent, CRF bounds, and warm
+start semantics remain unchanged while the manifest revision advances.
