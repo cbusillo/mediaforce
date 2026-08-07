@@ -2026,7 +2026,8 @@ source-and-mode invocation identities. All invocation digests must differ, and
 baseline/guided base config digests must match within each source.
 
 The resulting machine-local record is `prepared_unfrozen`, binds the completed
-rights attestation by ID and digest, and explicitly records
+rights attestation and the exact active owner preparation grant by ID and
+digest, and explicitly records
 `media_bytes_read=false`, `builder_subprocess_executed=false`,
 `media_processing_subprocess_executed=false`, and the separately measured
 version-probe subprocess state. Every execution,
@@ -2035,12 +2036,47 @@ dogfood authority remains false. This phase defines and tests the contract only;
 it does not create or commit a real preparation record.
 
 A preparation record is valid only as a bundle with the exact completed rights
-attestation whose ID, payload digest, and timestamp it carries. Public bundle
-validation and canonical serialization both require that attestation payload;
-there is no public record-only validation or serialization path.
+attestation and owner preparation grant whose IDs, payload digests, and
+timestamps it carries. Public bundle validation and canonical serialization
+require both payloads; there is no public record-only validation or
+serialization path. Adding this binding advances the preparation schema to
+version `3` without changing the frozen manifest revision or identity.
 
 `mediaforce/tuning/av1_validation_v4_path_privacy.py` defines the pure HMAC-SHA256
 derivation contract for the path-privacy key ID and the instance/source path
 IDs. It accepts only canonical absolute POSIX path strings, requires at least
 32 key bytes, and uses distinct frozen domains for key, instance-path, and
 source-path identities.
+
+`mediaforce/tuning/av1_validation_v4_runtime_compatibility.py` defines the pure
+`host_toolchain_config` identity. Its domain-separated digest includes only the
+effective config digest, the three tool identities, and public platform fields;
+it excludes hostname, username, and all paths. Preparation schema version `3`
+carries the validated derivation payload and recomputes the runtime identity
+rather than accepting an arbitrary prefixed value.
+
+---
+
+## Phase 8 — V4 Preparation Owner Grant (non-executing)
+
+`mediaforce/tuning/av1_validation_v4_preparation_grant.py` defines the canonical
+machine-local owner grant required before creating the path-privacy key or
+collecting the bounded preparation measurements. The grant is bound to the
+exact manifest revision, discovery digest, owner-attested rights record,
+repository commit/tree, owner principal, and a maximum 24-hour activity window.
+
+The positive grant vocabulary is deliberately disjoint from the manifest's
+frozen authority fields. It authorizes only one exclusive mode-`0600`
+machine-local path-privacy key, repository/config/binary hashing, the three
+frozen version probes, opaque path/runtime/warm-start/invocation identity
+derivation, and one `prepared_unfrozen` record. It explicitly forbids network
+access, media-path probing, media-byte reads, media-processing subprocesses,
+key disclosure, grant reuse, and any selection or partition use of the key.
+
+All manifest authority fields—including `key_creation_authorized`—remain
+false. That legacy field continues to mean empirical selection/partition key
+authority; the narrowly named `path_privacy_key_creation_authorized` exists
+only inside this machine-local preparation grant. The executing preparation
+operation must enforce single use with exclusive key and record creation; the
+preparation record is the resulting consumption artifact. Manifest freeze
+remains a later separate owner decision.

@@ -21,6 +21,12 @@ from mediaforce.tuning.av1_validation_v4_preparation import (
     build_av1_validation_v4_preparation_record,
     serialize_av1_validation_v4_preparation_record,
 )
+from mediaforce.tuning.av1_validation_v4_preparation_grant import (
+    build_av1_validation_v4_preparation_grant,
+)
+from mediaforce.tuning.av1_validation_v4_runtime_compatibility import (
+    av1_validation_v4_runtime_compatibility_payload,
+)
 from mediaforce.tuning.av1_validation_v4_rights import (
     build_av1_validation_v4_rights_attestation,
     build_av1_validation_v4_rights_template,
@@ -53,6 +59,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             serialize_av1_validation_v4_preparation_record(
                 first,
                 rights_attestation=rights,
+                preparation_grant=self._grant(),
             ),
             json.dumps(
                 first,
@@ -85,7 +92,9 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             "mediaforce.core.evidence",
             "mediaforce.core.type_defs",
             "mediaforce.tuning.av1_validation_v4",
+            "mediaforce.tuning.av1_validation_v4_preparation_grant",
             "mediaforce.tuning.av1_validation_v4_rights",
+            "mediaforce.tuning.av1_validation_v4_runtime_compatibility",
             "re",
             "typing",
         }
@@ -130,6 +139,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             build_av1_validation_v4_preparation_record(
                 inputs=self._inputs(),
                 rights_attestation=build_av1_validation_v4_rights_template(),
+                preparation_grant=self._grant(),
             )
 
     def test_bundle_rejects_a_different_rights_attestation(self) -> None:
@@ -137,6 +147,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         record = build_av1_validation_v4_preparation_record(
             inputs=self._inputs(),
             rights_attestation=rights,
+            preparation_grant=self._grant(),
         )
         other_rights = self._rights_attestation(
             attested_at="2026-08-07T05:31:00Z"
@@ -145,7 +156,24 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             AV1ValidationV4PreparationError,
             "binding does not match",
         ):
-            assert_av1_validation_v4_preparation_bundle(record, other_rights)
+            assert_av1_validation_v4_preparation_bundle(
+                record,
+                other_rights,
+                self._grant(),
+            )
+
+    def test_bundle_rejects_a_different_preparation_grant(self) -> None:
+        record = self._record()
+        other_grant = self._grant(valid_until="2026-08-07T07:30:00Z")
+        with self.assertRaisesRegex(
+            AV1ValidationV4PreparationError,
+            "grant binding does not match",
+        ):
+            assert_av1_validation_v4_preparation_bundle(
+                record,
+                self._rights_attestation(),
+                other_grant,
+            )
 
     def test_input_mutations_fail_closed(self) -> None:
         cases = [
@@ -154,7 +182,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                     self._inputs(),
                     repository_commit="not-a-commit",
                 ),
-                "repository commit",
+                "grant repository binding",
             ),
             (
                 replace(
@@ -225,6 +253,24 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             (
                 replace(
                     self._inputs(),
+                    runtime_compatibility_payload={"scope": "forged"},
+                ),
+                "runtime compatibility payload",
+            ),
+            (
+                replace(
+                    self._inputs(),
+                    runtime_compatibility_payload=(
+                        self._runtime_compatibility_payload(
+                            ffmpeg_binary_sha256="sha256:" + "f" * 64
+                        )
+                    ),
+                ),
+                "runtime compatibility measurements do not match",
+            ),
+            (
+                replace(
+                    self._inputs(),
                     invocations=tuple(reversed(self._inputs().invocations)),
                 ),
                 "invocation order is invalid",
@@ -262,6 +308,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                     build_av1_validation_v4_preparation_record(
                         inputs=inputs,
                         rights_attestation=self._rights_attestation(),
+                        preparation_grant=self._grant(),
                     )
 
     def test_probe_accounting_can_report_no_subprocess(self) -> None:
@@ -271,6 +318,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 tool_version_probe_subprocess_executed=False,
             ),
             rights_attestation=self._rights_attestation(),
+            preparation_grant=self._grant(),
         )
         self.assertFalse(record["tool_version_probe_subprocess_executed"])
 
@@ -285,18 +333,28 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         media_read = self._record()
         media_read["media_bytes_read"] = True
         cases.append((media_read, "binding is invalid"))
+        repository = self._record()
+        repository["repository"]["commit"] = "not-a-commit"
+        cases.append((repository, "repository commit is invalid"))
+        embedded_windows_path = self._record()
+        embedded_windows_path["rights_attested_at"] = (
+            "stamp --prefix=C:\\Users\\private"
+        )
+        cases.append((embedded_windows_path, "machine-local path"))
         for payload, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(AV1ValidationV4PreparationError, message):
                     assert_av1_validation_v4_preparation_bundle(
                         payload,
                         self._rights_attestation(),
+                        self._grant(),
                     )
 
     def _record(self) -> dict[str, object]:
         return build_av1_validation_v4_preparation_record(
             inputs=self._inputs(),
             rights_attestation=self._rights_attestation(),
+            preparation_grant=self._grant(),
         )
 
     def _inputs(self) -> AV1ValidationV4PreparationInputs:
@@ -327,7 +385,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 asset_id: f"av1vsource4_{index:032x}"
                 for index, asset_id in enumerate(AV1_VALIDATION_V4_SOURCE_IDS, start=1)
             },
-            runtime_compatibility_id="av1vruntime4_" + "b" * 32,
+            runtime_compatibility_payload=self._runtime_compatibility_payload(),
             guided_warm_start_identities=(
                 av1_validation_v4_guided_warm_start_identities()
             ),
@@ -368,6 +426,48 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 )
                 ordinal += 1
         return tuple(invocations)
+
+    def _grant(
+        self,
+        *,
+        valid_until: str = "2026-08-07T07:00:00Z",
+    ) -> dict[str, object]:
+        rights = self._rights_attestation()
+        return build_av1_validation_v4_preparation_grant(
+            rights_attestation=rights,
+            owner_principal=str(rights["owner_principal"]),
+            repository_commit="1" * 40,
+            repository_tree="2" * 40,
+            authorized_at="2026-08-07T05:45:00Z",
+            valid_until=valid_until,
+        )
+
+    def _runtime_compatibility_payload(
+        self,
+        *,
+        ffmpeg_binary_sha256: str = "sha256:" + "4" * 64,
+    ) -> dict[str, object]:
+        return av1_validation_v4_runtime_compatibility_payload(
+            effective_config_sha256="sha256:" + "3" * 64,
+            toolchain={
+                "ffmpeg": {
+                    "version": "ffmpeg version test",
+                    "binary_sha256": ffmpeg_binary_sha256,
+                },
+                "ffprobe": {
+                    "version": "ffprobe version test",
+                    "binary_sha256": "sha256:" + "5" * 64,
+                },
+                "ab_av1": {
+                    "version": "ab-av1 test",
+                    "binary_sha256": "sha256:" + "6" * 64,
+                },
+            },
+            operating_system="macOS",
+            operating_system_version="27.0 build 26A5388g",
+            architecture="arm64",
+            python_version="3.13.7",
+        )
 
     def _rights_attestation(
         self,
