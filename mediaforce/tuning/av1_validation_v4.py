@@ -144,6 +144,15 @@ def assert_av1_validation_manifest_v4(payload: Mapping[str, Any]) -> None:
     if not materialized:
         raise AV1ValidationV4Error("AV1 v4 manifest payload is invalid")
     _assert_identity(materialized)
+    assert_av1_validation_manifest_v4_semantics(materialized)
+
+
+def assert_av1_validation_manifest_v4_semantics(
+    payload: Mapping[str, Any],
+) -> None:
+    materialized = object_dict(payload)
+    if not materialized:
+        raise AV1ValidationV4Error("AV1 v4 manifest payload is invalid")
     _assert_no_private_paths(materialized)
     _assert_false_authorities(materialized)
     _assert_sources(materialized)
