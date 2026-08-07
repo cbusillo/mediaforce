@@ -348,6 +348,16 @@ Guidance:
 - `av1_validation_v3_tier2_selection.py`
   - pure owner-only v3 Tier 2 typed-source selection records, canonical
     candidate/set commitments, and privacy-safe non-authorizing summaries
+- `av1_validation_v4*.py`
+  - canonical AV1 v4 manifest, rights, preparation, freeze, qualification
+    request, and non-authorizing production-readiness contracts
+  - pure production execution-plan derivation stays in
+    `av1_validation_v4_execution_plan.py`, where source paths are opaque config
+    strings used only for invocation identity
+  - `av1_validation_v4_execution_preflight_operation.py` materializes the
+    owner-only blocked revision-2 readiness artifact without qualification
+    grant/claim consumption, runner callbacks, source media path probes,
+    tool probes, or network access
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

@@ -359,6 +359,7 @@ class AV1ValidationV4QualificationRequestOperationTests(unittest.TestCase):
             "secrets",
             "stat",
             "subprocess",
+            "threading",
             "typing",
         }
         script_allowed = {
