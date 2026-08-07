@@ -53,6 +53,13 @@ AV1_VALIDATION_V4_INSTANCE_PATH_HMAC_DOMAIN = (
 AV1_VALIDATION_V4_SOURCE_PATH_HMAC_DOMAIN = (
     "mediaforce:av1:protocol:4:revision:2:path-privacy:source-path:v1"
 )
+AV1_VALIDATION_V4_RUNTIME_COMPATIBILITY_SCOPE = "host_toolchain_config"
+AV1_VALIDATION_V4_PRIVATE_TEXT_RE = re.compile(
+    r"(?:/Users/|/Volumes/|/home/|/private/|/tmp(?:/|\b)|/var/|/etc/|/opt/|"
+    r"/usr/|/Library/|/Applications/|/mnt/|/srv/|/data/|~/|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\\\\[^\\\s]+\\|smb://|nfs://)",
+    re.IGNORECASE,
+)
 AV1_VALIDATION_V4_SOURCE_IDS = (
     "av1v4_animation_primary_sintel",
     "av1v4_animation_confirmation_cosmos_laundromat",
@@ -124,6 +131,10 @@ _FORBIDDEN_PATH_PREFIXES = ("/Users/", "/Volumes/", "/opt/homebrew/")
 
 class AV1ValidationV4Error(ValueError):
     pass
+
+
+def av1_validation_v4_contains_private_text(value: str) -> bool:
+    return value.startswith("/") or bool(AV1_VALIDATION_V4_PRIVATE_TEXT_RE.search(value))
 
 
 def av1_validation_v4_guided_warm_start_identities() -> dict[str, dict[str, Any]]:
@@ -661,7 +672,10 @@ def _assert_preparation_boundary(payload: Mapping[str, Any]) -> None:
     }
     if path_privacy != expected_path_privacy:
         raise AV1ValidationV4Error("AV1 v4 path privacy policy is not frozen")
-    if payload.get("runtime_compatibility_scope") != "host_toolchain_config":
+    if (
+        payload.get("runtime_compatibility_scope")
+        != AV1_VALIDATION_V4_RUNTIME_COMPATIBILITY_SCOPE
+    ):
         raise AV1ValidationV4Error(
             "AV1 v4 runtime compatibility scope is not frozen"
         )

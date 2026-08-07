@@ -19,9 +19,11 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_PAYLOAD_SHA256,
     AV1_VALIDATION_V4_PROTOCOL_VERSION,
     AV1_VALIDATION_V4_REVISED_AT,
+    AV1_VALIDATION_V4_RUNTIME_COMPATIBILITY_SCOPE,
     AV1_VALIDATION_V4_SOURCE_IDS,
     AV1_VALIDATION_V4_SOURCE_LAYOUT,
     AV1_VALIDATION_V4_VALID_UNTIL,
+    av1_validation_v4_contains_private_text,
     av1_validation_v4_guided_warm_start_identities,
 )
 from mediaforce.tuning.av1_validation_v4_rights import (
@@ -29,24 +31,32 @@ from mediaforce.tuning.av1_validation_v4_rights import (
     AV1ValidationV4RightsError,
     assert_av1_validation_v4_rights_attestation,
 )
+from mediaforce.tuning.av1_validation_v4_preparation_grant import (
+    AV1ValidationV4PreparationGrantError,
+    assert_av1_validation_v4_preparation_grant,
+    assert_av1_validation_v4_preparation_grant_active,
+)
+from mediaforce.tuning.av1_validation_v4_runtime_compatibility import (
+    AV1ValidationV4RuntimeCompatibilityError,
+    av1_validation_v4_runtime_compatibility_id_from_payload,
+)
 
 
 AV1_VALIDATION_V4_PREPARATION_SCHEMA = (
     "mediaforce.av1_cold_start_v4_preparation_record"
 )
-AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION = 2
+AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION = 3
 AV1_VALIDATION_V4_PREPARATION_STATE = "prepared_unfrozen"
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _PREPARATION_ID_RE = re.compile(r"av1vprep4_[0-9a-f]{32}\Z")
 _RIGHTS_ATTESTATION_ID_RE = re.compile(r"av1vrights4_[0-9a-f]{32}\Z")
+_PREPARATION_GRANT_ID_RE = re.compile(r"av1vprepgrant4_[0-9a-f]{32}\Z")
 _INSTANCE_PATH_HMAC_ID_RE = re.compile(r"av1vpath4_[0-9a-f]{32}\Z")
 _SOURCE_PATH_HMAC_ID_RE = re.compile(r"av1vsource4_[0-9a-f]{32}\Z")
 _RUNTIME_COMPATIBILITY_ID_RE = re.compile(r"av1vruntime4_[0-9a-f]{32}\Z")
 _PATH_PRIVACY_KEY_ID_RE = re.compile(r"av1vpathkey4_[0-9a-f]{32}\Z")
-_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/]")
-_FORBIDDEN_PATH_PREFIXES = ("/Users/", "/Volumes/", "/opt/homebrew/")
 _INSTANCE_PATH_ROLES = frozenset({
     "runtime_lock",
     "source_root",
@@ -82,6 +92,10 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "media_bytes_read",
     "payload_sha256",
     "preparation_id",
+    "preparation_grant_authorized_at",
+    "preparation_grant_id",
+    "preparation_grant_payload_sha256",
+    "preparation_grant_valid_until",
     "prepared_at",
     "protocol_version",
     "path_privacy_key_id",
@@ -90,6 +104,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "rights_attestation_payload_sha256",
     "rights_attested_at",
     "runtime_compatibility_id",
+    "runtime_compatibility_payload",
     "runtime_compatibility_scope",
     "schema",
     "schema_version",
@@ -134,7 +149,7 @@ class AV1ValidationV4PreparationInputs:
     ab_av1: AV1ValidationV4ToolIdentity
     dedicated_instance_path_hmac_ids: Mapping[str, str]
     source_path_hmac_ids: Mapping[str, str]
-    runtime_compatibility_id: str
+    runtime_compatibility_payload: Mapping[str, Any]
     guided_warm_start_identities: Mapping[str, Mapping[str, Any]]
     invocations: Sequence[AV1ValidationV4InvocationIdentity]
     path_privacy_key_id: str
@@ -149,9 +164,18 @@ def build_av1_validation_v4_preparation_record(
     *,
     inputs: AV1ValidationV4PreparationInputs,
     rights_attestation: Mapping[str, Any],
+    preparation_grant: Mapping[str, Any],
 ) -> dict[str, Any]:
     rights = object_dict(rights_attestation)
     _assert_completed_rights_attestation(rights)
+    grant = object_dict(preparation_grant)
+    _assert_preparation_grant_bundle_binding(
+        grant,
+        rights,
+        repository_commit=inputs.repository_commit,
+        repository_tree=inputs.repository_tree,
+        as_of=inputs.prepared_at,
+    )
     prepared_at = _parse_timestamp(inputs.prepared_at, "prepared_at")
     rights_attested_at = _parse_timestamp(
         str(rights.get("attested_at") or ""),
@@ -161,6 +185,19 @@ def build_av1_validation_v4_preparation_record(
         raise AV1ValidationV4PreparationError(
             "AV1 v4 rights attestation cannot postdate preparation"
         )
+    runtime_compatibility_payload = object_dict(
+        inputs.runtime_compatibility_payload
+    )
+    try:
+        runtime_compatibility_id = (
+            av1_validation_v4_runtime_compatibility_id_from_payload(
+                runtime_compatibility_payload
+            )
+        )
+    except AV1ValidationV4RuntimeCompatibilityError as exc:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation runtime compatibility payload is invalid"
+        ) from exc
     payload: dict[str, Any] = {
         "schema": AV1_VALIDATION_V4_PREPARATION_SCHEMA,
         "schema_version": AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION,
@@ -174,6 +211,10 @@ def build_av1_validation_v4_preparation_record(
         "rights_attestation_id": rights["attestation_id"],
         "rights_attestation_payload_sha256": rights["payload_sha256"],
         "rights_attested_at": rights["attested_at"],
+        "preparation_grant_id": grant["grant_id"],
+        "preparation_grant_payload_sha256": grant["payload_sha256"],
+        "preparation_grant_authorized_at": grant["authorized_at"],
+        "preparation_grant_valid_until": grant["valid_until"],
         "prepared_at": inputs.prepared_at,
         "valid_until": AV1_VALIDATION_V4_VALID_UNTIL,
         "repository": {
@@ -190,8 +231,9 @@ def build_av1_validation_v4_preparation_record(
             inputs.dedicated_instance_path_hmac_ids
         ),
         "source_path_hmac_ids": dict(inputs.source_path_hmac_ids),
-        "runtime_compatibility_id": inputs.runtime_compatibility_id,
-        "runtime_compatibility_scope": "host_toolchain_config",
+        "runtime_compatibility_id": runtime_compatibility_id,
+        "runtime_compatibility_payload": runtime_compatibility_payload,
+        "runtime_compatibility_scope": AV1_VALIDATION_V4_RUNTIME_COMPATIBILITY_SCOPE,
         "guided_warm_start_identities": {
             str(asset_id): object_dict(identity)
             for asset_id, identity in inputs.guided_warm_start_identities.items()
@@ -218,7 +260,7 @@ def build_av1_validation_v4_preparation_record(
     }
     payload.update({field: False for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS})
     bound = _bind_identity(payload)
-    assert_av1_validation_v4_preparation_bundle(bound, rights)
+    assert_av1_validation_v4_preparation_bundle(bound, rights, grant)
     return bound
 
 
@@ -249,9 +291,17 @@ def _assert_av1_validation_v4_preparation_record_structure(
 def assert_av1_validation_v4_preparation_bundle(
     preparation: Mapping[str, Any],
     rights_attestation: Mapping[str, Any],
+    preparation_grant: Mapping[str, Any],
 ) -> None:
     rights = object_dict(rights_attestation)
     _assert_completed_rights_attestation(rights)
+    grant = object_dict(preparation_grant)
+    try:
+        assert_av1_validation_v4_preparation_grant(grant)
+    except AV1ValidationV4PreparationGrantError as exc:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation grant is invalid"
+        ) from exc
     record = object_dict(preparation)
     _assert_av1_validation_v4_preparation_record_structure(record)
     if (
@@ -263,17 +313,39 @@ def assert_av1_validation_v4_preparation_bundle(
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation rights attestation binding does not match"
         )
+    repository = object_dict(record.get("repository"))
+    _assert_preparation_grant_bundle_binding(
+        grant,
+        rights,
+        repository_commit=str(repository.get("commit") or ""),
+        repository_tree=str(repository.get("tree") or ""),
+        as_of=str(record.get("prepared_at") or ""),
+    )
+    if (
+        record.get("preparation_grant_id") != grant.get("grant_id")
+        or record.get("preparation_grant_payload_sha256")
+        != grant.get("payload_sha256")
+        or record.get("preparation_grant_authorized_at")
+        != grant.get("authorized_at")
+        or record.get("preparation_grant_valid_until")
+        != grant.get("valid_until")
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation grant binding does not match"
+        )
 
 
 def serialize_av1_validation_v4_preparation_record(
     payload: Mapping[str, Any],
     *,
     rights_attestation: Mapping[str, Any],
+    preparation_grant: Mapping[str, Any],
 ) -> bytes:
     materialized = json.loads(canonical_json_bytes(payload))
     assert_av1_validation_v4_preparation_bundle(
         materialized,
         rights_attestation,
+        preparation_grant,
     )
     return canonical_json_bytes(materialized) + b"\n"
 
@@ -306,6 +378,40 @@ def _assert_completed_rights_attestation(
     if rights_attestation.get("state") != AV1_VALIDATION_V4_RIGHTS_ATTESTED_STATE:
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation requires a completed owner rights attestation"
+        )
+
+
+def _assert_preparation_grant_bundle_binding(
+    grant: Mapping[str, Any],
+    rights: Mapping[str, Any],
+    *,
+    repository_commit: str,
+    repository_tree: str,
+    as_of: str,
+) -> None:
+    try:
+        assert_av1_validation_v4_preparation_grant_active(grant, as_of=as_of)
+    except AV1ValidationV4PreparationGrantError as exc:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation requires an active preparation grant"
+        ) from exc
+    grant_repository = object_dict(grant.get("repository"))
+    if (
+        grant.get("rights_attestation_id") != rights.get("attestation_id")
+        or grant.get("rights_attestation_payload_sha256")
+        != rights.get("payload_sha256")
+        or grant.get("rights_attested_at") != rights.get("attested_at")
+        or grant.get("owner_principal") != rights.get("owner_principal")
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation grant rights binding does not match"
+        )
+    if (
+        grant_repository.get("commit") != repository_commit
+        or grant_repository.get("tree") != repository_tree
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation grant repository binding does not match"
         )
 
 
@@ -360,6 +466,30 @@ def _assert_base_binding(payload: Mapping[str, Any]) -> None:
     ):
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation rights attestation digest is invalid"
+        )
+    if not _PREPARATION_GRANT_ID_RE.fullmatch(
+        str(payload.get("preparation_grant_id") or "")
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation grant ID is invalid"
+        )
+    if not _SHA256_RE.fullmatch(
+        str(payload.get("preparation_grant_payload_sha256") or "")
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation grant digest is invalid"
+        )
+    grant_authorized_at = _parse_timestamp(
+        payload.get("preparation_grant_authorized_at"),
+        "preparation_grant_authorized_at",
+    )
+    grant_valid_until = _parse_timestamp(
+        payload.get("preparation_grant_valid_until"),
+        "preparation_grant_valid_until",
+    )
+    if not grant_authorized_at <= prepared_at < grant_valid_until:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation falls outside its grant window"
         )
 
 
@@ -453,9 +583,34 @@ def _assert_runtime_and_warm_start(payload: Mapping[str, Any]) -> None:
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation runtime compatibility ID is invalid"
         )
-    if payload.get("runtime_compatibility_scope") != "host_toolchain_config":
+    if (
+        payload.get("runtime_compatibility_scope")
+        != AV1_VALIDATION_V4_RUNTIME_COMPATIBILITY_SCOPE
+    ):
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation runtime compatibility scope is invalid"
+        )
+    runtime_payload = object_dict(payload.get("runtime_compatibility_payload"))
+    try:
+        expected_runtime_id = av1_validation_v4_runtime_compatibility_id_from_payload(
+            runtime_payload
+        )
+    except AV1ValidationV4RuntimeCompatibilityError as exc:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation runtime compatibility payload is invalid"
+        ) from exc
+    if payload.get("runtime_compatibility_id") != expected_runtime_id:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation runtime compatibility binding is invalid"
+        )
+    if (
+        runtime_payload.get("effective_config_sha256")
+        != payload.get("effective_config_sha256")
+        or object_dict(runtime_payload.get("toolchain"))
+        != object_dict(payload.get("toolchain"))
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation runtime compatibility measurements do not match"
         )
     if not _PATH_PRIVACY_KEY_ID_RE.fullmatch(
         str(payload.get("path_privacy_key_id") or "")
@@ -588,11 +743,7 @@ def _assert_no_private_paths(payload: Mapping[str, Any]) -> None:
             for child in value:
                 visit(child)
         elif isinstance(value, str):
-            if (
-                value.startswith("/")
-                or _WINDOWS_ABSOLUTE_PATH_RE.match(value)
-                or any(prefix in value for prefix in _FORBIDDEN_PATH_PREFIXES)
-            ):
+            if av1_validation_v4_contains_private_text(value):
                 raise AV1ValidationV4PreparationError(
                     "AV1 v4 preparation exposes a machine-local path"
                 )
