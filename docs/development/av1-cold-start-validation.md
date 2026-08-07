@@ -1868,3 +1868,99 @@ and SHA-256 that bind the source path, frozen video policy, allowlisted search
 inputs, and exact baseline or guided warm-start identity. A later manifest can
 therefore prove baseline and guided invocation identities differ while the base
 config SHA remains identical.
+
+---
+
+## Phase 5 — V4 Canonical Manifest Draft (non-executing)
+
+**Manifest:** `docs/validation/av1-cold-start-preregistration-v4.json`
+**Discovery projection:** `docs/validation/av1-v4-discovery-public-v1.json`
+**Validator:** `mediaforce/tuning/av1_validation_v4.py`
+**State:** `draft_unapproved`
+
+### Purpose
+
+Phase 5 converts the owner-approved source table and completed owner-only
+discovery into canonical, reviewable repository bytes without importing any
+media, machine-local paths, runtime state, or execution authority. The draft
+binds all identities that are public and stable now, while explicitly requiring
+a later non-executing machine-local preparation artifact before the owner can
+freeze the manifest.
+
+The draft supersedes the terminal v3 protocol for this successor workstream but
+does not alter v3 history or grant permission to resume any v3 operation.
+
+### Bound public identities
+
+The manifest fixes:
+
+- exactly four ordered sources across `animation_content` and
+  `live_action_content`, with one primary and one confirmation per class;
+- official fetch and license URLs, media byte lengths and SHA-256 values,
+  complete observed stream inventories, probe digests, SDR evidence, terms
+  digests, and the discovery/toolchain-probe binding;
+- the safe single-entry Tears of Steel archive relationship and Sintel's
+  publisher checksum corroboration;
+- all eight source/configuration traversals, with both primary sources before
+  either confirmation source and no adaptation, substitution, or favorable
+  subset;
+- confirmed `balanced` policy with frozen CRF bounds `10..45`;
+- baseline search with no warm start and guided search with the exact v4 source,
+  signature/cohort prefixes, matching expected signature, planner bypass, and
+  mandatory target-size routing; and
+- the exact byte, storage, fetch, discovery, traversal, and whole-run limits
+  approved in issue `#334`.
+
+### NASA video-only constraint
+
+Discovery found third-party music and sample ingredients in the NASA MP4's
+official metadata. The source remains eligible only under a structural
+video-only rule:
+
+- qualification video stream index: `0`;
+- excluded stream index: `1`;
+- excluded stream type: `audio`.
+
+The manifest loader rejects any mutation that allows the NASA AAC track. A
+later preparation artifact and executor must independently enforce the same
+stream map; the repository draft alone does not authorize that executor.
+
+### Machine-local preparation boundary
+
+The repository manifest intentionally does not contain absolute source paths,
+workspace paths, config paths, or binary paths. Before owner freeze, a separate
+non-executing preparation step must bind:
+
+- the exact repository commit and tree;
+- effective config SHA-256;
+- `ffmpeg`, `ffprobe`, and `ab-av1` versions and binary digests;
+- HMAC-derived dedicated-instance and source-path identities;
+- runtime compatibility, qualification key, guided warm-start identity, and
+  concrete baseline/guided invocation digests.
+
+That preparation may hash approved files and binaries but must not read media
+content, invoke subprocesses, ingest media, run search, encode, or create
+evidence. Concrete invocation digests remain machine-local because the Phase 2
+seam intentionally binds absolute source paths.
+
+### Privacy and authority contract
+
+The public discovery projection removes the raw discovery workspace and
+`ffprobe` path while retaining public-source provenance and cryptographic
+identity. Both checked-in JSON files are canonical single-line JSON with a
+trailing newline. Validation rejects `/Users`, `/Volumes`, `/opt/homebrew`, and
+private path keys.
+
+Validate the checked-in draft without loading site packages or runtime config:
+
+```bash
+uv run python -I -S scripts/verify_av1_v4_manifest.py \
+  docs/validation/av1-cold-start-preregistration-v4.json \
+  docs/validation/av1-v4-discovery-public-v1.json \
+  --json
+```
+
+Every execution, evidence, private-inventory, freeze, publication, activation,
+retry, and dogfood authority bit is `false`. Authoring, validating, or merging
+this draft does not freeze it. A later exact owner decision is required after
+machine-local preparation and independent review.
