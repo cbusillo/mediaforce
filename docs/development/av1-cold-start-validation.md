@@ -2332,3 +2332,64 @@ regular owner-owned mode-`0600` file with one hard link and the exact canonical
 size. No qualification Grant, qualification Claim, run-start receipt, runner,
 media-tool handle, source path, key, or network authority is imported or
 created by this phase.
+
+---
+
+## Phase 13 — V4 Production Execution Readiness Preflight (non-media)
+
+`mediaforce/tuning/av1_validation_v4_execution_plan.py` defines the pure
+production execution-plan identity layer for manifest revision `2`. It derives
+the eight frozen source/configuration plans in manifest order from the
+canonical manifest, effective config, preparation record, and owner-submitted
+qualification request. Source and dedicated paths are read only from the closed
+effective-config snapshot and are treated as opaque strings for deterministic
+invocation identity; the module imports no runner, authority grant/claim, media,
+filesystem, subprocess, database, or network surface.
+
+`mediaforce/tuning/av1_validation_v4_execution_preflight_operation.py` and
+`scripts/materialize_av1_v4_execution_preflight.py` materialize one fixed
+owner-only production execution readiness preflight artifact for revision `2`.
+The operation validates the canonical manifest, owner freeze, rights record,
+preparation grant, derived preparation claim, effective config, preparation
+record, preparation measurement, and active qualification request. It also
+requires the live execution repository commit/tree to be clean and to match the
+request's execution repository identity. It does not create or consume a
+qualification grant or claim, publish a run-start receipt, invoke a runner
+callback, open/stat source media paths, probe tools, or access the network.
+
+The qualification request used by this phase must therefore be materialized
+after the preflight implementation is merged and from the same clean commit
+that will run the preflight. A request bound to an earlier commit is retained
+unchanged as a non-authorizing historical artifact and must not be amended,
+reinterpreted, or reused. Its successor is materialized in a distinct
+owner-only request registry before this phase runs; the preflight rejects any
+request whose execution repository differs from its live repository.
+
+The preflight recomputes all eight invocation SHA-256 values exactly against
+the request and preparation. Every per-ordinal plan reports the expected,
+preparation, and derived invocation digests plus booleans proving the matches.
+The singleton artifact always has `execution_ready=false`,
+`all_invocation_digests_match=true`, and every
+`AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS` entry set to `false`.
+
+For revision `2`, the readiness result is intentionally blocked with exactly
+these protocol codes:
+
+- `video_policy_incomplete_for_production_search`: the frozen video policy lacks
+  `pixel_format`, `sample_every`, `sample_duration`, and
+  `max_encoded_percent`.
+- `stream_budget_target_unresolvable`: no target size or target byte contract is
+  present for production stream-budget resolution.
+- `grant_window_shorter_than_run_budget`: the qualification grant maximum is
+  four hours while the frozen public run budget is 36 hours.
+- `temp_isolation_not_identity_bound`: `quality_temp_dir` is omitted from the
+  effective config and no `TMPDIR` identity is bound.
+
+Publication uses the same owner-only singleton pattern as the request
+materializer: a registry lock, fully written and fsynced unique temporary file,
+atomic hard link, parent-directory fsync, stale-temp reconciliation, and final
+regular owner-owned mode-`0600`/single-link custody. Existing identical
+preflights are accepted without changing bytes; conflicting or timestamp-invalid
+singletons fail closed and preserve existing bytes. The CLI emits path-safe JSON
+only, both on success and failure, and reports no registry paths, source paths,
+private text, key material, or invocation-private source strings.

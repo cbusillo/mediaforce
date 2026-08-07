@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import secrets
 import stat
 import subprocess
+import threading
 from typing import Any
 
 from mediaforce.core.evidence import canonical_json_bytes
@@ -83,6 +84,7 @@ class AV1ValidationV4QualificationRequestOperationResult:
 
 
 Clock = Callable[[], datetime]
+_PROCESS_REGISTRY_LOCK = threading.Lock()
 
 
 def materialize_av1_validation_v4_qualification_request(
@@ -113,12 +115,8 @@ def _materialize_locked(
         raise AV1ValidationV4QualificationRequestOperationError(
             "AV1 v4 qualification request manifest binding is invalid"
         )
-    rights = load_av1_validation_v4_rights_attestation(
-        inputs.rights_attestation_path
-    )
-    grant = load_av1_validation_v4_preparation_grant(
-        inputs.preparation_grant_path
-    )
+    rights = load_av1_validation_v4_rights_attestation(inputs.rights_attestation_path)
+    grant = load_av1_validation_v4_preparation_grant(inputs.preparation_grant_path)
     claim = load_av1_validation_v4_preparation_claim(
         _claim_registry_path(grant, repository_root=inputs.repository_root)
         / f"{grant['grant_id']}.json"
@@ -340,35 +338,36 @@ def _assert_registry(path: Path, *, repository_root: Path) -> None:
 
 @contextmanager
 def _registry_lock(registry: Path) -> Iterator[None]:
-    directory_descriptor = os.open(
-        registry,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-    )
-    try:
-        lock_descriptor = os.open(
-            ".av1-v4-qualification-request.lock",
-            os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
-            0o600,
-            dir_fd=directory_descriptor,
+    with _PROCESS_REGISTRY_LOCK:
+        directory_descriptor = os.open(
+            registry,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
         try:
-            metadata = os.fstat(lock_descriptor)
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or stat.S_IMODE(metadata.st_mode) != 0o600
-                or metadata.st_uid != os.geteuid()
-                or metadata.st_nlink != 1
-            ):
-                raise AV1ValidationV4QualificationRequestOperationError(
-                    "AV1 v4 qualification request registry lock is invalid"
-                )
-            os.fsync(directory_descriptor)
-            fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
-            yield
+            lock_descriptor = os.open(
+                ".av1-v4-qualification-request.lock",
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory_descriptor,
+            )
+            try:
+                metadata = os.fstat(lock_descriptor)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1
+                ):
+                    raise AV1ValidationV4QualificationRequestOperationError(
+                        "AV1 v4 qualification request registry lock is invalid"
+                    )
+                os.fsync(directory_descriptor)
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(lock_descriptor)
         finally:
-            os.close(lock_descriptor)
-    finally:
-        os.close(directory_descriptor)
+            os.close(directory_descriptor)
 
 
 def _claim_registry_path(
@@ -413,7 +412,17 @@ def _measure_repository_identity(repository_root: Path) -> tuple[str, str]:
     }
     try:
         result = subprocess.run(
-            [git_path, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "rev-parse", "--show-toplevel", "HEAD", "HEAD^{tree}"],
+            [
+                git_path,
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "rev-parse",
+                "--show-toplevel",
+                "HEAD",
+                "HEAD^{tree}",
+            ],
             cwd=repository_root,
             check=False,
             capture_output=True,
@@ -436,7 +445,16 @@ def _measure_repository_identity(repository_root: Path) -> tuple[str, str]:
         )
     try:
         status = subprocess.run(
-            [git_path, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status", "--porcelain", "--untracked-files=all"],
+            [
+                git_path,
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
             cwd=repository_root,
             check=False,
             capture_output=True,
@@ -482,10 +500,7 @@ def _assert_manifest_location(path: Path, *, repository_root: Path) -> None:
         raise AV1ValidationV4QualificationRequestOperationError(
             "AV1 v4 qualification request manifest path is unavailable"
         ) from exc
-    expected = (
-        resolved_root
-        / "docs/validation/av1-cold-start-preregistration-v4.json"
-    )
+    expected = resolved_root / "docs/validation/av1-cold-start-preregistration-v4.json"
     if resolved_path != expected:
         raise AV1ValidationV4QualificationRequestOperationError(
             "AV1 v4 qualification request manifest is outside the materializer repository"
@@ -692,9 +707,7 @@ def _canonical_timestamp(value: datetime) -> str:
         raise AV1ValidationV4QualificationRequestOperationError(
             "AV1 v4 qualification request clock must return a timezone-aware timestamp"
         )
-    return value.astimezone(UTC).replace(microsecond=0).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
+    return value.astimezone(UTC).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _parse_timestamp(value: Any) -> datetime:
