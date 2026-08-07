@@ -178,7 +178,7 @@ class AV1ValidationV4RightsTests(unittest.TestCase):
         }
         return build_av1_validation_v4_rights_attestation(
             owner_principal="owner:test",
-            attested_at="2026-08-07T02:30:00Z",
+            attested_at="2026-08-07T05:30:00Z",
             source_claims=claims,
         )
 

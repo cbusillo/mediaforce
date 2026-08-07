@@ -18,7 +18,7 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_PROTOCOL_VERSION,
     AV1_VALIDATION_V4_SOURCE_IDS,
     AV1_VALIDATION_V4_VALID_UNTIL,
-    AV1_VALIDATION_V4_DRAFTED_AT,
+    AV1_VALIDATION_V4_REVISED_AT,
 )
 
 
@@ -326,10 +326,10 @@ def _assert_attested_at(value: Any) -> None:
         raise AV1ValidationV4RightsError(
             "AV1 v4 rights attestation timestamp must be timezone-aware"
         )
-    drafted_at = datetime.fromisoformat(AV1_VALIDATION_V4_DRAFTED_AT.replace("Z", "+00:00"))
+    active_at = datetime.fromisoformat(AV1_VALIDATION_V4_REVISED_AT.replace("Z", "+00:00"))
     valid_until = datetime.fromisoformat(AV1_VALIDATION_V4_VALID_UNTIL.replace("Z", "+00:00"))
     normalized = attested_at.astimezone(UTC)
-    if normalized < drafted_at or normalized >= valid_until:
+    if normalized < active_at or normalized >= valid_until:
         raise AV1ValidationV4RightsError(
             "AV1 v4 rights attestation timestamp is outside the manifest window"
         )

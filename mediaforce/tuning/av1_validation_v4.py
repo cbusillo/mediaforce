@@ -16,19 +16,43 @@ AV1_VALIDATION_V4_MANIFEST_SCHEMA = "mediaforce.av1_cold_start_v4_manifest"
 AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SCHEMA = (
     "mediaforce.av1_cold_start_v4_discovery_public"
 )
-AV1_VALIDATION_V4_SCHEMA_VERSION = 1
+AV1_VALIDATION_V4_SCHEMA_VERSION = 2
+AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SCHEMA_VERSION = 1
 AV1_VALIDATION_V4_PROTOCOL_VERSION = 4
 AV1_VALIDATION_V4_EXPERIMENT_ID = "av1_cold_start_v4"
-AV1_VALIDATION_V4_CONTRACT_VERSION = "acsv4"
-AV1_VALIDATION_V4_MANIFEST_ID = "av1vmanifest4_63f7d31daaf390fae657a42123a88f15"
+AV1_VALIDATION_V4_CONTRACT_VERSION = "acsv4r2"
+AV1_VALIDATION_V4_MANIFEST_REVISION = 2
+AV1_VALIDATION_V4_MANIFEST_ID = "av1vmanifest4_bcdf3a9ccfa50e988a597741c25d322f"
 AV1_VALIDATION_V4_PAYLOAD_SHA256 = (
-    "sha256:91b1c85c0c51544e1e7a2352d68b1025a838b9f5f3dad0deb5c3b9175e9ed589"
+    "sha256:7debca673289845c411e57f68506ed170ba72a3c4c6e9478ee7cfb0f63cdcc17"
 )
 AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256 = (
     "sha256:cf4c771992bed9eaddc94ef415ebfe16e9d5582016831b7412abf28503b6c697"
 )
 AV1_VALIDATION_V4_DRAFTED_AT = "2026-08-06T18:53:35Z"
+AV1_VALIDATION_V4_REVISED_AT = "2026-08-07T05:03:53Z"
 AV1_VALIDATION_V4_VALID_UNTIL = "2027-02-02T18:53:35Z"
+AV1_VALIDATION_V4_SUPERSEDED_MANIFEST_ID = (
+    "av1vmanifest4_63f7d31daaf390fae657a42123a88f15"
+)
+AV1_VALIDATION_V4_SUPERSEDED_MANIFEST_PAYLOAD_SHA256 = (
+    "sha256:91b1c85c0c51544e1e7a2352d68b1025a838b9f5f3dad0deb5c3b9175e9ed589"
+)
+AV1_VALIDATION_V4_WARM_START_SIGNATURE_DOMAIN = (
+    "mediaforce:av1:protocol:4:revision:2:warm-start:search-signature:v1"
+)
+AV1_VALIDATION_V4_WARM_START_COHORT_DOMAIN = (
+    "mediaforce:av1:protocol:4:revision:2:warm-start:content-class-cohort:v1"
+)
+AV1_VALIDATION_V4_PATH_PRIVACY_KEY_ID_DOMAIN = (
+    "mediaforce:av1:protocol:4:revision:2:path-privacy:key-id:v1"
+)
+AV1_VALIDATION_V4_INSTANCE_PATH_HMAC_DOMAIN = (
+    "mediaforce:av1:protocol:4:revision:2:path-privacy:instance-path:v1"
+)
+AV1_VALIDATION_V4_SOURCE_PATH_HMAC_DOMAIN = (
+    "mediaforce:av1:protocol:4:revision:2:path-privacy:source-path:v1"
+)
 AV1_VALIDATION_V4_SOURCE_IDS = (
     "av1v4_animation_primary_sintel",
     "av1v4_animation_confirmation_cosmos_laundromat",
@@ -102,6 +126,35 @@ class AV1ValidationV4Error(ValueError):
     pass
 
 
+def av1_validation_v4_guided_warm_start_identities() -> dict[str, dict[str, Any]]:
+    identities: dict[str, dict[str, Any]] = {}
+    cohort_ids: dict[str, str] = {}
+    for asset_id, content_class, _role in AV1_VALIDATION_V4_SOURCE_LAYOUT:
+        cohort_id = cohort_ids.setdefault(
+            content_class,
+            "acsh1_"
+            + stable_json_hash({
+                "domain": AV1_VALIDATION_V4_WARM_START_COHORT_DOMAIN,
+                "content_class": content_class,
+            })[:32],
+        )
+        identities[asset_id] = {
+            "requested_crf": 28.0,
+            "candidate_crf": 28,
+            "search_signature_id": "acss1_"
+            + stable_json_hash({
+                "domain": AV1_VALIDATION_V4_WARM_START_SIGNATURE_DOMAIN,
+                "asset_id": asset_id,
+            })[:32],
+            "cohort_id": cohort_id,
+            "source": "av1_cold_start_v4_qualification",
+            "confidence": None,
+            "provenance_id": None,
+            "review_risks": [],
+        }
+    return identities
+
+
 def load_av1_validation_manifest_v4(
     path: Path,
     *,
@@ -172,9 +225,9 @@ def assert_av1_validation_manifest_v4_current(
     current = as_of or datetime.now(UTC)
     if current.tzinfo is None:
         raise AV1ValidationV4Error("AV1 v4 activity checks require timezone-aware time")
-    drafted_at = _parse_timestamp(str(payload["drafted_at"]))
+    active_at = _parse_timestamp(str(payload["revised_at"]))
     valid_until = _parse_timestamp(str(payload["valid_until"]))
-    if current < drafted_at or current >= valid_until:
+    if current < active_at or current >= valid_until:
         raise AV1ValidationV4Error("AV1 v4 draft is not active at the requested time")
 
 
@@ -210,8 +263,10 @@ def _assert_identity(payload: Mapping[str, Any]) -> None:
         "protocol_version": AV1_VALIDATION_V4_PROTOCOL_VERSION,
         "experiment_id": AV1_VALIDATION_V4_EXPERIMENT_ID,
         "contract_version": AV1_VALIDATION_V4_CONTRACT_VERSION,
+        "manifest_revision": AV1_VALIDATION_V4_MANIFEST_REVISION,
         "state": "draft_unapproved",
         "drafted_at": AV1_VALIDATION_V4_DRAFTED_AT,
+        "revised_at": AV1_VALIDATION_V4_REVISED_AT,
         "valid_until": AV1_VALIDATION_V4_VALID_UNTIL,
         "governance_issue": "#334",
         "implementation_issue": "#334",
@@ -220,6 +275,11 @@ def _assert_identity(payload: Mapping[str, Any]) -> None:
         "artifact_namespace": "av1_v4_qualification",
         "supersedes_protocol_id": "av1vprotocol3_ba85a44eef70b857d678b236bb1b4afc",
         "supersedes_payload_sha256": "sha256:d17606e4920846de810ab467d63a194f6a9b9138f6d8416a3ff3e0416c37a590",
+        "supersedes_manifest_revision": {
+            "revision": 1,
+            "manifest_id": AV1_VALIDATION_V4_SUPERSEDED_MANIFEST_ID,
+            "payload_sha256": AV1_VALIDATION_V4_SUPERSEDED_MANIFEST_PAYLOAD_SHA256,
+        },
         "manifest_id": AV1_VALIDATION_V4_MANIFEST_ID,
         "payload_sha256": AV1_VALIDATION_V4_PAYLOAD_SHA256,
         "discovery_public_sha256": AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256,
@@ -228,8 +288,9 @@ def _assert_identity(payload: Mapping[str, Any]) -> None:
         if payload.get(key) != value:
             raise AV1ValidationV4Error(f"AV1 v4 manifest {key} is not frozen")
     drafted_at = _parse_timestamp(str(payload["drafted_at"]))
+    revised_at = _parse_timestamp(str(payload["revised_at"]))
     valid_until = _parse_timestamp(str(payload["valid_until"]))
-    if valid_until <= drafted_at:
+    if not drafted_at <= revised_at < valid_until:
         raise AV1ValidationV4Error("AV1 v4 validity interval is invalid")
     manifest_id = str(payload.get("manifest_id") or "")
     if not _MANIFEST_ID_RE.fullmatch(manifest_id):
@@ -437,10 +498,73 @@ def _assert_invocation(payload: Mapping[str, Any]) -> None:
         or guided.get("expected_search_signature_matches_warm_start") is not True
     ):
         raise AV1ValidationV4Error("AV1 v4 guided identity is invalid")
+    if invocation.get("guided_warm_start_count") != len(AV1_VALIDATION_V4_SOURCE_IDS):
+        raise AV1ValidationV4Error("AV1 v4 guided warm-start count is invalid")
+    if invocation.get("guided_warm_start_scope") != "source":
+        raise AV1ValidationV4Error("AV1 v4 guided warm-start scope is invalid")
+    if invocation.get("search_signature_scope") != "source":
+        raise AV1ValidationV4Error("AV1 v4 search signature scope is invalid")
+    if invocation.get("cohort_scope") != "content_class":
+        raise AV1ValidationV4Error("AV1 v4 cohort scope is invalid")
+    if invocation.get("warm_start_identity_domains") != {
+        "cohort": AV1_VALIDATION_V4_WARM_START_COHORT_DOMAIN,
+        "search_signature": AV1_VALIDATION_V4_WARM_START_SIGNATURE_DOMAIN,
+    }:
+        raise AV1ValidationV4Error("AV1 v4 warm-start domains are invalid")
+    expected_warm_starts = av1_validation_v4_guided_warm_start_identities()
+    actual_warm_starts = [
+        object_dict(value)
+        for value in object_list(invocation.get("guided_warm_starts"))
+    ]
+    expected_entries = [
+        {
+            "asset_id": asset_id,
+            "content_class": content_class,
+            "content_traits": ["unknown"],
+            "warm_start": expected_warm_starts[asset_id],
+        }
+        for asset_id, content_class, _role in AV1_VALIDATION_V4_SOURCE_LAYOUT
+    ]
+    if actual_warm_starts != expected_entries:
+        raise AV1ValidationV4Error("AV1 v4 guided warm starts are not frozen")
+    if invocation.get("invocation_digest_count") != 8:
+        raise AV1ValidationV4Error("AV1 v4 invocation digest count is invalid")
+    if invocation.get("invocation_digest_scope") != "source_and_mode":
+        raise AV1ValidationV4Error("AV1 v4 invocation digest scope is invalid")
+    if invocation.get("all_invocation_digests_must_differ") is not True:
+        raise AV1ValidationV4Error("AV1 v4 invocation digests must be unique")
+    if invocation.get("base_config_digest_must_match_within_source") is not True:
+        raise AV1ValidationV4Error("AV1 v4 base config pairing is not frozen")
+    if invocation.get("frozen_extra_search_kwargs") != [
+        "height",
+        "source_codec",
+        "width",
+    ]:
+        raise AV1ValidationV4Error("AV1 v4 frozen search kwargs are invalid")
+    if invocation.get("omitted_preparation_search_kwargs") != [
+        "cadence_decision",
+        "cadence_evidence",
+        "cadence_source_fingerprint",
+        "detected_crop",
+        "host",
+        "quality_temp_dir",
+    ]:
+        raise AV1ValidationV4Error("AV1 v4 omitted search kwargs are invalid")
+    if invocation.get("allowed_search_kwargs") != [
+        "cadence_decision",
+        "cadence_evidence",
+        "cadence_source_fingerprint",
+        "detected_crop",
+        "height",
+        "host",
+        "quality_temp_dir",
+        "source_codec",
+        "width",
+    ]:
+        raise AV1ValidationV4Error("AV1 v4 allowed search kwargs are invalid")
     for field in (
         "concrete_invocation_digests_preparation_required",
         "invocation_digests_must_differ",
-        "base_config_digest_must_match",
     ):
         if invocation.get(field) is not True:
             raise AV1ValidationV4Error(f"AV1 v4 invocation {field} must be true")
@@ -484,8 +608,6 @@ def _assert_preparation_boundary(payload: Mapping[str, Any]) -> None:
         raise AV1ValidationV4Error("AV1 v4 preparation must precede owner freeze")
     if requirements.get("media_bytes_must_not_be_read") is not True:
         raise AV1ValidationV4Error("AV1 v4 preparation must not read media bytes")
-    if requirements.get("subprocess_execution_allowed") is not False:
-        raise AV1ValidationV4Error("AV1 v4 preparation cannot execute subprocesses")
     for field in (
         "repository_commit_and_tree",
         "effective_config_sha256",
@@ -495,20 +617,61 @@ def _assert_preparation_boundary(payload: Mapping[str, Any]) -> None:
         "dedicated_instance_path_hmac_ids",
         "source_path_hmac_ids",
         "runtime_compatibility_id",
-        "guided_warm_start_identity",
-        "baseline_and_guided_invocation_sha256",
-        "qualification_key_id",
+        "guided_warm_start_identities_by_source",
+        "all_traversal_invocation_sha256",
+        "path_privacy_key_id",
+        "subprocess_execution_accounting",
     ):
         if requirements.get(field) is not True:
             raise AV1ValidationV4Error(
                 f"AV1 v4 preparation requirement {field} is absent"
             )
+    measurement = object_dict(payload.get("preparation_measurement_policy"))
+    expected_measurement = {
+        "builder_subprocess_execution_allowed": False,
+        "media_processing_subprocess_execution_allowed": False,
+        "network_access_allowed": False,
+        "tool_version_probe_subprocess_execution_allowed": True,
+        "tool_version_probe_media_arguments_allowed": False,
+        "tool_version_probe_timeout_seconds_max": 10,
+        "tool_version_string_normalization": "first_line_stripped",
+        "tool_version_probe_argv": {
+            "ab_av1": ["--version"],
+            "ffmpeg": ["-version"],
+            "ffprobe": ["-version"],
+        },
+    }
+    if measurement != expected_measurement:
+        raise AV1ValidationV4Error(
+            "AV1 v4 preparation measurement policy is not frozen"
+        )
+    path_privacy = object_dict(payload.get("path_privacy"))
+    expected_path_privacy = {
+        "algorithm": "hmac_sha256_v1",
+        "key_bytes_min": 32,
+        "key_id_domain": AV1_VALIDATION_V4_PATH_PRIVACY_KEY_ID_DOMAIN,
+        "key_id_prefix": "av1vpathkey4_",
+        "instance_path_domain": AV1_VALIDATION_V4_INSTANCE_PATH_HMAC_DOMAIN,
+        "instance_path_id_prefix": "av1vpath4_",
+        "source_path_domain": AV1_VALIDATION_V4_SOURCE_PATH_HMAC_DOMAIN,
+        "source_path_id_prefix": "av1vsource4_",
+        "normalized_path_format": "absolute_posix_canonical",
+        "single_key_with_domain_separation": True,
+        "selection_or_partition_use_allowed": False,
+    }
+    if path_privacy != expected_path_privacy:
+        raise AV1ValidationV4Error("AV1 v4 path privacy policy is not frozen")
+    if payload.get("runtime_compatibility_scope") != "host_toolchain_config":
+        raise AV1ValidationV4Error(
+            "AV1 v4 runtime compatibility scope is not frozen"
+        )
 
 
 def _assert_discovery_public(payload: Mapping[str, Any]) -> None:
     if (
         payload.get("schema") != AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SCHEMA
-        or payload.get("schema_version") != AV1_VALIDATION_V4_SCHEMA_VERSION
+        or payload.get("schema_version")
+        != AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SCHEMA_VERSION
         or payload.get("protocol_version") != AV1_VALIDATION_V4_PROTOCOL_VERSION
         or payload.get("experiment_id") != AV1_VALIDATION_V4_EXPERIMENT_ID
         or payload.get("status") != "pass"

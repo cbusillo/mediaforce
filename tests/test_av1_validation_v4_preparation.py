@@ -9,8 +9,10 @@ import unittest
 from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
     AV1_VALIDATION_V4_SOURCE_IDS,
+    av1_validation_v4_guided_warm_start_identities,
 )
 from mediaforce.tuning.av1_validation_v4_preparation import (
+    AV1ValidationV4InvocationIdentity,
     AV1ValidationV4PreparationError,
     AV1ValidationV4PreparationInputs,
     AV1ValidationV4ToolIdentity,
@@ -63,7 +65,11 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         )
         self.assertEqual(first["state"], "prepared_unfrozen")
         self.assertFalse(first["media_bytes_read"])
-        self.assertFalse(first["subprocess_executed"])
+        self.assertFalse(first["builder_subprocess_executed"])
+        self.assertFalse(first["media_processing_subprocess_executed"])
+        self.assertTrue(first["tool_version_probe_subprocess_executed"])
+        self.assertEqual(len(first["guided_warm_start_identities"]), 4)
+        self.assertEqual(len(first["invocations"]), 8)
         for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
             with self.subTest(field=field):
                 self.assertIs(first[field], False)
@@ -133,7 +139,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             rights_attestation=rights,
         )
         other_rights = self._rights_attestation(
-            attested_at="2026-08-07T02:31:00Z"
+            attested_at="2026-08-07T05:31:00Z"
         )
         with self.assertRaisesRegex(
             AV1ValidationV4PreparationError,
@@ -153,24 +159,36 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             (
                 replace(
                     self._inputs(),
-                    qualification_key_id="wrong-key-id",
+                    path_privacy_key_id="wrong-key-id",
                 ),
-                "qualification key ID",
+                "path privacy key ID",
             ),
             (
                 replace(
                     self._inputs(),
-                    baseline_invocation_sha256="sha256:" + "b" * 64,
-                    guided_invocation_sha256="sha256:" + "b" * 64,
+                    invocations=tuple(
+                        replace(invocation, invocation_sha256="sha256:" + "b" * 64)
+                        for invocation in self._inputs().invocations
+                    ),
                 ),
-                "invocation digests must differ",
+                "traversal invocation digests must differ",
             ),
             (
                 replace(
                     self._inputs(),
-                    guided_base_config_sha256="sha256:" + "c" * 64,
+                    invocations=tuple(
+                        replace(
+                            invocation,
+                            base_config_sha256=(
+                                "sha256:" + "c" * 64
+                                if invocation.ordinal == 2
+                                else invocation.base_config_sha256
+                            ),
+                        )
+                        for invocation in self._inputs().invocations
+                    ),
                 ),
-                "base config digests must match",
+                "base config digests must match within source",
             ),
             (
                 replace(
@@ -193,6 +211,50 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 ),
                 "source path identity set",
             ),
+            (
+                replace(
+                    self._inputs(),
+                    guided_warm_start_identities={
+                        key: value
+                        for key, value in self._inputs().guided_warm_start_identities.items()
+                        if key != AV1_VALIDATION_V4_SOURCE_IDS[0]
+                    },
+                ),
+                "guided warm-start identities",
+            ),
+            (
+                replace(
+                    self._inputs(),
+                    invocations=tuple(reversed(self._inputs().invocations)),
+                ),
+                "invocation order is invalid",
+            ),
+            (
+                replace(
+                    self._inputs(),
+                    invocations=(
+                        replace(
+                            self._inputs().invocations[0],
+                            source_path_hmac_id="av1vsource4_" + "f" * 32,
+                        ),
+                        *self._inputs().invocations[1:],
+                    ),
+                ),
+                "source path binding is invalid",
+            ),
+            (
+                replace(
+                    self._inputs(),
+                    invocations=(
+                        replace(
+                            self._inputs().invocations[0],
+                            configuration="unknown",
+                        ),
+                        *self._inputs().invocations[1:],
+                    ),
+                ),
+                "configuration is invalid",
+            ),
         ]
         for inputs, message in cases:
             with self.subTest(message=message):
@@ -201,6 +263,16 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                         inputs=inputs,
                         rights_attestation=self._rights_attestation(),
                     )
+
+    def test_probe_accounting_can_report_no_subprocess(self) -> None:
+        record = build_av1_validation_v4_preparation_record(
+            inputs=replace(
+                self._inputs(),
+                tool_version_probe_subprocess_executed=False,
+            ),
+            rights_attestation=self._rights_attestation(),
+        )
+        self.assertFalse(record["tool_version_probe_subprocess_executed"])
 
     def test_record_mutations_fail_closed(self) -> None:
         cases = []
@@ -229,7 +301,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
 
     def _inputs(self) -> AV1ValidationV4PreparationInputs:
         return AV1ValidationV4PreparationInputs(
-            prepared_at="2026-08-07T03:00:00Z",
+            prepared_at="2026-08-07T06:00:00Z",
             repository_commit="1" * 40,
             repository_tree="2" * 40,
             effective_config_sha256="sha256:" + "3" * 64,
@@ -256,20 +328,51 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 for index, asset_id in enumerate(AV1_VALIDATION_V4_SOURCE_IDS, start=1)
             },
             runtime_compatibility_id="av1vruntime4_" + "b" * 32,
-            guided_search_signature_id="acss1_test_signature",
-            guided_cohort_id="acsh1_test_cohort",
-            guided_warm_start_payload_sha256="sha256:" + "c" * 64,
-            baseline_invocation_sha256="sha256:" + "d" * 64,
-            baseline_base_config_sha256="sha256:" + "e" * 64,
-            guided_invocation_sha256="sha256:" + "f" * 64,
-            guided_base_config_sha256="sha256:" + "e" * 64,
-            qualification_key_id="av1vqkey4_" + "1" * 32,
+            guided_warm_start_identities=(
+                av1_validation_v4_guided_warm_start_identities()
+            ),
+            invocations=self._invocations(),
+            path_privacy_key_id="av1vpathkey4_" + "1" * 32,
+            tool_version_probe_subprocess_executed=True,
         )
+
+    def _invocations(self) -> tuple[AV1ValidationV4InvocationIdentity, ...]:
+        source_path_ids = {
+            asset_id: f"av1vsource4_{index:032x}"
+            for index, asset_id in enumerate(AV1_VALIDATION_V4_SOURCE_IDS, start=1)
+        }
+        asset_order = (
+            AV1_VALIDATION_V4_SOURCE_IDS[0],
+            AV1_VALIDATION_V4_SOURCE_IDS[2],
+            AV1_VALIDATION_V4_SOURCE_IDS[1],
+            AV1_VALIDATION_V4_SOURCE_IDS[3],
+        )
+        configurations = (
+            "balanced_full_search_baseline",
+            "balanced_frozen_search_hint",
+        )
+        invocations: list[AV1ValidationV4InvocationIdentity] = []
+        ordinal = 1
+        for source_index, asset_id in enumerate(asset_order, start=1):
+            base_config_sha256 = f"sha256:{source_index + 100:064x}"
+            for configuration in configurations:
+                invocations.append(
+                    AV1ValidationV4InvocationIdentity(
+                        ordinal=ordinal,
+                        asset_id=asset_id,
+                        configuration=configuration,
+                        source_path_hmac_id=source_path_ids[asset_id],
+                        invocation_sha256=f"sha256:{ordinal:064x}",
+                        base_config_sha256=base_config_sha256,
+                    )
+                )
+                ordinal += 1
+        return tuple(invocations)
 
     def _rights_attestation(
         self,
         *,
-        attested_at: str = "2026-08-07T02:30:00Z",
+        attested_at: str = "2026-08-07T05:30:00Z",
     ) -> dict[str, object]:
         claims = {
             AV1_VALIDATION_V4_SOURCE_IDS[0]: {

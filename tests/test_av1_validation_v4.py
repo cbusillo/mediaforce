@@ -84,6 +84,45 @@ class AV1ValidationV4Tests(unittest.TestCase):
             },
         )
 
+    def test_revision_two_preparation_cardinalities_are_frozen(self) -> None:
+        self.assertEqual(self.manifest["manifest_revision"], 2)
+        self.assertEqual(
+            self.manifest["supersedes_manifest_revision"],
+            {
+                "revision": 1,
+                "manifest_id": "av1vmanifest4_63f7d31daaf390fae657a42123a88f15",
+                "payload_sha256": (
+                    "sha256:91b1c85c0c51544e1e7a2352d68b1025a838b9f5f3dad0deb5c3b9175e9ed589"
+                ),
+            },
+        )
+        invocation = self.manifest["qualification_invocation"]
+        warm_starts = invocation["guided_warm_starts"]
+        self.assertEqual(invocation["guided_warm_start_count"], 4)
+        self.assertEqual(invocation["invocation_digest_count"], 8)
+        self.assertEqual(
+            {entry["warm_start"]["candidate_crf"] for entry in warm_starts},
+            {28},
+        )
+        self.assertEqual(
+            {tuple(entry["content_traits"]) for entry in warm_starts},
+            {("unknown",)},
+        )
+        self.assertEqual(
+            len({entry["warm_start"]["search_signature_id"] for entry in warm_starts}),
+            4,
+        )
+        self.assertEqual(
+            len({entry["warm_start"]["cohort_id"] for entry in warm_starts}),
+            2,
+        )
+        requirements = self.manifest["preparation_requirements"]
+        self.assertIn("path_privacy_key_id", requirements)
+        self.assertNotIn("qualification_key_id", requirements)
+        self.assertFalse(
+            self.manifest["path_privacy"]["selection_or_partition_use_allowed"]
+        )
+
     def test_primary_traversals_precede_confirmation_traversals(self) -> None:
         traversals = self.manifest["qualification_matrix"]["traversals"]
         self.assertEqual(
@@ -164,12 +203,12 @@ class AV1ValidationV4Tests(unittest.TestCase):
     def test_activity_window_boundaries(self) -> None:
         assert_av1_validation_manifest_v4_current(
             self.manifest,
-            as_of=datetime(2026, 8, 6, 18, 53, 35, tzinfo=UTC),
+            as_of=datetime(2026, 8, 7, 5, 3, 53, tzinfo=UTC),
         )
         with self.assertRaises(AV1ValidationV4Error):
             assert_av1_validation_manifest_v4_current(
                 self.manifest,
-                as_of=datetime(2026, 8, 6, 18, 53, 34, tzinfo=UTC),
+                as_of=datetime(2026, 8, 7, 5, 3, 52, tzinfo=UTC),
             )
         with self.assertRaises(AV1ValidationV4Error):
             assert_av1_validation_manifest_v4_current(
@@ -179,7 +218,7 @@ class AV1ValidationV4Tests(unittest.TestCase):
         with self.assertRaisesRegex(AV1ValidationV4Error, "timezone-aware"):
             assert_av1_validation_manifest_v4_current(
                 self.manifest,
-                as_of=datetime(2026, 8, 6, 18, 53, 35),
+                as_of=datetime(2026, 8, 7, 5, 3, 53),
             )
 
     def test_mutations_fail_closed(self) -> None:
@@ -284,9 +323,12 @@ class AV1ValidationV4Tests(unittest.TestCase):
             ),
             (
                 "preparation",
-                ("preparation_requirements", "subprocess_execution_allowed"),
+                (
+                    "preparation_measurement_policy",
+                    "media_processing_subprocess_execution_allowed",
+                ),
                 True,
-                "cannot execute subprocesses",
+                "measurement policy is not frozen",
             ),
         ]
         for name, path, value, message in cases:
@@ -407,7 +449,7 @@ class AV1ValidationV4Tests(unittest.TestCase):
                 str(MANIFEST_PATH),
                 str(DISCOVERY_PATH),
                 "--as-of",
-                "2026-08-06T18:53:35Z",
+                "2026-08-07T05:03:53Z",
                 "--json",
             ],
             check=True,

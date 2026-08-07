@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -8,17 +8,21 @@ import re
 from typing import Any
 
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.tuning.av1_validation_v4 import (
+    AV1_VALIDATION_V4_CONFIGURATIONS,
     AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256,
-    AV1_VALIDATION_V4_DRAFTED_AT,
     AV1_VALIDATION_V4_EXPERIMENT_ID,
     AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
     AV1_VALIDATION_V4_MANIFEST_ID,
+    AV1_VALIDATION_V4_MANIFEST_REVISION,
     AV1_VALIDATION_V4_PAYLOAD_SHA256,
     AV1_VALIDATION_V4_PROTOCOL_VERSION,
+    AV1_VALIDATION_V4_REVISED_AT,
     AV1_VALIDATION_V4_SOURCE_IDS,
+    AV1_VALIDATION_V4_SOURCE_LAYOUT,
     AV1_VALIDATION_V4_VALID_UNTIL,
+    av1_validation_v4_guided_warm_start_identities,
 )
 from mediaforce.tuning.av1_validation_v4_rights import (
     AV1_VALIDATION_V4_RIGHTS_ATTESTED_STATE,
@@ -30,7 +34,7 @@ from mediaforce.tuning.av1_validation_v4_rights import (
 AV1_VALIDATION_V4_PREPARATION_SCHEMA = (
     "mediaforce.av1_cold_start_v4_preparation_record"
 )
-AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION = 1
+AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION = 2
 AV1_VALIDATION_V4_PREPARATION_STATE = "prepared_unfrozen"
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -40,9 +44,7 @@ _RIGHTS_ATTESTATION_ID_RE = re.compile(r"av1vrights4_[0-9a-f]{32}\Z")
 _INSTANCE_PATH_HMAC_ID_RE = re.compile(r"av1vpath4_[0-9a-f]{32}\Z")
 _SOURCE_PATH_HMAC_ID_RE = re.compile(r"av1vsource4_[0-9a-f]{32}\Z")
 _RUNTIME_COMPATIBILITY_ID_RE = re.compile(r"av1vruntime4_[0-9a-f]{32}\Z")
-_QUALIFICATION_KEY_ID_RE = re.compile(r"av1vqkey4_[0-9a-f]{32}\Z")
-_SEARCH_SIGNATURE_ID_RE = re.compile(r"acss1_[A-Za-z0-9_.:-]{8,185}\Z")
-_COHORT_ID_RE = re.compile(r"acsh1_[A-Za-z0-9_.:-]{8,185}\Z")
+_PATH_PRIVACY_KEY_ID_RE = re.compile(r"av1vpathkey4_[0-9a-f]{32}\Z")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"[A-Za-z]:[\\/]")
 _FORBIDDEN_PATH_PREFIXES = ("/Users/", "/Volumes/", "/opt/homebrew/")
 _INSTANCE_PATH_ROLES = frozenset({
@@ -53,44 +55,49 @@ _INSTANCE_PATH_ROLES = frozenset({
 })
 _COVERED_REQUIREMENTS = frozenset({
     "ab_av1_sha256_and_version",
-    "baseline_and_guided_invocation_sha256",
+    "all_traversal_invocation_sha256",
     "dedicated_instance_path_hmac_ids",
     "effective_config_sha256",
     "ffmpeg_sha256_and_version",
     "ffprobe_sha256_and_version",
-    "guided_warm_start_identity",
+    "guided_warm_start_identities_by_source",
     "media_bytes_must_not_be_read",
-    "qualification_key_id",
+    "path_privacy_key_id",
     "repository_commit_and_tree",
     "required_before_owner_freeze",
     "runtime_compatibility_id",
     "source_path_hmac_ids",
+    "subprocess_execution_accounting",
 })
 _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "dedicated_instance_path_hmac_ids",
     "discovery_public_sha256",
     "effective_config_sha256",
     "experiment_id",
-    "guided_warm_start_identity",
+    "guided_warm_start_identities",
     "invocations",
     "manifest_id",
+    "manifest_revision",
     "manifest_payload_sha256",
     "media_bytes_read",
     "payload_sha256",
     "preparation_id",
     "prepared_at",
     "protocol_version",
-    "qualification_key_id",
+    "path_privacy_key_id",
     "repository",
     "rights_attestation_id",
     "rights_attestation_payload_sha256",
     "rights_attested_at",
     "runtime_compatibility_id",
+    "runtime_compatibility_scope",
     "schema",
     "schema_version",
     "source_path_hmac_ids",
     "state",
-    "subprocess_executed",
+    "builder_subprocess_executed",
+    "media_processing_subprocess_executed",
+    "tool_version_probe_subprocess_executed",
     "toolchain",
     "valid_until",
 }) | AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS
@@ -107,6 +114,16 @@ class AV1ValidationV4ToolIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class AV1ValidationV4InvocationIdentity:
+    ordinal: int
+    asset_id: str
+    configuration: str
+    source_path_hmac_id: str
+    invocation_sha256: str
+    base_config_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class AV1ValidationV4PreparationInputs:
     prepared_at: str
     repository_commit: str
@@ -118,14 +135,10 @@ class AV1ValidationV4PreparationInputs:
     dedicated_instance_path_hmac_ids: Mapping[str, str]
     source_path_hmac_ids: Mapping[str, str]
     runtime_compatibility_id: str
-    guided_search_signature_id: str
-    guided_cohort_id: str
-    guided_warm_start_payload_sha256: str
-    baseline_invocation_sha256: str
-    baseline_base_config_sha256: str
-    guided_invocation_sha256: str
-    guided_base_config_sha256: str
-    qualification_key_id: str
+    guided_warm_start_identities: Mapping[str, Mapping[str, Any]]
+    invocations: Sequence[AV1ValidationV4InvocationIdentity]
+    path_privacy_key_id: str
+    tool_version_probe_subprocess_executed: bool
 
 
 def av1_validation_v4_preparation_covered_requirements() -> frozenset[str]:
@@ -152,6 +165,7 @@ def build_av1_validation_v4_preparation_record(
         "schema": AV1_VALIDATION_V4_PREPARATION_SCHEMA,
         "schema_version": AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION,
         "protocol_version": AV1_VALIDATION_V4_PROTOCOL_VERSION,
+        "manifest_revision": AV1_VALIDATION_V4_MANIFEST_REVISION,
         "experiment_id": AV1_VALIDATION_V4_EXPERIMENT_ID,
         "state": AV1_VALIDATION_V4_PREPARATION_STATE,
         "manifest_id": AV1_VALIDATION_V4_MANIFEST_ID,
@@ -177,24 +191,30 @@ def build_av1_validation_v4_preparation_record(
         ),
         "source_path_hmac_ids": dict(inputs.source_path_hmac_ids),
         "runtime_compatibility_id": inputs.runtime_compatibility_id,
-        "guided_warm_start_identity": {
-            "search_signature_id": inputs.guided_search_signature_id,
-            "cohort_id": inputs.guided_cohort_id,
-            "payload_sha256": inputs.guided_warm_start_payload_sha256,
+        "runtime_compatibility_scope": "host_toolchain_config",
+        "guided_warm_start_identities": {
+            str(asset_id): object_dict(identity)
+            for asset_id, identity in inputs.guided_warm_start_identities.items()
         },
-        "invocations": {
-            "baseline": {
-                "sha256": inputs.baseline_invocation_sha256,
-                "base_config_sha256": inputs.baseline_base_config_sha256,
-            },
-            "guided": {
-                "sha256": inputs.guided_invocation_sha256,
-                "base_config_sha256": inputs.guided_base_config_sha256,
-            },
-        },
-        "qualification_key_id": inputs.qualification_key_id,
+        "invocations": [
+            {
+                "ordinal": invocation.ordinal,
+                "asset_id": invocation.asset_id,
+                "configuration": invocation.configuration,
+                "mode": _mode_for_configuration(invocation.configuration),
+                "source_path_hmac_id": invocation.source_path_hmac_id,
+                "sha256": invocation.invocation_sha256,
+                "base_config_sha256": invocation.base_config_sha256,
+            }
+            for invocation in inputs.invocations
+        ],
+        "path_privacy_key_id": inputs.path_privacy_key_id,
         "media_bytes_read": False,
-        "subprocess_executed": False,
+        "builder_subprocess_executed": False,
+        "media_processing_subprocess_executed": False,
+        "tool_version_probe_subprocess_executed": (
+            inputs.tool_version_probe_subprocess_executed
+        ),
     }
     payload.update({field: False for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS})
     bound = _bind_identity(payload)
@@ -302,6 +322,7 @@ def _assert_base_binding(payload: Mapping[str, Any]) -> None:
         or payload.get("schema_version")
         != AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION
         or payload.get("protocol_version") != AV1_VALIDATION_V4_PROTOCOL_VERSION
+        or payload.get("manifest_revision") != AV1_VALIDATION_V4_MANIFEST_REVISION
         or payload.get("experiment_id") != AV1_VALIDATION_V4_EXPERIMENT_ID
         or payload.get("state") != AV1_VALIDATION_V4_PREPARATION_STATE
         or payload.get("manifest_id") != AV1_VALIDATION_V4_MANIFEST_ID
@@ -310,7 +331,9 @@ def _assert_base_binding(payload: Mapping[str, Any]) -> None:
         != AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256
         or payload.get("valid_until") != AV1_VALIDATION_V4_VALID_UNTIL
         or payload.get("media_bytes_read") is not False
-        or payload.get("subprocess_executed") is not False
+        or payload.get("builder_subprocess_executed") is not False
+        or payload.get("media_processing_subprocess_executed") is not False
+        or not isinstance(payload.get("tool_version_probe_subprocess_executed"), bool)
     ):
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation binding is invalid"
@@ -320,9 +343,9 @@ def _assert_base_binding(payload: Mapping[str, Any]) -> None:
         payload.get("rights_attested_at"),
         "rights_attested_at",
     )
-    drafted_at = _parse_timestamp(AV1_VALIDATION_V4_DRAFTED_AT, "drafted_at")
+    active_at = _parse_timestamp(AV1_VALIDATION_V4_REVISED_AT, "revised_at")
     valid_until = _parse_timestamp(AV1_VALIDATION_V4_VALID_UNTIL, "valid_until")
-    if not drafted_at <= rights_attested_at <= prepared_at < valid_until:
+    if not active_at <= rights_attested_at <= prepared_at < valid_until:
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation timestamps are outside the manifest window"
         )
@@ -430,63 +453,110 @@ def _assert_runtime_and_warm_start(payload: Mapping[str, Any]) -> None:
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation runtime compatibility ID is invalid"
         )
-    if not _QUALIFICATION_KEY_ID_RE.fullmatch(
-        str(payload.get("qualification_key_id") or "")
+    if payload.get("runtime_compatibility_scope") != "host_toolchain_config":
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation runtime compatibility scope is invalid"
+        )
+    if not _PATH_PRIVACY_KEY_ID_RE.fullmatch(
+        str(payload.get("path_privacy_key_id") or "")
     ):
         raise AV1ValidationV4PreparationError(
-            "AV1 v4 preparation qualification key ID is invalid"
+            "AV1 v4 preparation path privacy key ID is invalid"
         )
-    warm_start = object_dict(payload.get("guided_warm_start_identity"))
-    if set(warm_start) != {"cohort_id", "payload_sha256", "search_signature_id"}:
+    warm_starts = object_dict(payload.get("guided_warm_start_identities"))
+    expected_warm_starts = av1_validation_v4_guided_warm_start_identities()
+    if warm_starts != expected_warm_starts:
         raise AV1ValidationV4PreparationError(
-            "AV1 v4 preparation guided warm-start identity is invalid"
-        )
-    if not _SEARCH_SIGNATURE_ID_RE.fullmatch(
-        str(warm_start.get("search_signature_id") or "")
-    ):
-        raise AV1ValidationV4PreparationError(
-            "AV1 v4 preparation search signature ID is invalid"
-        )
-    if not _COHORT_ID_RE.fullmatch(str(warm_start.get("cohort_id") or "")):
-        raise AV1ValidationV4PreparationError(
-            "AV1 v4 preparation cohort ID is invalid"
-        )
-    if not _SHA256_RE.fullmatch(str(warm_start.get("payload_sha256") or "")):
-        raise AV1ValidationV4PreparationError(
-            "AV1 v4 preparation warm-start digest is invalid"
+            "AV1 v4 preparation guided warm-start identities are invalid"
         )
 
 
 def _assert_invocations(payload: Mapping[str, Any]) -> None:
-    invocations = object_dict(payload.get("invocations"))
-    if set(invocations) != {"baseline", "guided"}:
+    invocations = [object_dict(value) for value in object_list(payload.get("invocations"))]
+    if len(invocations) != 8 or any(not invocation for invocation in invocations):
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation invocation set is invalid"
         )
-    normalized: dict[str, dict[str, Any]] = {}
-    for mode, raw_invocation in invocations.items():
-        invocation = object_dict(raw_invocation)
-        if set(invocation) != {"base_config_sha256", "sha256"}:
+    role_rank = {"primary": 0, "confirmation": 1}
+    expected_assets = tuple(
+        asset_id
+        for asset_id, content_class, role in sorted(
+            AV1_VALIDATION_V4_SOURCE_LAYOUT,
+            key=lambda item: (role_rank[item[2]], item[1]),
+        )
+    )
+    expected = [
+        (ordinal, asset_id, configuration, _mode_for_configuration(configuration))
+        for ordinal, (asset_id, configuration) in enumerate(
+            (
+                (asset_id, configuration)
+                for asset_id in expected_assets
+                for configuration in AV1_VALIDATION_V4_CONFIGURATIONS
+            ),
+            start=1,
+        )
+    ]
+    actual = [
+        (
+            invocation.get("ordinal"),
+            invocation.get("asset_id"),
+            invocation.get("configuration"),
+            invocation.get("mode"),
+        )
+        for invocation in invocations
+    ]
+    if actual != expected:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation invocation order is invalid"
+        )
+    invocation_digests: list[str] = []
+    base_config_by_source: dict[str, set[str]] = {}
+    source_path_ids = object_dict(payload.get("source_path_hmac_ids"))
+    for invocation in invocations:
+        if set(invocation) != {
+            "asset_id",
+            "base_config_sha256",
+            "configuration",
+            "mode",
+            "ordinal",
+            "sha256",
+            "source_path_hmac_id",
+        }:
             raise AV1ValidationV4PreparationError(
-                f"AV1 v4 preparation {mode} invocation is invalid"
+                "AV1 v4 preparation invocation identity is invalid"
             )
         for field in ("base_config_sha256", "sha256"):
             if not _SHA256_RE.fullmatch(str(invocation.get(field) or "")):
                 raise AV1ValidationV4PreparationError(
-                    f"AV1 v4 preparation {mode} {field} is invalid"
+                    f"AV1 v4 preparation invocation {field} is invalid"
                 )
-        normalized[mode] = invocation
-    if normalized["baseline"]["sha256"] == normalized["guided"]["sha256"]:
-        raise AV1ValidationV4PreparationError(
-            "AV1 v4 baseline and guided invocation digests must differ"
+        asset_id = str(invocation["asset_id"])
+        if invocation.get("source_path_hmac_id") != source_path_ids.get(asset_id):
+            raise AV1ValidationV4PreparationError(
+                "AV1 v4 preparation invocation source path binding is invalid"
+            )
+        invocation_digests.append(str(invocation["sha256"]))
+        base_config_by_source.setdefault(asset_id, set()).add(
+            str(invocation["base_config_sha256"])
         )
-    if (
-        normalized["baseline"]["base_config_sha256"]
-        != normalized["guided"]["base_config_sha256"]
-    ):
+    if len(set(invocation_digests)) != len(invocation_digests):
         raise AV1ValidationV4PreparationError(
-            "AV1 v4 baseline and guided base config digests must match"
+            "AV1 v4 traversal invocation digests must differ"
         )
+    if any(len(digests) != 1 for digests in base_config_by_source.values()):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 baseline and guided base config digests must match within source"
+        )
+
+
+def _mode_for_configuration(configuration: str) -> str:
+    if configuration == "balanced_full_search_baseline":
+        return "baseline"
+    if configuration == "balanced_frozen_search_hint":
+        return "guided"
+    raise AV1ValidationV4PreparationError(
+        "AV1 v4 preparation configuration is invalid"
+    )
 
 
 def _assert_identity(payload: Mapping[str, Any]) -> None:
