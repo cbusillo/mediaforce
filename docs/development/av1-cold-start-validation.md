@@ -1871,7 +1871,7 @@ config SHA remains identical.
 
 ---
 
-## Phase 5 — V4 Canonical Manifest Draft (non-executing)
+## Phase 5 — V4 Canonical Manifest Draft, Revision 2 (non-executing)
 
 **Manifest:** `docs/validation/av1-cold-start-preregistration-v4.json`
 **Discovery projection:** `docs/validation/av1-v4-discovery-public-v1.json`
@@ -1889,6 +1889,8 @@ freeze the manifest.
 
 The draft supersedes the terminal v3 protocol for this successor workstream but
 does not alter v3 history or grant permission to resume any v3 operation.
+Revision 2 also preserves explicit intra-protocol provenance to the original v4
+manifest while correcting its preparation cardinalities and key semantics.
 
 ### Bound public identities
 
@@ -1905,9 +1907,12 @@ The manifest fixes:
   either confirmation source and no adaptation, substitution, or favorable
   subset;
 - confirmed `balanced` policy with frozen CRF bounds `10..45`;
-- baseline search with no warm start and guided search with the exact v4 source,
-  signature/cohort prefixes, matching expected signature, planner bypass, and
-  mandatory target-size routing; and
+- baseline search with no warm start and four source-specific guided fixtures
+  at neutral CRF `28`, unknown content traits, source-specific search signatures,
+  and content-class cohorts;
+- eight source-and-mode invocation identities with matching baseline/guided
+  base config digests within each source, planner bypass, and mandatory
+  target-size routing; and
 - the exact byte, storage, fetch, discovery, traversal, and whole-run limits
   approved in issue `#334`.
 
@@ -1935,13 +1940,19 @@ non-executing preparation step must bind:
 - effective config SHA-256;
 - `ffmpeg`, `ffprobe`, and `ab-av1` versions and binary digests;
 - HMAC-derived dedicated-instance and source-path identities;
-- runtime compatibility, qualification key, guided warm-start identity, and
-  concrete baseline/guided invocation digests.
+- one path-privacy key identity, used only with frozen domain separation and
+  never for source selection or partitioning;
+- one host/toolchain/config runtime-compatibility identity;
+- four exact guided warm-start identities and all eight traversal invocation
+  digests.
 
-That preparation may hash approved files and binaries but must not read media
-content, invoke subprocesses, ingest media, run search, encode, or create
-evidence. Concrete invocation digests remain machine-local because the Phase 2
-seam intentionally binds absolute source paths.
+The pure preparation builder never invokes subprocesses. External preparation
+may hash approved files and binaries and may run only the frozen version probes
+(`ffmpeg -version`, `ffprobe -version`, and `ab-av1 --version`) with no media
+arguments or network access. It must not read media content, run a media
+processing subprocess, ingest media, run search, encode, or create evidence.
+Concrete invocation digests remain machine-local because the Phase 2 seam
+intentionally binds absolute source paths.
 
 ### Privacy and authority contract
 
@@ -2004,18 +2015,21 @@ authority. No completed attestation is checked in by this phase.
 `mediaforce/tuning/av1_validation_v4_preparation.py` defines the pure contract
 for the machine-local preparation record required before an owner freeze
 decision. It accepts only externally measured repository, config, toolchain,
-HMAC, runtime-compatibility, warm-start, invocation, qualification-key, and
+HMAC, runtime-compatibility, warm-start, invocation, path-privacy-key, and
 completed-rights-attestation identities. It does not discover or measure them.
 
 The module imports no filesystem, subprocess, network, or database facilities.
 It accepts no source paths, binary paths, media bytes, key bytes, or executable
 handles. Dedicated-instance and source paths appear only as closed-schema HMAC
-IDs. Baseline and guided invocation digests must differ while their base config
-digest remains identical.
+IDs. The record contains exactly four frozen warm starts and eight ordered
+source-and-mode invocation identities. All invocation digests must differ, and
+baseline/guided base config digests must match within each source.
 
 The resulting machine-local record is `prepared_unfrozen`, binds the completed
 rights attestation by ID and digest, and explicitly records
-`media_bytes_read=false` and `subprocess_executed=false`. Every execution,
+`media_bytes_read=false`, `builder_subprocess_executed=false`,
+`media_processing_subprocess_executed=false`, and the separately measured
+version-probe subprocess state. Every execution,
 freeze, traversal, evidence, publication, activation, retry, private-read, and
 dogfood authority remains false. This phase defines and tests the contract only;
 it does not create or commit a real preparation record.
@@ -2024,3 +2038,9 @@ A preparation record is valid only as a bundle with the exact completed rights
 attestation whose ID, payload digest, and timestamp it carries. Public bundle
 validation and canonical serialization both require that attestation payload;
 there is no public record-only validation or serialization path.
+
+`mediaforce/tuning/av1_validation_v4_path_privacy.py` defines the pure HMAC-SHA256
+derivation contract for the path-privacy key ID and the instance/source path
+IDs. It accepts only canonical absolute POSIX path strings, requires at least
+32 key bytes, and uses distinct frozen domains for key, instance-path, and
+source-path identities.

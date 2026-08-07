@@ -10,8 +10,8 @@ import sys
 from typing import Sequence
 
 
-MANIFEST_ID = "av1vmanifest4_63f7d31daaf390fae657a42123a88f15"
-PAYLOAD_SHA256 = "sha256:91b1c85c0c51544e1e7a2352d68b1025a838b9f5f3dad0deb5c3b9175e9ed589"
+MANIFEST_ID = "av1vmanifest4_bcdf3a9ccfa50e988a597741c25d322f"
+PAYLOAD_SHA256 = "sha256:7debca673289845c411e57f68506ed170ba72a3c4c6e9478ee7cfb0f63cdcc17"
 DISCOVERY_SHA256 = "sha256:cf4c771992bed9eaddc94ef415ebfe16e9d5582016831b7412abf28503b6c697"
 FALSE_AUTHORITY_FIELDS = frozenset({
     "activation_authorized",
@@ -114,12 +114,16 @@ def _validate(
 ) -> None:
     if payload.get("schema") != "mediaforce.av1_cold_start_v4_manifest":
         raise ValueError("AV1 v4 manifest schema is invalid")
+    if payload.get("schema_version") != 2 or payload.get("manifest_revision") != 2:
+        raise ValueError("AV1 v4 manifest revision is invalid")
     if payload.get("protocol_version") != 4 or payload.get("experiment_id") != "av1_cold_start_v4":
         raise ValueError("AV1 v4 manifest identity is invalid")
     if payload.get("state") != "draft_unapproved":
         raise ValueError("AV1 v4 manifest state is invalid")
-    if not isinstance(payload.get("drafted_at"), str) or not isinstance(
-        payload.get("valid_until"), str
+    if (
+        not isinstance(payload.get("drafted_at"), str)
+        or not isinstance(payload.get("revised_at"), str)
+        or not isinstance(payload.get("valid_until"), str)
     ):
         raise ValueError("AV1 v4 manifest timestamps are absent")
     if payload.get("manifest_id") != MANIFEST_ID:
@@ -151,7 +155,7 @@ def _assert_current(payload: dict[str, object], as_of: str) -> None:
     current = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
     if current.tzinfo is None:
         raise ValueError("AV1 v4 activity checks require timezone-aware time")
-    drafted = datetime.fromisoformat(str(payload.get("drafted_at")).replace("Z", "+00:00"))
+    drafted = datetime.fromisoformat(str(payload.get("revised_at")).replace("Z", "+00:00"))
     valid_until = datetime.fromisoformat(str(payload.get("valid_until")).replace("Z", "+00:00"))
     if current < drafted or current >= valid_until:
         raise ValueError("AV1 v4 draft is not active at the requested time")
