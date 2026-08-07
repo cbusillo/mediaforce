@@ -316,6 +316,7 @@ class LibraryLifecycleTests(unittest.TestCase):
                 config,
                 prefixes=["tv/Show/Season 1"],
                 limit=None,
+                now=NOW,
                 manual_override_prefix="tv/Show/Season 1",
             )
 
