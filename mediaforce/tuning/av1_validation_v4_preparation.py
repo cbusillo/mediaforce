@@ -23,6 +23,7 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_SOURCE_IDS,
     AV1_VALIDATION_V4_SOURCE_LAYOUT,
     AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION,
+    AV1_VALIDATION_V4_TRAVERSAL_COUNT,
     AV1_VALIDATION_V4_VALID_UNTIL,
     av1_validation_v4_contains_private_text,
     av1_validation_v4_guided_warm_start_identities,
@@ -734,7 +735,7 @@ def _assert_runtime_and_warm_start(payload: Mapping[str, Any]) -> None:
 
 def _assert_invocations(payload: Mapping[str, Any]) -> None:
     invocations = [object_dict(value) for value in object_list(payload.get("invocations"))]
-    if len(invocations) != 8 or any(not invocation for invocation in invocations):
+    if len(invocations) != AV1_VALIDATION_V4_TRAVERSAL_COUNT or any(not invocation for invocation in invocations):
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation invocation set is invalid"
         )

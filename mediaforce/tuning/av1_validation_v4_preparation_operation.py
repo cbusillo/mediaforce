@@ -22,6 +22,7 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_MANIFEST_ID,
     AV1_VALIDATION_V4_PAYLOAD_SHA256,
     AV1_VALIDATION_V4_SOURCE_IDS,
+    AV1_VALIDATION_V4_TRAVERSAL_COUNT,
     av1_validation_v4_contains_private_text,
     av1_validation_v4_guided_warm_start_identities,
     av1_validation_v4_source_stream_selection_payload,
@@ -685,7 +686,7 @@ def _validate_manifest_traversals(manifest: Mapping[str, Any]) -> None:
             object_dict(manifest.get("qualification_matrix")).get("traversals")
         )
     ]
-    if len(traversals) != 8:
+    if len(traversals) != AV1_VALIDATION_V4_TRAVERSAL_COUNT:
         raise AV1ValidationV4PreparationOperationError(
             "manifest traversal set is incomplete"
         )

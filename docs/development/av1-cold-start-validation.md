@@ -2175,3 +2175,112 @@ decision for revision `2` cannot be materialized in the same registry. The freez
 no source paths, registry path, key bytes, media data, or executable handle.
 It authorizes no qualification traversal; a later request/grant/claim/runner
 must establish that authority independently.
+
+---
+
+## Phase 11 — V4 Qualification Authority Layer (non-authorizing contract boundary)
+
+`mediaforce/tuning/av1_validation_v4_qualification_authority.py` defines three
+canonical artifacts — Request, Grant, and Claim — that together form one
+burn-before-read qualification execution token. No CLI is provided; the
+authority is issued through the programmatic builder API.
+
+### Non-authorizing contract boundary
+
+This layer enforces the rule that authority flows *only* through the Grant
+artifact and *only* through three specific fields: `qualification_execution_authorized`,
+`runtime_execution_authorized`, and `media_read_authorized` — all of which are
+set to `true` in the Grant and to `false` in every other artifact. This is
+enforced by an import-time exact-set guard:
+
+```
+_QUALIFICATION_GRANT_AUTHORIZED_FIELDS = frozenset({
+    "media_read_authorized",
+    "qualification_execution_authorized",
+    "runtime_execution_authorized",
+})
+```
+
+The `AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS` frozenset lists every field
+that is *false except in the grant's authorized subset*. Any artifact other
+than the Grant that sets one of these fields to `true` is structurally invalid
+and will be rejected at assertion time. The Grant itself must have *exactly*
+the three authorized fields set to `true` and all remaining false-authority
+fields set to `false`; any deviation closes the grant.
+
+### Request
+
+The Request binds the entire reviewed chain: the exact owner freeze (by ID and
+payload digest), the full accepted preparation record (by ID and payload
+digest, with self-consistency recomputation), all 8 prepared invocation records
+in ordinal order, the runtime/config/path-key identities, a separate future
+`execution_repository` commit/tree supplied by the builder (distinct from
+`freeze.materializer_repository`), the owner principal, and a time window.
+Every `AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS` field is `false`.
+
+The `execution_repository` is a separate identity from
+`freeze.materializer_repository`. It binds the future merged runner commit/tree;
+the two fields may contain the same Git identity only when that is factually true.
+
+### Non-inheritance freeze precondition
+
+The freeze's `execution_grant_creation_authorized=false` field is a
+*non-inheritance precondition*, not an authorization: the fact that the freeze
+scope explicitly records this field as `false` is a structural health check,
+not a grant of authority. The precondition verifies that the freeze scope
+object contains this field and that its value is `false`. A freeze built with
+a different scope would fail this check and the Request builder would abort.
+
+### Grant
+
+The Grant binds the Request by ID and payload digest plus the owner principal.
+It is the *only* artifact with `qualification_execution_authorized`,
+`runtime_execution_authorized`, and `media_read_authorized` set to `true`.
+Additional scope fields record: `run_scope=one_run_wide`, `single_use_authorized=true`,
+`owner_authorization_confirmed=true`, `resume_run_authorized=false`,
+`substitute_source_authorized=false`, `backfill_authorized_scope=false`,
+`adaptive_continuation_authorized=false`, and `traversal_count=8`. The grant
+scope is not part of the false-authority set; collisions between the scope and
+the false-authority set are checked at import time. The grant has a
+configurable active window (authorized_at to valid_until) bounded to 4 hours and
+contained within the request window.
+
+### Claim (burn-before-read)
+
+The Claim is written atomically via `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`
+inside an `fcntl.LOCK_EX` registry lock. Writing the claim *consumes* the
+grant: a crash or failure after the write burns the grant without the runner
+having executed. Only one claim per grant ID can ever be written; a second
+attempt raises an error ("already exists"). Concurrent callers are serialized
+by the registry lock; the `O_EXCL` flag ensures exactly one writer succeeds
+even under concurrent access. The Claim has every `AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS`
+field set to `false`.
+
+### Simulated sequential runner
+
+`mediaforce/tuning/av1_validation_v4_qualification_runner.py` provides a pure
+simulated runner that accepts a typed callback. The runner:
+
+- Validates that the grant is active at the Claim's `claimed_at` timestamp
+- Validates that the Claim binds the Grant
+- Requires exactly 8 traversal specs in ordinal order 1..8
+- Invokes the callback sequentially for each ordinal
+- Stops on the *first* callback failure; later ordinals are never invoked
+- Returns `outcome=success_all_traversals` if all 8 succeed, or
+  `outcome=failed_partial_non_comparable` if any fail
+
+The runner never opens media files, spawns subprocesses, or performs network
+calls. Every traversal outcome and the final run outcome have all
+`AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS` fields set to `false`. No retry,
+resume, substitution, backfill, or adaptive continuation is provided.
+Before callback 1, it atomically publishes a second owner-only `O_EXCL`
+run-start receipt bound to the request, grant, and claim. The immutable claim is
+retained, but a replay cannot pass the run-start singleton and invokes no
+callback.
+
+### Traversal-count constant
+
+`AV1_VALIDATION_V4_TRAVERSAL_COUNT = 8` is defined in
+`mediaforce/tuning/av1_validation_v4.py` and used throughout the preparation,
+preparation operation, qualification authority, and runner modules. This
+replaces the literal `8` without changing any manifest digest.
