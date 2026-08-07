@@ -1973,3 +1973,26 @@ mutated in-memory payloads to prove the private-path, authority, source, matrix,
 invocation, rights, resource-limit, and preparation branches fail closed. This
 test-only separation does not change the loader order, the isolated verifier,
 or either frozen JSON artifact.
+
+---
+
+## Phase 6 — V4 Rights Attestation Template (non-executing)
+
+`docs/validation/av1-v4-rights-attestation-template-v1.json` is a canonical,
+digest-bound template for a later explicit owner rights review. The checked-in
+template is `template_unattested`: it names no owner, carries no timestamp, and
+all four source claim slots are `null`.
+
+The contract binds the merged v4 manifest identity, the public discovery
+digest, and the exact captured terms digests without storing page bodies or
+verbatim terms. A later machine-local completed record must explicitly retain
+the Gooseberry title grant as the Cosmos license authority, classify the
+Netflix mirror as technical provenance only, and preserve the NASA video-only
+stream constraint after acknowledging the discovered third-party audio
+ingredients.
+
+The validator rejects captured-page fields, long reproduced terms text,
+machine-local paths, missing source claims, and any authority bit set to true.
+Even a completed owner attestation grants no manifest freeze, traversal,
+execution, evidence, publication, activation, retry, private-read, or dogfood
+authority. No completed attestation is checked in by this phase.
