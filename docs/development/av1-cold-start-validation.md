@@ -2284,3 +2284,51 @@ callback.
 `mediaforce/tuning/av1_validation_v4.py` and used throughout the preparation,
 preparation operation, qualification authority, and runner modules. This
 replaces the literal `8` without changing any manifest digest.
+
+---
+
+## Phase 12 — V4 Qualification Request Materializer (non-authorizing)
+
+`mediaforce/tuning/av1_validation_v4_qualification_request_operation.py` and
+`scripts/materialize_av1_v4_qualification_request.py` materialize the single
+owner-submitted Request for manifest revision `2`. This operation does not
+authorize media reads, qualification execution, runtime execution, grant
+creation, evidence publication, retry, activation, dogfood, or backfill. The
+three execution-authority fields that a later Grant may set to `true` remain
+`false` in the Request and in the CLI summary.
+
+The materializer accepts explicit absolute paths for the repository root,
+owner-only request registry, manifest, owner freeze, rights attestation,
+preparation grant, effective config, preparation record, and preparation
+measurement. It derives the preparation claim path from the preparation grant's
+consumption registry and grant ID; callers cannot substitute an arbitrary claim
+path. It loads only canonical artifacts, validates the freeze against the full
+rights/grant/claim/config/preparation/measurement bundle, and measures the
+current clean Git commit/tree as the Request's `execution_repository`.
+
+The request registry must be a canonical resolved real directory, owned by the
+effective user, mode `0700`, absolute, and outside the repository while also
+not containing the repository. The artifact filename is one fixed
+manifest-revision singleton, protected by a distinct owner-only lock file. The
+Request binds the resolved registry path internally as `consumption_registry`,
+but the CLI emits only path-safe JSON: request ID, payload digest, state,
+freeze ID, request window, preparation/execution repository IDs, and the three
+execution-authority fields set to `false`.
+
+`requested_at` is canonical UTC `now`; there is no caller-supplied timestamp or
+duration knob. `valid_until` is `min(now + 24 hours, manifest.valid_until)`,
+and materialization fails once the manifest window can no longer contain a
+non-empty request window. Existing canonical requests are treated as immutable:
+the operation loads the on-disk Request under custody, derives the window from
+its own `requested_at`, rebuilds the full expected Request from the current
+bundle/repository/registry, and requires exact dictionary equality. A matching
+unexpired Request returns `created=false`; conflicting, invalid, or expired
+singletons fail without changing bytes.
+
+Publication uses a fully written and fsynced unique temporary file, hard-links
+that file to the singleton destination, fsyncs the directory, then removes only
+owned stale temp names for the request singleton. Final custody requires a
+regular owner-owned mode-`0600` file with one hard link and the exact canonical
+size. No qualification Grant, qualification Claim, run-start receipt, runner,
+media-tool handle, source path, key, or network authority is imported or
+created by this phase.
