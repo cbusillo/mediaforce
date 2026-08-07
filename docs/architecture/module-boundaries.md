@@ -365,6 +365,19 @@ Guidance:
     and leaves production source, stream-plan, ledger, and quality-temp HMAC
     identities unresolved until private preparation; it imports no media,
     database, runtime, filesystem, or network surface and carries no authority
+  - `av1_validation_v4r3_ordinal_window.py` is the pure public artifact module
+    for revision-3 ordinal-window plan/grant/claim/started/outcome/terminal
+    records; it accepts mappings and canonical bytes only, publishes only an
+    opaque `run_registry_id`, validates exact revision-3 closure order from
+    `build_av1_v4_r3_all_closure_payloads()`, and imports no filesystem surface
+  - `av1_validation_v4r3_ordinal_window_registry.py` is the owner-only local I/O
+    boundary for those records: callers supply a private registry binding for an
+    absolute owner-only mode-`0700` directory, and every transition runs under a
+    process-local lock plus `flock` on one `O_DIRECTORY|O_NOFOLLOW` descriptor
+    with `dir_fd` custody reads/writes of owner-owned mode-`0600` single-link
+    files; registry state, not caller dictionaries, determines predecessor
+    hashes, high-water, failure/lapse/crash terminal absorption, and final
+    comparability
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
