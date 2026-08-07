@@ -41,6 +41,23 @@ _FORBIDDEN_CAPTURE_KEY_FRAGMENTS = (
     "snapshot",
 )
 _MAX_TERMS_SUMMARY_LENGTH = 400
+_ALLOWED_TOP_LEVEL_KEYS = frozenset({
+    "attestation_id",
+    "attested_at",
+    "discovery_public_sha256",
+    "experiment_id",
+    "manifest_id",
+    "manifest_payload_sha256",
+    "owner_attested",
+    "owner_principal",
+    "payload_sha256",
+    "protocol_version",
+    "schema",
+    "schema_version",
+    "source_claims",
+    "state",
+    "terms",
+}) | AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS
 
 _RIGHTS_TERMS: dict[str, dict[str, int | str]] = {
     "cc-by-3.0-legalcode.html": {
@@ -174,6 +191,11 @@ def assert_av1_validation_v4_rights_attestation(
     materialized = object_dict(payload)
     if not materialized:
         raise AV1ValidationV4RightsError("AV1 v4 rights payload is invalid")
+    unknown_fields = set(materialized) - _ALLOWED_TOP_LEVEL_KEYS
+    if unknown_fields:
+        raise AV1ValidationV4RightsError(
+            f"AV1 v4 rights attestation contains unknown fields: {sorted(unknown_fields)}"
+        )
     _assert_no_private_or_captured_content(materialized)
     _assert_base_binding(materialized)
     _assert_false_authorities(materialized)

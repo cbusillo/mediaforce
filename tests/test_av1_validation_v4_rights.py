@@ -83,6 +83,9 @@ class AV1ValidationV4RightsTests(unittest.TestCase):
         authority = self._completed_attestation()
         authority["manifest_freeze_authorized"] = True
         cases.append((authority, "cannot authorize manifest_freeze_authorized"))
+        unknown_authority = self._completed_attestation()
+        unknown_authority["custom_authority"] = True
+        cases.append((unknown_authority, "contains unknown fields"))
         cosmos = self._completed_attestation()
         cosmos["source_claims"][AV1_VALIDATION_V4_SOURCE_IDS[1]][
             "netflix_mirror_is_technical_provenance_only"
