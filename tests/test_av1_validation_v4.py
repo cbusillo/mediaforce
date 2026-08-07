@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from typing import Any
 
 from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256,
@@ -19,6 +20,7 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1ValidationV4Error,
     assert_av1_validation_manifest_v4,
     assert_av1_validation_manifest_v4_current,
+    assert_av1_validation_manifest_v4_semantics,
     av1_validation_v4_manifest_id,
     load_av1_validation_manifest_v4,
     load_av1_validation_v4_discovery_public,
@@ -212,6 +214,90 @@ class AV1ValidationV4Tests(unittest.TestCase):
             with self.subTest(index=index):
                 with self.assertRaises(AV1ValidationV4Error):
                     assert_av1_validation_manifest_v4(payload)
+
+    def test_semantics_accepts_frozen_manifest(self) -> None:
+        assert_av1_validation_manifest_v4_semantics(self.manifest)
+
+    def test_identity_gate_precedes_semantics(self) -> None:
+        payload = copy.deepcopy(self.manifest)
+        payload["qualification_execution_authorized"] = True
+        with self.assertRaisesRegex(AV1ValidationV4Error, "manifest ID"):
+            assert_av1_validation_manifest_v4(payload)
+
+    def test_semantic_branches_fail_closed(self) -> None:
+        cases: list[tuple[str, tuple[str | int, ...], object, str]] = [
+            (
+                "private-path",
+                ("preparation_requirements", "unexpected_location"),
+                "/Volumes/private",
+                "machine-local path",
+            ),
+            (
+                "authority",
+                ("qualification_execution_authorized",),
+                True,
+                "cannot authorize qualification_execution_authorized",
+            ),
+            (
+                "source-order",
+                ("source_order",),
+                list(reversed(AV1_VALIDATION_V4_SOURCE_IDS)),
+                "source order is not frozen",
+            ),
+            (
+                "source-special-case",
+                (
+                    "sources",
+                    3,
+                    "stream_constraint",
+                    "allowed_stream_indexes",
+                ),
+                [0, 1],
+                "NASA audio exclusion",
+            ),
+            (
+                "matrix",
+                ("qualification_matrix", "traversal_count"),
+                7,
+                "qualification matrix is invalid",
+            ),
+            (
+                "invocation",
+                ("qualification_invocation", "video_policy", "max_crf"),
+                46,
+                "balanced policy is not frozen",
+            ),
+            (
+                "rights",
+                ("rights_constraints", "no_media_redistribution"),
+                False,
+                "rights constraints are invalid",
+            ),
+            (
+                "resource-limits",
+                (
+                    "resource_limits",
+                    "cumulative_network_body_bytes_max",
+                ),
+                4_250_000_001,
+                "resource limits are not frozen",
+            ),
+            (
+                "preparation",
+                ("preparation_requirements", "subprocess_execution_allowed"),
+                True,
+                "cannot execute subprocesses",
+            ),
+        ]
+        for name, path, value, message in cases:
+            with self.subTest(name=name):
+                payload = copy.deepcopy(self.manifest)
+                target: Any = payload
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                with self.assertRaisesRegex(AV1ValidationV4Error, message):
+                    assert_av1_validation_manifest_v4_semantics(payload)
 
     def test_noncanonical_file_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

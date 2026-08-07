@@ -1964,3 +1964,12 @@ Every execution, evidence, private-inventory, freeze, publication, activation,
 retry, and dogfood authority bit is `false`. Authoring, validating, or merging
 this draft does not freeze it. A later exact owner decision is required after
 machine-local preparation and independent review.
+
+### Semantic validator coverage
+
+The runtime loader still validates frozen identity before any semantic rule.
+Tests may call `assert_av1_validation_manifest_v4_semantics(...)` directly on
+mutated in-memory payloads to prove the private-path, authority, source, matrix,
+invocation, rights, resource-limit, and preparation branches fail closed. This
+test-only separation does not change the loader order, the isolated verifier,
+or either frozen JSON artifact.
