@@ -358,6 +358,13 @@ Guidance:
     owner-only blocked revision-2 readiness artifact without qualification
     grant/claim consumption, runner callbacks, source media path probes,
     tool probes, or network access
+  - `av1_validation_v4r3_invocation_closure.py` is a pure no-media module
+    (protocol v4, manifest revision 3) that freezes the full checked-in
+    production video policy with the revision-2 CRF override, derives per-source
+    size-goal/transform/ledger closure payloads from revision-2 public facts,
+    and leaves production source, stream-plan, ledger, and quality-temp HMAC
+    identities unresolved until private preparation; it imports no media,
+    database, runtime, filesystem, or network surface and carries no authority
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
