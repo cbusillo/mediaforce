@@ -103,6 +103,9 @@ AV1_VALIDATION_V4_CONFIGURATIONS = (
     "balanced_full_search_baseline",
     "balanced_frozen_search_hint",
 )
+AV1_VALIDATION_V4_TRAVERSAL_COUNT = (
+    len(AV1_VALIDATION_V4_SOURCE_IDS) * len(AV1_VALIDATION_V4_CONFIGURATIONS)
+)
 AV1_VALIDATION_V4_STAGES = (
     "ingest",
     "fingerprint",
