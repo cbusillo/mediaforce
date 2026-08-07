@@ -28,6 +28,12 @@ class AV1ValidationV4PreparationGrantTests(unittest.TestCase):
         grant = self._grant()
         self.assertEqual(grant, self._grant())
         self.assertEqual(grant["state"], "owner_authorized")
+        self.assertEqual(grant["schema_version"], 2)
+        self.assertEqual(grant["contract_version"], "av1v4pgg2")
+        self.assertEqual(
+            grant["consumption_registry"],
+            "/registry/av1-v4-preparation",
+        )
         self.assertTrue(
             grant["operation_scope"]["path_privacy_key_creation_authorized"]
         )
@@ -110,6 +116,7 @@ class AV1ValidationV4PreparationGrantTests(unittest.TestCase):
                         owner_principal=str(case["owner_principal"]),
                         repository_commit="1" * 40,
                         repository_tree="2" * 40,
+                        consumption_registry="/registry/av1-v4-preparation",
                         authorized_at=str(case["authorized_at"]),
                         valid_until=str(case["valid_until"]),
                     )
@@ -136,6 +143,9 @@ class AV1ValidationV4PreparationGrantTests(unittest.TestCase):
             "owner --prefix=C:\\Users\\private"
         )
         cases.append((embedded_windows_private, "machine-local path"))
+        invalid_registry = copy.deepcopy(self._grant())
+        invalid_registry["consumption_registry"] = "relative/registry"
+        cases.append((invalid_registry, "consumption registry is invalid"))
         for payload, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(
@@ -151,6 +161,7 @@ class AV1ValidationV4PreparationGrantTests(unittest.TestCase):
             owner_principal="owner:test",
             repository_commit="1" * 40,
             repository_tree="2" * 40,
+            consumption_registry="/registry/av1-v4-preparation",
             authorized_at="2026-08-07T05:45:00Z",
             valid_until="2026-08-07T07:00:00Z",
         )

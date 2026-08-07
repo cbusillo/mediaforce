@@ -2026,9 +2026,9 @@ source-and-mode invocation identities. All invocation digests must differ, and
 baseline/guided base config digests must match within each source.
 
 The resulting machine-local record is `prepared_unfrozen`, binds the completed
-rights attestation and the exact active owner preparation grant by ID and
-digest, and explicitly records
-`media_bytes_read=false`, `builder_subprocess_executed=false`,
+rights attestation, exact active owner preparation grant, and durable one-shot
+claim by ID and digest. It explicitly records `media_bytes_read=false`,
+`media_bytes_read_count=0`, `builder_subprocess_executed=false`,
 `media_processing_subprocess_executed=false`, and the separately measured
 version-probe subprocess state. Every execution,
 freeze, traversal, evidence, publication, activation, retry, private-read, and
@@ -2037,10 +2037,11 @@ it does not create or commit a real preparation record.
 
 A preparation record is valid only as a bundle with the exact completed rights
 attestation and owner preparation grant whose IDs, payload digests, and
-timestamps it carries. Public bundle validation and canonical serialization
-require both payloads; there is no public record-only validation or
-serialization path. Adding this binding advances the preparation schema to
-version `3` without changing the frozen manifest revision or identity.
+timestamps it carries, plus the exact durable claim that consumed that grant.
+Public bundle validation and canonical serialization require all three
+payloads; there is no public record-only validation or serialization path.
+Adding the claim and stream-selection binding advances the preparation schema
+to version `4` without changing the frozen manifest revision or identity.
 
 `mediaforce/tuning/av1_validation_v4_path_privacy.py` defines the pure HMAC-SHA256
 derivation contract for the path-privacy key ID and the instance/source path
@@ -2051,7 +2052,7 @@ source-path identities.
 `mediaforce/tuning/av1_validation_v4_runtime_compatibility.py` defines the pure
 `host_toolchain_config` identity. Its domain-separated digest includes only the
 effective config digest, the three tool identities, and public platform fields;
-it excludes hostname, username, and all paths. Preparation schema version `3`
+it excludes hostname, username, and all paths. Preparation schema version `4`
 carries the validated derivation payload and recomputes the runtime identity
 rather than accepting an arbitrary prefixed value.
 
@@ -2063,7 +2064,11 @@ rather than accepting an arbitrary prefixed value.
 machine-local owner grant required before creating the path-privacy key or
 collecting the bounded preparation measurements. The grant is bound to the
 exact manifest revision, discovery digest, owner-attested rights record,
-repository commit/tree, owner principal, and a maximum 24-hour activity window.
+repository commit/tree, owner principal, one owner-only machine-local
+consumption registry, and a maximum 24-hour activity window. Grant schema
+version `2` and contract `av1v4pgg2` make that registry part of the grant's
+content-addressed identity, so changing or copying the output workspace cannot
+create another valid claim.
 
 The positive grant vocabulary is deliberately disjoint from the manifest's
 frozen authority fields. It authorizes only one exclusive mode-`0600`
@@ -2080,3 +2085,48 @@ only inside this machine-local preparation grant. The executing preparation
 operation must enforce single use with exclusive key and record creation; the
 preparation record is the resulting consumption artifact. Manifest freeze
 remains a later separate owner decision.
+
+---
+
+## Phase 9 — V4 Contracted Preparation Runner (non-media operation)
+
+`mediaforce/tuning/av1_validation_v4_preparation_claim.py`,
+`mediaforce/tuning/av1_validation_v4_preparation_config.py`,
+`mediaforce/tuning/av1_validation_v4_preparation_measurement.py`, and
+`mediaforce/tuning/av1_validation_v4_preparation_operation.py` define the
+one-shot producer that was intentionally absent from the earlier contract-only
+phases. `scripts/run_av1_v4_preparation.py` is the bounded operator entry point.
+
+The runner performs capability and binding checks before consumption, acquires
+an owner-only workspace lock, then publishes an exclusive mode-`0600` claim at
+the grant-bound consumption registry before creating the path-privacy key or
+collecting any measurements. The claim is named by grant ID, survives every
+post-claim failure, and makes the owner grant non-reusable across output
+workspaces. Success publishes the key, canonical
+machine-local effective-config snapshot, schema-version-`4` preparation record,
+and canonical success measurement with exclusive key-custody evidence.
+
+The effective-config snapshot is independently canonical and validated under
+contract `av1v4config2`. Raw paths are permitted only in the closed
+`source_paths` and `dedicated_instance_paths` maps. The remaining fields bind
+the repository, frozen video policy, search kwargs, and source-stream
+constraints. The SHA-256 of its exact canonical file bytes becomes the config
+digest used by the preparation and runtime-compatibility identities.
+
+Preparation never opens, stats, resolves, or probes a media source path. Source
+paths are accepted only as canonical absolute strings for the config snapshot,
+HMAC identities, and deterministic invocation digests. The only subprocesses
+are the exact three frozen version probes, and the only whole-file binary reads
+are the three authorized tool hashes. Stream selection is derived from the
+merged manifest's observed-stream metadata and is bound into every invocation;
+the NASA source therefore remains video stream `0` with stream `1` excluded.
+
+If any post-claim stage fails, the runner removes the key, config snapshot, and
+preparation record, retains the claim, and exclusively publishes a canonical
+failure measurement naming the failed stage plus removed and retained rollback
+artifacts without paths or key material. Exclusive writes use parent directory
+descriptors, no-follow semantics, file and directory fsync, and never unlink a
+pre-existing foreign artifact. Neither success nor failure grants manifest freeze, qualification
+execution, evidence, publication, activation, retry, or dogfood authority. A
+fresh owner grant bound to the merged runner commit is required before using
+this operation against the real machine-local source paths.

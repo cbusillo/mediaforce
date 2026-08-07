@@ -22,6 +22,7 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_RUNTIME_COMPATIBILITY_SCOPE,
     AV1_VALIDATION_V4_SOURCE_IDS,
     AV1_VALIDATION_V4_SOURCE_LAYOUT,
+    AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION,
     AV1_VALIDATION_V4_VALID_UNTIL,
     av1_validation_v4_contains_private_text,
     av1_validation_v4_guided_warm_start_identities,
@@ -36,6 +37,10 @@ from mediaforce.tuning.av1_validation_v4_preparation_grant import (
     assert_av1_validation_v4_preparation_grant,
     assert_av1_validation_v4_preparation_grant_active,
 )
+from mediaforce.tuning.av1_validation_v4_preparation_claim import (
+    AV1ValidationV4PreparationClaimError,
+    assert_av1_validation_v4_preparation_claim,
+)
 from mediaforce.tuning.av1_validation_v4_runtime_compatibility import (
     AV1ValidationV4RuntimeCompatibilityError,
     av1_validation_v4_runtime_compatibility_id_from_payload,
@@ -45,7 +50,7 @@ from mediaforce.tuning.av1_validation_v4_runtime_compatibility import (
 AV1_VALIDATION_V4_PREPARATION_SCHEMA = (
     "mediaforce.av1_cold_start_v4_preparation_record"
 )
-AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION = 3
+AV1_VALIDATION_V4_PREPARATION_SCHEMA_VERSION = 4
 AV1_VALIDATION_V4_PREPARATION_STATE = "prepared_unfrozen"
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -53,6 +58,7 @@ _GIT_OBJECT_ID_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _PREPARATION_ID_RE = re.compile(r"av1vprep4_[0-9a-f]{32}\Z")
 _RIGHTS_ATTESTATION_ID_RE = re.compile(r"av1vrights4_[0-9a-f]{32}\Z")
 _PREPARATION_GRANT_ID_RE = re.compile(r"av1vprepgrant4_[0-9a-f]{32}\Z")
+_PREPARATION_CLAIM_ID_RE = re.compile(r"av1vprepclaim4_[0-9a-f]{32}\Z")
 _INSTANCE_PATH_HMAC_ID_RE = re.compile(r"av1vpath4_[0-9a-f]{32}\Z")
 _SOURCE_PATH_HMAC_ID_RE = re.compile(r"av1vsource4_[0-9a-f]{32}\Z")
 _RUNTIME_COMPATIBILITY_ID_RE = re.compile(r"av1vruntime4_[0-9a-f]{32}\Z")
@@ -90,12 +96,16 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "manifest_revision",
     "manifest_payload_sha256",
     "media_bytes_read",
+    "media_bytes_read_count",
     "payload_sha256",
     "preparation_id",
     "preparation_grant_authorized_at",
     "preparation_grant_id",
     "preparation_grant_payload_sha256",
     "preparation_grant_valid_until",
+    "preparation_claim_id",
+    "preparation_claim_payload_sha256",
+    "preparation_claimed_at",
     "prepared_at",
     "protocol_version",
     "path_privacy_key_id",
@@ -136,6 +146,8 @@ class AV1ValidationV4InvocationIdentity:
     source_path_hmac_id: str
     invocation_sha256: str
     base_config_sha256: str
+    video_stream_index: int
+    excluded_stream_indexes: Sequence[int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +177,7 @@ def build_av1_validation_v4_preparation_record(
     inputs: AV1ValidationV4PreparationInputs,
     rights_attestation: Mapping[str, Any],
     preparation_grant: Mapping[str, Any],
+    preparation_claim: Mapping[str, Any],
 ) -> dict[str, Any]:
     rights = object_dict(rights_attestation)
     _assert_completed_rights_attestation(rights)
@@ -175,6 +188,15 @@ def build_av1_validation_v4_preparation_record(
         repository_commit=inputs.repository_commit,
         repository_tree=inputs.repository_tree,
         as_of=inputs.prepared_at,
+    )
+    claim = object_dict(preparation_claim)
+    _assert_preparation_claim_bundle_binding(
+        claim,
+        grant,
+        rights,
+        repository_commit=inputs.repository_commit,
+        repository_tree=inputs.repository_tree,
+        prepared_at=inputs.prepared_at,
     )
     prepared_at = _parse_timestamp(inputs.prepared_at, "prepared_at")
     rights_attested_at = _parse_timestamp(
@@ -215,6 +237,9 @@ def build_av1_validation_v4_preparation_record(
         "preparation_grant_payload_sha256": grant["payload_sha256"],
         "preparation_grant_authorized_at": grant["authorized_at"],
         "preparation_grant_valid_until": grant["valid_until"],
+        "preparation_claim_id": claim["claim_id"],
+        "preparation_claim_payload_sha256": claim["payload_sha256"],
+        "preparation_claimed_at": claim["claimed_at"],
         "prepared_at": inputs.prepared_at,
         "valid_until": AV1_VALIDATION_V4_VALID_UNTIL,
         "repository": {
@@ -247,11 +272,14 @@ def build_av1_validation_v4_preparation_record(
                 "source_path_hmac_id": invocation.source_path_hmac_id,
                 "sha256": invocation.invocation_sha256,
                 "base_config_sha256": invocation.base_config_sha256,
+                "video_stream_index": invocation.video_stream_index,
+                "excluded_stream_indexes": list(invocation.excluded_stream_indexes),
             }
             for invocation in inputs.invocations
         ],
         "path_privacy_key_id": inputs.path_privacy_key_id,
         "media_bytes_read": False,
+        "media_bytes_read_count": 0,
         "builder_subprocess_executed": False,
         "media_processing_subprocess_executed": False,
         "tool_version_probe_subprocess_executed": (
@@ -260,7 +288,7 @@ def build_av1_validation_v4_preparation_record(
     }
     payload.update({field: False for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS})
     bound = _bind_identity(payload)
-    assert_av1_validation_v4_preparation_bundle(bound, rights, grant)
+    assert_av1_validation_v4_preparation_bundle(bound, rights, grant, claim)
     return bound
 
 
@@ -292,6 +320,7 @@ def assert_av1_validation_v4_preparation_bundle(
     preparation: Mapping[str, Any],
     rights_attestation: Mapping[str, Any],
     preparation_grant: Mapping[str, Any],
+    preparation_claim: Mapping[str, Any],
 ) -> None:
     rights = object_dict(rights_attestation)
     _assert_completed_rights_attestation(rights)
@@ -302,6 +331,7 @@ def assert_av1_validation_v4_preparation_bundle(
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation grant is invalid"
         ) from exc
+    claim = object_dict(preparation_claim)
     record = object_dict(preparation)
     _assert_av1_validation_v4_preparation_record_structure(record)
     if (
@@ -321,6 +351,14 @@ def assert_av1_validation_v4_preparation_bundle(
         repository_tree=str(repository.get("tree") or ""),
         as_of=str(record.get("prepared_at") or ""),
     )
+    _assert_preparation_claim_bundle_binding(
+        claim,
+        grant,
+        rights,
+        repository_commit=str(repository.get("commit") or ""),
+        repository_tree=str(repository.get("tree") or ""),
+        prepared_at=str(record.get("prepared_at") or ""),
+    )
     if (
         record.get("preparation_grant_id") != grant.get("grant_id")
         or record.get("preparation_grant_payload_sha256")
@@ -333,6 +371,15 @@ def assert_av1_validation_v4_preparation_bundle(
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation grant binding does not match"
         )
+    if (
+        record.get("preparation_claim_id") != claim.get("claim_id")
+        or record.get("preparation_claim_payload_sha256")
+        != claim.get("payload_sha256")
+        or record.get("preparation_claimed_at") != claim.get("claimed_at")
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation claim binding does not match"
+        )
 
 
 def serialize_av1_validation_v4_preparation_record(
@@ -340,12 +387,14 @@ def serialize_av1_validation_v4_preparation_record(
     *,
     rights_attestation: Mapping[str, Any],
     preparation_grant: Mapping[str, Any],
+    preparation_claim: Mapping[str, Any],
 ) -> bytes:
     materialized = json.loads(canonical_json_bytes(payload))
     assert_av1_validation_v4_preparation_bundle(
         materialized,
         rights_attestation,
         preparation_grant,
+        preparation_claim,
     )
     return canonical_json_bytes(materialized) + b"\n"
 
@@ -415,6 +464,44 @@ def _assert_preparation_grant_bundle_binding(
         )
 
 
+def _assert_preparation_claim_bundle_binding(
+    claim: Mapping[str, Any],
+    grant: Mapping[str, Any],
+    rights: Mapping[str, Any],
+    *,
+    repository_commit: str,
+    repository_tree: str,
+    prepared_at: str,
+) -> None:
+    try:
+        assert_av1_validation_v4_preparation_claim(claim)
+    except AV1ValidationV4PreparationClaimError as exc:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation claim is invalid"
+        ) from exc
+    repository = object_dict(claim.get("repository"))
+    if (
+        claim.get("preparation_grant_id") != grant.get("grant_id")
+        or claim.get("preparation_grant_payload_sha256")
+        != grant.get("payload_sha256")
+        or claim.get("rights_attestation_id") != rights.get("attestation_id")
+        or claim.get("rights_attestation_payload_sha256")
+        != rights.get("payload_sha256")
+        or claim.get("owner_principal") != rights.get("owner_principal")
+        or repository.get("commit") != repository_commit
+        or repository.get("tree") != repository_tree
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation claim bundle binding does not match"
+        )
+    claimed_at = _parse_timestamp(claim.get("claimed_at"), "preparation_claimed_at")
+    prepared = _parse_timestamp(prepared_at, "prepared_at")
+    if claimed_at > prepared:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation claim cannot postdate preparation"
+        )
+
+
 def _bind_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
     bound = dict(payload)
     bound["preparation_id"] = av1_validation_v4_preparation_id(bound)
@@ -437,6 +524,9 @@ def _assert_base_binding(payload: Mapping[str, Any]) -> None:
         != AV1_VALIDATION_V4_DISCOVERY_PUBLIC_SHA256
         or payload.get("valid_until") != AV1_VALIDATION_V4_VALID_UNTIL
         or payload.get("media_bytes_read") is not False
+        or isinstance(payload.get("media_bytes_read_count"), bool)
+        or not isinstance(payload.get("media_bytes_read_count"), int)
+        or payload.get("media_bytes_read_count") != 0
         or payload.get("builder_subprocess_executed") is not False
         or payload.get("media_processing_subprocess_executed") is not False
         or not isinstance(payload.get("tool_version_probe_subprocess_executed"), bool)
@@ -490,6 +580,22 @@ def _assert_base_binding(payload: Mapping[str, Any]) -> None:
     if not grant_authorized_at <= prepared_at < grant_valid_until:
         raise AV1ValidationV4PreparationError(
             "AV1 v4 preparation falls outside its grant window"
+        )
+    if not _PREPARATION_CLAIM_ID_RE.fullmatch(
+        str(payload.get("preparation_claim_id") or "")
+    ) or not _SHA256_RE.fullmatch(
+        str(payload.get("preparation_claim_payload_sha256") or "")
+    ):
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation claim identity is invalid"
+        )
+    claimed_at = _parse_timestamp(
+        payload.get("preparation_claimed_at"),
+        "preparation_claimed_at",
+    )
+    if not grant_authorized_at <= claimed_at <= prepared_at:
+        raise AV1ValidationV4PreparationError(
+            "AV1 v4 preparation claim timestamp is invalid"
         )
 
 
@@ -672,10 +778,12 @@ def _assert_invocations(payload: Mapping[str, Any]) -> None:
             "asset_id",
             "base_config_sha256",
             "configuration",
+            "excluded_stream_indexes",
             "mode",
             "ordinal",
             "sha256",
             "source_path_hmac_id",
+            "video_stream_index",
         }:
             raise AV1ValidationV4PreparationError(
                 "AV1 v4 preparation invocation identity is invalid"
@@ -686,6 +794,16 @@ def _assert_invocations(payload: Mapping[str, Any]) -> None:
                     f"AV1 v4 preparation invocation {field} is invalid"
                 )
         asset_id = str(invocation["asset_id"])
+        expected_streams = AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION.get(asset_id)
+        if expected_streams is None or (
+            invocation.get("video_stream_index")
+            != expected_streams["video_stream_index"]
+            or invocation.get("excluded_stream_indexes")
+            != list(expected_streams["excluded_stream_indexes"])
+        ):
+            raise AV1ValidationV4PreparationError(
+                "AV1 v4 preparation invocation stream selection is invalid"
+            )
         if invocation.get("source_path_hmac_id") != source_path_ids.get(asset_id):
             raise AV1ValidationV4PreparationError(
                 "AV1 v4 preparation invocation source path binding is invalid"

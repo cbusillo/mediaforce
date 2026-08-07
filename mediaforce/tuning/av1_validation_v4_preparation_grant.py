@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
@@ -31,8 +31,8 @@ from mediaforce.tuning.av1_validation_v4_rights import (
 AV1_VALIDATION_V4_PREPARATION_GRANT_SCHEMA = (
     "mediaforce.av1_cold_start_v4_preparation_grant"
 )
-AV1_VALIDATION_V4_PREPARATION_GRANT_SCHEMA_VERSION = 1
-AV1_VALIDATION_V4_PREPARATION_GRANT_CONTRACT_VERSION = "av1v4pgg1"
+AV1_VALIDATION_V4_PREPARATION_GRANT_SCHEMA_VERSION = 2
+AV1_VALIDATION_V4_PREPARATION_GRANT_CONTRACT_VERSION = "av1v4pgg2"
 AV1_VALIDATION_V4_PREPARATION_GRANT_STATE = "owner_authorized"
 AV1_VALIDATION_V4_PREPARATION_GRANT_AUTHORITY = (
     "av1_v4_path_privacy_key_and_non_media_preparation"
@@ -75,6 +75,7 @@ _ALLOWED_TOP_LEVEL_KEYS = frozenset({
     "authority",
     "authorized_at",
     "contract_version",
+    "consumption_registry",
     "discovery_public_sha256",
     "experiment_id",
     "grant_id",
@@ -109,6 +110,7 @@ def build_av1_validation_v4_preparation_grant(
     owner_principal: str,
     repository_commit: str,
     repository_tree: str,
+    consumption_registry: str,
     authorized_at: str,
     valid_until: str,
 ) -> dict[str, Any]:
@@ -138,6 +140,7 @@ def build_av1_validation_v4_preparation_grant(
             "commit": repository_commit,
             "tree": repository_tree,
         },
+        "consumption_registry": consumption_registry,
         "authorized_at": authorized_at,
         "valid_until": valid_until,
         "operation_scope": _OPERATION_SCOPE,
@@ -161,11 +164,16 @@ def assert_av1_validation_v4_preparation_grant(
         raise AV1ValidationV4PreparationGrantError(
             f"AV1 v4 preparation grant contains unknown fields: {sorted(unknown_fields)}"
         )
-    _assert_no_private_paths(materialized)
+    _assert_no_private_paths({
+        key: value
+        for key, value in materialized.items()
+        if key != "consumption_registry"
+    })
     _assert_base_binding(materialized)
     _assert_false_authorities(materialized)
     _assert_rights_binding(materialized)
     _assert_repository(materialized)
+    _assert_consumption_registry(materialized)
     _assert_window(materialized)
     _assert_identity(materialized)
 
@@ -374,6 +382,29 @@ def _assert_identity(payload: Mapping[str, Any]) -> None:
     if payload.get("payload_sha256") != expected_sha:
         raise AV1ValidationV4PreparationGrantError(
             "AV1 v4 preparation grant payload SHA-256 does not match"
+        )
+
+
+def _assert_consumption_registry(payload: Mapping[str, Any]) -> None:
+    value = payload.get("consumption_registry")
+    if not isinstance(value, str):
+        raise AV1ValidationV4PreparationGrantError(
+            "AV1 v4 preparation grant consumption registry is invalid"
+        )
+    path = PurePosixPath(value)
+    if (
+        not value.startswith("/")
+        or value == "/"
+        or "\x00" in value
+        or "\n" in value
+        or "\r" in value
+        or "//" in value
+        or value.endswith("/")
+        or ".." in path.parts
+        or path.as_posix() != value
+    ):
+        raise AV1ValidationV4PreparationGrantError(
+            "AV1 v4 preparation grant consumption registry is invalid"
         )
 
 
