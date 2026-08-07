@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+from types import MappingProxyType
 from typing import Any
 
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
@@ -80,6 +81,24 @@ AV1_VALIDATION_V4_SOURCE_LAYOUT = (
         "confirmation",
     ),
 )
+AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION = MappingProxyType({
+    "av1v4_animation_primary_sintel": MappingProxyType({
+        "video_stream_index": 0,
+        "excluded_stream_indexes": tuple(range(1, 12)),
+    }),
+    "av1v4_animation_confirmation_cosmos_laundromat": MappingProxyType({
+        "video_stream_index": 0,
+        "excluded_stream_indexes": (1,),
+    }),
+    "av1v4_live_action_primary_tears_of_steel": MappingProxyType({
+        "video_stream_index": 0,
+        "excluded_stream_indexes": (1,),
+    }),
+    "av1v4_live_action_confirmation_nasa_earth_views": MappingProxyType({
+        "video_stream_index": 0,
+        "excluded_stream_indexes": (1,),
+    }),
+})
 AV1_VALIDATION_V4_CONFIGURATIONS = (
     "balanced_full_search_baseline",
     "balanced_frozen_search_hint",
@@ -135,6 +154,16 @@ class AV1ValidationV4Error(ValueError):
 
 def av1_validation_v4_contains_private_text(value: str) -> bool:
     return value.startswith("/") or bool(AV1_VALIDATION_V4_PRIVATE_TEXT_RE.search(value))
+
+
+def av1_validation_v4_source_stream_selection_payload() -> dict[str, dict[str, Any]]:
+    return {
+        asset_id: {
+            "video_stream_index": int(selection["video_stream_index"]),
+            "excluded_stream_indexes": list(selection["excluded_stream_indexes"]),
+        }
+        for asset_id, selection in AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION.items()
+    }
 
 
 def av1_validation_v4_guided_warm_start_identities() -> dict[str, dict[str, Any]]:

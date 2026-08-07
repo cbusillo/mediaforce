@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
     AV1_VALIDATION_V4_SOURCE_IDS,
+    AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION,
     av1_validation_v4_guided_warm_start_identities,
 )
+from mediaforce.tuning import av1_validation_v4_preparation_operation
 from mediaforce.tuning.av1_validation_v4_preparation import (
     AV1ValidationV4InvocationIdentity,
     AV1ValidationV4PreparationError,
@@ -23,6 +29,23 @@ from mediaforce.tuning.av1_validation_v4_preparation import (
 )
 from mediaforce.tuning.av1_validation_v4_preparation_grant import (
     build_av1_validation_v4_preparation_grant,
+    serialize_av1_validation_v4_preparation_grant,
+)
+from mediaforce.tuning.av1_validation_v4_preparation_claim import (
+    build_av1_validation_v4_preparation_claim,
+    load_av1_validation_v4_preparation_claim,
+    serialize_av1_validation_v4_preparation_claim,
+)
+from mediaforce.tuning.av1_validation_v4_preparation_config import (
+    load_av1_validation_v4_effective_config_snapshot,
+)
+from mediaforce.tuning.av1_validation_v4_preparation_measurement import (
+    load_av1_validation_v4_preparation_measurement,
+)
+from mediaforce.tuning.av1_validation_v4_preparation_operation import (
+    AV1ValidationV4PreparationOperationError,
+    AV1ValidationV4PreparationOperationInputs,
+    run_av1_validation_v4_preparation_operation,
 )
 from mediaforce.tuning.av1_validation_v4_runtime_compatibility import (
     av1_validation_v4_runtime_compatibility_payload,
@@ -60,6 +83,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 first,
                 rights_attestation=rights,
                 preparation_grant=self._grant(),
+                preparation_claim=self._claim(),
             ),
             json.dumps(
                 first,
@@ -72,6 +96,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         )
         self.assertEqual(first["state"], "prepared_unfrozen")
         self.assertFalse(first["media_bytes_read"])
+        self.assertEqual(first["media_bytes_read_count"], 0)
         self.assertFalse(first["builder_subprocess_executed"])
         self.assertFalse(first["media_processing_subprocess_executed"])
         self.assertTrue(first["tool_version_probe_subprocess_executed"])
@@ -93,6 +118,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             "mediaforce.core.type_defs",
             "mediaforce.tuning.av1_validation_v4",
             "mediaforce.tuning.av1_validation_v4_preparation_grant",
+            "mediaforce.tuning.av1_validation_v4_preparation_claim",
             "mediaforce.tuning.av1_validation_v4_rights",
             "mediaforce.tuning.av1_validation_v4_runtime_compatibility",
             "re",
@@ -140,6 +166,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 inputs=self._inputs(),
                 rights_attestation=build_av1_validation_v4_rights_template(),
                 preparation_grant=self._grant(),
+                preparation_claim=self._claim(),
             )
 
     def test_bundle_rejects_a_different_rights_attestation(self) -> None:
@@ -148,6 +175,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             inputs=self._inputs(),
             rights_attestation=rights,
             preparation_grant=self._grant(),
+            preparation_claim=self._claim(),
         )
         other_rights = self._rights_attestation(
             attested_at="2026-08-07T05:31:00Z"
@@ -160,6 +188,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                 record,
                 other_rights,
                 self._grant(),
+                self._claim(),
             )
 
     def test_bundle_rejects_a_different_preparation_grant(self) -> None:
@@ -167,13 +196,302 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         other_grant = self._grant(valid_until="2026-08-07T07:30:00Z")
         with self.assertRaisesRegex(
             AV1ValidationV4PreparationError,
-            "grant binding does not match",
+            "binding does not match",
         ):
             assert_av1_validation_v4_preparation_bundle(
                 record,
                 self._rights_attestation(),
                 other_grant,
+                self._claim(),
             )
+
+    def test_claim_round_trips_canonically(self) -> None:
+        claim = self._claim()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "claim.json"
+            path.write_bytes(serialize_av1_validation_v4_preparation_claim(claim))
+            self.assertEqual(load_av1_validation_v4_preparation_claim(path), claim)
+
+    def test_operation_publishes_one_shot_non_media_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, digest_calls = self._operation_inputs(root)
+            self.assertTrue(
+                all(not path.exists() for path in inputs.source_paths.values())
+            )
+            result = run_av1_validation_v4_preparation_operation(
+                inputs,
+                now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                random_bytes=lambda count: b"k" * count,
+                probe_tool=self._probe_tool,
+                binary_digest=lambda path: self._record_digest_call(
+                    digest_calls,
+                    path,
+                ),
+            )
+            self.assertEqual(result.measurement["state"], "measured_success")
+            self.assertEqual(result.measurement["invocation_count"], 8)
+            self.assertEqual(result.preparation["media_bytes_read_count"], 0)
+            self.assertEqual(len(digest_calls), 3)
+            self.assertTrue(
+                all(path.parent.name == "tools" for path in digest_calls)
+            )
+            self.assertEqual(
+                load_av1_validation_v4_preparation_claim(
+                    result.artifact_paths["claim"]
+                ),
+                result.claim,
+            )
+            self.assertEqual(
+                load_av1_validation_v4_preparation_measurement(
+                    result.artifact_paths["measurement"]
+                ),
+                result.measurement,
+            )
+            config = load_av1_validation_v4_effective_config_snapshot(
+                result.artifact_paths["config"]
+            )
+            self.assertEqual(config["schema_version"], 2)
+            self.assertEqual(
+                result.artifact_paths["preparation"].read_bytes(),
+                serialize_av1_validation_v4_preparation_record(
+                    result.preparation,
+                    rights_attestation=self._rights_attestation(),
+                    preparation_grant=self._grant(
+                        consumption_registry=str(root / "grant-consumption")
+                    ),
+                    preparation_claim=result.claim,
+                ),
+            )
+            key_path = result.artifact_paths["key"]
+            self.assertEqual(key_path.read_bytes(), b"k" * 32)
+            self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(key_path.stat().st_nlink, 1)
+            with self.assertRaisesRegex(
+                AV1ValidationV4PreparationOperationError,
+                "already exists",
+            ):
+                run_av1_validation_v4_preparation_operation(
+                    inputs,
+                    now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                    random_bytes=lambda count: b"z" * count,
+                    probe_tool=self._probe_tool,
+                )
+            second_workspace = root / "second-workspace"
+            second_workspace.mkdir(mode=0o700)
+            with self.assertRaisesRegex(
+                AV1ValidationV4PreparationOperationError,
+                "already exists",
+            ):
+                run_av1_validation_v4_preparation_operation(
+                    replace(inputs, workspace=second_workspace),
+                    now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                    random_bytes=lambda count: b"z" * count,
+                    probe_tool=self._probe_tool,
+                )
+
+    def test_operation_failure_consumes_grant_and_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _digest_calls = self._operation_inputs(root)
+
+            def failing_probe(
+                tool_name: str,
+                _path: Path,
+                argv: object,
+            ) -> dict[str, object]:
+                if tool_name == "ffprobe":
+                    raise RuntimeError("injected probe failure")
+                return self._probe_tool(tool_name, _path, argv)
+
+            with self.assertRaisesRegex(
+                AV1ValidationV4PreparationOperationError,
+                "after consuming the grant",
+            ):
+                run_av1_validation_v4_preparation_operation(
+                    inputs,
+                    now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                    random_bytes=lambda count: b"k" * count,
+                    probe_tool=failing_probe,
+                    binary_digest=lambda _path: "sha256:" + "a" * 64,
+                )
+            workspace = inputs.workspace
+            claim_files = list((root / "grant-consumption").glob("*.json"))
+            self.assertEqual(len(claim_files), 1)
+            self.assertFalse((workspace / "secrets/path-privacy.key").exists())
+            self.assertFalse(
+                (workspace / "configuration/effective-config-snapshot.json").exists()
+            )
+            self.assertFalse(
+                (workspace / "preparation/preparation-record.json").exists()
+            )
+            measurement = load_av1_validation_v4_preparation_measurement(
+                workspace / "measurements/preparation-measurement.json"
+            )
+            self.assertEqual(measurement["state"], "measured_failed")
+            self.assertEqual(measurement["failure"]["stage"], "probe_toolchain")
+            self.assertTrue(measurement["rollback"]["grant_consumed"])
+
+    def test_operation_preflight_failure_does_not_consume_grant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _digest_calls = self._operation_inputs(root)
+            invalid = replace(inputs, source_paths={})
+            with self.assertRaisesRegex(
+                AV1ValidationV4PreparationOperationError,
+                "source path set",
+            ):
+                run_av1_validation_v4_preparation_operation(
+                    invalid,
+                    now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                )
+            self.assertFalse(
+                any((root / "grant-consumption").glob("*.json"))
+            )
+
+    def test_failed_claim_write_does_not_report_grant_consumed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _digest_calls = self._operation_inputs(root)
+            real_writer = av1_validation_v4_preparation_operation._exclusive_write
+
+            def fail_claim(path: Path, data: bytes) -> None:
+                if path.parent == root / "grant-consumption":
+                    raise OSError("injected claim publication failure")
+                real_writer(path, data)
+
+            with mock.patch.object(
+                av1_validation_v4_preparation_operation,
+                "_exclusive_write",
+                side_effect=fail_claim,
+            ):
+                with self.assertRaisesRegex(OSError, "claim publication"):
+                    run_av1_validation_v4_preparation_operation(
+                        inputs,
+                        now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                        random_bytes=lambda count: b"k" * count,
+                        probe_tool=self._probe_tool,
+                    )
+            self.assertFalse(any((root / "grant-consumption").glob("*.json")))
+            self.assertFalse(
+                (inputs.workspace / "measurements/preparation-measurement.json").exists()
+            )
+
+    def test_exclusive_write_preserves_foreign_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            path = root / "artifact.json"
+            path.write_bytes(b"foreign")
+            with self.assertRaisesRegex(
+                AV1ValidationV4PreparationOperationError,
+                "already exists",
+            ):
+                av1_validation_v4_preparation_operation._exclusive_write(
+                    path,
+                    b"replacement",
+                )
+            self.assertEqual(path.read_bytes(), b"foreign")
+
+    def test_post_preflight_foreign_artifact_is_not_rolled_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _digest_calls = self._operation_inputs(root)
+            real_writer = av1_validation_v4_preparation_operation._exclusive_write
+
+            def inject_foreign_key(path: Path, data: bytes) -> None:
+                if path.name == "path-privacy.key" and not path.exists():
+                    real_writer(path, b"foreign key material")
+                    raise AV1ValidationV4PreparationOperationError(
+                        "preparation artifact already exists: path-privacy.key"
+                    )
+                real_writer(path, data)
+
+            with mock.patch.object(
+                av1_validation_v4_preparation_operation,
+                "_exclusive_write",
+                side_effect=inject_foreign_key,
+            ):
+                with self.assertRaisesRegex(
+                    AV1ValidationV4PreparationOperationError,
+                    "after consuming the grant",
+                ):
+                    run_av1_validation_v4_preparation_operation(
+                        inputs,
+                        now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                        random_bytes=lambda count: b"k" * count,
+                        probe_tool=self._probe_tool,
+                    )
+            key_path = inputs.workspace / "secrets/path-privacy.key"
+            self.assertEqual(key_path.read_bytes(), b"foreign key material")
+            measurement = load_av1_validation_v4_preparation_measurement(
+                inputs.workspace / "measurements/preparation-measurement.json"
+            )
+            self.assertEqual(measurement["rollback"]["removed_artifacts"], [])
+            self.assertEqual(measurement["rollback"]["retained_artifacts"], [])
+
+    def test_rollback_failure_is_recorded_without_hiding_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _digest_calls = self._operation_inputs(root)
+            real_unlink = av1_validation_v4_preparation_operation._unlink_artifact
+
+            def fail_existing_unlink(path: Path) -> None:
+                if path.exists():
+                    raise PermissionError("injected rollback failure")
+                real_unlink(path)
+
+            def failing_probe(
+                _tool_name: str,
+                _path: Path,
+                _argv: object,
+            ) -> dict[str, object]:
+                raise RuntimeError("injected probe failure")
+
+            with mock.patch.object(
+                av1_validation_v4_preparation_operation,
+                "_unlink_artifact",
+                side_effect=fail_existing_unlink,
+            ):
+                with self.assertRaisesRegex(
+                    AV1ValidationV4PreparationOperationError,
+                    "after consuming the grant",
+                ):
+                    run_av1_validation_v4_preparation_operation(
+                        inputs,
+                        now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                        random_bytes=lambda count: b"k" * count,
+                        probe_tool=failing_probe,
+                        binary_digest=lambda _path: "sha256:" + "a" * 64,
+                    )
+            measurement = load_av1_validation_v4_preparation_measurement(
+                inputs.workspace / "measurements/preparation-measurement.json"
+            )
+            self.assertEqual(
+                set(measurement["rollback"]["retained_artifacts"]),
+                {"effective_config_snapshot", "path_privacy_key"},
+            )
+            self.assertFalse(
+                measurement["rollback"]["preparation_record_retained"]
+            )
+
+    def test_symlinked_workspace_is_rejected_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _digest_calls = self._operation_inputs(root)
+            target = root / "workspace-target"
+            target.mkdir(mode=0o700)
+            symlink = root / "workspace-link"
+            symlink.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(
+                AV1ValidationV4PreparationOperationError,
+                "owner-only real directory",
+            ):
+                run_av1_validation_v4_preparation_operation(
+                    replace(inputs, workspace=symlink),
+                    now=lambda: datetime(2026, 8, 7, 6, 0, tzinfo=UTC),
+                )
+            self.assertFalse(any((root / "grant-consumption").glob("*.json")))
 
     def test_input_mutations_fail_closed(self) -> None:
         cases = [
@@ -309,6 +627,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                         inputs=inputs,
                         rights_attestation=self._rights_attestation(),
                         preparation_grant=self._grant(),
+                        preparation_claim=self._claim(),
                     )
 
     def test_probe_accounting_can_report_no_subprocess(self) -> None:
@@ -319,6 +638,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             ),
             rights_attestation=self._rights_attestation(),
             preparation_grant=self._grant(),
+            preparation_claim=self._claim(),
         )
         self.assertFalse(record["tool_version_probe_subprocess_executed"])
 
@@ -348,6 +668,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                         payload,
                         self._rights_attestation(),
                         self._grant(),
+                        self._claim(),
                     )
 
     def _record(self) -> dict[str, object]:
@@ -355,6 +676,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             inputs=self._inputs(),
             rights_attestation=self._rights_attestation(),
             preparation_grant=self._grant(),
+            preparation_claim=self._claim(),
         )
 
     def _inputs(self) -> AV1ValidationV4PreparationInputs:
@@ -422,6 +744,16 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
                         source_path_hmac_id=source_path_ids[asset_id],
                         invocation_sha256=f"sha256:{ordinal:064x}",
                         base_config_sha256=base_config_sha256,
+                        video_stream_index=(
+                            AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION[asset_id][
+                                "video_stream_index"
+                            ]
+                        ),
+                        excluded_stream_indexes=tuple(
+                            AV1_VALIDATION_V4_SOURCE_STREAM_SELECTION[asset_id][
+                                "excluded_stream_indexes"
+                            ]
+                        ),
                     )
                 )
                 ordinal += 1
@@ -431,6 +763,7 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         self,
         *,
         valid_until: str = "2026-08-07T07:00:00Z",
+        consumption_registry: str = "/registry/av1-v4-preparation",
     ) -> dict[str, object]:
         rights = self._rights_attestation()
         return build_av1_validation_v4_preparation_grant(
@@ -438,8 +771,16 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             owner_principal=str(rights["owner_principal"]),
             repository_commit="1" * 40,
             repository_tree="2" * 40,
+            consumption_registry=consumption_registry,
             authorized_at="2026-08-07T05:45:00Z",
             valid_until=valid_until,
+        )
+
+    def _claim(self) -> dict[str, object]:
+        return build_av1_validation_v4_preparation_claim(
+            preparation_grant=self._grant(),
+            rights_attestation=self._rights_attestation(),
+            claimed_at="2026-08-07T05:50:00Z",
         )
 
     def _runtime_compatibility_payload(
@@ -532,6 +873,86 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
             attested_at=attested_at,
             source_claims=claims,
         )
+
+    def _operation_inputs(
+        self,
+        root: Path,
+    ) -> tuple[AV1ValidationV4PreparationOperationInputs, list[Path]]:
+        workspace = root / "workspace"
+        workspace.mkdir(mode=0o700)
+        rights_path = root / "rights.json"
+        rights_path.write_text(
+            json.dumps(
+                self._rights_attestation(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        grant_path = root / "grant.json"
+        consumption_registry = root / "grant-consumption"
+        consumption_registry.mkdir(mode=0o700)
+        grant_path.write_bytes(
+            serialize_av1_validation_v4_preparation_grant(
+                self._grant(consumption_registry=str(consumption_registry))
+            )
+        )
+        tools = root / "tools"
+        tools.mkdir()
+        tool_paths = {
+            name: tools / name
+            for name in ("ffmpeg", "ffprobe", "ab-av1")
+        }
+        for path in tool_paths.values():
+            path.write_bytes(b"test tool")
+            os.chmod(path, 0o700)
+        digest_calls: list[Path] = []
+        inputs = AV1ValidationV4PreparationOperationInputs(
+            workspace=workspace,
+            manifest_path=MANIFEST_PATH.resolve(),
+            rights_attestation_path=rights_path,
+            preparation_grant_path=grant_path,
+            repository_commit="1" * 40,
+            repository_tree="2" * 40,
+            source_paths={
+                asset_id: root / "missing-media" / f"{asset_id}.mp4"
+                for asset_id in AV1_VALIDATION_V4_SOURCE_IDS
+            },
+            dedicated_instance_paths={
+                "runtime_lock": Path("/runtime/qualification.lock"),
+                "source_root": Path("/media"),
+                "state_root": Path("/runtime/state"),
+                "temp_root": Path("/runtime/temp"),
+            },
+            ffmpeg_path=tool_paths["ffmpeg"],
+            ffprobe_path=tool_paths["ffprobe"],
+            ab_av1_path=tool_paths["ab-av1"],
+            operating_system="macOS",
+            operating_system_version="27.0 build test",
+            architecture="arm64",
+            python_version="3.13.7",
+        )
+        return inputs, digest_calls
+
+    @staticmethod
+    def _probe_tool(
+        tool_name: str,
+        _path: Path,
+        argv: object,
+    ) -> dict[str, object]:
+        return {
+            "tool": tool_name,
+            "argv": list(argv),
+            "exit_code": 0,
+            "duration_ms": 1,
+            "stdout_first_line": f"{tool_name} version test",
+            "truncated": False,
+        }
+
+    @staticmethod
+    def _record_digest_call(calls: list[Path], path: Path) -> str:
+        calls.append(path)
+        return "sha256:" + f"{len(calls):064x}"
 
 
 if __name__ == "__main__":
