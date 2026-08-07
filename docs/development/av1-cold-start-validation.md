@@ -2455,3 +2455,48 @@ Every public r3 payload sets all v4 authority fields to `false`. The contract is
 protocol v4 because the experiment ID, source set, source public facts,
 qualification traversal order, target-size path intent, CRF bounds, and warm
 start semantics remain unchanged while the manifest revision advances.
+
+## Manifest revision 3 — ordinal-window registry
+
+`mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure
+public ordinal-window artifact contract for revision `3`. It performs no path,
+filesystem, subprocess, media, network, or runner access. Public plan artifacts
+publish only an opaque `run_registry_id` derived out-of-band from a private
+registry binding; no absolute registry path is serialized. The plan requires the
+exact ordered closure IDs from `build_av1_v4_r3_all_closure_payloads()` and
+requires future invocation digest records to bind ordinal, closure ID,
+repository identity, and toolchain ID without reinterpreting revision-2
+artifacts as revision-3 execution authority.
+
+Every ordinal-window artifact, including the owner-published grant, keeps every
+v4 authority boolean `false`. The grant's authority discriminator identifies
+the sequencing contract only: it reserves one bounded ordinal window but does
+not authorize media reads, qualification execution, runtime execution, or any
+other implementation or experiment activity.
+
+`mediaforce/tuning/av1_validation_v4r3_ordinal_window_registry.py` is the only
+I/O boundary for the ordinal-window chain. The private registry is an absolute
+owner-owned mode-`0700` directory matched to the public `run_registry_id` by a
+caller-supplied private binding or the HMAC helper. Every state transition runs
+entirely under one process-local lock and one `fcntl` exclusive lock on an
+`O_DIRECTORY|O_NOFOLLOW` directory descriptor. All existence checks, reads, and
+writes use that descriptor via `dir_fd`, and every record must be a regular
+owner-owned mode-`0600` single-link file before it is trusted.
+
+The registry custody-loads the published plan/grant/claim/started/outcome chain
+before deriving the next record; caller-provided predecessor dictionaries are
+only hints that must byte-match the registry copy. Grant, claim, started,
+outcome, and terminal timestamps are stamped from an injected timezone-aware
+clock while the lock is held. Admission is limited to
+`[authorized_at + 300s, valid_until - 300s]`; starts must remain in that same
+interval and not precede the claim, and outcomes must be after start and no
+later than `valid_until`. The preserved per-ordinal window remains
+`300 + 13_200 + 300 = 13_800` seconds, and the aggregate eight-ordinal budget
+remains `110_400 <= 129_600` seconds.
+
+High-water is derived only from contiguous custody-validated successful outcome
+records. There are no high-water sentinel files or mutable counters. Gaps,
+failure outcomes, expired admission, clock rewind, and started-without-outcome
+crash states fail closed by publishing an absorbing terminal record when the
+registry can do so atomically. A successful ordinal `8` also publishes the
+success terminal, and no later admission is accepted once any terminal exists.
