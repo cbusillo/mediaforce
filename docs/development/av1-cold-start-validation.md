@@ -1996,3 +1996,31 @@ machine-local paths, missing source claims, and any authority bit set to true.
 Even a completed owner attestation grants no manifest freeze, traversal,
 execution, evidence, publication, activation, retry, private-read, or dogfood
 authority. No completed attestation is checked in by this phase.
+
+---
+
+## Phase 7 — V4 Preparation Record Contract (non-executing)
+
+`mediaforce/tuning/av1_validation_v4_preparation.py` defines the pure contract
+for the machine-local preparation record required before an owner freeze
+decision. It accepts only externally measured repository, config, toolchain,
+HMAC, runtime-compatibility, warm-start, invocation, qualification-key, and
+completed-rights-attestation identities. It does not discover or measure them.
+
+The module imports no filesystem, subprocess, network, or database facilities.
+It accepts no source paths, binary paths, media bytes, key bytes, or executable
+handles. Dedicated-instance and source paths appear only as closed-schema HMAC
+IDs. Baseline and guided invocation digests must differ while their base config
+digest remains identical.
+
+The resulting machine-local record is `prepared_unfrozen`, binds the completed
+rights attestation by ID and digest, and explicitly records
+`media_bytes_read=false` and `subprocess_executed=false`. Every execution,
+freeze, traversal, evidence, publication, activation, retry, private-read, and
+dogfood authority remains false. This phase defines and tests the contract only;
+it does not create or commit a real preparation record.
+
+A preparation record is valid only as a bundle with the exact completed rights
+attestation whose ID, payload digest, and timestamp it carries. Public bundle
+validation and canonical serialization both require that attestation payload;
+there is no public record-only validation or serialization path.
