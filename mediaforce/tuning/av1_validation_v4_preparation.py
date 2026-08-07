@@ -202,7 +202,7 @@ def build_av1_validation_v4_preparation_record(
     return bound
 
 
-def assert_av1_validation_v4_preparation_record(
+def _assert_av1_validation_v4_preparation_record_structure(
     payload: Mapping[str, Any],
 ) -> None:
     materialized = object_dict(payload)
@@ -233,7 +233,7 @@ def assert_av1_validation_v4_preparation_bundle(
     rights = object_dict(rights_attestation)
     _assert_completed_rights_attestation(rights)
     record = object_dict(preparation)
-    assert_av1_validation_v4_preparation_record(record)
+    _assert_av1_validation_v4_preparation_record_structure(record)
     if (
         record.get("rights_attestation_id") != rights.get("attestation_id")
         or record.get("rights_attestation_payload_sha256")
@@ -247,9 +247,14 @@ def assert_av1_validation_v4_preparation_bundle(
 
 def serialize_av1_validation_v4_preparation_record(
     payload: Mapping[str, Any],
+    *,
+    rights_attestation: Mapping[str, Any],
 ) -> bytes:
     materialized = json.loads(canonical_json_bytes(payload))
-    assert_av1_validation_v4_preparation_record(materialized)
+    assert_av1_validation_v4_preparation_bundle(
+        materialized,
+        rights_attestation,
+    )
     return canonical_json_bytes(materialized) + b"\n"
 
 

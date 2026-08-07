@@ -2019,3 +2019,8 @@ rights attestation by ID and digest, and explicitly records
 freeze, traversal, evidence, publication, activation, retry, private-read, and
 dogfood authority remains false. This phase defines and tests the contract only;
 it does not create or commit a real preparation record.
+
+A preparation record is valid only as a bundle with the exact completed rights
+attestation whose ID, payload digest, and timestamp it carries. Public bundle
+validation and canonical serialization both require that attestation payload;
+there is no public record-only validation or serialization path.

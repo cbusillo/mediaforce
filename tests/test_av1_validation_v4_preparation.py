@@ -15,7 +15,6 @@ from mediaforce.tuning.av1_validation_v4_preparation import (
     AV1ValidationV4PreparationInputs,
     AV1ValidationV4ToolIdentity,
     assert_av1_validation_v4_preparation_bundle,
-    assert_av1_validation_v4_preparation_record,
     av1_validation_v4_preparation_covered_requirements,
     build_av1_validation_v4_preparation_record,
     serialize_av1_validation_v4_preparation_record,
@@ -46,9 +45,13 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
     def test_valid_record_is_deterministic_and_non_authorizing(self) -> None:
         first = self._record()
         second = self._record()
+        rights = self._rights_attestation()
         self.assertEqual(first, second)
         self.assertEqual(
-            serialize_av1_validation_v4_preparation_record(first),
+            serialize_av1_validation_v4_preparation_record(
+                first,
+                rights_attestation=rights,
+            ),
             json.dumps(
                 first,
                 sort_keys=True,
@@ -67,35 +70,51 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
 
     def test_preparation_module_is_structurally_pure(self) -> None:
         tree = ast.parse(MODULE_PATH.read_text())
-        forbidden_imports = {
-            "os",
-            "pathlib",
-            "requests",
-            "shutil",
-            "socket",
-            "subprocess",
-            "urllib",
+        allowed_import_modules = {
+            "__future__",
+            "collections.abc",
+            "dataclasses",
+            "datetime",
+            "json",
+            "mediaforce.core.evidence",
+            "mediaforce.core.type_defs",
+            "mediaforce.tuning.av1_validation_v4",
+            "mediaforce.tuning.av1_validation_v4_rights",
+            "re",
+            "typing",
         }
-        forbidden_calls = {
+        forbidden_named_calls = {
+            "__import__",
+            "compile",
+            "eval",
+            "exec",
+        }
+        forbidden_attribute_calls = {
             "open",
             "popen",
             "read_bytes",
             "read_text",
             "run",
+            "write_bytes",
+            "write_text",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                self.assertFalse(
-                    {alias.name.split(".")[0] for alias in node.names}
-                    & forbidden_imports
-                )
+                for alias in node.names:
+                    self.assertIn(alias.name, allowed_import_modules)
             elif isinstance(node, ast.ImportFrom) and node.module:
-                self.assertNotIn(node.module.split(".")[0], forbidden_imports)
+                self.assertIn(node.module, allowed_import_modules)
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name):
-                    self.assertNotIn(node.func.id.lower(), forbidden_calls)
+                    self.assertNotIn(
+                        node.func.id.lower(),
+                        forbidden_named_calls | forbidden_attribute_calls,
+                    )
                 elif isinstance(node.func, ast.Attribute):
-                    self.assertNotIn(node.func.attr.lower(), forbidden_calls)
+                    self.assertNotIn(
+                        node.func.attr.lower(),
+                        forbidden_attribute_calls,
+                    )
 
     def test_template_rights_record_is_rejected(self) -> None:
         with self.assertRaisesRegex(
@@ -197,7 +216,10 @@ class AV1ValidationV4PreparationTests(unittest.TestCase):
         for payload, message in cases:
             with self.subTest(message=message):
                 with self.assertRaisesRegex(AV1ValidationV4PreparationError, message):
-                    assert_av1_validation_v4_preparation_record(payload)
+                    assert_av1_validation_v4_preparation_bundle(
+                        payload,
+                        self._rights_attestation(),
+                    )
 
     def _record(self) -> dict[str, object]:
         return build_av1_validation_v4_preparation_record(
