@@ -414,6 +414,16 @@ Guidance:
     verifies the path-privacy key identity and opaque ordinal-registry HMAC, then
     acquires the ordinal lock to build and publish the plan/preflight pair; the
     operation never nests the registries, reads media, or grants execution
+  - `av1_validation_v4r3_execution_grant.py` is the pure per-ordinal owner
+    execution-authority contract; it binds the reviewed plan/preflight and
+    sequencing grant to one closure/invocation and is the only revision-3
+    artifact whose three execution-envelope authority booleans are true
+  - `av1_validation_v4r3_runner_admission.py` is the pure non-authorizing
+    execution-claim and runtime-admission contract; it declares intent to
+    consume a grant through later exclusive custody and binds resolved
+    source/instance/temp, canonical production stream-plan and ledger payload
+    identities, and frozen size-goal, ledger-closure, and transform-plan
+    identities without performing a production runtime operation
   - `av1_validation_v4r3_ordinal_window_registry.py` is the owner-only local I/O
     boundary for those records and the canonical `preflight.json`: callers
     supply a private registry binding for an absolute owner-only mode-`0700`
