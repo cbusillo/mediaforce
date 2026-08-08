@@ -2482,6 +2482,30 @@ preparation, freeze, request, claim, preflight, runner, media read, or execution
 authority. The generic preregistration verifier can load the canonical bytes
 and reports all twenty authority fields as false.
 
+## Manifest revision 3 — rights rollover
+
+`mediaforce/tuning/av1_validation_v4r3_rights.py` defines the pure canonical
+rights rollover required before a revision-3 preparation grant. A revision-2
+rights record cannot be used directly as a revision-3 grant prerequisite
+because it is hard-bound to the revision-2 manifest. The rollover instead
+embeds one fully validated owner-attested revision-2 record as provenance with
+`confers_revision_3_authority=false`, then independently binds the approved
+revision-3 manifest and owner reaffirmation recorded by issue `#364` at
+`2026-08-08T02:22:20Z`.
+
+The nine frozen terms digests and all four source claims are copied exactly from
+the prior record and validated for canonical equality. The revision-3 profile
+acknowledgement covers AV1 in MKV, video-only output, at most 1080p, and the
+duration-normalized 300 MB target. NASA acknowledgement remains an explicit
+obligation on any future output or publication record, endorsement remains
+prohibited, and redistribution disposition remains `none`.
+
+The module accepts mappings and canonical bytes only. It performs no filesystem,
+network, subprocess, media, database, publication, or execution work. Every v4
+authority field remains `false`; the rollover itself creates no grant, key,
+preparation artifact, media read, qualification, runtime, activation, or
+dogfood authority.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure

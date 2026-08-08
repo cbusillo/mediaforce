@@ -364,6 +364,12 @@ Guidance:
     sequencing budget and revision-3 path-privacy domains, and keeps every v4
     authority field false; the checked-in JSON artifact and generic verifier
     own filesystem loading outside this module
+  - `av1_validation_v4r3_rights.py` is the pure revision-3 rights rollover:
+    it embeds one fully validated owner-attested revision-2 rights artifact as
+    non-authorizing provenance, copies its frozen terms and source claims
+    exactly, binds an independent revision-3 owner reaffirmation and derivative
+    profile acknowledgement, and carries NASA acknowledgement/endorsement
+    obligations forward without filesystem or execution imports
   - `av1_validation_v4r3_invocation_closure.py` is a pure no-media module
     (protocol v4, manifest revision 3) that freezes the full checked-in
     production video policy with the revision-2 CRF override, derives per-source
