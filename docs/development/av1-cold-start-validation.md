@@ -2660,6 +2660,46 @@ then-current clean merged repository. Qualification request, ordinal planning,
 execution preflight, media access, publication, activation, and dogfood remain
 later independent gates.
 
+## Manifest revision 3 — qualification request
+
+`mediaforce/tuning/av1_validation_v4r3_qualification_request.py` defines the
+pure canonical request that follows one valid revision-3 owner freeze. The
+request binds the freeze identity and digest, owner and decision time, reviewed
+and requesting repositories, prepared bundle, keyed whole-config binding,
+path-privacy-key identity, toolchain/runtime identities, and the exact ordered
+eight closure/invocation records. Its ID uses the already-frozen
+`av1v4r3req_` domain required by the downstream ordinal-window contract.
+
+The freeze remains reviewed evidence rather than request authority: its
+`qualification_request_creation_authorized` scope stays `false`. The request
+carries a separate explicit
+`manifest_revision_3_qualification_request_approved=true` owner decision while
+every v4 authority field, `selection_or_partition_use_allowed`, and every
+request-scope planning, execution, retry, resume, substitution, backfill,
+manifest-mutation, and revision-2-reuse permission remains `false`. The request
+declares all eight ordinals but reserves none and creates no plan, run-registry
+binding, per-ordinal record, preflight, media access, or execution authority.
+
+Submission must occur no more than 86,400 seconds after the freeze decision.
+The canonical request window is 172,800 seconds, capped by manifest expiry, and
+materialization fails unless the remaining window is strictly longer than the
+129,600-second public run maximum. Revision 2's 24-hour request window is not
+reused because it cannot contain the complete revision-3 public run bound.
+
+`mediaforce/tuning/av1_validation_v4r3_qualification_request_operation.py` is
+the sole owner-only materialization boundary. Under the existing private
+preparation-registry lock it custody-loads and reconstructs the retained
+preparation/freeze chain, verifies the current clean requesting repository, and
+publishes one mode-`0600` request singleton through the existing
+descriptor-relative atomic writer. Existing identical bytes are idempotent;
+expired or changed owner, repository, evidence, or payload bindings fail closed.
+The request is path-free and key-free, and tests use only temporary custody.
+
+No real qualification request is created by implementation tests. Ordinal-plan
+materialization, deterministic preflight-ID reconciliation, execution-ready
+preflight, media access, publication, activation, and dogfood remain later
+independent gates.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure
@@ -2667,7 +2707,8 @@ public ordinal-window artifact contract for revision `3`. It performs no path,
 filesystem, subprocess, media, network, or runner access. Public plan artifacts
 publish only an opaque `run_registry_id` derived out-of-band from a private
 registry binding; no absolute registry path is serialized. The plan requires the
-exact ordered closure IDs from `build_av1_v4_r3_all_closure_payloads()` and
+exact owner-request identity from the qualification-request contract, the exact
+ordered closure IDs from `build_av1_v4_r3_all_closure_payloads()`, and
 requires future invocation digest records to bind ordinal, closure ID,
 repository identity, and toolchain ID without reinterpreting revision-2
 artifacts as revision-3 execution authority.

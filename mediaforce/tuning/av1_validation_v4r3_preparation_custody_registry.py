@@ -55,6 +55,7 @@ _CONFIG_NAME = "effective-config.json"
 _BUNDLE_NAME = "preparation-bundle.json"
 _MEASUREMENT_NAME = "preparation-terminal-measurement.json"
 _FREEZE_NAME = "owner-freeze.json"
+_REQUEST_NAME = "qualification-request.json"
 _MAX_JSON_BYTES = 256 * 1024
 _TEMP_SUFFIX = ".tmp"
 _ARTIFACT_NAMES = frozenset(
@@ -69,6 +70,7 @@ _ARTIFACT_NAMES = frozenset(
         _BUNDLE_NAME,
         _MEASUREMENT_NAME,
         _FREEZE_NAME,
+        _REQUEST_NAME,
     }
 )
 
