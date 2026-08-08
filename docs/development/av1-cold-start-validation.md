@@ -2822,3 +2822,37 @@ confirmation, reports only public artifact identities and non-authorizing
 state, and never prints private artifact paths. Implementation tests use only
 temporary custody and do not create a real plan, preflight, grant, media read,
 execution record, evidence record, publication, activation, or dogfood state.
+
+## Manifest revision 3 — per-ordinal execution authority
+
+`mediaforce/tuning/av1_validation_v4r3_execution_grant.py` defines the pure
+owner execution-grant contract for exactly one frozen ordinal. The grant binds
+the canonical plan/preflight pair, request/freeze/preparation/config/key/
+toolchain/runtime identities, the sequencing-only ordinal grant, and that
+ordinal's closure and invocation digest. Only `media_read_authorized`,
+`qualification_execution_authorized`, and `runtime_execution_authorized` become
+true; every retry, derivation, evidence, publication, activation, and dogfood
+authority remains false. Grant validity is contained by the enclosing
+manifest, request, preflight, plan, and sequencing windows.
+
+`mediaforce/tuning/av1_validation_v4r3_runner_admission.py` defines two later
+pure records. The execution claim declares intent to consume the exact
+execution and sequencing grants without granting additional authority. The
+next owner-custody operation must publish that claim exclusively by execution
+grant ID before runner activity; only that atomic publication enforces
+single-use, and the first claim remains burned after downstream failure. Runner
+admission then binds that claim to source, instance, and quality-temp HMAC
+identities plus canonical production stream-plan and stream-budget-ledger
+payload identities, the frozen size-goal and ledger closures, the frozen
+transform plan, and the production-returned ledger. The returned ledger payload
+must equal the admitted ledger payload, both identities are recomputed through
+the canonical production parsers, and the transform plan must match the
+reviewed ordinal readiness record; the original preparation invocation remains
+immutable.
+
+These modules accept mappings and canonical bytes only. They perform no path,
+filesystem, subprocess, database, network, production search, encoder, runner,
+or media activity. Runner admission uses only the canonical production
+stream-plan and ledger identity parsers; it does not resolve, search, persist,
+or execute them. No publication or custody operation exists in this slice, so
+implementation tests create no durable or actionable owner authority.
