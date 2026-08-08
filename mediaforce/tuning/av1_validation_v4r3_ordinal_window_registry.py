@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.tuning.av1_validation_v4r3_execution_preflight import (
+    AV1V4R3ExecutionPreflightError,
+    assert_av1_v4r3_ordinal_plan_preflight_pair,
+    deserialize_av1_v4r3_execution_preflight,
+    serialize_av1_v4r3_execution_preflight,
+)
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
     AV1V4R3OrdinalWindowError,
     AV1_V4R3_OW_ORDINAL_COUNT,
@@ -59,6 +65,7 @@ Clock = Callable[[], datetime]
 
 _PROCESS_LOCK = threading.RLock()
 _PLAN_NAME = "plan.json"
+_PREFLIGHT_NAME = "preflight.json"
 _TERMINAL_NAME = "terminal.json"
 _MAX_FILE_BYTES = 64 * 1024
 _TEMP_SUFFIX = ".tmp"
@@ -70,6 +77,14 @@ class AV1V4R3OrdinalWindowRegistryBinding:
 
     registry: Path
     run_registry_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AV1V4R3OrdinalWindowPairPublication:
+    plan: Mapping[str, Any]
+    preflight: Mapping[str, Any]
+    plan_created: bool
+    preflight_created: bool
 
 
 def av1_v4r3_ordinal_window_registry_hmac_id(
@@ -152,7 +167,7 @@ def publish_av1_v4r3_ordinal_window_grant(
     _assert_clock(clock)
     with _locked_registry(binding.registry) as ctx:
         ctx.assert_no_terminal()
-        plan_payload = ctx.load_or_publish_plan(binding, plan)
+        plan_payload, _preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
         if not isinstance(ordinal, int) or isinstance(ordinal, bool):
             raise AV1V4R3OrdinalWindowRegistryError(
                 "AV1 v4 r3 ordinal window grant ordinal must be an integer"
@@ -189,7 +204,7 @@ def publish_av1_v4r3_ordinal_window_claim(
     _assert_clock(clock)
     with _locked_registry(binding.registry) as ctx:
         ctx.assert_no_terminal()
-        plan_payload = ctx.load_or_publish_plan(binding, plan)
+        plan_payload, _preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
         grant_payload = ctx.load_matching_grant(plan_payload, grant)
         ordinal = int(grant_payload["ordinal"])
         ctx.assert_next_ordinal_admissible(plan_payload, ordinal, ctx.now(clock))
@@ -222,7 +237,7 @@ def publish_av1_v4r3_ordinal_window_started(
     _assert_clock(clock)
     with _locked_registry(binding.registry) as ctx:
         ctx.assert_no_terminal()
-        plan_payload = ctx.load_or_publish_plan(binding, plan)
+        plan_payload, _preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
         grant_payload = ctx.load_matching_grant(plan_payload, grant)
         ordinal = int(grant_payload["ordinal"])
         claim_payload = ctx.load_claim(ordinal)
@@ -271,7 +286,7 @@ def publish_av1_v4r3_ordinal_window_outcome(
         )
     with _locked_registry(binding.registry) as ctx:
         ctx.assert_no_terminal()
-        plan_payload = ctx.load_or_publish_plan(binding, plan)
+        plan_payload, _preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
         now = ctx.now(clock)
         started_payload = dict(started)
         ordinal = int(started_payload.get("ordinal") or 0)
@@ -322,7 +337,7 @@ def publish_av1_v4r3_ordinal_window_terminal(
 
     _assert_clock(clock)
     with _locked_registry(binding.registry) as ctx:
-        plan_payload = ctx.load_or_publish_plan(binding, plan)
+        plan_payload, _preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
         if ctx.exists(_TERMINAL_NAME):
             return ctx.load_terminal()
         ctx.now(clock)
@@ -339,6 +354,7 @@ def derive_av1_v4r3_ordinal_window_high_water(
     _assert_clock(clock)
     with _locked_registry(registry) as ctx:
         ctx.now(clock)
+        plan_payload, _preflight_payload = ctx.load_registry_plan_preflight_pair()
         if ctx.exists(_TERMINAL_NAME):
             terminal = ctx.load_terminal()
             if terminal["success_all_ordinals"] is True:
@@ -346,7 +362,6 @@ def derive_av1_v4r3_ordinal_window_high_water(
             raise AV1V4R3OrdinalWindowRegistryError(
                 "AV1 v4 r3 ordinal window terminal registry is non-comparable"
             )
-        plan_payload = ctx.load_plan()
         return ctx.derive_high_water_or_terminal(plan_payload)
 
 
@@ -548,6 +563,123 @@ class _RegistryContext:
 
     def load_plan(self) -> dict[str, Any]:
         return deserialize_av1_v4r3_ordinal_window_plan(self.read(_PLAN_NAME))
+
+    def load_preflight(self) -> dict[str, Any]:
+        try:
+            return deserialize_av1_v4r3_execution_preflight(self.read(_PREFLIGHT_NAME))
+        except AV1V4R3ExecutionPreflightError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window preflight registry artifact is invalid"
+            ) from exc
+
+    def publish_plan_preflight_pair(
+        self,
+        binding: AV1V4R3OrdinalWindowRegistryBinding,
+        plan: Mapping[str, Any],
+        preflight: Mapping[str, Any],
+    ) -> AV1V4R3OrdinalWindowPairPublication:
+        plan_payload = dict(plan)
+        preflight_payload = dict(preflight)
+        try:
+            assert_av1_v4r3_ordinal_plan_preflight_pair(
+                plan=plan_payload,
+                preflight=preflight_payload,
+            )
+        except AV1V4R3ExecutionPreflightError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window plan/preflight pair is invalid"
+            ) from exc
+        _assert_binding_matches_plan(binding, plan_payload)
+        self.assert_no_terminal()
+        plan_exists = self.exists(_PLAN_NAME)
+        preflight_exists = self.exists(_PREFLIGHT_NAME)
+        if preflight_exists and not plan_exists:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window preflight exists without its plan"
+            )
+        if plan_exists:
+            canonical_plan = self.load_plan()
+            _assert_same_record(canonical_plan, plan_payload, "plan")
+            plan_created = False
+        else:
+            self.write(
+                _PLAN_NAME,
+                serialize_av1_v4r3_ordinal_window_plan(plan_payload),
+            )
+            canonical_plan = plan_payload
+            plan_created = True
+        if preflight_exists:
+            canonical_preflight = self.load_preflight()
+            _assert_same_record(canonical_preflight, preflight_payload, "preflight")
+            preflight_created = False
+        else:
+            self.write(
+                _PREFLIGHT_NAME,
+                serialize_av1_v4r3_execution_preflight(preflight_payload),
+            )
+            canonical_preflight = preflight_payload
+            preflight_created = True
+        try:
+            assert_av1_v4r3_ordinal_plan_preflight_pair(
+                plan=canonical_plan,
+                preflight=canonical_preflight,
+            )
+        except AV1V4R3ExecutionPreflightError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window registry pair is invalid"
+            ) from exc
+        return AV1V4R3OrdinalWindowPairPublication(
+            plan=canonical_plan,
+            preflight=canonical_preflight,
+            plan_created=plan_created,
+            preflight_created=preflight_created,
+        )
+
+    def load_plan_preflight_pair(
+        self,
+        binding: AV1V4R3OrdinalWindowRegistryBinding,
+        plan: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        plan_payload = dict(plan)
+        assert_av1_v4r3_ordinal_window_plan(plan_payload)
+        _assert_binding_matches_plan(binding, plan_payload)
+        if not self.exists(_PLAN_NAME) or not self.exists(_PREFLIGHT_NAME):
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window plan/preflight pair is unavailable"
+            )
+        canonical_plan = self.load_plan()
+        _assert_same_record(canonical_plan, plan_payload, "plan")
+        canonical_preflight = self.load_preflight()
+        try:
+            assert_av1_v4r3_ordinal_plan_preflight_pair(
+                plan=canonical_plan,
+                preflight=canonical_preflight,
+            )
+        except AV1V4R3ExecutionPreflightError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window registry pair is invalid"
+            ) from exc
+        return canonical_plan, canonical_preflight
+
+    def load_registry_plan_preflight_pair(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not self.exists(_PLAN_NAME) or not self.exists(_PREFLIGHT_NAME):
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window plan/preflight pair is unavailable"
+            )
+        canonical_plan = self.load_plan()
+        canonical_preflight = self.load_preflight()
+        try:
+            assert_av1_v4r3_ordinal_plan_preflight_pair(
+                plan=canonical_plan,
+                preflight=canonical_preflight,
+            )
+        except AV1V4R3ExecutionPreflightError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window registry pair is invalid"
+            ) from exc
+        return canonical_plan, canonical_preflight
 
     def load_grant(self, ordinal: int) -> dict[str, Any]:
         return deserialize_av1_v4r3_ordinal_window_grant(
@@ -844,7 +976,7 @@ def _assert_registry_filename(filename: str) -> None:
 
 
 def _is_registry_artifact_filename(filename: str) -> bool:
-    if filename in {_PLAN_NAME, _TERMINAL_NAME}:
+    if filename in {_PLAN_NAME, _PREFLIGHT_NAME, _TERMINAL_NAME}:
         return True
     return any(
         filename
