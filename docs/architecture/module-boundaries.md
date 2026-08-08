@@ -377,6 +377,17 @@ Guidance:
     and leaves production source, stream-plan, ledger, and quality-temp HMAC
     identities unresolved until private preparation; it imports no media,
     database, runtime, filesystem, or network surface and carries no authority
+  - `av1_validation_v4r3_paths.py` owns the shared string-only canonical
+    absolute-POSIX path rule used by revision-3 private identity contracts;
+    `av1_validation_v4r3_path_privacy.py` binds that rule to the approved
+    manifest's key, instance-path, and source-path HMAC domains and prefixes,
+    without exposing key bytes or granting selection/partition authority
+  - `av1_validation_v4r3_preparation_grant.py` is the pure canonical
+    single-use preparation-grant contract: it binds the approved manifest,
+    revision-3 rights identity, repository commit/tree, and a manifest-derived
+    opaque revision-3 registry token while limiting authority to path-privacy
+    key creation and non-media preparation measurements; it accepts mappings
+    and canonical bytes only and creates no key, registry, artifact, or I/O
   - `av1_validation_v4r3_ordinal_window.py` is the pure public artifact module
     for revision-3 ordinal-window plan/grant/claim/started/outcome/terminal
     records; it accepts mappings and canonical bytes only, publishes only an

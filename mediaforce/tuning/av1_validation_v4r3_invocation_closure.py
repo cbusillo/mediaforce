@@ -30,6 +30,10 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_TRAVERSAL_COUNT,
     av1_validation_v4_guided_warm_start_identities,
 )
+from mediaforce.tuning.av1_validation_v4r3_paths import (
+    AV1V4R3CanonicalPathError,
+    canonical_av1_v4r3_absolute_posix_path,
+)
 
 
 AV1_V4_R3_MANIFEST_REVISION = 3
@@ -361,7 +365,7 @@ def av1_v4_r3_quality_temp_hmac_id(
                 "manifest_revision": AV1_V4_R3_MANIFEST_REVISION,
                 "role": AV1_V4_R3_QUALITY_TEMP_ROLE,
                 "asset_id": asset_id,
-                "normalized_path": _canonical_absolute_posix_path(normalized_path),
+                "normalized_path": _canonical_quality_temp_path(normalized_path),
             },
         )[:32]
     )
@@ -684,27 +688,13 @@ def _stable_prefixed_id(prefix: str, payload: Mapping[str, Any]) -> str:
     return f"{prefix}{stable_json_hash(payload)[:32]}"
 
 
-def _canonical_absolute_posix_path(value: str) -> str:
-    if not isinstance(value, str):
-        raise AV1V4R3InvocationClosureError("Quality-temp path must be text")
-    if (
-        not value
-        or "\x00" in value
-        or "\n" in value
-        or "\r" in value
-        or not value.startswith("/")
-        or value == "/"
-        or "//" in value
-        or value.endswith("/")
-        or "/../" in value
-        or value.endswith("/..")
-        or "/./" in value
-        or value.endswith("/.")
-    ):
+def _canonical_quality_temp_path(value: str) -> str:
+    try:
+        return canonical_av1_v4r3_absolute_posix_path(value)
+    except AV1V4R3CanonicalPathError as exc:
         raise AV1V4R3InvocationClosureError(
             "AV1 v4 r3 quality-temp path must be a canonical absolute POSIX path"
-        )
-    return value
+        ) from exc
 
 
 assert_av1_v4_r3_protocol_v4_invariants()
