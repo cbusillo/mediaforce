@@ -2541,6 +2541,46 @@ reads, and media-processing subprocesses. Every v4 authority field remains
 grant file, key, registry, preparation artifact, qualification, publication,
 runtime, activation, dogfood, or execution authority.
 
+## Manifest revision 3 — owner-only preparation custody
+
+`mediaforce/tuning/av1_validation_v4r3_preparation_custody.py` defines three
+pure canonical records: the path-free private-registry marker, the durable
+single-use preparation-grant claim, and path-privacy key-custody evidence. The
+claim binds the active revision-3 grant, rights identity, owner, repository,
+manifest-derived registry token, and claim timestamp. Custody evidence binds
+that claim to the revision-3 key ID and records only the fixed 32-byte length,
+exclusive-create requirement, mode `0600`, and `key_material_serialized=false`.
+No absolute path or key material enters any canonical record, and every v4
+authority field remains `false`.
+
+`mediaforce/tuning/av1_validation_v4r3_preparation_custody_registry.py` is the
+sole I/O boundary for this custody stage. The caller supplies an absolute
+owner-owned mode-`0700` registry and repository root; the registry must be a
+canonical real directory that is neither inside the repository nor contains it.
+All state transitions run under one process-local lock and one `flock`, with
+descriptor-relative `O_NOFOLLOW` reads/writes. Marker and grant publication are
+byte-idempotent singletons. A conflicting singleton fails closed.
+
+Grant consumption publishes an exclusive mode-`0600` claim before creating the
+key. The key is exactly 32 bytes from `secrets.token_bytes`, is created with
+`O_CREAT|O_EXCL|O_NOFOLLOW`, and is never returned or serialized. Custody
+evidence is published only after file ownership, mode, link count, and size are
+verified. Any failure after claim publication removes newly created key/custody
+files but retains the claim, permanently burning the grant; there is no retry or
+resume path. Thread and process races serialize so exactly one consumer wins.
+Recognized stale temporary files are reconciled under the registry lock. A
+recognized temporary file with invalid ownership, mode, link count, or final
+inode intentionally locks the registry fail-closed for explicit owner repair
+rather than deleting ambiguous custody state.
+
+This implementation does not select or create a real owner registry, grant,
+claim, key, or custody record. Tests use isolated temporary directories only.
+A later real invocation remains owner-gated on the registry location, owner
+principal, grant window, and authorization to create durable artifacts from the
+then-current clean merged repository identity. This stage accepts no media or
+source paths and performs no subprocess, network, database, qualification,
+publication, activation, dogfood, or execution work.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure

@@ -388,6 +388,16 @@ Guidance:
     opaque revision-3 registry token while limiting authority to path-privacy
     key creation and non-media preparation measurements; it accepts mappings
     and canonical bytes only and creates no key, registry, artifact, or I/O
+  - `av1_validation_v4r3_preparation_custody.py` owns the pure path-free
+    registry marker, single-use grant claim, and path-privacy key-custody
+    evidence contracts; each is revision-scoped, canonical, private-text-free,
+    and carries every v4 authority field as false
+  - `av1_validation_v4r3_preparation_custody_registry.py` is the owner-only
+    local I/O boundary for those contracts: one private mode-`0700` registry
+    outside the repository, one process lock plus `flock`, descriptor-relative
+    mode-`0600` singleton records, claim-before-key ordering, exclusive 32-byte
+    key creation, and claim-retaining rollback on every post-claim failure;
+    tests use temporary custody only and no real owner artifacts are created
   - `av1_validation_v4r3_ordinal_window.py` is the pure public artifact module
     for revision-3 ordinal-window plan/grant/claim/started/outcome/terminal
     records; it accepts mappings and canonical bytes only, publishes only an
