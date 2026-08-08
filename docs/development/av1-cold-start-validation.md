@@ -2581,6 +2581,49 @@ then-current clean merged repository identity. This stage accepts no media or
 source paths and performs no subprocess, network, database, qualification,
 publication, activation, dogfood, or execution work.
 
+## Manifest revision 3 — prepared-unfrozen bundle
+
+`mediaforce/tuning/av1_validation_v4r3_preparation_config.py`,
+`mediaforce/tuning/av1_validation_v4r3_preparation_bundle.py`, and
+`mediaforce/tuning/av1_validation_v4r3_preparation_measurement.py` define the
+pure canonical contracts for the private effective config, path-free prepared
+bundle, and terminal preparation measurement. The config contains the raw
+owner-private source, instance, and quality-temporary paths but validates them
+as strings only: it does not stat, open, probe, or read any supplied media path.
+The prepared bundle replaces those paths with domain-separated HMAC identities
+from the existing custody key and binds all four sources, all four dedicated
+instance roles, all four quality-temporary identities, a keyed whole-config
+binding, the repository, runtime, measured toolchain, and the exact eight
+revision-3 closures in frozen order. The private config's unkeyed ID and digest
+never enter the path-free bundle or measurement, so those artifacts cannot be
+used as an offline path-confirmation oracle. Each invocation digest is
+recomputed from the keyed bindings. Production
+stream-plan and stream-budget-ledger IDs remain explicitly `null` and assigned
+to execution preflight because this non-media stage cannot honestly derive
+them.
+
+`mediaforce/tuning/av1_validation_v4r3_preparation_operation.py` is the sole
+owner-only orchestration boundary for this stage. Under the custody registry's
+existing descriptor-relative lock it validates the grant/claim/key chain,
+publishes a durable attempt marker before technical measurement, custody-reads
+the mode-`0600` key, verifies the clean repository identity, hashes the three
+declared executable files, and runs only the grant-declared bounded version
+arguments. It never runs a builder, encoder, media probe, database operation,
+network request, or media-processing subprocess. Tool binaries are hashed
+before and after probing to detect substitution.
+
+Success publishes the private config, path-free prepared bundle, and exactly
+one terminal success measurement. Any post-start failure removes only this
+stage's partial config/bundle artifacts, retains the grant claim and key
+custody, and publishes a sanitized stage-attributed terminal failure whose
+message is represented only by a SHA-256 digest. An interrupted attempt is
+reconciled to terminal failure on the next locked access. Success and failure
+both prohibit retry, resume, substitution, and backfill and keep every v4
+authority field plus `selection_or_partition_use_allowed` false. Owner freeze,
+qualification request, ordinal planning, execution preflight, media access,
+publication, activation, and dogfood remain separate later gates. No real
+registry, key, source, bundle, or measurement is used by implementation tests.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure
