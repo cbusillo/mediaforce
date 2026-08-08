@@ -403,14 +403,26 @@ Guidance:
     records; it accepts mappings and canonical bytes only, publishes only an
     opaque `run_registry_id`, validates exact revision-3 closure order from
     `build_av1_v4_r3_all_closure_payloads()`, and imports no filesystem surface
+  - `av1_validation_v4r3_execution_preflight.py` is the pure public
+    execution-readiness contract and plan/preflight pair validator; it binds the
+    semantic plan seam, exact request/repository/toolchain/closure identities,
+    deterministic ordinal windows, and unresolved runner-owned media bindings
+    while preserving every execution and media authority field as false
+  - `av1_validation_v4r3_execution_preflight_operation.py` is the sole
+    owner-only cross-registry materializer: it custody-reconstructs the retained
+    preparation/request chain under the preparation lock, releases that lock,
+    verifies the path-privacy key identity and opaque ordinal-registry HMAC, then
+    acquires the ordinal lock to build and publish the plan/preflight pair; the
+    operation never nests the registries, reads media, or grants execution
   - `av1_validation_v4r3_ordinal_window_registry.py` is the owner-only local I/O
-    boundary for those records: callers supply a private registry binding for an
-    absolute owner-only mode-`0700` directory, and every transition runs under a
-    process-local lock plus `flock` on one `O_DIRECTORY|O_NOFOLLOW` descriptor
-    with `dir_fd` custody reads/writes of owner-owned mode-`0600` single-link
-    files; registry state, not caller dictionaries, determines predecessor
-    hashes, high-water, failure/lapse/crash terminal absorption, and final
-    comparability
+    boundary for those records and the canonical `preflight.json`: callers
+    supply a private registry binding for an absolute owner-only mode-`0700`
+    directory, and every transition runs under a process-local lock plus `flock`
+    on one `O_DIRECTORY|O_NOFOLLOW` descriptor with `dir_fd` custody reads/writes
+    of owner-owned mode-`0600` single-link files; grant and every later ordinal
+    transition require the custody-valid plan/preflight pair, while registry
+    state, not caller dictionaries, determines predecessor hashes, high-water,
+    failure/lapse/crash terminal absorption, and final comparability
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

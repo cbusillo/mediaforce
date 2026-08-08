@@ -2786,3 +2786,39 @@ and a span between the 110,400-second aggregate floor and 129,600-second public
 run maximum. This contract slice performs no I/O and materializes no plan or
 preflight. Joint publication, crash-window repair, registry custody, and grant
 gating remain the dependent owner-only operation gate.
+
+## Manifest revision 3 — plan/preflight pair materialization
+
+`mediaforce/tuning/av1_validation_v4r3_execution_preflight_operation.py` is the
+single owner-only I/O boundary for publishing the matched ordinal plan and
+execution-readiness preflight. It first acquires only the preparation registry,
+custody-loads and reconstructs the retained grant/claim/key/bundle/measurement/
+freeze/request chain, verifies the exact clean reviewed repository, and reads
+the 32-byte path-privacy key only to verify its retained custody identity and
+derive the opaque ordinal-registry HMAC identity. The key and private registry
+paths never enter either canonical artifact or any public error message.
+
+The preparation lock is released before the ordinal registry is acquired; the
+locks are never nested. Under the ordinal lock, one whole-second UTC timestamp
+defines `plan_opens_at`, and `plan_closes_at` is exactly 110,400 seconds later.
+The operation builds the draft, preflight, and finalized plan entirely in
+memory, validates the bidirectional pair, then writes `plan.json` first and
+`preflight.json` second. Both are owner-owned mode-`0600` append-only registry
+artifacts. Identical reruns are byte-idempotent. A plan-only interruption is the
+sole repairable crash state and reconstructs the exact preflight from the
+persisted plan opening time; a preflight without a plan fails closed.
+
+The ordinal grant publisher and every later claim/start/outcome/terminal or
+high-water transition now custody-require the matching persisted pair. Missing
+or mismatched preflight custody is a repairable refusal and does not publish an
+absorbing terminal record. The pair itself still grants nothing: every
+execution, media-read, publication, activation, and dogfood authority remains
+false, and runtime-produced stream plan and ledger identities remain unresolved
+for a later owner execution-grant and runner-admission slice.
+
+`scripts/materialize_av1_v4r3_execution_preflight.py` exposes the operation as a
+JSON-only owner tool. It requires an exact repeated owner principal as explicit
+confirmation, reports only public artifact identities and non-authorizing
+state, and never prints private artifact paths. Implementation tests use only
+temporary custody and do not create a real plan, preflight, grant, media read,
+execution record, evidence record, publication, activation, or dogfood state.

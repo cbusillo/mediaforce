@@ -15,6 +15,9 @@ from unittest.mock import patch
 
 from mediaforce.tuning import av1_validation_v4r3_ordinal_window as pure_module
 from mediaforce.tuning.av1_validation_v4 import AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS
+from mediaforce.tuning.av1_validation_v4r3_execution_preflight import (
+    build_av1_v4r3_execution_preflight,
+)
 from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
     AV1_V4_R3_MANIFEST_REVISION,
     AV1_V4_R3_PROTOCOL_VERSION,
@@ -44,6 +47,7 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
     AV1V4R3OrdinalWindowRegistryBinding,
     AV1V4R3OrdinalWindowRegistryError,
+    _locked_registry,
     assert_av1_v4r3_ordinal_window_file_custody,
     assert_av1_v4r3_ordinal_window_registry,
     av1_v4r3_ordinal_window_registry_hmac_id,
@@ -56,6 +60,11 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
     publish_av1_v4r3_ordinal_window_started,
     publish_av1_v4r3_ordinal_window_terminal,
 )
+from mediaforce.tuning.av1_validation_v4r3_qualification_request import (
+    av1_v4r3_qualification_request_valid_until,
+    build_av1_v4r3_qualification_request,
+)
+from tests.test_av1_validation_v4r3_preparation_custody import _r3_freeze
 
 
 _OPENS = "2026-08-08T04:00:00Z"
@@ -64,8 +73,20 @@ _REQUEST_UNTIL = "2026-08-10T03:30:00Z"
 _FAKE_HEX32 = "a" * 32
 _FAKE_HEX40 = "b" * 40
 _KEY = b"k" * 32
-_REPOSITORY = {"commit": _FAKE_HEX40, "tree": _FAKE_HEX40}
-_TOOLCHAIN_ID = f"av1v4r3toolchain_{_FAKE_HEX32}"
+_FREEZE = _r3_freeze()
+_REVIEWED_REPOSITORY = dict(_FREEZE["reviewed_repository"])
+_REQUESTED_AT = "2026-08-08T03:30:00Z"
+_REQUEST = build_av1_v4r3_qualification_request(
+    owner_freeze=_FREEZE,
+    owner_principal="owner:test",
+    requested_at=_REQUESTED_AT,
+    valid_until=av1_v4r3_qualification_request_valid_until(_REQUESTED_AT),
+    requesting_repository_commit=str(_REVIEWED_REPOSITORY["commit"]),
+    requesting_repository_tree=str(_REVIEWED_REPOSITORY["tree"]),
+)
+_REPOSITORY = dict(_REQUEST["reviewed_repository"])
+_TOOLCHAIN_ID = str(_REQUEST["toolchain_id"])
+_PREFLIGHT_BY_PLAN_ID: dict[str, dict[str, object]] = {}
 
 
 def _ts(hour: int, minute: int = 0, second: int = 0) -> datetime:
@@ -93,31 +114,19 @@ def _binding(registry: Path) -> AV1V4R3OrdinalWindowRegistryBinding:
 
 
 def _closure_ids() -> list[str]:
-    return [
-        str(closure["closure_id"]) for closure in build_av1_v4_r3_all_closure_payloads()
-    ]
+    return [str(item) for item in _REQUEST["closure_ids"]]
 
 
 def _invocation_digests() -> list[dict[str, object]]:
-    return [
-        {
-            "ordinal": index,
-            "closure_id": closure_id,
-            "invocation_sha256": f"sha256:{index:064x}",
-            "r3_repository": dict(_REPOSITORY),
-            "r3_toolchain_id": _TOOLCHAIN_ID,
-        }
-        for index, closure_id in enumerate(_closure_ids(), start=1)
-    ]
+    return [dict(item) for item in _REQUEST["invocation_digests"]]
 
 
 def _make_plan(binding: AV1V4R3OrdinalWindowRegistryBinding) -> dict[str, object]:
-    return pure_module.build_av1_v4r3_ordinal_window_plan(
+    draft = build_av1_v4r3_ordinal_window_plan_draft(
         r3_manifest_id=AV1_V4R3_MANIFEST_ID,
         r3_manifest_valid_until=AV1_V4R3_MANIFEST_VALID_UNTIL,
-        r3_request_id=f"av1v4r3req_{_FAKE_HEX32}",
+        r3_request_id=str(_REQUEST["request_id"]),
         r3_request_valid_until=_REQUEST_UNTIL,
-        r3_preflight_id=f"av1v4r3preflight_{_FAKE_HEX32}",
         r3_repository=_REPOSITORY,
         r3_toolchain_id=_TOOLCHAIN_ID,
         r3_closure_ids=_closure_ids(),
@@ -126,6 +135,32 @@ def _make_plan(binding: AV1V4R3OrdinalWindowRegistryBinding) -> dict[str, object
         plan_closes_at=_CLOSES,
         run_registry_id=binding.run_registry_id,
     )
+    preflight = build_av1_v4r3_execution_preflight(
+        qualification_request=_REQUEST,
+        ordinal_window_plan_draft=draft,
+        owner_principal="owner:test",
+        preflight_repository_commit=str(_REPOSITORY["commit"]),
+        preflight_repository_tree=str(_REPOSITORY["tree"]),
+        created_at=_OPENS,
+    )
+    plan = finalize_av1_v4r3_ordinal_window_plan(
+        draft=draft,
+        r3_preflight_id=str(preflight["preflight_id"]),
+    )
+    _PREFLIGHT_BY_PLAN_ID[str(plan["plan_id"])] = preflight
+    return plan
+
+
+def _publish_pair(
+    binding: AV1V4R3OrdinalWindowRegistryBinding,
+    plan: dict[str, object],
+) -> None:
+    with _locked_registry(binding.registry) as context:
+        context.publish_plan_preflight_pair(
+            binding,
+            plan,
+            _PREFLIGHT_BY_PLAN_ID[str(plan["plan_id"])],
+        )
 
 
 def _publish_grant_claim_start_outcome(
@@ -135,6 +170,7 @@ def _publish_grant_claim_start_outcome(
     *,
     success: bool = True,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
+    _publish_pair(binding, plan)
     authorized = _ts(7) + timedelta(minutes=ordinal * 10)
     grant = publish_av1_v4r3_ordinal_window_grant(
         binding=binding,
@@ -404,6 +440,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             grant = publish_av1_v4r3_ordinal_window_grant(
                 binding=binding,
                 plan=plan,
@@ -424,6 +461,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             grant = publish_av1_v4r3_ordinal_window_grant(
                 binding=binding,
                 plan=plan,
@@ -505,6 +543,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             grant = publish_av1_v4r3_ordinal_window_grant(
                 binding=binding,
                 plan=plan,
@@ -549,6 +588,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             grant = publish_av1_v4r3_ordinal_window_grant(
                 binding=binding,
                 plan=plan,
@@ -606,6 +646,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             grant = publish_av1_v4r3_ordinal_window_grant(
                 binding=binding,
                 plan=plan,
@@ -664,6 +705,7 @@ class ConcurrencyTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             grant = publish_av1_v4r3_ordinal_window_grant(
                 binding=binding,
                 plan=plan,
@@ -700,6 +742,7 @@ class ConcurrencyTests(unittest.TestCase):
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
+            _publish_pair(binding, plan)
             ctx = get_context("spawn")
             with ctx.Pool(4) as pool:
                 results = pool.starmap(
