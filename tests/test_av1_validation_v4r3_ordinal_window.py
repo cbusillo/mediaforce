@@ -20,6 +20,10 @@ from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
     AV1_V4_R3_PROTOCOL_VERSION,
     build_av1_v4_r3_all_closure_payloads,
 )
+from mediaforce.tuning.av1_validation_v4r3_manifest import (
+    AV1_V4R3_MANIFEST_ID,
+    AV1_V4R3_MANIFEST_VALID_UNTIL,
+)
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
     AV1V4R3OrdinalWindowError,
     AV1_V4R3_OW_AGGREGATE_SECONDS_MAX,
@@ -30,7 +34,10 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
     AV1_V4R3_OW_TRAVERSAL_SECONDS_MAX,
     AV1_V4R3_OW_WINDOW_SECONDS_MAX,
     assert_av1_v4r3_ordinal_window_plan,
+    av1_v4r3_ordinal_window_plan_seam_sha256,
+    build_av1_v4r3_ordinal_window_plan_draft,
     deserialize_av1_v4r3_ordinal_window_plan,
+    finalize_av1_v4r3_ordinal_window_plan,
     serialize_av1_v4r3_ordinal_window_claim,
     serialize_av1_v4r3_ordinal_window_plan,
 )
@@ -51,10 +58,9 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
 )
 
 
-_OPENS = "2026-08-07T06:00:00Z"
-_CLOSES = "2026-08-08T12:00:00Z"
-_MANIFEST_UNTIL = "2027-02-02T18:53:35Z"
-_REQUEST_UNTIL = "2027-01-01T00:00:00Z"
+_OPENS = "2026-08-08T04:00:00Z"
+_CLOSES = "2026-08-09T10:40:00Z"
+_REQUEST_UNTIL = "2026-08-10T03:30:00Z"
 _FAKE_HEX32 = "a" * 32
 _FAKE_HEX40 = "b" * 40
 _KEY = b"k" * 32
@@ -63,7 +69,7 @@ _TOOLCHAIN_ID = f"av1v4r3toolchain_{_FAKE_HEX32}"
 
 
 def _ts(hour: int, minute: int = 0, second: int = 0) -> datetime:
-    return datetime(2026, 8, 7, hour, minute, second, tzinfo=UTC)
+    return datetime(2026, 8, 8, hour, minute, second, tzinfo=UTC)
 
 
 def _clock(value: datetime) -> Callable[[], datetime]:
@@ -107,8 +113,8 @@ def _invocation_digests() -> list[dict[str, object]]:
 
 def _make_plan(binding: AV1V4R3OrdinalWindowRegistryBinding) -> dict[str, object]:
     return pure_module.build_av1_v4r3_ordinal_window_plan(
-        r3_manifest_id=f"av1vmanifest4r3_{_FAKE_HEX32}",
-        r3_manifest_valid_until=_MANIFEST_UNTIL,
+        r3_manifest_id=AV1_V4R3_MANIFEST_ID,
+        r3_manifest_valid_until=AV1_V4R3_MANIFEST_VALID_UNTIL,
         r3_request_id=f"av1v4r3req_{_FAKE_HEX32}",
         r3_request_valid_until=_REQUEST_UNTIL,
         r3_preflight_id=f"av1v4r3preflight_{_FAKE_HEX32}",
@@ -174,7 +180,7 @@ def _claim_worker(
         plan=plan,
         ordinal=1,
         clock=_clock(_ts(7)),
-        valid_until="2026-08-07T10:50:00Z",
+        valid_until="2026-08-08T10:50:00Z",
     )
     try:
         publish_av1_v4r3_ordinal_window_claim(
@@ -189,6 +195,75 @@ def _claim_worker(
 
 
 class TimingAndSchemaTests(unittest.TestCase):
+    def test_plan_draft_finalize_and_seam_are_deterministic(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            draft = build_av1_v4r3_ordinal_window_plan_draft(
+                r3_manifest_id=AV1_V4R3_MANIFEST_ID,
+                r3_manifest_valid_until=AV1_V4R3_MANIFEST_VALID_UNTIL,
+                r3_request_id=f"av1v4r3req_{_FAKE_HEX32}",
+                r3_request_valid_until=_REQUEST_UNTIL,
+                r3_repository=_REPOSITORY,
+                r3_toolchain_id=_TOOLCHAIN_ID,
+                r3_closure_ids=_closure_ids(),
+                r3_invocation_digests=_invocation_digests(),
+                plan_opens_at=_OPENS,
+                plan_closes_at=_CLOSES,
+                run_registry_id=binding.run_registry_id,
+            )
+            plan = finalize_av1_v4r3_ordinal_window_plan(
+                draft=draft,
+                r3_preflight_id=f"av1v4r3preflight_{_FAKE_HEX32}",
+            )
+
+        assert_av1_v4r3_ordinal_window_plan(plan)
+        self.assertEqual(
+            av1_v4r3_ordinal_window_plan_seam_sha256(draft),
+            av1_v4r3_ordinal_window_plan_seam_sha256(plan),
+        )
+
+    def test_plan_hardening_rejects_manifest_span_and_shape_drift(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            kwargs = {
+                "r3_manifest_id": AV1_V4R3_MANIFEST_ID,
+                "r3_manifest_valid_until": AV1_V4R3_MANIFEST_VALID_UNTIL,
+                "r3_request_id": f"av1v4r3req_{_FAKE_HEX32}",
+                "r3_request_valid_until": _REQUEST_UNTIL,
+                "r3_repository": _REPOSITORY,
+                "r3_toolchain_id": _TOOLCHAIN_ID,
+                "r3_closure_ids": _closure_ids(),
+                "r3_invocation_digests": _invocation_digests(),
+                "plan_opens_at": _OPENS,
+                "plan_closes_at": _CLOSES,
+                "run_registry_id": binding.run_registry_id,
+            }
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                build_av1_v4r3_ordinal_window_plan_draft(
+                    **{**kwargs, "r3_manifest_id": f"av1vmanifest4r3_{_FAKE_HEX32}"}
+                )
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                build_av1_v4r3_ordinal_window_plan_draft(
+                    **{
+                        **kwargs,
+                        "plan_closes_at": "2026-08-09T10:39:59Z",
+                    }
+                )
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                build_av1_v4r3_ordinal_window_plan_draft(
+                    **{
+                        **kwargs,
+                        "plan_opens_at": "2026-08-08T01:26:53Z",
+                        "plan_closes_at": "2026-08-09T08:06:53Z",
+                    }
+                )
+
+            plan = _make_plan(binding)
+            missing = dict(plan)
+            missing.pop("run_registry_id")
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                assert_av1_v4r3_ordinal_window_plan(missing)
+
     def test_window_and_aggregate_constants_are_preserved(self) -> None:
         self.assertEqual(AV1_V4R3_OW_SETUP_SECONDS, 300)
         self.assertEqual(AV1_V4R3_OW_TRAVERSAL_SECONDS_MAX, 13_200)
@@ -217,8 +292,8 @@ class TimingAndSchemaTests(unittest.TestCase):
             reversed_ids = list(reversed(_closure_ids()))
             with self.assertRaises(AV1V4R3OrdinalWindowError):
                 pure_module.build_av1_v4r3_ordinal_window_plan(
-                    r3_manifest_id=f"av1vmanifest4r3_{_FAKE_HEX32}",
-                    r3_manifest_valid_until=_MANIFEST_UNTIL,
+                    r3_manifest_id=AV1_V4R3_MANIFEST_ID,
+                    r3_manifest_valid_until=AV1_V4R3_MANIFEST_VALID_UNTIL,
                     r3_request_id=f"av1v4r3req_{_FAKE_HEX32}",
                     r3_request_valid_until=_REQUEST_UNTIL,
                     r3_preflight_id=f"av1v4r3preflight_{_FAKE_HEX32}",
@@ -241,8 +316,8 @@ class TimingAndSchemaTests(unittest.TestCase):
             }
             with self.assertRaises(AV1V4R3OrdinalWindowError):
                 pure_module.build_av1_v4r3_ordinal_window_plan(
-                    r3_manifest_id=f"av1vmanifest4r3_{_FAKE_HEX32}",
-                    r3_manifest_valid_until=_MANIFEST_UNTIL,
+                    r3_manifest_id=AV1_V4R3_MANIFEST_ID,
+                    r3_manifest_valid_until=AV1_V4R3_MANIFEST_VALID_UNTIL,
                     r3_request_id=f"av1v4r3req_{_FAKE_HEX32}",
                     r3_request_valid_until=_REQUEST_UNTIL,
                     r3_preflight_id=f"av1v4r3preflight_{_FAKE_HEX32}",
@@ -334,7 +409,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 plan=plan,
                 ordinal=1,
                 clock=_clock(_ts(7)),
-                valid_until="2026-08-07T10:50:00Z",
+                valid_until="2026-08-08T10:50:00Z",
             )
             forged = {**grant, "payload_sha256": f"sha256:{'f' * 64}"}
             with self.assertRaises(AV1V4R3OrdinalWindowError):
@@ -354,7 +429,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 plan=plan,
                 ordinal=1,
                 clock=_clock(_ts(7)),
-                valid_until="2026-08-07T10:50:00Z",
+                valid_until="2026-08-08T10:50:00Z",
             )
             claim = publish_av1_v4r3_ordinal_window_claim(
                 binding=binding,
@@ -372,7 +447,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
             replacement = pure_module.build_av1_v4r3_ordinal_window_claim(
                 plan=plan,
                 grant=grant,
-                claimed_at="2026-08-07T07:06:01Z",
+                claimed_at="2026-08-08T07:06:01Z",
             )
             (binding.registry / "ordinal_01.claim.json").write_bytes(
                 serialize_av1_v4r3_ordinal_window_claim(replacement)
@@ -388,7 +463,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 )
             terminal = load_av1_v4r3_ordinal_window_registry_terminal(binding.registry)
             self.assertIsNotNone(terminal)
-            self.assertEqual(terminal["terminal_at"], "2026-08-07T07:08:00Z")
+            self.assertEqual(terminal["terminal_at"], "2026-08-08T07:08:00Z")
 
     def test_interrupted_atomic_publish_leaves_no_final_or_temp_artifact(self) -> None:
         with TemporaryDirectory() as raw:
@@ -435,7 +510,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 plan=plan,
                 ordinal=1,
                 clock=_clock(_ts(7)),
-                valid_until="2026-08-07T10:50:00Z",
+                valid_until="2026-08-08T10:50:00Z",
             )
             with self.assertRaises(AV1V4R3OrdinalWindowRegistryError):
                 publish_av1_v4r3_ordinal_window_claim(
@@ -479,7 +554,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 plan=plan,
                 ordinal=1,
                 clock=_clock(_ts(7)),
-                valid_until="2026-08-07T10:50:00Z",
+                valid_until="2026-08-08T10:50:00Z",
             )
             claim = publish_av1_v4r3_ordinal_window_claim(
                 binding=binding,
@@ -525,7 +600,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                     plan=plan,
                     ordinal=2,
                     clock=_clock(_ts(8)),
-                    valid_until="2026-08-07T11:50:00Z",
+                    valid_until="2026-08-08T11:50:00Z",
                 )
 
         with TemporaryDirectory() as raw:
@@ -536,7 +611,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 plan=plan,
                 ordinal=1,
                 clock=_clock(_ts(7)),
-                valid_until="2026-08-07T10:50:00Z",
+                valid_until="2026-08-08T10:50:00Z",
             )
             claim = publish_av1_v4r3_ordinal_window_claim(
                 binding=binding,
@@ -594,7 +669,7 @@ class ConcurrencyTests(unittest.TestCase):
                 plan=plan,
                 ordinal=1,
                 clock=_clock(_ts(7)),
-                valid_until="2026-08-07T10:50:00Z",
+                valid_until="2026-08-08T10:50:00Z",
             )
             results: list[str] = []
             barrier = threading.Barrier(8)

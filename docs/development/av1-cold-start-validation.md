@@ -2745,3 +2745,44 @@ failure outcomes, expired admission, clock rewind, and started-without-outcome
 crash states fail closed by publishing an absorbing terminal record when the
 registry can do so atomically. A successful ordinal `8` also publishes the
 success terminal, and no later admission is accepted once any terminal exists.
+
+## Manifest revision 3 — ordinal-plan/preflight seam
+
+`mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` now separates plan
+drafting from finalization. The draft contains every semantic plan field except
+the preflight reference and plan identity. Its canonical seam is the SHA-256 of
+that semantic draft. The execution preflight binds the seam, and the finalized
+plan then binds the preflight ID, producing the one-directional dependency
+`plan draft -> seam -> preflight ID -> finalized plan ID` without changing the
+manifest's required publication order.
+
+`mediaforce/tuning/av1_validation_v4r3_execution_preflight.py` defines the pure,
+path-free, key-free execution-readiness artifact. It binds the frozen manifest,
+qualification request, freeze and prepared-bundle anchors, exact repository,
+config-HMAC/key/toolchain/runtime identities, the eight ordered closure and
+invocation records, the ordinal-window timing and registry handle, and the plan
+seam. `created_at` is exactly `plan_opens_at` and participates in preflight
+identity, so a later crash-repair operation can reconstruct the same preflight
+from a persisted plan without permitting multiple payloads to share one ID.
+
+The preflight publishes eight pure ordinal-readiness records, including each
+closure's size-goal, transform-plan, and stream-ledger-closure identities. It
+does not read media or claim that runtime-produced production stream-plan and
+stream-budget-ledger IDs already exist. Those values remain `null` per asset,
+with their concrete resolution and returned-ledger verification assigned to
+runner admission under a separate future owner execution grant.
+
+Readiness is expressed as
+`execution_readiness_state=ready_pending_owner_execution_grant` with an empty
+blocker list. No literal `execution_ready=true` is introduced. The sole true
+decision field is
+`manifest_revision_3_execution_preflight_approved`; all v4 authority fields,
+selection/partition use, media-read authority, grant creation, retry, resume,
+substitution, backfill, manifest mutation, and revision-2 reuse remain `false`.
+
+The plan validator now requires the exact frozen manifest identity and validity,
+an opening time no earlier than manifest approval, an exact required key set,
+and a span between the 110,400-second aggregate floor and 129,600-second public
+run maximum. This contract slice performs no I/O and materializes no plan or
+preflight. Joint publication, crash-window repair, registry custody, and grant
+gating remain the dependent owner-only operation gate.

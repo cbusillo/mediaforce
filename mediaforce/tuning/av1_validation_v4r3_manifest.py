@@ -25,7 +25,6 @@ from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_PAYLOAD_SHA256,
     AV1_VALIDATION_V4_PROTOCOL_VERSION,
     AV1_VALIDATION_V4_SOURCE_IDS,
-    AV1_VALIDATION_V4_VALID_UNTIL,
     av1_validation_v4_contains_private_text,
 )
 from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
@@ -44,19 +43,19 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
     AV1_V4R3_OW_TRAVERSAL_SECONDS_MAX,
     AV1_V4R3_OW_WINDOW_SECONDS_MAX,
 )
+from mediaforce.tuning.av1_validation_v4r3_manifest_identity import (
+    AV1_V4R3_MANIFEST_APPROVED_AT,
+    AV1_V4R3_MANIFEST_ID,
+    AV1_V4R3_MANIFEST_PAYLOAD_SHA256,
+    AV1_V4R3_MANIFEST_VALID_UNTIL,
+)
 
 
 AV1_V4R3_MANIFEST_SCHEMA = "mediaforce.av1_cold_start_v4r3_manifest"
 AV1_V4R3_MANIFEST_SCHEMA_VERSION = 1
 AV1_V4R3_MANIFEST_STATE = "owner_approved_non_executing"
 AV1_V4R3_MANIFEST_DRAFTED_AT = "2026-08-07T23:46:50Z"
-AV1_V4R3_MANIFEST_APPROVED_AT = "2026-08-08T01:26:54Z"
 AV1_V4R3_MANIFEST_REVISED_AT = AV1_V4R3_MANIFEST_APPROVED_AT
-AV1_V4R3_MANIFEST_VALID_UNTIL = AV1_VALIDATION_V4_VALID_UNTIL
-AV1_V4R3_MANIFEST_ID = "av1vmanifest4r3_3da4b0f00de54d97b6b907ff589da9d0"
-AV1_V4R3_MANIFEST_PAYLOAD_SHA256 = (
-    "sha256:d1d90a475a3b720a7c3f69177db649401eab0de593bac543c688c9afdf052e91"
-)
 AV1_V4R3_MANIFEST_IDENTITY_DOMAIN = (
     "mediaforce:av1:protocol:4:revision:3:manifest:identity:v1"
 )

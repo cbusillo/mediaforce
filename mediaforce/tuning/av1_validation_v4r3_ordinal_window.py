@@ -18,6 +18,11 @@ from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
     AV1_V4_R3_PROTOCOL_VERSION,
     build_av1_v4_r3_all_closure_payloads,
 )
+from mediaforce.tuning.av1_validation_v4r3_manifest_identity import (
+    AV1_V4R3_MANIFEST_APPROVED_AT,
+    AV1_V4R3_MANIFEST_ID,
+    AV1_V4R3_MANIFEST_VALID_UNTIL,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +128,11 @@ _PLAN_ALLOWED_KEYS = (
     )
     | AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS
 )
+_PLAN_DRAFT_ALLOWED_KEYS = _PLAN_ALLOWED_KEYS - {
+    "plan_id",
+    "payload_sha256",
+    "r3_preflight_id",
+}
 
 _GRANT_ALLOWED_KEYS = (
     frozenset(
@@ -410,6 +420,39 @@ def build_av1_v4r3_ordinal_window_plan(
     plan_closes_at: str,
     run_registry_id: str,
 ) -> dict[str, Any]:
+    draft = build_av1_v4r3_ordinal_window_plan_draft(
+        r3_manifest_id=r3_manifest_id,
+        r3_manifest_valid_until=r3_manifest_valid_until,
+        r3_request_id=r3_request_id,
+        r3_request_valid_until=r3_request_valid_until,
+        r3_repository=r3_repository,
+        r3_toolchain_id=r3_toolchain_id,
+        r3_closure_ids=r3_closure_ids,
+        r3_invocation_digests=r3_invocation_digests,
+        plan_opens_at=plan_opens_at,
+        plan_closes_at=plan_closes_at,
+        run_registry_id=run_registry_id,
+    )
+    return finalize_av1_v4r3_ordinal_window_plan(
+        draft=draft,
+        r3_preflight_id=r3_preflight_id,
+    )
+
+
+def build_av1_v4r3_ordinal_window_plan_draft(
+    *,
+    r3_manifest_id: str,
+    r3_manifest_valid_until: str,
+    r3_request_id: str,
+    r3_request_valid_until: str,
+    r3_repository: Mapping[str, Any],
+    r3_toolchain_id: str,
+    r3_closure_ids: list[str],
+    r3_invocation_digests: list[Mapping[str, Any]],
+    plan_opens_at: str,
+    plan_closes_at: str,
+    run_registry_id: str,
+) -> dict[str, Any]:
     opens = _parse_timestamp(plan_opens_at, "plan_opens_at")
     closes = _parse_timestamp(plan_closes_at, "plan_closes_at")
     manifest_until = _parse_timestamp(
@@ -421,9 +464,20 @@ def build_av1_v4r3_ordinal_window_plan(
             "AV1 v4 r3 ordinal window plan opens_at must be before closes_at"
         )
     span_seconds = int((closes - opens).total_seconds())
-    if span_seconds > AV1_V4R3_OW_PUBLIC_RUN_SECONDS_MAX:
+    if not (
+        AV1_V4R3_OW_AGGREGATE_SECONDS_MAX
+        <= span_seconds
+        <= AV1_V4R3_OW_PUBLIC_RUN_SECONDS_MAX
+    ):
         raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan span exceeds the public run maximum"
+            "AV1 v4 r3 ordinal window plan span is outside the public run bounds"
+        )
+    manifest_approved = _parse_timestamp(
+        AV1_V4R3_MANIFEST_APPROVED_AT, "manifest_approved_at"
+    )
+    if opens < manifest_approved:
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window plan opens before manifest approval"
         )
     if closes >= manifest_until:
         raise AV1V4R3OrdinalWindowError(
@@ -443,7 +497,6 @@ def build_av1_v4r3_ordinal_window_plan(
         "r3_manifest_valid_until": r3_manifest_valid_until,
         "r3_request_id": r3_request_id,
         "r3_request_valid_until": r3_request_valid_until,
-        "r3_preflight_id": r3_preflight_id,
         "r3_repository": dict(object_dict(r3_repository)),
         "r3_toolchain_id": r3_toolchain_id,
         "r3_closure_ids": list(r3_closure_ids),
@@ -456,21 +509,18 @@ def build_av1_v4r3_ordinal_window_plan(
         "run_registry_id": run_registry_id,
     }
     payload.update({field: False for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS})
-    bound = _bind_plan_identity(payload)
-    assert_av1_v4r3_ordinal_window_plan(bound)
-    return bound
+    materialized = json.loads(canonical_json_bytes(payload))
+    assert_av1_v4r3_ordinal_window_plan_draft(materialized)
+    return materialized
 
 
-def assert_av1_v4r3_ordinal_window_plan(payload: Mapping[str, Any]) -> None:
+def assert_av1_v4r3_ordinal_window_plan_draft(
+    payload: Mapping[str, Any],
+) -> None:
     materialized = object_dict(payload)
-    if not materialized:
+    if set(materialized) != _PLAN_DRAFT_ALLOWED_KEYS:
         raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan payload is invalid"
-        )
-    unknown = set(materialized) - _PLAN_ALLOWED_KEYS
-    if unknown:
-        raise AV1V4R3OrdinalWindowError(
-            f"AV1 v4 r3 ordinal window plan contains unknown fields: {sorted(unknown)}"
+            "AV1 v4 r3 ordinal window plan draft shape is invalid"
         )
     _assert_no_private_text(materialized)
     expected = {
@@ -479,29 +529,33 @@ def assert_av1_v4r3_ordinal_window_plan(payload: Mapping[str, Any]) -> None:
         "contract_version": AV1_V4R3_OW_PLAN_CONTRACT_VERSION,
         "protocol_version": AV1_V4_R3_PROTOCOL_VERSION,
         "manifest_revision": AV1_V4_R3_MANIFEST_REVISION,
+        "r3_manifest_id": AV1_V4R3_MANIFEST_ID,
+        "r3_manifest_valid_until": AV1_V4R3_MANIFEST_VALID_UNTIL,
     }
-    if any(materialized.get(k) != v for k, v in expected.items()):
+    if any(materialized.get(key) != value for key, value in expected.items()):
         raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan binding is invalid"
+            "AV1 v4 r3 ordinal window plan draft binding is invalid"
+        )
+    if any(
+        type(materialized.get(field)) is not int
+        for field in (
+            "schema_version",
+            "protocol_version",
+            "manifest_revision",
+            "plan_span_seconds",
+        )
+    ):
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window plan draft scalar type is invalid"
         )
     for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
         if materialized.get(field) is not False:
             raise AV1V4R3OrdinalWindowError(
                 f"AV1 v4 r3 ordinal window plan cannot authorize {field}"
             )
-    if not _R3_MANIFEST_ID_RE.fullmatch(str(materialized.get("r3_manifest_id") or "")):
-        raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan manifest ID is invalid"
-        )
     if not _R3_REQUEST_ID_RE.fullmatch(str(materialized.get("r3_request_id") or "")):
         raise AV1V4R3OrdinalWindowError(
             "AV1 v4 r3 ordinal window plan request ID is invalid"
-        )
-    if not _R3_PREFLIGHT_ID_RE.fullmatch(
-        str(materialized.get("r3_preflight_id") or "")
-    ):
-        raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan preflight ID is invalid"
         )
     if not _R3_TOOLCHAIN_ID_RE.fullmatch(
         str(materialized.get("r3_toolchain_id") or "")
@@ -510,9 +564,7 @@ def assert_av1_v4r3_ordinal_window_plan(payload: Mapping[str, Any]) -> None:
             "AV1 v4 r3 ordinal window plan toolchain ID is invalid"
         )
     _assert_repository(materialized.get("r3_repository"), "r3")
-    closure_ids = [
-        str(item) for item in object_list(materialized.get("r3_closure_ids"))
-    ]
+    closure_ids = object_list(materialized.get("r3_closure_ids"))
     _assert_r3_closures(closure_ids)
     _assert_r3_invocation_digests(
         materialized.get("r3_invocation_digests"),
@@ -523,20 +575,27 @@ def assert_av1_v4r3_ordinal_window_plan(payload: Mapping[str, Any]) -> None:
     _assert_run_registry_id(materialized.get("run_registry_id"))
     opens = _parse_timestamp(materialized.get("plan_opens_at"), "plan_opens_at")
     closes = _parse_timestamp(materialized.get("plan_closes_at"), "plan_closes_at")
-    manifest_until = _parse_timestamp(
-        materialized.get("r3_manifest_valid_until"), "r3_manifest_valid_until"
-    )
     request_until = _parse_timestamp(
         materialized.get("r3_request_valid_until"), "r3_request_valid_until"
     )
-    if opens >= closes:
+    manifest_approved = _parse_timestamp(
+        AV1_V4R3_MANIFEST_APPROVED_AT, "manifest_approved_at"
+    )
+    manifest_until = _parse_timestamp(
+        AV1_V4R3_MANIFEST_VALID_UNTIL, "manifest_valid_until"
+    )
+    if not (manifest_approved <= opens < closes):
         raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan opens_at must be before closes_at"
+            "AV1 v4 r3 ordinal window plan draft timeline is invalid"
         )
     span_seconds = int((closes - opens).total_seconds())
-    if span_seconds > AV1_V4R3_OW_PUBLIC_RUN_SECONDS_MAX:
+    if not (
+        AV1_V4R3_OW_AGGREGATE_SECONDS_MAX
+        <= span_seconds
+        <= AV1_V4R3_OW_PUBLIC_RUN_SECONDS_MAX
+    ):
         raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window plan span exceeds the public run maximum"
+            "AV1 v4 r3 ordinal window plan span is outside the public run bounds"
         )
     if materialized.get("plan_span_seconds") != span_seconds:
         raise AV1V4R3OrdinalWindowError(
@@ -549,6 +608,62 @@ def assert_av1_v4r3_ordinal_window_plan(payload: Mapping[str, Any]) -> None:
     if closes >= request_until:
         raise AV1V4R3OrdinalWindowError(
             "AV1 v4 r3 ordinal window plan closes_at must be before request valid_until"
+        )
+
+
+def av1_v4r3_ordinal_window_plan_seam_sha256(
+    payload: Mapping[str, Any],
+) -> str:
+    materialized = object_dict(payload)
+    if set(materialized) == _PLAN_ALLOWED_KEYS:
+        assert_av1_v4r3_ordinal_window_plan(materialized)
+    elif set(materialized) == _PLAN_DRAFT_ALLOWED_KEYS:
+        assert_av1_v4r3_ordinal_window_plan_draft(materialized)
+    else:
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window plan seam payload shape is invalid"
+        )
+    semantic = {
+        key: value
+        for key, value in materialized.items()
+        if key not in {"r3_preflight_id", "plan_id", "payload_sha256"}
+    }
+    return f"sha256:{stable_json_hash(semantic)}"
+
+
+def finalize_av1_v4r3_ordinal_window_plan(
+    *, draft: Mapping[str, Any], r3_preflight_id: str
+) -> dict[str, Any]:
+    materialized = object_dict(draft)
+    assert_av1_v4r3_ordinal_window_plan_draft(materialized)
+    if not _R3_PREFLIGHT_ID_RE.fullmatch(r3_preflight_id):
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window plan preflight ID is invalid"
+        )
+    payload = dict(materialized)
+    payload["r3_preflight_id"] = r3_preflight_id
+    bound = _bind_plan_identity(payload)
+    assert_av1_v4r3_ordinal_window_plan(bound)
+    return bound
+
+
+def assert_av1_v4r3_ordinal_window_plan(payload: Mapping[str, Any]) -> None:
+    materialized = object_dict(payload)
+    if set(materialized) != _PLAN_ALLOWED_KEYS:
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window plan shape is invalid"
+        )
+    draft = {
+        key: value
+        for key, value in materialized.items()
+        if key not in {"r3_preflight_id", "plan_id", "payload_sha256"}
+    }
+    assert_av1_v4r3_ordinal_window_plan_draft(draft)
+    if not _R3_PREFLIGHT_ID_RE.fullmatch(
+        str(materialized.get("r3_preflight_id") or "")
+    ):
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window plan preflight ID is invalid"
         )
     plan_id = str(materialized.get("plan_id") or "")
     if not _PLAN_ID_RE.fullmatch(plan_id):
