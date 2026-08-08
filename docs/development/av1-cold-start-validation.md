@@ -2568,6 +2568,10 @@ evidence is published only after file ownership, mode, link count, and size are
 verified. Any failure after claim publication removes newly created key/custody
 files but retains the claim, permanently burning the grant; there is no retry or
 resume path. Thread and process races serialize so exactly one consumer wins.
+Recognized stale temporary files are reconciled under the registry lock. A
+recognized temporary file with invalid ownership, mode, link count, or final
+inode intentionally locks the registry fail-closed for explicit owner repair
+rather than deleting ambiguous custody state.
 
 This implementation does not select or create a real owner registry, grant,
 claim, key, or custody record. Tests use isolated temporary directories only.

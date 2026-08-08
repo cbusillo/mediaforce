@@ -263,7 +263,12 @@ def load_av1_v4r3_preparation_claim(
     with _locked_registry(binding) as context:
         if not context.exists(_CLAIM_NAME):
             return None
-        return deserialize_av1_v4r3_preparation_claim(context.read(_CLAIM_NAME))
+        try:
+            return deserialize_av1_v4r3_preparation_claim(context.read(_CLAIM_NAME))
+        except AV1V4R3PreparationCustodyError as exc:
+            raise AV1V4R3PreparationCustodyRegistryError(
+                "AV1 v4 r3 preparation claim registry artifact is invalid"
+            ) from exc
 
 
 def load_av1_v4r3_path_privacy_key_custody(
@@ -272,9 +277,14 @@ def load_av1_v4r3_path_privacy_key_custody(
     with _locked_registry(binding) as context:
         if not context.exists(_CUSTODY_NAME):
             return None
-        return deserialize_av1_v4r3_path_privacy_key_custody(
-            context.read(_CUSTODY_NAME)
-        )
+        try:
+            return deserialize_av1_v4r3_path_privacy_key_custody(
+                context.read(_CUSTODY_NAME)
+            )
+        except AV1V4R3PreparationCustodyError as exc:
+            raise AV1V4R3PreparationCustodyRegistryError(
+                "AV1 v4 r3 key custody registry artifact is invalid"
+            ) from exc
 
 
 @dataclass(slots=True)
@@ -493,12 +503,12 @@ class _RegistryContext:
             )
 
     def unlink_owned(self, filename: str, errors: list[OSError]) -> None:
+        if not self.exists(filename):
+            return
         try:
             self.assert_file_custody(filename)
             os.unlink(filename, dir_fd=self.dir_fd)
             os.fsync(self.dir_fd)
-        except FileNotFoundError:
-            return
         except OSError as exc:
             errors.append(exc)
         except AV1V4R3PreparationCustodyRegistryError as exc:

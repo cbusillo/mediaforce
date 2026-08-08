@@ -340,10 +340,16 @@ def assert_av1_v4r3_path_privacy_key_custody(
         "consumption_registry_token": (AV1_V4R3_PREPARATION_CONSUMPTION_REGISTRY_TOKEN),
         "key_bytes_length": 32,
         "key_file_mode": "0600",
-        "key_file_create_exclusive": True,
-        "key_material_serialized": False,
     }
     if any(materialized.get(key) != value for key, value in expected.items()):
+        raise AV1V4R3PreparationCustodyError(
+            "AV1 v4 r3 path-privacy key custody binding is invalid"
+        )
+    if (
+        type(materialized.get("key_bytes_length")) is not int
+        or materialized.get("key_file_create_exclusive") is not True
+        or materialized.get("key_material_serialized") is not False
+    ):
         raise AV1V4R3PreparationCustodyError(
             "AV1 v4 r3 path-privacy key custody binding is invalid"
         )
@@ -451,6 +457,11 @@ def _assert_base(
         raise AV1V4R3PreparationCustodyError(
             "AV1 v4 r3 preparation custody base binding is invalid"
         )
+    for field in ("schema_version", "protocol_version", "manifest_revision"):
+        if type(payload.get(field)) is not int:
+            raise AV1V4R3PreparationCustodyError(
+                "AV1 v4 r3 preparation custody base binding is invalid"
+            )
     for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
         if payload.get(field) is not False:
             raise AV1V4R3PreparationCustodyError(

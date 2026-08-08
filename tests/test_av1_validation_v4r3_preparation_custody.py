@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import copy
 import os
 import threading
 import unittest
@@ -133,7 +132,7 @@ class AV1V4R3PreparationCustodyContractTests(unittest.TestCase):
                 data = serializer(payload)
                 self.assertEqual(deserializer(data), payload)
                 self.assertNotIn(b"/Volumes/", data)
-                self.assertNotIn(b"path_privacy.key", data)
+                self.assertNotIn(b"path-privacy.key", data)
                 for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
                     self.assertIs(payload[field], False)
                 with self.assertRaises(AV1V4R3PreparationCustodyError):
@@ -178,6 +177,12 @@ class AV1V4R3PreparationCustodyContractTests(unittest.TestCase):
         custody = _custody()
         custody["runtime_execution_authorized"] = True
         cases.append((custody, assert_av1_v4r3_path_privacy_key_custody))
+        numeric_boolean = _custody()
+        numeric_boolean["key_material_serialized"] = 0
+        cases.append((numeric_boolean, assert_av1_v4r3_path_privacy_key_custody))
+        boolean_version = _claim()
+        boolean_version["schema_version"] = True
+        cases.append((boolean_version, assert_av1_v4r3_preparation_claim))
         unknown = _custody()
         unknown["key_material"] = "secret"
         cases.append((unknown, assert_av1_v4r3_path_privacy_key_custody))
@@ -267,6 +272,9 @@ class AV1V4R3PreparationCustodyRegistryTests(unittest.TestCase):
                 load_av1_v4r3_path_privacy_key_custody(binding),
                 result.key_custody,
             )
+            assert_av1_v4r3_preparation_custody_file(
+                binding, "path-privacy-key-custody.json"
+            )
             for payload in (result.claim, result.key_custody):
                 self.assertNotIn(str(binding.registry), repr(payload))
                 self.assertFalse(_contains_bytes(payload))
@@ -280,6 +288,10 @@ class AV1V4R3PreparationCustodyRegistryTests(unittest.TestCase):
                     rights_attestation=_rights(),
                     clock=_clock(3, 11),
                 )
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "already consumed its grant"
+            ):
+                _publish(binding)
 
     def test_post_claim_failure_removes_key_and_permanently_burns_grant(self) -> None:
         with TemporaryDirectory() as raw:
