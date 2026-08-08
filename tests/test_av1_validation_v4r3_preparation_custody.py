@@ -6,14 +6,30 @@ import subprocess
 import threading
 import unittest
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from multiprocessing import get_all_start_methods, get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
-from mediaforce.core.evidence import stable_json_hash
+from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
+from mediaforce.tuning import av1_validation_v4r3_freeze as freeze_module
+from mediaforce.tuning import (
+    av1_validation_v4r3_freeze_operation as freeze_operation_module,
+)
+from mediaforce.tuning.av1_validation_v4r3_freeze import (
+    AV1V4R3FreezeError,
+    AV1_V4R3_FREEZE_APPROVAL_FIELD,
+    build_av1_v4r3_owner_freeze,
+    deserialize_av1_v4r3_owner_freeze,
+    serialize_av1_v4r3_owner_freeze,
+)
+from mediaforce.tuning.av1_validation_v4r3_freeze_operation import (
+    AV1V4R3FreezeOperationError,
+    load_av1_v4r3_owner_freeze,
+    materialize_av1_v4r3_owner_freeze,
+)
 from mediaforce.tuning import av1_validation_v4r3_preparation_custody as pure_module
 from mediaforce.tuning import (
     av1_validation_v4r3_preparation_custody_registry as registry_module,
@@ -1209,6 +1225,511 @@ class AV1V4R3PreparationBundleOperationTests(unittest.TestCase):
                 operation_module._measure_clean_repository(repository)
 
 
+class AV1V4R3FreezeContractTests(unittest.TestCase):
+    def test_freeze_round_trips_without_paths_or_downstream_authority(self) -> None:
+        freeze = _r3_freeze()
+        data = serialize_av1_v4r3_owner_freeze(freeze)
+        self.assertEqual(deserialize_av1_v4r3_owner_freeze(data), freeze)
+        self.assertIs(freeze[AV1_V4R3_FREEZE_APPROVAL_FIELD], True)
+        self.assertEqual(len(freeze["invocation_digests"]), 8)
+        self.assertEqual(
+            freeze["effective_config_hmac_id"],
+            _r3_bundle(_r3_config())["effective_config_hmac_id"],
+        )
+        for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
+            self.assertIs(freeze[field], False)
+        for private_root in (
+            b"/private/media",
+            b"/private/runtime",
+            b"/private/state",
+            b"/private/temp",
+        ):
+            self.assertNotIn(private_root, data)
+        with self.assertRaises(AV1V4R3FreezeError):
+            deserialize_av1_v4r3_owner_freeze(data.rstrip(b"\n"))
+
+    def test_freeze_rejects_terminal_failure_and_owner_mismatch(self) -> None:
+        failure = build_av1_v4r3_preparation_failure_measurement(
+            preparation_grant=_grant(),
+            preparation_claim=_claim(),
+            key_custody=_custody(),
+            started_at="2026-08-08T03:10:02Z",
+            completed_at="2026-08-08T03:10:03Z",
+            stages_completed=("validate_custody_chain", "start_terminal_attempt"),
+            probes=(),
+            failure_stage="read_path_privacy_key",
+            error_class="RuntimeError",
+            error_code="stage_failed",
+            message_sha256="sha256:" + "a" * 64,
+        )
+        with self.assertRaises(AV1V4R3FreezeError):
+            _build_r3_freeze(measurement=failure)
+        with self.assertRaises(AV1V4R3FreezeError):
+            _build_r3_freeze(owner_principal="owner:other")
+
+    def test_freeze_rejects_decision_outside_grant_window(self) -> None:
+        with self.assertRaises(AV1V4R3FreezeError):
+            _build_r3_freeze(decided_at="2026-08-08T04:00:00Z")
+
+    def test_freeze_enforces_lag_manifest_and_chronology_boundaries(self) -> None:
+        freeze = _r3_freeze()
+        completed_at = datetime.fromisoformat(
+            str(freeze["measurement_completed_at"]).replace("Z", "+00:00")
+        )
+        extended_grant = (completed_at + timedelta(days=3)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        at_lag_limit = dict(freeze)
+        at_lag_limit["preparation_grant_valid_until"] = extended_grant
+        at_lag_limit["decided_at"] = (
+            completed_at + timedelta(seconds=86_400)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(at_lag_limit))
+
+        past_lag_limit = dict(at_lag_limit)
+        past_lag_limit["decided_at"] = (
+            completed_at + timedelta(seconds=86_401)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(past_lag_limit))
+
+        manifest_deadline = datetime.fromisoformat(
+            freeze_module.AV1_V4R3_MANIFEST_VALID_UNTIL.replace("Z", "+00:00")
+        )
+        at_manifest_deadline = dict(freeze)
+        at_manifest_deadline["preparation_grant_valid_until"] = (
+            manifest_deadline + timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        at_manifest_deadline["measurement_started_at"] = (
+            manifest_deadline - timedelta(minutes=2)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        at_manifest_deadline["measurement_completed_at"] = (
+            manifest_deadline - timedelta(minutes=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        at_manifest_deadline["decided_at"] = freeze_module.AV1_V4R3_MANIFEST_VALID_UNTIL
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(at_manifest_deadline))
+
+        chronology_inversion = dict(freeze)
+        chronology_inversion["decided_at"] = "2026-08-08T03:10:02Z"
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(chronology_inversion))
+
+    def test_freeze_rejects_mutated_authority_and_invocation(self) -> None:
+        freeze = _r3_freeze()
+        mutated = dict(freeze)
+        mutated["runtime_execution_authorized"] = True
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(mutated)
+        mutated = dict(freeze)
+        invocations = [dict(item) for item in freeze["invocation_digests"]]
+        invocations[0]["ordinal"] = 2
+        mutated["invocation_digests"] = invocations
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(mutated)
+
+    def test_freeze_rejects_rebound_states_and_scalar_types(self) -> None:
+        freeze = _r3_freeze()
+        mutations = (
+            ("preparation_bundle_state", "terminal_failure"),
+            ("measurement_state", "terminal_failure"),
+            ("schema_version", 1.0),
+            (freeze_module.AV1_V4R3_FREEZE_APPROVAL_FIELD, 1),
+            ("selection_or_partition_use_allowed", 0),
+        )
+        for field, value in mutations:
+            with self.subTest(field=field):
+                mutated = dict(freeze)
+                mutated[field] = value
+                with self.assertRaises(AV1V4R3FreezeError):
+                    serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(mutated))
+
+        mutated = dict(freeze)
+        mutated["freeze_scope"] = dict(freeze["freeze_scope"])
+        mutated["freeze_scope"]["retry_authorized"] = 0
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(mutated))
+
+        mutated = dict(freeze)
+        mutated["freeze_scope"] = dict(freeze["freeze_scope"])
+        mutated["freeze_scope"]["smuggled"] = False
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(mutated))
+
+        mutated = dict(freeze)
+        mutated["invocation_digests"] = [
+            dict(item) for item in freeze["invocation_digests"]
+        ]
+        mutated["invocation_digests"][0]["ordinal"] = 1.0
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(mutated))
+
+    def test_freeze_rejects_nonfinite_json_constants(self) -> None:
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                with self.assertRaises(AV1V4R3FreezeError):
+                    deserialize_av1_v4r3_owner_freeze(
+                        b'{"payload_sha256":' + constant + b"}\n"
+                    )
+
+    def test_freeze_serialization_normalizes_validation_errors(self) -> None:
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze({"invalid": object()})
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze({"invalid": float("nan")})
+
+        data = canonical_json_bytes(_r3_freeze()) + b"\n"
+        with (
+            patch.object(
+                freeze_module,
+                "assert_av1_v4r3_owner_freeze",
+                side_effect=TypeError("unexpected"),
+            ),
+            self.assertRaises(AV1V4R3FreezeError),
+        ):
+            deserialize_av1_v4r3_owner_freeze(data)
+
+    def test_freeze_rejects_rebound_invocation_smuggling(self) -> None:
+        freeze = _r3_freeze()
+        bogus_closures = dict(freeze)
+        bogus_closures["closure_ids"] = [f"bogus-{index}" for index in range(8)]
+        bogus_closures["invocation_digests"] = [
+            {
+                **invocation,
+                "closure_id": bogus_closures["closure_ids"][index],
+            }
+            for index, invocation in enumerate(freeze["invocation_digests"])
+        ]
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(bogus_closures))
+
+        smuggled = dict(freeze)
+        smuggled["invocation_digests"] = [
+            dict(item) for item in freeze["invocation_digests"]
+        ]
+        smuggled["invocation_digests"][0]["smuggled"] = True
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(smuggled))
+
+        duplicate = dict(freeze)
+        duplicate["invocation_digests"] = [
+            dict(item) for item in freeze["invocation_digests"]
+        ]
+        duplicate["invocation_digests"][1]["invocation_sha256"] = duplicate[
+            "invocation_digests"
+        ][0]["invocation_sha256"]
+        with self.assertRaises(AV1V4R3FreezeError):
+            serialize_av1_v4r3_owner_freeze(_rebind_r3_freeze(duplicate))
+
+    def test_freeze_contract_has_no_io_or_execution_imports(self) -> None:
+        tree = ast.parse(Path(freeze_module.__file__).read_text())
+        imports = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module is not None
+        } | {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        self.assertTrue(
+            {
+                "fcntl",
+                "os",
+                "pathlib",
+                "secrets",
+                "subprocess",
+                "mediaforce.execution",
+                "mediaforce.core.db",
+                "mediaforce.web",
+            }.isdisjoint(imports)
+        )
+
+    def test_freeze_scope_constant_is_immutable(self) -> None:
+        with self.assertRaises(TypeError):
+            freeze_module.AV1_V4R3_FREEZE_SCOPE["retry_authorized"] = True
+
+
+class AV1V4R3FreezeOperationTests(unittest.TestCase):
+    def test_clock_and_cohort_value_errors_use_operation_boundary(self) -> None:
+        def failing_clock() -> datetime:
+            raise RuntimeError("clock")
+
+        with TemporaryDirectory() as raw:
+            binding = _prepared_registry(Path(raw))
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "deserialize_av1_v4r3_preparation_measurement",
+                    side_effect=ValueError("invalid"),
+                ),
+                self.assertRaises(AV1V4R3FreezeOperationError),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "_measure_clean_repository",
+                    return_value=("3" * 40, "4" * 40),
+                ),
+                self.assertRaises(AV1V4R3FreezeOperationError),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=failing_clock,
+                )
+
+    def test_serialization_failure_uses_operation_boundary(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _prepared_registry(Path(raw))
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "_measure_clean_repository",
+                    return_value=("3" * 40, "4" * 40),
+                ),
+                patch.object(
+                    freeze_operation_module,
+                    "serialize_av1_v4r3_owner_freeze",
+                    side_effect=AV1V4R3FreezeError("invalid"),
+                ),
+                self.assertRaises(AV1V4R3FreezeOperationError),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+
+    def test_registry_and_freeze_custody_errors_use_operation_boundary(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _prepared_registry(root)
+            with patch.object(
+                freeze_operation_module,
+                "_measure_clean_repository",
+                return_value=("3" * 40, "4" * 40),
+            ):
+                result = materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+            result.path.chmod(0o644)
+            with self.assertRaises(AV1V4R3FreezeOperationError):
+                load_av1_v4r3_owner_freeze(binding)
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "_measure_clean_repository",
+                    return_value=("3" * 40, "4" * 40),
+                ),
+                self.assertRaises(AV1V4R3FreezeOperationError),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 21),
+                )
+            result.path.chmod(0o600)
+            binding.registry.chmod(0o755)
+            with self.assertRaises(AV1V4R3FreezeOperationError):
+                load_av1_v4r3_owner_freeze(binding)
+            binding.registry.chmod(0o700)
+
+    def test_unprepared_registry_uses_freeze_operation_error_boundary(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(Path(raw))
+            with self.assertRaisesRegex(
+                AV1V4R3FreezeOperationError, "preparation cohort is unavailable"
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+
+    def test_repository_measurement_uses_freeze_operation_error_boundary(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _prepared_registry(Path(raw))
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "_measure_clean_repository",
+                    side_effect=AV1V4R3PreparationCustodyRegistryError("dirty"),
+                ),
+                self.assertRaisesRegex(
+                    AV1V4R3FreezeOperationError,
+                    "materializer repository is invalid",
+                ),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+
+    def test_materialization_is_atomic_idempotent_and_owner_only(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _prepared_registry(root)
+            with patch.object(
+                freeze_operation_module,
+                "_measure_clean_repository",
+                return_value=("3" * 40, "4" * 40),
+            ):
+                first = materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+                second = materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 30),
+                )
+            self.assertTrue(first.created)
+            self.assertFalse(second.created)
+            self.assertEqual(first.freeze, second.freeze)
+            metadata = first.path.stat()
+            self.assertEqual(metadata.st_mode & 0o777, 0o600)
+            self.assertEqual(metadata.st_nlink, 1)
+            self.assertEqual(load_av1_v4r3_owner_freeze(binding), first.freeze)
+            self.assertTrue((binding.registry / "preparation-claim.json").exists())
+            self.assertTrue((binding.registry / "path-privacy.key").exists())
+
+    def test_conflicting_owner_or_repository_fails_closed(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _prepared_registry(root)
+            with patch.object(
+                freeze_operation_module,
+                "_measure_clean_repository",
+                return_value=("3" * 40, "4" * 40),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+                with self.assertRaises(AV1V4R3FreezeOperationError):
+                    materialize_av1_v4r3_owner_freeze(
+                        binding=binding,
+                        rights_attestation=_rights(),
+                        owner_principal="owner:other",
+                        clock=_clock(3, 21),
+                    )
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "_measure_clean_repository",
+                    return_value=("5" * 40, "6" * 40),
+                ),
+                self.assertRaisesRegex(AV1V4R3FreezeOperationError, "conflicts"),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 22),
+                )
+
+    def test_terminal_failure_preparation_cannot_be_frozen(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _binding(root)
+            _publish(binding)
+            consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            with (
+                patch.object(
+                    operation_module,
+                    "_measure_clean_repository",
+                    return_value=("1" * 40, "2" * 40),
+                ),
+                patch.object(
+                    operation_module,
+                    "_probe_tool_versions",
+                    side_effect=TimeoutError("probe failed"),
+                ),
+            ):
+                with self.assertRaises(AV1V4R3PreparationCustodyRegistryError):
+                    run_av1_v4r3_preparation_bundle(
+                        binding=binding,
+                        repository_commit="1" * 40,
+                        repository_tree="2" * 40,
+                        source_paths=_r3_source_paths(),
+                        dedicated_instance_paths=_r3_instance_paths(),
+                        quality_temp_paths=_r3_quality_temp_paths(),
+                        tool_paths=_stub_tools(root),
+                        clock=_clock(3, 11),
+                    )
+            with (
+                patch.object(
+                    freeze_operation_module,
+                    "_measure_clean_repository",
+                    return_value=("3" * 40, "4" * 40),
+                ),
+                self.assertRaises(AV1V4R3FreezeOperationError),
+            ):
+                materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+            self.assertFalse((binding.registry / "owner-freeze.json").exists())
+
+    def test_racing_materializers_create_one_freeze(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _prepared_registry(root)
+            outcomes: list[str] = []
+
+            def invoke() -> None:
+                result = materialize_av1_v4r3_owner_freeze(
+                    binding=binding,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    clock=_clock(3, 20),
+                )
+                outcomes.append("created" if result.created else "existing")
+
+            with patch.object(
+                freeze_operation_module,
+                "_measure_clean_repository",
+                return_value=("3" * 40, "4" * 40),
+            ):
+                threads = [threading.Thread(target=invoke) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertCountEqual(outcomes, ["created", "existing"])
+
+
 def _r3_source_paths() -> dict[str, str]:
     return {
         asset_id: f"/private/media/{index}.mkv"
@@ -1276,6 +1797,82 @@ def _r3_bundle(config: Mapping[str, Any]) -> dict[str, object]:
             "platform_machine": "arm64",
         },
     )
+
+
+def _r3_success_measurement() -> dict[str, object]:
+    config = _r3_config()
+    bundle = _r3_bundle(config)
+    return build_av1_v4r3_preparation_success_measurement(
+        preparation_grant=_grant(),
+        preparation_claim=_claim(),
+        key_custody=_custody(),
+        effective_config=config,
+        preparation_bundle=bundle,
+        path_privacy_key=b"k" * 32,
+        started_at="2026-08-08T03:10:02Z",
+        completed_at="2026-08-08T03:10:03Z",
+        probes=_r3_probes(),
+    )
+
+
+def _build_r3_freeze(
+    *,
+    measurement: Mapping[str, Any] | None = None,
+    owner_principal: str = "owner:test",
+    decided_at: str = "2026-08-08T03:20:00Z",
+) -> dict[str, Any]:
+    return build_av1_v4r3_owner_freeze(
+        rights_attestation=_rights(),
+        preparation_grant=_grant(),
+        preparation_claim=_claim(),
+        key_custody=_custody(),
+        preparation_bundle=_r3_bundle(_r3_config()),
+        preparation_measurement=measurement or _r3_success_measurement(),
+        owner_principal=owner_principal,
+        decided_at=decided_at,
+        materializer_repository_commit="3" * 40,
+        materializer_repository_tree="4" * 40,
+    )
+
+
+def _r3_freeze() -> dict[str, Any]:
+    return _build_r3_freeze()
+
+
+def _rebind_r3_freeze(payload: Mapping[str, Any]) -> dict[str, Any]:
+    rebound = dict(payload)
+    rebound["freeze_id"] = freeze_module._freeze_id(rebound)
+    without_sha = {
+        key: value for key, value in rebound.items() if key != "payload_sha256"
+    }
+    rebound["payload_sha256"] = "sha256:" + stable_json_hash(without_sha)
+    return rebound
+
+
+def _prepared_registry(root: Path) -> AV1V4R3PreparationCustodyRegistryBinding:
+    binding = _binding(root)
+    _publish(binding)
+    consume_av1_v4r3_preparation_grant(
+        binding=binding,
+        rights_attestation=_rights(),
+        clock=_clock(3, 10),
+    )
+    with patch.object(
+        operation_module,
+        "_measure_clean_repository",
+        return_value=("1" * 40, "2" * 40),
+    ):
+        run_av1_v4r3_preparation_bundle(
+            binding=binding,
+            repository_commit="1" * 40,
+            repository_tree="2" * 40,
+            source_paths=_r3_source_paths(),
+            dedicated_instance_paths=_r3_instance_paths(),
+            quality_temp_paths=_r3_quality_temp_paths(),
+            tool_paths=_stub_tools(root),
+            clock=_clock(3, 11),
+        )
+    return binding
 
 
 def _stub_tools(root: Path) -> dict[str, Path]:

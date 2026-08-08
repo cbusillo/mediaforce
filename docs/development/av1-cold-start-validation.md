@@ -2624,6 +2624,42 @@ qualification request, ordinal planning, execution preflight, media access,
 publication, activation, and dogfood remain separate later gates. No real
 registry, key, source, bundle, or measurement is used by implementation tests.
 
+## Manifest revision 3 — owner freeze
+
+`mediaforce/tuning/av1_validation_v4r3_freeze.py` defines the pure canonical
+owner-freeze artifact for one terminal-success preparation cohort. The artifact
+binds the revision-3 manifest and rights, preparation grant/claim/key custody,
+prepared-unfrozen bundle, keyed whole-config HMAC, reviewed repository,
+materializer repository, toolchain/runtime identities, and the exact eight
+closure/invocation records. It carries
+`manifest_revision_3_owner_freeze_approved=true` as the explicit owner decision,
+while every field in `AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS` and
+`selection_or_partition_use_allowed` remains `false`. The approval therefore
+freezes reviewed evidence but does not authorize qualification, media access,
+runtime execution, evidence creation, publication, activation, or dogfood.
+
+The owner decision must follow the successful terminal measurement, occur
+before both the preparation-grant and manifest validity deadlines, and be no
+more than 86,400 seconds after measurement completion. The freeze remains
+path-free and key-free: it carries only the keyed whole-config binding and never
+the private config ID, raw config digest, absolute paths, or key material.
+
+`mediaforce/tuning/av1_validation_v4r3_freeze_operation.py` is the sole
+owner-only materialization boundary. Under the existing private registry lock,
+it custody-loads the append-only preparation chain, verifies the then-current
+clean materializer repository, and publishes one mode-`0600` freeze singleton
+using the registry's descriptor-relative atomic writer. Identical existing
+bytes are idempotent; a changed owner, repository, evidence chain, or freeze
+payload fails closed. All predecessor grant, claim, key, config, bundle, and
+measurement artifacts remain retained.
+
+This implementation does not invoke a real owner freeze. Tests use temporary
+registries and stub non-media preparation probes only. A real freeze remains a
+separate explicit owner decision over an exact terminal-success cohort from the
+then-current clean merged repository. Qualification request, ordinal planning,
+execution preflight, media access, publication, activation, and dogfood remain
+later independent gates.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure
