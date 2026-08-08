@@ -2456,6 +2456,29 @@ protocol v4 because the experiment ID, source set, source public facts,
 qualification traversal order, target-size path intent, CRF bounds, and warm
 start semantics remain unchanged while the manifest revision advances.
 
+## Manifest revision 3 — canonical public manifest
+
+`mediaforce/tuning/av1_validation_v4r3_manifest.py` builds and validates the
+canonical revision-3 manifest without filesystem, subprocess, media, database,
+runtime, or network access. The checked-in artifact is
+`docs/validation/av1-cold-start-preregistration-v4r3.json`; it is a standalone
+revision overlay and does not rewrite the historical revision-2 manifest.
+
+The manifest binds revision 2 by its frozen manifest ID, payload digest,
+discovery digest, source order, and configuration order, but explicitly forbids
+using any revision-2 artifact as revision-3 authority. It embeds the exact
+public contract and closure order from
+`build_av1_v4_r3_all_closure_payloads()`, freezes the eight ordinal windows at
+`300 + 13_200 + 300 = 13_800` seconds each with a `110_400`-second aggregate
+under the `129_600`-second public maximum, and introduces revision-3-specific
+path-privacy domains.
+
+Every v4 authority field is `false`, `execution_ready=false`, and the state is
+`draft_unapproved`. The manifest creates no grant, key, registry, preparation,
+freeze, request, claim, preflight, runner, media read, or execution authority.
+The generic preregistration verifier can load the canonical bytes and reports
+all twenty authority fields as false.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure

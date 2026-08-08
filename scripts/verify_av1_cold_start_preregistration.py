@@ -2557,6 +2557,14 @@ from mediaforce.tuning.av1_validation_v3_qualification import (
 from mediaforce.tuning.av1_validation_v3_tier1_coverage import (
     AV1ValidationV3Tier1CoverageError,
 )
+from mediaforce.tuning.av1_validation_v4 import (
+    AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
+)
+from mediaforce.tuning.av1_validation_v4r3_manifest import (
+    AV1V4R3ManifestError,
+    AV1_V4R3_MANIFEST_SCHEMA,
+    deserialize_av1_v4r3_manifest,
+)
 from mediaforce.tuning.av1_validation_v3_tier1_compat_authorization import (
     AV1ValidationV3Tier1CompatAuthorizationError,
     AV1ValidationV3Tier1CompatRequest,
@@ -2757,6 +2765,7 @@ ValidationManifest: TypeAlias = (
     AV1ColdStartValidationManifestV1
     | AV1ValidationManifestV2
     | AV1ValidationProtocolV3
+    | dict[str, object]
 )
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _CANONICAL_PREREGISTRATION_RUNNER = (
@@ -3293,7 +3302,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_tier1_residual_probe(args)
 
         manifest = _load_manifest(args.manifest)
-        if isinstance(manifest, AV1ValidationProtocolV3):
+        is_v4r3_manifest = (
+            isinstance(manifest, dict)
+            and manifest.get("schema") == AV1_V4R3_MANIFEST_SCHEMA
+        )
+        if is_v4r3_manifest:
+            pass
+        elif isinstance(manifest, AV1ValidationProtocolV3):
             assert_preregistered_av1_validation_protocol_v3(manifest)
         elif isinstance(manifest, AV1ValidationManifestV2):
             assert_preregistered_av1_validation_manifest_v2(manifest)
@@ -3303,6 +3318,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _validation_payload(manifest)
             if args.json_output:
                 rendered_payload = json.dumps(payload, indent=2, sort_keys=True)
+            elif is_v4r3_manifest:
+                rendered_payload = (
+                    f"manifest={payload['manifest_id']} state={payload['state']} "
+                    f"closures={payload['closure_count']} execution_ready=false "
+                    "runtime_execution_authorized=false"
+                )
             elif isinstance(manifest, AV1ValidationProtocolV3):
                 rendered_payload = (
                     f"protocol={manifest.protocol_id} state={payload['state']} "
@@ -3322,6 +3343,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(rendered_payload)
             return 0
 
+        if is_v4r3_manifest:
+            raise AV1V4R3ManifestError(
+                "AV1 v4 r3 reports remain blocked until a fresh non-authorizing preflight exists"
+            )
         if isinstance(manifest, AV1ValidationProtocolV3):
             raise AV1ValidationV3Error(
                 "AV1 v3 reports remain blocked until complete independently reviewed holdout evidence exists"
@@ -7457,11 +7482,14 @@ def _print_partition_payload(payload: dict[str, object], *, json_output: bool) -
 
 
 def _load_manifest(path: Path) -> ValidationManifest:
-    payload = json.loads(path.read_bytes())
+    raw = path.read_bytes()
+    payload = json.loads(raw)
     if not isinstance(payload, dict):
         raise AV1ColdStartValidationError(
             "AV1 validation manifest must be a JSON object"
         )
+    if payload.get("schema") == AV1_V4R3_MANIFEST_SCHEMA:
+        return deserialize_av1_v4r3_manifest(raw)
     if payload.get("protocol_version") == 3:
         return load_av1_validation_protocol_v3(path)
     schema_version = payload.get("schema_version")
@@ -7475,6 +7503,23 @@ def _load_manifest(path: Path) -> ValidationManifest:
 
 
 def _validation_payload(manifest: ValidationManifest) -> dict[str, object]:
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("schema") == AV1_V4R3_MANIFEST_SCHEMA
+    ):
+        return {
+            "manifest_id": manifest["manifest_id"],
+            "schema_version": manifest["schema_version"],
+            "protocol_version": manifest["protocol_version"],
+            "manifest_revision": manifest["manifest_revision"],
+            "state": manifest["state"],
+            "execution_ready": manifest["execution_ready"],
+            "closure_count": len(cast(list[object], manifest["closure_ids"])),
+            **{
+                field: manifest[field]
+                for field in sorted(AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS)
+            },
+        }
     if isinstance(manifest, AV1ValidationProtocolV3):
         return {
             "protocol_id": manifest.protocol_id,
