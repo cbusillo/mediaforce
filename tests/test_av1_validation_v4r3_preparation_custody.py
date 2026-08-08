@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import ast
 import os
+import subprocess
 import threading
 import unittest
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from multiprocessing import get_all_start_methods, get_context
 from pathlib import Path
@@ -12,9 +13,15 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from unittest.mock import patch
 
+from mediaforce.core.evidence import stable_json_hash
 from mediaforce.tuning import av1_validation_v4r3_preparation_custody as pure_module
 from mediaforce.tuning import (
     av1_validation_v4r3_preparation_custody_registry as registry_module,
+)
+from mediaforce.tuning import av1_validation_v4r3_preparation_bundle as bundle_module
+from mediaforce.tuning import av1_validation_v4r3_preparation_config as config_module
+from mediaforce.tuning import (
+    av1_validation_v4r3_preparation_measurement as measurement_module,
 )
 from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
@@ -52,8 +59,34 @@ from mediaforce.tuning.av1_validation_v4r3_preparation_custody_registry import (
     load_av1_v4r3_preparation_claim,
     publish_av1_v4r3_preparation_grant,
 )
+from mediaforce.tuning import (
+    av1_validation_v4r3_preparation_operation as operation_module,
+)
+from mediaforce.tuning.av1_validation_v4r3_preparation_operation import (
+    AV1V4R3PreparationBundleResult,
+    run_av1_v4r3_preparation_bundle,
+)
+from mediaforce.tuning.av1_validation_v4r3_preparation_bundle import (
+    AV1V4R3PreparationBundleError,
+    build_av1_v4r3_preparation_bundle,
+    deserialize_av1_v4r3_preparation_bundle,
+    serialize_av1_v4r3_preparation_bundle,
+)
+from mediaforce.tuning.av1_validation_v4r3_preparation_config import (
+    AV1V4R3PreparationConfigError,
+    build_av1_v4r3_effective_config_snapshot,
+    deserialize_av1_v4r3_effective_config_snapshot,
+    serialize_av1_v4r3_effective_config_snapshot,
+)
 from mediaforce.tuning.av1_validation_v4r3_preparation_grant import (
     build_av1_v4r3_preparation_grant,
+)
+from mediaforce.tuning.av1_validation_v4r3_preparation_measurement import (
+    AV1V4R3PreparationMeasurementError,
+    build_av1_v4r3_preparation_failure_measurement,
+    build_av1_v4r3_preparation_success_measurement,
+    deserialize_av1_v4r3_preparation_measurement,
+    serialize_av1_v4r3_preparation_measurement,
 )
 from mediaforce.tuning.av1_validation_v4r3_rights import (
     build_av1_v4r3_rights_attestation,
@@ -698,6 +731,578 @@ def _prior_rights() -> dict[str, object]:
         attested_at="2026-08-07T05:30:00Z",
         source_claims=source_claims,
     )
+
+
+class AV1V4R3PreparationBundleContractTests(unittest.TestCase):
+    def test_private_config_bundle_and_success_measurement_round_trip(self) -> None:
+        config = _r3_config()
+        bundle = _r3_bundle(config)
+        measurement = build_av1_v4r3_preparation_success_measurement(
+            preparation_grant=_grant(),
+            preparation_claim=_claim(),
+            key_custody=_custody(),
+            effective_config=config,
+            preparation_bundle=bundle,
+            path_privacy_key=b"k" * 32,
+            started_at="2026-08-08T03:10:02Z",
+            completed_at="2026-08-08T03:10:03Z",
+            probes=_r3_probes(),
+        )
+        self.assertEqual(
+            deserialize_av1_v4r3_effective_config_snapshot(
+                serialize_av1_v4r3_effective_config_snapshot(config)
+            ),
+            config,
+        )
+        bundle_bytes = serialize_av1_v4r3_preparation_bundle(bundle)
+        self.assertEqual(deserialize_av1_v4r3_preparation_bundle(bundle_bytes), bundle)
+        self.assertEqual(
+            deserialize_av1_v4r3_preparation_measurement(
+                serialize_av1_v4r3_preparation_measurement(measurement)
+            ),
+            measurement,
+        )
+        self.assertEqual(len(bundle["invocation_digests"]), 8)
+        self.assertEqual(
+            bundle["unresolved_execution_bindings"],
+            {
+                "production_stream_plan_id": None,
+                "stream_budget_ledger_id": None,
+                "assigned_stage": "execution_preflight",
+            },
+        )
+        self.assertNotIn(b"/private/media", bundle_bytes)
+        self.assertNotIn("effective_config_id", bundle)
+        self.assertNotIn("effective_config_payload_sha256", bundle)
+        self.assertRegex(
+            str(bundle["effective_config_hmac_id"]),
+            r"av1v4r3confighmac_[0-9a-f]{32}",
+        )
+        measurement_bytes = serialize_av1_v4r3_preparation_measurement(measurement)
+        for private_root in (
+            b"/private/media",
+            b"/private/runtime",
+            b"/private/state",
+            b"/private/temp",
+        ):
+            self.assertNotIn(private_root, bundle_bytes)
+            self.assertNotIn(private_root, measurement_bytes)
+        for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
+            self.assertIs(bundle[field], False)
+            self.assertIs(measurement[field], False)
+
+    def test_effective_config_public_binding_is_keyed(self) -> None:
+        first_config = _r3_config()
+        changed_paths = _r3_source_paths()
+        changed_paths[AV1_VALIDATION_V4_SOURCE_IDS[0]] = "/private/media/changed.mkv"
+        second_config = build_av1_v4r3_effective_config_snapshot(
+            repository_commit="1" * 40,
+            repository_tree="2" * 40,
+            source_paths=changed_paths,
+            dedicated_instance_paths=_r3_instance_paths(),
+            quality_temp_paths=_r3_quality_temp_paths(),
+        )
+        first_bundle = _r3_bundle(first_config)
+        second_bundle = _r3_bundle(second_config)
+        self.assertNotEqual(
+            first_bundle["effective_config_hmac_id"],
+            second_bundle["effective_config_hmac_id"],
+        )
+        self.assertNotIn(first_config["config_id"], repr(first_bundle))
+        self.assertNotIn(first_config["payload_sha256"], repr(first_bundle))
+
+    def test_pure_contract_modules_have_no_io_or_execution_imports(self) -> None:
+        forbidden = {
+            "fcntl",
+            "os",
+            "pathlib",
+            "secrets",
+            "subprocess",
+            "mediaforce.execution",
+            "mediaforce.core.db",
+            "mediaforce.web",
+        }
+        for module in (config_module, bundle_module, measurement_module):
+            tree = ast.parse(Path(module.__file__).read_text())
+            imports = {
+                node.module
+                for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module is not None
+            } | {
+                alias.name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Import)
+                for alias in node.names
+            }
+            with self.subTest(module=module.__name__):
+                self.assertTrue(forbidden.isdisjoint(imports))
+
+    def test_config_rejects_hostile_paths_without_filesystem_access(self) -> None:
+        paths = _r3_source_paths()
+        paths[AV1_VALIDATION_V4_SOURCE_IDS[0]] = "/private/media/../escape.mkv"
+        with self.assertRaises(AV1V4R3PreparationConfigError):
+            build_av1_v4r3_effective_config_snapshot(
+                repository_commit="1" * 40,
+                repository_tree="2" * 40,
+                source_paths=paths,
+                dedicated_instance_paths=_r3_instance_paths(),
+                quality_temp_paths=_r3_quality_temp_paths(),
+            )
+
+    def test_failure_measurement_is_absorbing_and_stage_attributed(self) -> None:
+        failure = build_av1_v4r3_preparation_failure_measurement(
+            preparation_grant=_grant(),
+            preparation_claim=_claim(),
+            key_custody=_custody(),
+            started_at="2026-08-08T03:10:02Z",
+            completed_at="2026-08-08T03:10:03Z",
+            stages_completed=("validate_custody_chain", "start_terminal_attempt"),
+            probes=(),
+            failure_stage="read_path_privacy_key",
+            error_class="RuntimeError",
+            error_code="stage_failed",
+            message_sha256="sha256:" + "a" * 64,
+        )
+        self.assertEqual(failure["state"], "terminal_failure")
+        self.assertIs(failure["retry_authorized"], False)
+        self.assertIs(failure["resume_allowed"], False)
+        tampered = dict(failure)
+        tampered["resume_allowed"] = True
+        with self.assertRaises(AV1V4R3PreparationMeasurementError):
+            serialize_av1_v4r3_preparation_measurement(tampered)
+
+    def test_bundle_rejects_replaced_invocation_digest(self) -> None:
+        bundle = _r3_bundle(_r3_config())
+        tampered = dict(bundle)
+        invocations = [dict(item) for item in bundle["invocation_digests"]]
+        invocations[0]["invocation_sha256"] = "sha256:" + "f" * 64
+        tampered["invocation_digests"] = invocations
+        tampered["bundle_id"] = bundle_module._bundle_id(tampered)
+        without_sha = {
+            key: value for key, value in tampered.items() if key != "payload_sha256"
+        }
+        tampered["payload_sha256"] = "sha256:" + stable_json_hash(without_sha)
+        with self.assertRaises(AV1V4R3PreparationBundleError):
+            serialize_av1_v4r3_preparation_bundle(tampered)
+
+    def test_bundle_rejects_key_that_does_not_match_custody(self) -> None:
+        with self.assertRaises(AV1V4R3PreparationBundleError):
+            build_av1_v4r3_preparation_bundle(
+                preparation_grant=_grant(),
+                preparation_claim=_claim(),
+                key_custody=_custody(),
+                effective_config=_r3_config(),
+                path_privacy_key=b"x" * 32,
+                toolchain={
+                    str(probe["tool"]): {
+                        "binary_sha256": str(probe["binary_sha256"]),
+                        "version": str(probe["version"]),
+                    }
+                    for probe in _r3_probes()
+                },
+                runtime={
+                    "python_implementation": "CPython",
+                    "python_version": "3.13.7",
+                    "platform_system": "Darwin",
+                    "platform_machine": "arm64",
+                },
+            )
+
+    def test_new_artifacts_reject_noncanonical_bytes(self) -> None:
+        config = _r3_config()
+        bundle = _r3_bundle(config)
+        measurement = build_av1_v4r3_preparation_success_measurement(
+            preparation_grant=_grant(),
+            preparation_claim=_claim(),
+            key_custody=_custody(),
+            effective_config=config,
+            preparation_bundle=bundle,
+            path_privacy_key=b"k" * 32,
+            started_at="2026-08-08T03:10:02Z",
+            completed_at="2026-08-08T03:10:03Z",
+            probes=_r3_probes(),
+        )
+        cases = (
+            (
+                serialize_av1_v4r3_effective_config_snapshot(config),
+                deserialize_av1_v4r3_effective_config_snapshot,
+            ),
+            (
+                serialize_av1_v4r3_preparation_bundle(bundle),
+                deserialize_av1_v4r3_preparation_bundle,
+            ),
+            (
+                serialize_av1_v4r3_preparation_measurement(measurement),
+                deserialize_av1_v4r3_preparation_measurement,
+            ),
+        )
+        for data, loader in cases:
+            with self.subTest(loader=loader.__name__), self.assertRaises(ValueError):
+                loader(data.rstrip(b"\n"))
+
+
+class AV1V4R3PreparationBundleOperationTests(unittest.TestCase):
+    def test_probe_scope_must_match_the_canonical_version_argv(self) -> None:
+        grant = dict(_grant())
+        scope = dict(grant["operation_scope"])
+        scope["ffmpeg_version_probe_argv"] = ["-i", "/private/media/1.mkv"]
+        grant["operation_scope"] = scope
+        with (
+            patch.object(operation_module.subprocess, "run") as run,
+            self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "probe scope is invalid"
+            ),
+        ):
+            operation_module._probe_tool_versions(grant, {}, None, [])
+        run.assert_not_called()
+
+    def test_operation_uses_nonexistent_media_paths_and_becomes_terminal(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _binding(root)
+            _publish(binding)
+            consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            tools = _stub_tools(root)
+            with patch.object(
+                operation_module,
+                "_measure_clean_repository",
+                return_value=("1" * 40, "2" * 40),
+            ):
+                result = run_av1_v4r3_preparation_bundle(
+                    binding=binding,
+                    repository_commit="1" * 40,
+                    repository_tree="2" * 40,
+                    source_paths=_r3_source_paths(),
+                    dedicated_instance_paths=_r3_instance_paths(),
+                    quality_temp_paths=_r3_quality_temp_paths(),
+                    tool_paths=tools,
+                    clock=_clock(3, 11),
+                )
+            self.assertIsInstance(result, AV1V4R3PreparationBundleResult)
+            self.assertEqual(result.measurement["state"], "terminal_success")
+            self.assertTrue(result.artifact_paths["effective_config"].exists())
+            self.assertTrue(result.artifact_paths["preparation_bundle"].exists())
+            for path in _r3_source_paths().values():
+                self.assertFalse(Path(path).exists())
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "already terminal"
+            ):
+                run_av1_v4r3_preparation_bundle(
+                    binding=binding,
+                    repository_commit="1" * 40,
+                    repository_tree="2" * 40,
+                    source_paths=_r3_source_paths(),
+                    dedicated_instance_paths=_r3_instance_paths(),
+                    quality_temp_paths=_r3_quality_temp_paths(),
+                    tool_paths=tools,
+                    clock=_clock(3, 12),
+                )
+
+    def test_post_start_failure_retains_custody_and_blocks_retry(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _binding(root)
+            _publish(binding)
+            custody_result = consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            tools = _stub_tools(root)
+            with (
+                patch.object(
+                    operation_module,
+                    "_measure_clean_repository",
+                    return_value=("1" * 40, "2" * 40),
+                ),
+                patch.object(
+                    operation_module,
+                    "_probe_tool_versions",
+                    side_effect=TimeoutError("private path /Volumes/secret"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    AV1V4R3PreparationCustodyRegistryError, "attempt terminated"
+                ):
+                    run_av1_v4r3_preparation_bundle(
+                        binding=binding,
+                        repository_commit="1" * 40,
+                        repository_tree="2" * 40,
+                        source_paths=_r3_source_paths(),
+                        dedicated_instance_paths=_r3_instance_paths(),
+                        quality_temp_paths=_r3_quality_temp_paths(),
+                        tool_paths=tools,
+                        clock=_clock(3, 11),
+                    )
+            measurement = deserialize_av1_v4r3_preparation_measurement(
+                (
+                    binding.registry / "preparation-terminal-measurement.json"
+                ).read_bytes()
+            )
+            self.assertEqual(measurement["state"], "terminal_failure")
+            self.assertEqual(measurement["failure"]["stage"], "probe_toolchain")
+            self.assertNotIn("Volumes", repr(measurement))
+            self.assertTrue(custody_result.artifact_paths["path_privacy_key"].exists())
+            self.assertTrue(
+                custody_result.artifact_paths["path_privacy_key_custody"].exists()
+            )
+            self.assertFalse((binding.registry / "effective-config.json").exists())
+            self.assertFalse((binding.registry / "preparation-bundle.json").exists())
+
+    def test_racing_attempts_publish_one_terminal(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _binding(root)
+            _publish(binding)
+            consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            tools = _stub_tools(root)
+            outcomes: list[str] = []
+
+            def invoke() -> None:
+                try:
+                    run_av1_v4r3_preparation_bundle(
+                        binding=binding,
+                        repository_commit="1" * 40,
+                        repository_tree="2" * 40,
+                        source_paths=_r3_source_paths(),
+                        dedicated_instance_paths=_r3_instance_paths(),
+                        quality_temp_paths=_r3_quality_temp_paths(),
+                        tool_paths=tools,
+                        clock=_clock(3, 11),
+                    )
+                except AV1V4R3PreparationCustodyRegistryError:
+                    outcomes.append("rejected")
+                else:
+                    outcomes.append("created")
+
+            with patch.object(
+                operation_module,
+                "_measure_clean_repository",
+                return_value=("1" * 40, "2" * 40),
+            ):
+                threads = [threading.Thread(target=invoke) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+            self.assertCountEqual(outcomes, ["created", "rejected"])
+            self.assertTrue(
+                (binding.registry / "preparation-terminal-measurement.json").exists()
+            )
+
+    def test_binary_substitution_publishes_terminal_failure(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _binding(root)
+            _publish(binding)
+            consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            tools = _stub_tools(root)
+            tools["ab_av1"].write_text(
+                "#!/bin/sh\nprintf '%s\\n' 'ab_av1 test 1.0'\nprintf '\\n' >> \"$0\"\n"
+            )
+            tools["ab_av1"].chmod(0o700)
+            with patch.object(
+                operation_module,
+                "_measure_clean_repository",
+                return_value=("1" * 40, "2" * 40),
+            ):
+                with self.assertRaisesRegex(
+                    AV1V4R3PreparationCustodyRegistryError, "attempt terminated"
+                ):
+                    run_av1_v4r3_preparation_bundle(
+                        binding=binding,
+                        repository_commit="1" * 40,
+                        repository_tree="2" * 40,
+                        source_paths=_r3_source_paths(),
+                        dedicated_instance_paths=_r3_instance_paths(),
+                        quality_temp_paths=_r3_quality_temp_paths(),
+                        tool_paths=tools,
+                        clock=_clock(3, 11),
+                    )
+            measurement = deserialize_av1_v4r3_preparation_measurement(
+                (
+                    binding.registry / "preparation-terminal-measurement.json"
+                ).read_bytes()
+            )
+            self.assertEqual(measurement["state"], "terminal_failure")
+            self.assertEqual(measurement["failure"]["stage"], "probe_toolchain")
+
+    def test_interrupted_attempt_recovers_to_terminal_failure(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            binding = _binding(root)
+            _publish(binding)
+            custody_result = consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            with registry_module._locked_registry(binding) as context:
+                context.write_exclusive(
+                    registry_module._ATTEMPT_NAME,
+                    operation_module._attempt_bytes(
+                        grant=custody_result.grant,
+                        claim=custody_result.claim,
+                        custody=custody_result.key_custody,
+                        started_at="2026-08-08T03:10:02Z",
+                    ),
+                )
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "already started"
+            ):
+                run_av1_v4r3_preparation_bundle(
+                    binding=binding,
+                    repository_commit="1" * 40,
+                    repository_tree="2" * 40,
+                    source_paths=_r3_source_paths(),
+                    dedicated_instance_paths=_r3_instance_paths(),
+                    quality_temp_paths=_r3_quality_temp_paths(),
+                    tool_paths=_stub_tools(root),
+                    clock=_clock(3, 11),
+                )
+            measurement = deserialize_av1_v4r3_preparation_measurement(
+                (
+                    binding.registry / "preparation-terminal-measurement.json"
+                ).read_bytes()
+            )
+            self.assertEqual(measurement["state"], "terminal_failure")
+            self.assertEqual(
+                measurement["failure"]["error_code"], "interrupted_prior_attempt"
+            )
+            self.assertTrue(custody_result.artifact_paths["path_privacy_key"].exists())
+
+    def test_repository_measurement_requires_exact_clean_toplevel(self) -> None:
+        with TemporaryDirectory() as raw:
+            repository = Path(raw) / "repository"
+            repository.mkdir()
+            _git(repository, "init")
+            _git(repository, "config", "user.email", "test@example.com")
+            _git(repository, "config", "user.name", "Mediaforce Test")
+            (repository / "tracked.txt").write_text("tracked\n")
+            _git(repository, "add", "tracked.txt")
+            _git(repository, "commit", "-m", "fixture")
+            commit, tree = operation_module._measure_clean_repository(repository)
+            self.assertEqual(commit, _git(repository, "rev-parse", "HEAD"))
+            self.assertEqual(tree, _git(repository, "rev-parse", "HEAD^{tree}"))
+            nested = repository / "nested"
+            nested.mkdir()
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "clean and canonical"
+            ):
+                operation_module._measure_clean_repository(nested)
+            (repository / "untracked.txt").write_text("dirty\n")
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "clean and canonical"
+            ):
+                operation_module._measure_clean_repository(repository)
+
+
+def _r3_source_paths() -> dict[str, str]:
+    return {
+        asset_id: f"/private/media/{index}.mkv"
+        for index, asset_id in enumerate(AV1_VALIDATION_V4_SOURCE_IDS, start=1)
+    }
+
+
+def _r3_instance_paths() -> dict[str, str]:
+    return {
+        "runtime_lock": "/private/runtime/lock",
+        "source_root": "/private/media",
+        "state_root": "/private/state",
+        "temp_root": "/private/temp",
+    }
+
+
+def _r3_quality_temp_paths() -> dict[str, str]:
+    return {
+        asset_id: f"/private/temp/quality/{index}"
+        for index, asset_id in enumerate(AV1_VALIDATION_V4_SOURCE_IDS, start=1)
+    }
+
+
+def _r3_config() -> dict[str, object]:
+    return build_av1_v4r3_effective_config_snapshot(
+        repository_commit="1" * 40,
+        repository_tree="2" * 40,
+        source_paths=_r3_source_paths(),
+        dedicated_instance_paths=_r3_instance_paths(),
+        quality_temp_paths=_r3_quality_temp_paths(),
+    )
+
+
+def _r3_probes() -> list[dict[str, object]]:
+    return [
+        {
+            "tool": name,
+            "argv": ["--version"] if name == "ab_av1" else ["-version"],
+            "version": f"{name} test 1.0",
+            "binary_sha256": f"sha256:{index:064x}",
+        }
+        for index, name in enumerate(("ab_av1", "ffmpeg", "ffprobe"), start=1)
+    ]
+
+
+def _r3_bundle(config: Mapping[str, Any]) -> dict[str, object]:
+    probes = _r3_probes()
+    return build_av1_v4r3_preparation_bundle(
+        preparation_grant=_grant(),
+        preparation_claim=_claim(),
+        key_custody=_custody(),
+        effective_config=config,
+        path_privacy_key=b"k" * 32,
+        toolchain={
+            str(probe["tool"]): {
+                "binary_sha256": str(probe["binary_sha256"]),
+                "version": str(probe["version"]),
+            }
+            for probe in probes
+        },
+        runtime={
+            "python_implementation": "CPython",
+            "python_version": "3.13.7",
+            "platform_system": "Darwin",
+            "platform_machine": "arm64",
+        },
+    )
+
+
+def _stub_tools(root: Path) -> dict[str, Path]:
+    tools: dict[str, Path] = {}
+    for name in ("ab_av1", "ffmpeg", "ffprobe"):
+        path = root / name
+        path.write_text(f"#!/bin/sh\nprintf '%s\\n' '{name} test 1.0'\n")
+        path.chmod(0o700)
+        tools[name] = path
+    return tools
+
+
+def _git(repository: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["/usr/bin/git", *args],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "LANG": "C",
+            "LC_ALL": "C",
+        },
+    )
+    return result.stdout.strip()
 
 
 if __name__ == "__main__":

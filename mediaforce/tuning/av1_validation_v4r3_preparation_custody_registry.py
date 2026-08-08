@@ -50,6 +50,10 @@ _GRANT_NAME = "preparation-grant.json"
 _CLAIM_NAME = "preparation-claim.json"
 _KEY_NAME = "path-privacy.key"
 _CUSTODY_NAME = "path-privacy-key-custody.json"
+_ATTEMPT_NAME = "preparation-attempt-started.json"
+_CONFIG_NAME = "effective-config.json"
+_BUNDLE_NAME = "preparation-bundle.json"
+_MEASUREMENT_NAME = "preparation-terminal-measurement.json"
 _MAX_JSON_BYTES = 256 * 1024
 _TEMP_SUFFIX = ".tmp"
 _ARTIFACT_NAMES = frozenset(
@@ -59,6 +63,10 @@ _ARTIFACT_NAMES = frozenset(
         _CLAIM_NAME,
         _KEY_NAME,
         _CUSTODY_NAME,
+        _ATTEMPT_NAME,
+        _CONFIG_NAME,
+        _BUNDLE_NAME,
+        _MEASUREMENT_NAME,
     }
 )
 
