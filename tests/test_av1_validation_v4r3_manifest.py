@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from mediaforce.core.evidence import stable_json_hash
 from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
     AV1_VALIDATION_V4_INSTANCE_PATH_HMAC_DOMAIN,
@@ -22,12 +23,15 @@ from mediaforce.tuning import av1_validation_v4r3_manifest as manifest_module
 from mediaforce.tuning.av1_validation_v4r3_manifest import (
     AV1V4R3ManifestError,
     AV1_V4R3_INSTANCE_PATH_HMAC_DOMAIN,
+    AV1_V4R3_MANIFEST_APPROVED_AT,
+    AV1_V4R3_MANIFEST_DRAFTED_AT,
     AV1_V4R3_MANIFEST_ID,
     AV1_V4R3_MANIFEST_PAYLOAD_SHA256,
     AV1_V4R3_MANIFEST_SCHEMA,
     AV1_V4R3_PATH_PRIVACY_KEY_ID_DOMAIN,
     AV1_V4R3_SOURCE_PATH_HMAC_DOMAIN,
     assert_av1_v4r3_manifest,
+    av1_v4r3_manifest_id,
     build_av1_v4r3_manifest_payload,
     deserialize_av1_v4r3_manifest,
     serialize_av1_v4r3_manifest,
@@ -79,6 +83,7 @@ class AV1V4R3ManifestTests(unittest.TestCase):
 
     def test_manifest_is_non_authorizing_and_requires_a_fresh_chain(self) -> None:
         payload = build_av1_v4r3_manifest_payload()
+        self.assertEqual(payload["state"], "owner_approved_non_executing")
         self.assertFalse(payload["execution_ready"])
         for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS:
             self.assertIs(payload[field], False)
@@ -87,6 +92,35 @@ class AV1V4R3ManifestTests(unittest.TestCase):
         )
         self.assertFalse(
             payload["fresh_chain_requirements"]["revision_2_artifact_reuse_allowed"]
+        )
+
+    def test_owner_approval_changes_only_approval_metadata(self) -> None:
+        payload = build_av1_v4r3_manifest_payload()
+        approval = payload["approval"]
+        self.assertEqual(approval["issue"], "#362")
+        self.assertEqual(approval["approved_at"], AV1_V4R3_MANIFEST_APPROVED_AT)
+        self.assertEqual(
+            approval["source_commit"],
+            "8e1c78776f1c39e9913a0202ee53e382d240f28d",
+        )
+        self.assertEqual(
+            approval["decision_scope"], "non_executing_preparation_planning"
+        )
+        self.assertIs(approval["substantive_changes_allowed"], False)
+
+        draft_semantic = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"approval", "manifest_id", "payload_sha256"}
+        }
+        draft_semantic["state"] = "draft_unapproved"
+        draft_semantic["revised_at"] = AV1_V4R3_MANIFEST_DRAFTED_AT
+        draft_manifest_id = av1_v4r3_manifest_id(draft_semantic)
+        self.assertEqual(draft_manifest_id, approval["draft_manifest_id"])
+        draft_payload = {**draft_semantic, "manifest_id": draft_manifest_id}
+        self.assertEqual(
+            f"sha256:{stable_json_hash(draft_payload)}",
+            approval["draft_payload_sha256"],
         )
 
     def test_revision_3_domains_do_not_reuse_revision_2(self) -> None:

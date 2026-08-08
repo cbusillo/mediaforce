@@ -2474,10 +2474,13 @@ under the `129_600`-second public maximum, and introduces revision-3-specific
 path-privacy domains.
 
 Every v4 authority field is `false`, `execution_ready=false`, and the state is
-`draft_unapproved`. The manifest creates no grant, key, registry, preparation,
-freeze, request, claim, preflight, runner, media read, or execution authority.
-The generic preregistration verifier can load the canonical bytes and reports
-all twenty authority fields as false.
+`owner_approved_non_executing`. Approval issue `#362` binds the exact draft
+manifest merged at `8e1c78776f1c39e9913a0202ee53e382d240f28d`; a regression
+reconstructs that draft ID and digest from the approved payload to prove that
+only approval metadata changed. Approval creates no grant, key, registry,
+preparation, freeze, request, claim, preflight, runner, media read, or execution
+authority. The generic preregistration verifier can load the canonical bytes
+and reports all twenty authority fields as false.
 
 ## Manifest revision 3 — ordinal-window registry
 

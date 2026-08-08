@@ -48,13 +48,14 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
 
 AV1_V4R3_MANIFEST_SCHEMA = "mediaforce.av1_cold_start_v4r3_manifest"
 AV1_V4R3_MANIFEST_SCHEMA_VERSION = 1
-AV1_V4R3_MANIFEST_STATE = "draft_unapproved"
+AV1_V4R3_MANIFEST_STATE = "owner_approved_non_executing"
 AV1_V4R3_MANIFEST_DRAFTED_AT = "2026-08-07T23:46:50Z"
-AV1_V4R3_MANIFEST_REVISED_AT = AV1_V4R3_MANIFEST_DRAFTED_AT
+AV1_V4R3_MANIFEST_APPROVED_AT = "2026-08-08T01:26:54Z"
+AV1_V4R3_MANIFEST_REVISED_AT = AV1_V4R3_MANIFEST_APPROVED_AT
 AV1_V4R3_MANIFEST_VALID_UNTIL = AV1_VALIDATION_V4_VALID_UNTIL
-AV1_V4R3_MANIFEST_ID = "av1vmanifest4r3_85deed0228e73855916a0cc4d565274a"
+AV1_V4R3_MANIFEST_ID = "av1vmanifest4r3_3da4b0f00de54d97b6b907ff589da9d0"
 AV1_V4R3_MANIFEST_PAYLOAD_SHA256 = (
-    "sha256:2aade590da2f8eb4158e00c2a3fe1343b6d28fca3f726c5bb0bbd1ef789ea767"
+    "sha256:d1d90a475a3b720a7c3f69177db649401eab0de593bac543c688c9afdf052e91"
 )
 AV1_V4R3_MANIFEST_IDENTITY_DOMAIN = (
     "mediaforce:av1:protocol:4:revision:3:manifest:identity:v1"
@@ -179,6 +180,17 @@ def _manifest_semantic_payload() -> dict[str, Any]:
         "drafted_at": AV1_V4R3_MANIFEST_DRAFTED_AT,
         "revised_at": AV1_V4R3_MANIFEST_REVISED_AT,
         "valid_until": AV1_V4R3_MANIFEST_VALID_UNTIL,
+        "approval": {
+            "issue": "#362",
+            "approved_at": AV1_V4R3_MANIFEST_APPROVED_AT,
+            "decision_scope": "non_executing_preparation_planning",
+            "source_commit": "8e1c78776f1c39e9913a0202ee53e382d240f28d",
+            "draft_manifest_id": "av1vmanifest4r3_85deed0228e73855916a0cc4d565274a",
+            "draft_payload_sha256": (
+                "sha256:2aade590da2f8eb4158e00c2a3fe1343b6d28fca3f726c5bb0bbd1ef789ea767"
+            ),
+            "substantive_changes_allowed": False,
+        },
         "governance_issue": "#334",
         "implementation_issue": "#360",
         "workstream_issue": "#355",
