@@ -369,11 +369,22 @@ class AV1ValidationV4ExecutionPreflightTests(unittest.TestCase):
             registry = self._registry(root)
             inputs = self._operation_inputs(bundle, registry)
             output = io.StringIO()
+            fixed_now = lambda: datetime(2026, 8, 7, 7, 0, tzinfo=UTC)
             with (
                 mock.patch.object(
                     av1_validation_v4_execution_preflight_operation,
                     "_measure_repository_identity",
                     return_value=("b" * 40, "c" * 40),
+                ),
+                mock.patch.object(
+                    cli,
+                    "materialize_av1_validation_v4_execution_preflight",
+                    side_effect=lambda operation_inputs: (
+                        materialize_av1_validation_v4_execution_preflight(
+                            operation_inputs,
+                            now=fixed_now,
+                        )
+                    ),
                 ),
                 redirect_stdout(output),
             ):
