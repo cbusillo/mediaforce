@@ -358,6 +358,12 @@ Guidance:
     owner-only blocked revision-2 readiness artifact without qualification
     grant/claim consumption, runner callbacks, source media path probes,
     tool probes, or network access
+  - `av1_validation_v4r3_manifest.py` is the pure canonical revision-3 manifest
+    overlay: it binds the immutable revision-2 base by manifest ID and digest,
+    embeds the complete public invocation closure, freezes the eight-window
+    sequencing budget and revision-3 path-privacy domains, and keeps every v4
+    authority field false; the checked-in JSON artifact and generic verifier
+    own filesystem loading outside this module
   - `av1_validation_v4r3_invocation_closure.py` is a pure no-media module
     (protocol v4, manifest revision 3) that freezes the full checked-in
     production video policy with the revision-2 CRF override, derives per-source
