@@ -29,6 +29,7 @@ from mediaforce.tuning.av1_validation_v4r3_manifest import (
 )
 from mediaforce.tuning.av1_validation_v4r3_rights import (
     AV1V4R3RightsError,
+    AV1_V4R3_RIGHTS_REAFFIRMED_AT,
     AV1_V4R3_RIGHTS_STATE,
     assert_av1_v4r3_rights_attestation,
 )
@@ -349,6 +350,10 @@ def _assert_rights_binding(payload: Mapping[str, Any]) -> None:
         raise AV1V4R3PreparationGrantError(
             "AV1 v4 r3 preparation grant owner principal is invalid"
         )
+    if payload.get("rights_attested_at") != AV1_V4R3_RIGHTS_REAFFIRMED_AT:
+        raise AV1V4R3PreparationGrantError(
+            "AV1 v4 r3 preparation grant rights timestamp is invalid"
+        )
 
 
 def _assert_repository(payload: Mapping[str, Any]) -> None:
@@ -443,7 +448,12 @@ def _parse_timestamp(value: Any, label: str) -> datetime:
         raise AV1V4R3PreparationGrantError(
             f"AV1 v4 r3 preparation grant {label} timestamp must use canonical UTC seconds"
         )
-    return parsed.astimezone(UTC)
+    normalized = parsed.astimezone(UTC)
+    if normalized.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise AV1V4R3PreparationGrantError(
+            f"AV1 v4 r3 preparation grant {label} timestamp must use canonical UTC seconds"
+        )
+    return normalized
 
 
 def _assert_no_private_text(value: Any) -> None:

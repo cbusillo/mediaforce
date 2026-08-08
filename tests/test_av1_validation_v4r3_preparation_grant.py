@@ -70,6 +70,7 @@ class AV1V4R3PreparationGrantTests(unittest.TestCase):
 
     def test_grant_window_is_active_only_inside_bounds(self) -> None:
         grant = _grant()
+        assert_av1_v4r3_preparation_grant_active(grant, as_of="2026-08-08T03:00:00Z")
         assert_av1_v4r3_preparation_grant_active(grant, as_of="2026-08-08T03:30:00Z")
         with self.assertRaisesRegex(AV1V4R3PreparationGrantError, "not active"):
             assert_av1_v4r3_preparation_grant_active(
@@ -98,6 +99,20 @@ class AV1V4R3PreparationGrantTests(unittest.TestCase):
                 r3_rights,
                 "owner:test",
                 "2026-08-08T03:00:00.1Z",
+                "2026-08-08T04:00:00Z",
+                "canonical UTC seconds",
+            ),
+            (
+                r3_rights,
+                "owner:test",
+                "20260808T030000Z",
+                "2026-08-08T04:00:00Z",
+                "canonical UTC seconds",
+            ),
+            (
+                r3_rights,
+                "owner:test",
+                "2026-08-08T03:00:00.000000Z",
                 "2026-08-08T04:00:00Z",
                 "canonical UTC seconds",
             ),
@@ -141,6 +156,12 @@ class AV1V4R3PreparationGrantTests(unittest.TestCase):
             AV1V4R3PreparationGrantError, "consumption registry token"
         ):
             assert_av1_v4r3_preparation_grant(grant)
+        grant = _grant()
+        grant["consumption_registry_token"] = "av1v4r3prepregistry_" + "0" * 32
+        with self.assertRaisesRegex(
+            AV1V4R3PreparationGrantError, "consumption registry token"
+        ):
+            assert_av1_v4r3_preparation_grant(grant)
 
     def test_mutations_fail_closed(self) -> None:
         cases: list[tuple[dict[str, object], str]] = []
@@ -159,6 +180,12 @@ class AV1V4R3PreparationGrantTests(unittest.TestCase):
         rights = copy.deepcopy(_grant())
         rights["rights_attestation_id"] = "av1vrights4_" + "0" * 32
         cases.append((rights, "rights binding"))
+        rights_timestamp = copy.deepcopy(_grant())
+        rights_timestamp["rights_attested_at"] = "2026-08-08T02:22:21Z"
+        cases.append((rights_timestamp, "rights timestamp"))
+        manifest_expiration = copy.deepcopy(_grant())
+        manifest_expiration["valid_until"] = "2027-02-02T18:53:36Z"
+        cases.append((manifest_expiration, "timestamps are out of order"))
         private = copy.deepcopy(_grant())
         private["owner_principal"] = "/Volumes/private"
         cases.append((private, "private path-like text"))
