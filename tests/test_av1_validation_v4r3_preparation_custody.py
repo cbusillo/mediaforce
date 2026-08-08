@@ -521,6 +521,45 @@ class AV1V4R3PreparationCustodyRegistryTests(unittest.TestCase):
             self.assertFalse(orphan_temp.exists())
             self.assertEqual(grant_path.stat().st_nlink, 1)
 
+    def test_malformed_stale_temp_locks_registry_fail_closed(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(Path(raw))
+            malformed = binding.registry / (
+                ".preparation-grant.json.999.0123456789abcdef.tmp"
+            )
+            malformed.write_bytes(b"{}\n")
+            malformed.chmod(0o644)
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError, "custody is invalid"
+            ):
+                _publish(binding)
+            self.assertTrue(malformed.exists())
+
+    def test_corrupt_registry_loaders_normalize_domain_errors(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(Path(raw))
+            _publish(binding)
+            result = consume_av1_v4r3_preparation_grant(
+                binding=binding,
+                rights_attestation=_rights(),
+                clock=_clock(3, 10),
+            )
+            result.artifact_paths["preparation_claim"].write_bytes(b"\xff\n")
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError,
+                "claim registry artifact is invalid",
+            ):
+                load_av1_v4r3_preparation_claim(binding)
+            result.artifact_paths["preparation_claim"].write_bytes(
+                serialize_av1_v4r3_preparation_claim(result.claim)
+            )
+            result.artifact_paths["path_privacy_key_custody"].write_bytes(b"\xff\n")
+            with self.assertRaisesRegex(
+                AV1V4R3PreparationCustodyRegistryError,
+                "key custody registry artifact is invalid",
+            ):
+                load_av1_v4r3_path_privacy_key_custody(binding)
+
     def test_registry_must_be_disjoint_from_repository(self) -> None:
         with TemporaryDirectory() as raw:
             root = Path(raw).resolve()

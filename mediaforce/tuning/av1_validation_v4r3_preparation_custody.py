@@ -564,7 +564,7 @@ def _deserialize(
         )
     try:
         payload = json.loads(data)
-    except (json.JSONDecodeError, RecursionError) as exc:
+    except (json.JSONDecodeError, RecursionError, UnicodeDecodeError) as exc:
         raise AV1V4R3PreparationCustodyError(
             "AV1 v4 r3 preparation custody JSON is invalid"
         ) from exc
