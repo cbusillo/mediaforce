@@ -2506,6 +2506,41 @@ authority field remains `false`; the rollover itself creates no grant, key,
 preparation artifact, media read, qualification, runtime, activation, or
 dogfood authority.
 
+## Manifest revision 3 — path privacy and preparation grant
+
+`mediaforce/tuning/av1_validation_v4r3_paths.py` defines the one string-only
+canonical absolute-POSIX path rule shared by revision-3 private path identities.
+It rejects root, relative, repeated-separator, trailing-separator, dot-segment,
+parent-segment, NUL, and line-break forms without resolving or inspecting the
+filesystem. The quality-temp derivation and
+`mediaforce/tuning/av1_validation_v4r3_path_privacy.py` both use this rule.
+
+The path-privacy contract reproduces the approved manifest's HMAC-SHA256
+algorithm, minimum 32-byte key, revision-specific domains, and
+`av1vpathkey4r3_`, `av1vpath4r3_`, and `av1vsource4r3_` prefixes exactly. Key,
+instance-path, source-path, and quality-temp derivations remain domain-separated;
+the same key and path inputs cannot reuse revision-2 identities. Key bytes are
+never serialized, and `selection_or_partition_use_allowed` remains `false`.
+
+`mediaforce/tuning/av1_validation_v4r3_preparation_grant.py` defines a pure
+single-use preparation grant that binds protocol `4`, manifest revision `3`,
+the approved manifest ID/digest, one validated revision-3 rights identity and
+owner, a repository commit/tree, and a maximum 86,400-second window inside the
+manifest validity interval. Instead of serializing or probing a machine-local
+registry path, it freezes the manifest-derived opaque token
+`av1v4r3prepregistry_3ce2006c94283bc748b142997b5acc0d`; a later owner-only
+operation must bind that token to fresh private custody.
+
+The grant scope is no wider than revision 2: it permits single-use exclusive
+32-byte path-privacy key creation at mode `0600`, machine-local key custody,
+tool/version and repository/config measurements, and creation of an unfrozen
+non-media preparation record. It explicitly prohibits grant reuse, key
+disclosure, selection/partition use, network access, media-path probes, media
+reads, and media-processing subprocesses. Every v4 authority field remains
+`false`. The contract accepts mappings and canonical bytes only and creates no
+grant file, key, registry, preparation artifact, qualification, publication,
+runtime, activation, dogfood, or execution authority.
+
 ## Manifest revision 3 — ordinal-window registry
 
 `mediaforce/tuning/av1_validation_v4r3_ordinal_window.py` defines the pure
