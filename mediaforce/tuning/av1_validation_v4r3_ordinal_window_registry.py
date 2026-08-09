@@ -15,6 +15,7 @@ import os
 import secrets
 import stat
 import threading
+import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -69,6 +70,9 @@ _PREFLIGHT_NAME = "preflight.json"
 _TERMINAL_NAME = "terminal.json"
 _MAX_FILE_BYTES = 64 * 1024
 _TEMP_SUFFIX = ".tmp"
+_EXECUTION_CLAIM_FILENAME_RE = re.compile(
+    r"av1v4r3execgrant_[0-9a-f]{32}\.claim\.json\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -513,6 +517,45 @@ class _RegistryContext:
         os.fsync(self.dir_fd)
         self.assert_file_custody(filename)
 
+    def write_burn(self, filename: str, data: bytes) -> None:
+        """Create the final artifact exclusively and never remove it on failure."""
+
+        _assert_registry_filename(filename)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(filename, flags, 0o600, dir_fd=self.dir_fd)
+        except FileExistsError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                f"AV1 v4 r3 ordinal window artifact already exists: {filename}"
+            ) from exc
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            written = 0
+            while written < len(view):
+                count = os.write(fd, view[written:])
+                if count <= 0:
+                    raise OSError("registry burn artifact write made no progress")
+                written += count
+            os.fsync(fd)
+            metadata = os.fstat(fd)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_nlink != 1
+                or metadata.st_size != len(data)
+            ):
+                raise AV1V4R3OrdinalWindowRegistryError(
+                    "AV1 v4 r3 ordinal window burn artifact custody is invalid"
+                )
+        finally:
+            os.close(fd)
+            os.fsync(self.dir_fd)
+        self.assert_file_custody(filename)
+
     def cleanup_stale_temps(self) -> None:
         removed = False
         for name in os.listdir(self.dir_fd):
@@ -752,7 +795,7 @@ class _RegistryContext:
     ) -> None:
         opens = _admission_opens(grant)
         closes = _admission_closes(grant)
-        if now < opens or now > closes:
+        if now < opens or now >= closes:
             raise AV1V4R3OrdinalWindowRegistryError(
                 "AV1 v4 r3 ordinal window admission is outside the grant interval"
             )
@@ -978,6 +1021,8 @@ def _assert_registry_filename(filename: str) -> None:
 def _is_registry_artifact_filename(filename: str) -> bool:
     if filename in {_PLAN_NAME, _PREFLIGHT_NAME, _TERMINAL_NAME}:
         return True
+    if _EXECUTION_CLAIM_FILENAME_RE.fullmatch(filename):
+        return True
     return any(
         filename
         in {
@@ -985,6 +1030,7 @@ def _is_registry_artifact_filename(filename: str) -> bool:
             _claim_name(ordinal),
             _started_name(ordinal),
             _outcome_name(ordinal),
+            _execution_grant_name(ordinal),
         }
         for ordinal in range(1, AV1_V4R3_OW_ORDINAL_COUNT + 1)
     )
@@ -1106,3 +1152,16 @@ def _started_name(ordinal: int) -> str:
 
 def _outcome_name(ordinal: int) -> str:
     return f"ordinal_{ordinal:02d}.outcome.json"
+
+
+def _execution_grant_name(ordinal: int) -> str:
+    return f"ordinal_{ordinal:02d}.execution-grant.json"
+
+
+def _execution_claim_name(grant_id: str) -> str:
+    filename = f"{grant_id}.claim.json"
+    if not _EXECUTION_CLAIM_FILENAME_RE.fullmatch(filename):
+        raise AV1V4R3OrdinalWindowRegistryError(
+            "AV1 v4 r3 execution claim filename is invalid"
+        )
+    return filename

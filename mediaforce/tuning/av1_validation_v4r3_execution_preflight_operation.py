@@ -139,17 +139,7 @@ def _materialize_av1_v4r3_execution_preflight(
     owner_principal: str,
     clock: Clock,
 ) -> AV1V4R3ExecutionPreflightOperationResult:
-    if preparation_binding.registry == ordinal_binding.registry:
-        raise AV1V4R3ExecutionPreflightOperationError(
-            "AV1 v4 r3 execution preflight registries must be distinct"
-        )
-    try:
-        if preparation_binding.registry.samefile(ordinal_binding.registry):
-            raise AV1V4R3ExecutionPreflightOperationError(
-                "AV1 v4 r3 execution preflight registries must be distinct"
-            )
-    except OSError:
-        pass
+    _assert_distinct_registry_bindings(preparation_binding, ordinal_binding)
     snapshot = _load_preparation_snapshot(
         preparation_binding=preparation_binding,
         ordinal_binding=ordinal_binding,
@@ -306,6 +296,23 @@ def _load_preparation_snapshot(
         raise AV1V4R3ExecutionPreflightOperationError(
             "AV1 v4 r3 execution preflight evidence cohort is unavailable"
         ) from exc
+
+
+def _assert_distinct_registry_bindings(
+    preparation_binding: AV1V4R3PreparationCustodyRegistryBinding,
+    ordinal_binding: AV1V4R3OrdinalWindowRegistryBinding,
+) -> None:
+    if preparation_binding.registry == ordinal_binding.registry:
+        raise AV1V4R3ExecutionPreflightOperationError(
+            "AV1 v4 r3 execution preflight registries must be distinct"
+        )
+    try:
+        if preparation_binding.registry.samefile(ordinal_binding.registry):
+            raise AV1V4R3ExecutionPreflightOperationError(
+                "AV1 v4 r3 execution preflight registries must be distinct"
+            )
+    except OSError:
+        pass
 
 
 def _assert_request_chain(
