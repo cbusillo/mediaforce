@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 import unittest
-from typing import Any
+from typing import Any, Mapping
 from unittest.mock import MagicMock, call
 
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart
@@ -75,12 +75,15 @@ def _baseline_quality_result() -> QualitySearchResult:
             "schema_version": 1,
             "status": "selected",
             "selection_reason": "candidate_inside_sample_projection_band",
+            "curve": {"candidate_count": 3},
         },
     )
 
 
 def _guided_quality_result(
     warm_status: str,
+    *,
+    search_trace_overrides: Mapping[str, Any] | None = None,
     **trace_overrides: Any,
 ) -> QualitySearchResult:
     warm_start_trace: dict[str, Any] = {
@@ -95,25 +98,35 @@ def _guided_quality_result(
         "confidence": None,
         "provenance_id": None,
         "review_risks": [],
-        "candidate_count": 0,
+        "candidate_count": 1,
         "duration_seconds": 0.001,
         "fallback_used": warm_status != "accepted",
         "fallback_reason": None,
         "error_type": None,
         "candidate": None,
+        "baseline_candidate_count": 0 if warm_status == "accepted" else 2,
     }
     warm_start_trace.update(trace_overrides)
+    target_size_trace: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "selected",
+        "selection_reason": (
+            "quality_memory_candidate_inside_sample_projection_band"
+            if warm_status == "accepted"
+            else "candidate_inside_sample_projection_band"
+        ),
+        "curve": {"candidate_count": 2},
+        "candidate_count": 1 if warm_status == "accepted" else 3,
+        "warm_start": warm_start_trace,
+    }
+    target_size_trace.update(search_trace_overrides or {})
     return QualitySearchResult(
         crf=28.0,
         metric="vmaf",
         target=93.0,
         score=93.1,
         stdout="",
-        target_size_trace={
-            "schema_version": 1,
-            "status": "selected",
-            "warm_start": warm_start_trace,
-        },
+        target_size_trace=target_size_trace,
     )
 
 
@@ -216,7 +229,15 @@ class TestGuidedPath(unittest.TestCase):
         self.assertTrue(execution["attempted"])
 
     def test_guided_rejected_fallback_succeeds(self) -> None:
-        mock_search = MagicMock(return_value=_guided_quality_result("rejected_fallback"))
+        mock_search = MagicMock(
+            return_value=_guided_quality_result(
+                "rejected_fallback",
+                fallback_reason="target_band_miss",
+                candidate_count=1,
+                baseline_candidate_count=2,
+                duration_seconds=12.345,
+            )
+        )
         result = run_v4_qualification_search(
             mock_search,
             _SOURCE_PATH,
@@ -228,6 +249,22 @@ class TestGuidedPath(unittest.TestCase):
 
         execution = result.cold_start_prior_mirror["execution"]
         self.assertEqual(execution["status"], "rejected_fallback")
+        self.assertTrue(result.public_summary["execution_fallback_used"])
+        self.assertEqual(
+            result.public_summary["execution_fallback_reason"], "size_band_miss"
+        )
+        self.assertEqual(result.public_summary["execution_candidate_count"], 1)
+        self.assertEqual(result.public_summary["fallback_search_candidate_count"], 2)
+        self.assertEqual(result.public_summary["execution_probe_seconds"], 12.345)
+        self.assertEqual(
+            result.public_summary["search_disposition"], "fallback_search_selected"
+        )
+        self.assertEqual(
+            result.public_summary["search_selection_reason"],
+            "candidate_inside_sample_projection_band",
+        )
+        self.assertEqual(result.public_summary["search_candidate_count"], 3)
+        self.assertNotIn("target", str(result.public_summary).lower())
 
     def test_guided_call_kwargs(self) -> None:
         warm_start = _v4_warm_start()
@@ -263,6 +300,9 @@ class TestGuidedPath(unittest.TestCase):
             target_size_trace={
                 "schema_version": 1,
                 "status": "selected",
+                "selection_reason": "quality_memory_candidate_inside_sample_projection_band",
+                "candidate_count": 1,
+                "curve": {"candidate_count": 1},
                 "warm_start": {
                     "schema_version": 1,
                     "status": "accepted",
@@ -275,12 +315,13 @@ class TestGuidedPath(unittest.TestCase):
                     "confidence": None,
                     "provenance_id": None,
                     "review_risks": [],
-                    "candidate_count": 0,
+                    "candidate_count": 1,
                     "duration_seconds": 0.001,
                     "fallback_used": False,
                     "fallback_reason": None,
                     "error_type": None,
                     "candidate": None,
+                    "baseline_candidate_count": 0,
                 },
             },
         ))
@@ -897,7 +938,38 @@ class TestPublicSummaryPrivacy(unittest.TestCase):
 
     def test_public_summary_has_required_fields(self) -> None:
         result = self._run_baseline()
-        self.assertEqual(result.public_summary["schema_version"], 1)
+        self.assertEqual(
+            set(result.public_summary),
+            {
+                "activation_authorized",
+                "contract_version",
+                "derivation_authorized",
+                "empirical_authority_conferred",
+                "evidence_creation_authorized",
+                "evidence_eligible",
+                "execution_attempted",
+                "execution_candidate_count",
+                "execution_fallback_reason",
+                "execution_fallback_used",
+                "execution_probe_seconds",
+                "execution_status",
+                "fallback_search_candidate_count",
+                "holdout_authorized",
+                "media_read_authorized",
+                "mode",
+                "planner_bypassed",
+                "private_inventory_read_authorized",
+                "publication_authorized",
+                "qualification_execution_authorized",
+                "retry_authorized",
+                "runtime_execution_authorized",
+                "schema_version",
+                "search_candidate_count",
+                "search_disposition",
+                "search_selection_reason",
+            },
+        )
+        self.assertEqual(result.public_summary["schema_version"], 2)
         self.assertEqual(result.public_summary["contract_version"], AV1_VALIDATION_V4_CONTRACT_VERSION)
         self.assertEqual(result.public_summary["mode"], "baseline")
         self.assertTrue(result.public_summary["planner_bypassed"])
@@ -908,11 +980,133 @@ class TestPublicSummaryPrivacy(unittest.TestCase):
         result = self._run_baseline()
         self.assertFalse(result.public_summary["execution_attempted"])
         self.assertIsNone(result.public_summary["execution_status"])
+        self.assertIsNone(result.public_summary["execution_fallback_used"])
+        self.assertIsNone(result.public_summary["execution_fallback_reason"])
+        self.assertEqual(
+            result.public_summary["search_disposition"], "baseline_search_selected"
+        )
+        self.assertEqual(result.public_summary["search_candidate_count"], 3)
 
     def test_public_summary_guided_accepted_execution_attempted(self) -> None:
         result = self._run_guided()
         self.assertTrue(result.public_summary["execution_attempted"])
         self.assertEqual(result.public_summary["execution_status"], "accepted")
+        self.assertFalse(result.public_summary["execution_fallback_used"])
+        self.assertEqual(
+            result.public_summary["search_disposition"], "warm_start_selected"
+        )
+
+    def test_public_summary_maps_unknown_diagnostics(self) -> None:
+        mock_search = MagicMock(
+            return_value=_guided_quality_result(
+                "rejected_fallback",
+                fallback_reason="future_reason",
+                search_trace_overrides={
+                    "selection_reason": "future_selection",
+                },
+            )
+        )
+        result = run_v4_qualification_search(
+            mock_search,
+            _SOURCE_PATH,
+            _BALANCED_POLICY,
+            mode="guided",
+            stream_budget_ledger=_mock_ledger(),
+            warm_start=_v4_warm_start(),
+        )
+
+        self.assertEqual(result.public_summary["execution_fallback_reason"], "other_reason")
+        self.assertEqual(result.public_summary["search_selection_reason"], "other_reason")
+        self.assertNotIn("target", str(result.public_summary).lower())
+
+    def test_public_summary_rejects_malformed_candidate_count(self) -> None:
+        mock_search = MagicMock(
+            return_value=_guided_quality_result(
+                "accepted",
+                search_trace_overrides={"candidate_count": -1},
+            )
+        )
+        with self.assertRaisesRegex(
+            V4QualificationContractError, "search candidate count"
+        ):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(),
+            )
+
+    def test_public_summary_rejects_malformed_probe_duration(self) -> None:
+        mock_search = MagicMock(
+            return_value=_guided_quality_result(
+                "accepted",
+                duration_seconds=-1,
+            )
+        )
+        with self.assertRaisesRegex(
+            V4QualificationContractError, "execution probe duration"
+        ):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(),
+            )
+
+    def test_public_summary_requires_fallback_search_count(self) -> None:
+        mock_search = MagicMock(
+            return_value=_guided_quality_result(
+                "accepted",
+                baseline_candidate_count=None,
+            )
+        )
+        with self.assertRaisesRegex(
+            V4QualificationContractError, "fallback search candidate count"
+        ):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(),
+            )
+
+    def test_public_summary_requires_baseline_curve_count(self) -> None:
+        quality_result = _baseline_quality_result()
+        quality_result.target_size_trace["curve"] = {}
+        mock_search = MagicMock(return_value=quality_result)
+        with self.assertRaisesRegex(
+            V4QualificationContractError, "search candidate count"
+        ):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="baseline",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=None,
+            )
+
+    def test_rejected_fallback_requires_reason(self) -> None:
+        mock_search = MagicMock(
+            return_value=_guided_quality_result("rejected_fallback")
+        )
+        with self.assertRaisesRegex(
+            V4QualificationContractError, "fallback state and reason"
+        ):
+            run_v4_qualification_search(
+                mock_search,
+                _SOURCE_PATH,
+                _BALANCED_POLICY,
+                mode="guided",
+                stream_budget_ledger=_mock_ledger(),
+                warm_start=_v4_warm_start(),
+            )
 
 
 class TestNoMediaOrDbAccess(unittest.TestCase):

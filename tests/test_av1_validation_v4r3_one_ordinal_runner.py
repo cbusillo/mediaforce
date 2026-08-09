@@ -454,6 +454,7 @@ def _quality_result(
             "schema_version": 1,
             "status": "selected",
             "selection_reason": "candidate_inside_sample_projection_band",
+            "curve": {"candidate_count": 1},
             "ledger": {
                 "ledger_id": ledger_id,
                 "source_id": source_id,
