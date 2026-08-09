@@ -47,9 +47,10 @@ AV1_V4R3_OW_STARTED_SCHEMA_VERSION = 1
 AV1_V4R3_OW_STARTED_CONTRACT_VERSION = "av1v4r3owstart1"
 
 AV1_V4R3_OW_OUTCOME_SCHEMA = "mediaforce.av1_cold_start_v4r3_ordinal_window_outcome"
-AV1_V4R3_OW_OUTCOME_SCHEMA_VERSION = 2
-AV1_V4R3_OW_OUTCOME_CONTRACT_VERSION = "av1v4r3owout2"
+AV1_V4R3_OW_OUTCOME_SCHEMA_VERSION = 3
+AV1_V4R3_OW_OUTCOME_CONTRACT_VERSION = "av1v4r3owout3"
 _AV1_V4R3_OW_OUTCOME_V1_CONTRACT_VERSION = "av1v4r3owout1"
+_AV1_V4R3_OW_OUTCOME_V2_CONTRACT_VERSION = "av1v4r3owout2"
 AV1_V4R3_OW_FAILURE_PHASES = frozenset({"production_search", "runtime_identity"})
 AV1_V4R3_OW_FAILURE_CLASSES = frozenset(
     {
@@ -64,6 +65,13 @@ AV1_V4R3_OW_FAILURE_CLASSES = frozenset(
 )
 AV1_V4R3_OW_FAILURE_SEARCH_STATUSES = frozenset(
     {"bound_exhausted", "infeasible", "needs_review", "quality_conflict"}
+)
+AV1_V4R3_OW_FAILURE_SEARCH_REASONS = frozenset(
+    {
+        "all_candidates_violate_quality_floor",
+        "target_band_violates_quality_floor",
+        "target_requires_crossing_quality_floor",
+    }
 )
 
 AV1_V4R3_OW_TERMINAL_SCHEMA = "mediaforce.av1_cold_start_v4r3_ordinal_window_terminal"
@@ -239,6 +247,7 @@ _OUTCOME_ALLOWED_KEYS = (
             "failure_phase",
             "failure_class",
             "failure_search_status",
+            "failure_search_reason",
         }
     )
     | AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS
@@ -1301,6 +1310,7 @@ def build_av1_v4r3_ordinal_window_outcome(
     failure_phase: str | None = None,
     failure_class: str | None = None,
     failure_search_status: str | None = None,
+    failure_search_reason: str | None = None,
 ) -> dict[str, Any]:
     plan_payload = object_dict(plan)
     started_payload = object_dict(started)
@@ -1334,6 +1344,7 @@ def build_av1_v4r3_ordinal_window_outcome(
         failure_phase=failure_phase,
         failure_class=failure_class,
         failure_search_status=failure_search_status,
+        failure_search_reason=failure_search_reason,
     )
     payload: dict[str, Any] = {
         "schema": AV1_V4R3_OW_OUTCOME_SCHEMA,
@@ -1351,6 +1362,7 @@ def build_av1_v4r3_ordinal_window_outcome(
         "failure_phase": failure_phase,
         "failure_class": failure_class,
         "failure_search_status": failure_search_status,
+        "failure_search_reason": failure_search_reason,
     }
     payload.update({field: False for field in AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS})
     bound = _bind_outcome_identity(payload)
@@ -1372,16 +1384,29 @@ def assert_av1_v4r3_ordinal_window_outcome(payload: Mapping[str, Any]) -> None:
     _assert_no_private_text(materialized)
     schema_version = materialized.get("schema_version")
     contract_version = materialized.get("contract_version")
+    if type(schema_version) is not int or not isinstance(contract_version, str):
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 ordinal window outcome binding is invalid"
+        )
     if schema_version == 1 and contract_version == _AV1_V4R3_OW_OUTCOME_V1_CONTRACT_VERSION:
         legacy_keys = _OUTCOME_ALLOWED_KEYS - {
             "failure_phase",
             "failure_class",
             "failure_search_status",
+            "failure_search_reason",
         }
-        unknown = set(materialized) - legacy_keys
-        if unknown:
+        if set(materialized) != legacy_keys:
             raise AV1V4R3OrdinalWindowError(
-                f"AV1 v4 r3 ordinal window outcome contains unknown fields: {sorted(unknown)}"
+                "AV1 v4 r3 ordinal window outcome fields do not match schema v1"
+            )
+    elif (
+        schema_version == 2
+        and contract_version == _AV1_V4R3_OW_OUTCOME_V2_CONTRACT_VERSION
+    ):
+        legacy_keys = _OUTCOME_ALLOWED_KEYS - {"failure_search_reason"}
+        if set(materialized) != legacy_keys:
+            raise AV1V4R3OrdinalWindowError(
+                "AV1 v4 r3 ordinal window outcome fields do not match schema v2"
             )
     elif schema_version != AV1_V4R3_OW_OUTCOME_SCHEMA_VERSION or contract_version != AV1_V4R3_OW_OUTCOME_CONTRACT_VERSION:
         raise AV1V4R3OrdinalWindowError(
@@ -1389,7 +1414,7 @@ def assert_av1_v4r3_ordinal_window_outcome(payload: Mapping[str, Any]) -> None:
         )
     elif set(materialized) != _OUTCOME_ALLOWED_KEYS:
         raise AV1V4R3OrdinalWindowError(
-            "AV1 v4 r3 ordinal window outcome fields do not match schema v2"
+            "AV1 v4 r3 ordinal window outcome fields do not match schema v3"
         )
     expected = {
         "schema": AV1_V4R3_OW_OUTCOME_SCHEMA,
@@ -1446,6 +1471,15 @@ def assert_av1_v4r3_ordinal_window_outcome(payload: Mapping[str, Any]) -> None:
             failure_phase=materialized.get("failure_phase"),
             failure_class=materialized.get("failure_class"),
             failure_search_status=materialized.get("failure_search_status"),
+            failure_search_reason=materialized.get("failure_search_reason"),
+        )
+    elif schema_version == 2:
+        _assert_outcome_failure_fields(
+            success=success,
+            failure_phase=materialized.get("failure_phase"),
+            failure_class=materialized.get("failure_class"),
+            failure_search_status=materialized.get("failure_search_status"),
+            failure_search_reason=None,
         )
     outcome_id = str(materialized.get("outcome_id") or "")
     if not _OUTCOME_ID_RE.fullmatch(outcome_id):
@@ -1469,9 +1503,18 @@ def _assert_outcome_failure_fields(
     failure_phase: Any,
     failure_class: Any,
     failure_search_status: Any,
+    failure_search_reason: Any,
 ) -> None:
     if success:
-        if any(value is not None for value in (failure_phase, failure_class, failure_search_status)):
+        if any(
+            value is not None
+            for value in (
+                failure_phase,
+                failure_class,
+                failure_search_status,
+                failure_search_reason,
+            )
+        ):
             raise AV1V4R3OrdinalWindowError(
                 "AV1 v4 r3 successful outcome cannot carry failure classification"
             )
@@ -1487,6 +1530,22 @@ def _assert_outcome_failure_fields(
     if failure_search_status is not None and failure_search_status not in AV1_V4R3_OW_FAILURE_SEARCH_STATUSES:
         raise AV1V4R3OrdinalWindowError(
             "AV1 v4 r3 failed outcome search status is invalid"
+        )
+    if failure_search_reason is None:
+        return
+    if (
+        failure_class != "target_size_search_error"
+        or failure_search_status != "quality_conflict"
+    ):
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 failed outcome search reason requires a quality conflict"
+        )
+    if (
+        not isinstance(failure_search_reason, str)
+        or failure_search_reason not in AV1_V4R3_OW_FAILURE_SEARCH_REASONS
+    ):
+        raise AV1V4R3OrdinalWindowError(
+            "AV1 v4 r3 failed outcome search reason is invalid"
         )
 
 

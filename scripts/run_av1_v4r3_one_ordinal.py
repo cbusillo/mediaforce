@@ -72,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "failure_phase": exc.failure_phase,
                     "failure_class": exc.failure_class,
                     "failure_search_status": exc.failure_search_status,
+                    "failure_search_reason": exc.failure_search_reason,
                 }
             )
         print(_json(payload))
