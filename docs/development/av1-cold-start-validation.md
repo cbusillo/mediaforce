@@ -2885,3 +2885,30 @@ bytes. This operation still performs no media read, runner callback, encoder,
 evidence publication, activation, or dogfood action. The next production
 operation must custody-load this retained claim and revalidate immediately
 before media access.
+
+### One-ordinal production qualification
+
+`mediaforce/tuning/av1_validation_v4r3_one_ordinal_runner.py` is the sole
+revision-3 media-capable operation. It custody-loads the retained preparation
+config/key/bundle, plan/preflight pair, sequencing grant, execution grant, and
+burned execution claim. It derives the selected source and quality-temp path
+identities, resolves the canonical production stream plan and stream-budget
+ledger, and appends the sequencing claim, runner admission, and started record
+before calling the production quality-search seam exactly once.
+
+The execution claim and sequencing claim remain distinct. The execution claim
+irreversibly consumes media authority; the sequencing claim controls ordinal
+order. The persisted runner admission bridges them and is required, together
+with a successful sequencing outcome, before a later ordinal can receive
+execution authority. Missing, malformed, partial, duplicated, or mismatched
+records fail closed and seal the run terminally. Search exceptions and returned
+ledger/source/stream/transform identity mismatches publish a failure outcome;
+operator-facing errors are fixed and path-free.
+
+`scripts/run_av1_v4r3_one_ordinal.py` is the explicit JSON-only owner entrypoint.
+It requires the owner principal to be repeated exactly and can operate only on
+an already-published, already-burned one-ordinal grant. It does not schedule a
+later ordinal, publish evidence, interpret results, activate AV1 behavior, or
+grant dogfood authority. A real invocation remains a separate owner decision;
+tests use temporary registries and injected search callbacks and do not read
+reviewed media.
