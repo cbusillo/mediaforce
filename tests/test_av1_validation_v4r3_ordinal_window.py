@@ -200,6 +200,8 @@ def _publish_grant_claim_start_outcome(
         started=started,
         clock=_clock(authorized + timedelta(minutes=7)),
         success=success,
+        failure_phase=None if success else "production_search",
+        failure_class=None if success else "unexpected_error",
     )
     return grant, claim, started, outcome
 
@@ -674,6 +676,83 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
             self.assertIsNotNone(
                 load_av1_v4r3_ordinal_window_registry_terminal(binding.registry)
             )
+
+    def test_schema_v1_outcome_remains_readable(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            plan = _make_plan(binding)
+            _grant, _claim, _started, outcome = _publish_grant_claim_start_outcome(
+                binding, plan, 1, success=True
+            )
+            legacy = dict(outcome)
+            for field in (
+                "failure_phase",
+                "failure_class",
+                "failure_search_status",
+                "outcome_id",
+                "payload_sha256",
+            ):
+                legacy.pop(field, None)
+            legacy["schema_version"] = 1
+            legacy["contract_version"] = "av1v4r3owout1"
+            legacy = pure_module._bind_outcome_identity(legacy)
+            serialized = pure_module.serialize_av1_v4r3_ordinal_window_outcome(legacy)
+            self.assertEqual(
+                pure_module.deserialize_av1_v4r3_ordinal_window_outcome(serialized),
+                legacy,
+            )
+            tampered = dict(legacy)
+            tampered["failure_class"] = "unexpected_error"
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                pure_module.assert_av1_v4r3_ordinal_window_outcome(tampered)
+
+    def test_schema_v2_rejects_invalid_failure_semantics(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            plan = _make_plan(binding)
+            _grant, _claim, _started, successful = (
+                _publish_grant_claim_start_outcome(binding, plan, 1, success=True)
+            )
+            invalid_success = dict(successful)
+            invalid_success["failure_class"] = "unexpected_error"
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                pure_module.assert_av1_v4r3_ordinal_window_outcome(invalid_success)
+
+        invalid_failures = (
+            {"failure_phase": None},
+            {"failure_phase": "media_probe"},
+            {"failure_class": "disk_full"},
+            {"failure_search_status": "selected"},
+        )
+        for mutation in invalid_failures:
+            with self.subTest(mutation=mutation), TemporaryDirectory() as raw:
+                binding = _binding(_make_registry(Path(raw)))
+                plan = _make_plan(binding)
+                _grant, _claim, _started, failed = (
+                    _publish_grant_claim_start_outcome(binding, plan, 1, success=False)
+                )
+                invalid = dict(failed)
+                invalid.update(mutation)
+                with self.assertRaises(AV1V4R3OrdinalWindowError):
+                    pure_module.assert_av1_v4r3_ordinal_window_outcome(invalid)
+
+    def test_schema_v2_requires_exact_failure_fields(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            plan = _make_plan(binding)
+            _grant, _claim, _started, outcome = _publish_grant_claim_start_outcome(
+                binding, plan, 1, success=True
+            )
+            for field in (
+                "failure_phase",
+                "failure_class",
+                "failure_search_status",
+            ):
+                with self.subTest(field=field):
+                    incomplete = dict(outcome)
+                    incomplete.pop(field)
+                    with self.assertRaises(AV1V4R3OrdinalWindowError):
+                        pure_module.assert_av1_v4r3_ordinal_window_outcome(incomplete)
 
     def test_successful_ordinal_eight_publishes_success_terminal(self) -> None:
         with TemporaryDirectory() as raw:

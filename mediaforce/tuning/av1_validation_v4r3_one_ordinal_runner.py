@@ -10,10 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart
+from mediaforce.encoding.quality import (
+    QualitySearchError,
+    QualitySearchResult,
+    QualitySearchWarmStart,
+    SampleEncodeError,
+)
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.tuning.av1_validation_v4 import AV1_VALIDATION_V4_SOURCE_IDS
 from mediaforce.tuning.av1_validation_v4_qualification_search import (
+    V4QualificationContractError,
     V4QualificationOperationResult,
     run_v4_qualification_search,
 )
@@ -28,6 +34,9 @@ from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
     av1_v4_r3_quality_temp_key_id,
     av1_v4_r3_transform_plan_payload,
     build_av1_v4_r3_all_closure_payloads,
+)
+from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
+    AV1_V4R3_OW_FAILURE_SEARCH_STATUSES,
 )
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
     AV1V4R3OrdinalWindowRegistryBinding,
@@ -69,6 +78,7 @@ from mediaforce.tuning.stream_budget import (
     StreamBudgetLedger,
     resolve_stream_budget_ledger,
 )
+from mediaforce.tuning.target_size_search import TargetSizeSearchError
 
 Clock = Callable[[], datetime]
 SearchQualityForSource = Callable[..., QualitySearchResult]
@@ -91,6 +101,19 @@ _SOURCE_MEDIA_SHA256 = {
 
 class AV1V4R3OneOrdinalRunnerError(RuntimeError):
     """Raised with path-free text after a one-ordinal attempt fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_phase: str | None = None,
+        failure_class: str | None = None,
+        failure_search_status: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.failure_phase = failure_phase
+        self.failure_class = failure_class
+        self.failure_search_status = failure_search_status
 
 
 class _ExecutionAuthorityError(RuntimeError):
@@ -120,6 +143,13 @@ class _PrivateRuntime:
     quality_temp_key_id: str
     stream_plan: ProductionStreamPlan
     stream_budget_ledger: StreamBudgetLedger
+
+
+@dataclass(frozen=True, slots=True)
+class _FailureClassification:
+    phase: str
+    failure_class: str
+    search_status: str | None = None
 
 
 def run_av1_v4r3_one_ordinal(
@@ -209,32 +239,48 @@ def run_av1_v4r3_one_ordinal(
             "AV1 v4 r3 one-ordinal admission failed"
         ) from exc
 
+    failure: _FailureClassification | None = None
+    failure_exception: BaseException | None = None
     try:
         search_result = _execute_search(
             closure=closure,
             runtime=runtime,
             search_quality_for_source=search_quality_for_source,
         )
-        _assert_returned_runtime_identity(search_result, publication.admission)
     except BaseException as exc:
+        failure = _classify_failure(exc, phase="production_search")
+        failure_exception = exc
+    if failure is None:
         try:
-            outcome = publish_av1_v4r3_ordinal_window_outcome(
+            _assert_returned_runtime_identity(search_result, publication.admission)
+        except BaseException as exc:
+            failure = _classify_failure(exc, phase="runtime_identity")
+            failure_exception = exc
+    if failure is not None:
+        try:
+            publish_av1_v4r3_ordinal_window_outcome(
                 binding=ordinal_binding,
                 plan=plan,
                 started=publication.started,
                 clock=clock,
                 success=False,
+                failure_phase=failure.phase,
+                failure_class=failure.failure_class,
+                failure_search_status=failure.search_status,
             )
         except Exception as terminal_exc:
             _seal_terminal(ordinal_binding, plan, ordinal, clock)
             raise AV1V4R3OneOrdinalRunnerError(
                 "AV1 v4 r3 one-ordinal failure could not be sealed"
             ) from terminal_exc
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            raise
+        if isinstance(failure_exception, (KeyboardInterrupt, SystemExit)):
+            raise failure_exception
         raise AV1V4R3OneOrdinalRunnerError(
-            "AV1 v4 r3 one-ordinal production search failed"
-        ) from exc
+            "AV1 v4 r3 one-ordinal execution failed",
+            failure_phase=failure.phase,
+            failure_class=failure.failure_class,
+            failure_search_status=failure.search_status,
+        ) from failure_exception
 
     try:
         outcome = publish_av1_v4r3_ordinal_window_outcome(
@@ -258,6 +304,30 @@ def run_av1_v4r3_one_ordinal(
         outcome=outcome,
         public_summary=search_result.public_summary,
     )
+
+
+def _classify_failure(exc: BaseException, *, phase: str) -> _FailureClassification:
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        return _FailureClassification(phase=phase, failure_class="interrupted")
+    if phase == "runtime_identity":
+        return _FailureClassification(phase=phase, failure_class="runtime_identity_error")
+    if isinstance(exc, TargetSizeSearchError):
+        return _FailureClassification(
+            phase=phase,
+            failure_class="target_size_search_error",
+            search_status=(
+                exc.status if exc.status in AV1_V4R3_OW_FAILURE_SEARCH_STATUSES else None
+            ),
+        )
+    if isinstance(exc, SampleEncodeError):
+        failure_class = "sample_encode_error"
+    elif isinstance(exc, V4QualificationContractError):
+        failure_class = "qualification_contract_error"
+    elif isinstance(exc, QualitySearchError):
+        failure_class = "quality_search_error"
+    else:
+        failure_class = "unexpected_error"
+    return _FailureClassification(phase=phase, failure_class=failure_class)
 
 
 def _load_execution_authority(

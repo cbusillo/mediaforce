@@ -456,6 +456,9 @@ def publish_av1_v4r3_ordinal_window_outcome(
     started: Mapping[str, Any],
     clock: Clock,
     success: bool,
+    failure_phase: str | None = None,
+    failure_class: str | None = None,
+    failure_search_status: str | None = None,
 ) -> dict[str, Any]:
     """Publish an outcome and atomically absorb terminal failures/success."""
 
@@ -498,6 +501,9 @@ def publish_av1_v4r3_ordinal_window_outcome(
             started=canonical_started,
             outcome_at=_format_ts(now),
             success=success,
+            failure_phase=failure_phase,
+            failure_class=failure_class,
+            failure_search_status=failure_search_status,
         )
         ctx.write(
             _outcome_name(ordinal), serialize_av1_v4r3_ordinal_window_outcome(outcome)
