@@ -28,6 +28,21 @@ AV1_VALIDATION_V4_QUALIFICATION_SEARCH_SCHEMA = (
 _V4_BYPASS_REASON = "cold_start_planner_bypassed_for_v4_qualification"
 _V3_HARNESS_SOURCE = "av1_validation_harness"
 _ACCEPTED_WARM_STATUSES = frozenset({"accepted", "rejected_fallback"})
+_PUBLIC_FALLBACK_REASONS = frozenset(
+    {
+        "candidate_rejected",
+        "quality_floor_miss",
+        "size_band_miss",
+        "source_cap_miss",
+    }
+)
+_PUBLIC_FALLBACK_REASON_ALIASES = {"target_band_miss": "size_band_miss"}
+_PUBLIC_SELECTION_REASONS = frozenset(
+    {
+        "candidate_inside_sample_projection_band",
+        "quality_memory_candidate_inside_sample_projection_band",
+    }
+)
 _ALLOWED_SEARCH_KWARGS = frozenset({
     "cadence_decision",
     "cadence_evidence",
@@ -115,7 +130,7 @@ def run_v4_qualification_search(
         invocation_sha256=invocation_sha256,
         quality_result=quality_result,
         cold_start_prior_mirror=mirror,
-        public_summary=_public_summary(mode, mirror),
+        public_summary=_public_summary(mode, mirror, target_size_trace),
     )
 
 
@@ -431,6 +446,18 @@ def _validate_mirror(
         raise V4QualificationContractError(
             f"Guided execution status must be accepted or rejected_fallback, got {status!r}"
         )
+    fallback_used = execution.get("fallback_used")
+    fallback_reason = str(execution.get("fallback_reason") or "") or None
+    if status == "accepted" and (fallback_used is not False or fallback_reason is not None):
+        raise V4QualificationContractError(
+            "Accepted guided execution must not carry fallback state"
+        )
+    if status == "rejected_fallback" and (
+        fallback_used is not True or fallback_reason is None
+    ):
+        raise V4QualificationContractError(
+            "Rejected guided execution must carry fallback state and reason"
+        )
     if warm_start is None:
         raise V4QualificationContractError("Guided mirror validation requires the frozen warm_start")
     if (
@@ -451,15 +478,68 @@ def _validate_mirror(
 def _public_summary(
     mode: V4QualificationMode,
     mirror: dict[str, Any],
+    target_size_trace: Mapping[str, Any],
 ) -> dict[str, Any]:
     execution = object_dict(mirror.get("execution")) or None
+    curve = object_dict(target_size_trace.get("curve"))
+    search_candidate_count = _required_nonnegative_int(
+        target_size_trace.get("candidate_count", curve.get("candidate_count")),
+        "search candidate count",
+    )
+    execution_status = (
+        (str(execution.get("status") or "") or None) if execution else None
+    )
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "contract_version": AV1_VALIDATION_V4_CONTRACT_VERSION,
         "mode": mode,
         "planner_bypassed": True,
         "execution_attempted": execution is not None and bool(execution.get("attempted")),
-        "execution_status": (str(execution.get("status") or "") or None) if execution else None,
+        "execution_status": execution_status,
+        "execution_fallback_used": (
+            bool(execution.get("fallback_used")) if execution else None
+        ),
+        "execution_fallback_reason": _public_code(
+            execution.get("fallback_reason") if execution else None,
+            allowed=_PUBLIC_FALLBACK_REASONS,
+            aliases=_PUBLIC_FALLBACK_REASON_ALIASES,
+            unknown="other_reason",
+        ),
+        "execution_probe_seconds": (
+            _required_nonnegative_float(
+                execution.get("duration_seconds"), "execution probe duration"
+            )
+            if execution
+            else None
+        ),
+        "execution_candidate_count": (
+            _required_nonnegative_int(
+                execution.get("candidate_count"), "execution candidate count"
+            )
+            if execution
+            else None
+        ),
+        "fallback_search_candidate_count": (
+            _required_nonnegative_int(
+                execution.get("baseline_candidate_count"),
+                "fallback search candidate count",
+            )
+            if execution
+            else None
+        ),
+        "search_disposition": (
+            "baseline_search_selected"
+            if mode == "baseline"
+            else "warm_start_selected"
+            if execution_status == "accepted"
+            else "fallback_search_selected"
+        ),
+        "search_selection_reason": _public_code(
+            target_size_trace.get("selection_reason"),
+            allowed=_PUBLIC_SELECTION_REASONS,
+            unknown="other_reason",
+        ),
+        "search_candidate_count": search_candidate_count,
         "evidence_creation_authorized": False,
         "evidence_eligible": False,
         "empirical_authority_conferred": False,
@@ -475,3 +555,34 @@ def _public_summary(
     }
     assert_av1_cold_start_public_payload_safe(summary)
     return summary
+
+
+def _public_code(
+    value: Any,
+    *,
+    allowed: frozenset[str],
+    aliases: Mapping[str, str] | None = None,
+    unknown: str,
+) -> str | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    public = str((aliases or {}).get(normalized, normalized))
+    return public if public in allowed else unknown
+
+
+def _required_nonnegative_int(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise V4QualificationContractError(f"{label} must be a nonnegative integer")
+    return value
+
+
+def _required_nonnegative_float(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0
+    ):
+        raise V4QualificationContractError(f"{label} must be a nonnegative number")
+    return round(float(value), 3)

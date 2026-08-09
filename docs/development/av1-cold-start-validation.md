@@ -1841,18 +1841,26 @@ shape without retaining a mutable alias to the search result.
 
 ### Privacy contract
 
-The public summary returned by `V4QualificationOperationResult.public_summary`
-contains only:
+The schema-v2 public summary returned by
+`V4QualificationOperationResult.public_summary` contains only:
 
 - `schema_version`, `contract_version`, `mode`
 - `planner_bypassed: True`
 - `execution_attempted` (bool)
 - `execution_status` (`"accepted"` | `"rejected_fallback"` | `null`)
+- whether fallback was used, a closed public rejection-reason code, warm-probe
+  duration, warm-probe candidate count, fallback-search candidate count, and
+  total search candidate count
+- a closed search disposition and selection-reason code
 - false evidence, inventory/media, empirical, derivation, holdout, publication,
   activation, and retry authority fields
 
-It never exposes source path, CRF values, signature ID, cohort ID, provenance ID,
-trace internals, or quality metric scores.
+The internal `target_band_miss` reason is published as `size_band_miss` so the
+summary does not disclose target-size vocabulary. Unknown reasons collapse to
+`other_reason`. Required counts and duration fail closed when malformed rather
+than becoming plausible zero values. The summary never exposes source path, CRF
+values, signature ID, cohort ID, provenance ID, raw trace internals, or quality
+metric scores.
 
 ### V4 vs V3 identity separation
 
@@ -2926,9 +2934,11 @@ The explicit operator sequence is:
 
 1. `uv run python scripts/prepare_av1_v4r3_dogfood.py < request.json`
 2. `uv run python scripts/claim_av1_v4r3_execution_grant.py ...`
-3. `uv run python scripts/run_av1_v4r3_one_ordinal.py ...`
+3. `uv run python scripts/run_av1_v4r3_one_ordinal.py ... | tee "$OWNER_RESULT_LOG"`
 
 Each step remains a separate owner decision. Preparation is restartable only
 when every retained artifact validates canonically; terminal preparation
 failure is absorbing. The claim command irreversibly burns one ordinal's
 execution authority, and the runner executes only that already-claimed ordinal.
+`OWNER_RESULT_LOG` must be an owner-only path outside the repository; its single
+JSON line is the durable public result, including schema-v2 fallback diagnostics.
