@@ -111,6 +111,12 @@ class AV1V4R3RunnerStartPublication:
     started: Mapping[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class AV1V4R3OrdinalWindowGrantPublication:
+    grant: Mapping[str, Any]
+    created: bool
+
+
 def av1_v4r3_ordinal_window_registry_hmac_id(
     registry: Path,
     *,
@@ -188,10 +194,32 @@ def publish_av1_v4r3_ordinal_window_grant(
 ) -> dict[str, Any]:
     """Publish an authoritative grant stamped by *clock* under lock."""
 
+    return dict(
+        publish_av1_v4r3_ordinal_window_grant_with_status(
+            binding=binding,
+            plan=plan,
+            ordinal=ordinal,
+            clock=clock,
+            valid_until=valid_until,
+        ).grant
+    )
+
+
+def publish_av1_v4r3_ordinal_window_grant_with_status(
+    *,
+    binding: AV1V4R3OrdinalWindowRegistryBinding,
+    plan: Mapping[str, Any],
+    ordinal: int,
+    clock: Clock,
+    valid_until: str,
+) -> AV1V4R3OrdinalWindowGrantPublication:
+    """Publish an ordinal grant and report atomic creation state."""
+
     _assert_clock(clock)
     with _locked_registry(binding.registry) as ctx:
         ctx.assert_no_terminal()
         plan_payload, _preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
+        now = ctx.now(clock)
         if not isinstance(ordinal, int) or isinstance(ordinal, bool):
             raise AV1V4R3OrdinalWindowRegistryError(
                 "AV1 v4 r3 ordinal window grant ordinal must be an integer"
@@ -200,20 +228,29 @@ def publish_av1_v4r3_ordinal_window_grant(
             raise AV1V4R3OrdinalWindowRegistryError(
                 "AV1 v4 r3 ordinal window grant ordinal is out of range"
             )
-        ctx.assert_next_ordinal_admissible(plan_payload, ordinal, ctx.now(clock))
+        ctx.assert_next_ordinal_admissible(plan_payload, ordinal, now)
         filename = _grant_name(ordinal)
         if ctx.exists(filename):
             grant = ctx.load_grant(ordinal)
             _assert_record_binds_plan(grant, plan_payload, "grant")
-            return grant
+            if now < _parse_ts(grant["authorized_at"]) or now >= _parse_ts(
+                grant["valid_until"]
+            ):
+                raise AV1V4R3OrdinalWindowRegistryError(
+                    "AV1 v4 r3 ordinal window retained grant is inactive"
+                )
+            return AV1V4R3OrdinalWindowGrantPublication(
+                grant=grant,
+                created=False,
+            )
         grant = build_av1_v4r3_ordinal_window_grant(
             plan=plan_payload,
             ordinal=ordinal,
-            authorized_at=_format_ts(ctx.now(clock)),
+            authorized_at=_format_ts(now),
             valid_until=valid_until,
         )
         ctx.write(filename, serialize_av1_v4r3_ordinal_window_grant(grant))
-        return grant
+        return AV1V4R3OrdinalWindowGrantPublication(grant=grant, created=True)
 
 
 def publish_av1_v4r3_ordinal_window_claim(

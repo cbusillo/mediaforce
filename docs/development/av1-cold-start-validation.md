@@ -2912,3 +2912,23 @@ later ordinal, publish evidence, interpret results, activate AV1 behavior, or
 grant dogfood authority. A real invocation remains a separate owner decision;
 tests use temporary registries and injected search callbacks and do not read
 reviewed media.
+
+### Owner dogfood command sequence
+
+`scripts/prepare_av1_v4r3_dogfood.py` accepts one JSON object on stdin and
+creates or custody-reconciles a fresh non-media cohort through preparation,
+freeze, request, plan/preflight, and the ordinal-1 sequencing grant. It derives
+the ordinal registry identity under preparation-key custody and returns only
+public IDs, stage creation state, deadlines, and false authority fields. It
+never returns paths or key bytes and stops before execution authority or media.
+
+The explicit operator sequence is:
+
+1. `uv run python scripts/prepare_av1_v4r3_dogfood.py < request.json`
+2. `uv run python scripts/claim_av1_v4r3_execution_grant.py ...`
+3. `uv run python scripts/run_av1_v4r3_one_ordinal.py ...`
+
+Each step remains a separate owner decision. Preparation is restartable only
+when every retained artifact validates canonically; terminal preparation
+failure is absorbing. The claim command irreversibly burns one ordinal's
+execution authority, and the runner executes only that already-claimed ordinal.
