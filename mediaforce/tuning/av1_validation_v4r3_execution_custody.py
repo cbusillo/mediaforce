@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import hmac
 from typing import Any
 
 from mediaforce.tuning.av1_validation_v4r3_execution_grant import (
@@ -21,8 +21,8 @@ from mediaforce.tuning.av1_validation_v4r3_execution_preflight_operation import 
     _load_preparation_snapshot,
 )
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
-    AV1V4R3OrdinalWindowError,
     AV1_V4R3_OW_ORDINAL_COUNT,
+    AV1V4R3OrdinalWindowError,
 )
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
     AV1V4R3OrdinalWindowRegistryBinding,
@@ -46,7 +46,6 @@ from mediaforce.tuning.av1_validation_v4r3_runner_admission import (
     deserialize_av1_v4r3_execution_claim,
     serialize_av1_v4r3_execution_claim,
 )
-
 
 Clock = Callable[[], datetime]
 
@@ -135,8 +134,13 @@ def claim_av1_v4r3_execution_grant(
                     "AV1 v4 r3 execution custody owner binding is invalid"
                 )
             sequencing_grant = context.load_grant(ordinal)
-            grant_time = _clock_now(clock)
-            context.assert_next_ordinal_admissible(plan, ordinal, grant_time)
+            grant_time = context.fresh_now(clock)
+            context.assert_next_execution_ordinal_admissible(
+                plan,
+                preflight,
+                ordinal,
+                grant_time,
+            )
             context.assert_grant_open_for_admission(sequencing_grant, grant_time)
             grant, grant_created = _load_or_publish_execution_grant(
                 context=context,
@@ -153,8 +157,13 @@ def claim_av1_v4r3_execution_grant(
                 raise AV1V4R3ExecutionCustodyError(
                     "AV1 v4 r3 execution grant has already been consumed"
                 )
-            burn_time = _clock_now(clock)
-            context.assert_next_ordinal_admissible(plan, ordinal, burn_time)
+            burn_time = context.fresh_now(clock)
+            context.assert_next_execution_ordinal_admissible(
+                plan,
+                preflight,
+                ordinal,
+                burn_time,
+            )
             context.assert_grant_open_for_admission(sequencing_grant, burn_time)
             claim = build_av1_v4r3_execution_claim(
                 execution_grant=grant,
@@ -199,15 +208,6 @@ def claim_av1_v4r3_execution_grant(
         raise AV1V4R3ExecutionCustodyError(
             "AV1 v4 r3 execution custody operation failed"
         ) from exc
-
-
-def _clock_now(clock: Clock) -> datetime:
-    current = clock()
-    if current.tzinfo is None or current.utcoffset() is None:
-        raise AV1V4R3ExecutionCustodyError(
-            "AV1 v4 r3 execution custody clock must be timezone-aware"
-        )
-    return current.astimezone(UTC).replace(microsecond=0)
 
 
 def _load_or_publish_execution_grant(

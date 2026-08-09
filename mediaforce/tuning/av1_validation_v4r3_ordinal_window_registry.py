@@ -12,10 +12,10 @@ from __future__ import annotations
 import fcntl
 import hmac
 import os
+import re
 import secrets
 import stat
 import threading
-import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +24,12 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.evidence import canonical_json_bytes
+from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.tuning.av1_validation_v4r3_execution_grant import (
+    assert_av1_v4r3_execution_grant_active,
+    assert_av1_v4r3_execution_grant_chain,
+    deserialize_av1_v4r3_execution_grant,
+)
 from mediaforce.tuning.av1_validation_v4r3_execution_preflight import (
     AV1V4R3ExecutionPreflightError,
     assert_av1_v4r3_ordinal_plan_preflight_pair,
@@ -31,13 +37,12 @@ from mediaforce.tuning.av1_validation_v4r3_execution_preflight import (
     serialize_av1_v4r3_execution_preflight,
 )
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
-    AV1V4R3OrdinalWindowError,
     AV1_V4R3_OW_ORDINAL_COUNT,
     AV1_V4R3_OW_SETUP_SECONDS,
     AV1_V4R3_OW_TEARDOWN_SECONDS,
+    AV1V4R3OrdinalWindowError,
     assert_av1_v4r3_ordinal_window_grant,
     assert_av1_v4r3_ordinal_window_plan,
-    assert_av1_v4r3_ordinal_window_terminal,
     build_av1_v4r3_ordinal_window_claim,
     build_av1_v4r3_ordinal_window_grant,
     build_av1_v4r3_ordinal_window_outcome,
@@ -55,6 +60,14 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
     serialize_av1_v4r3_ordinal_window_plan,
     serialize_av1_v4r3_ordinal_window_started,
     serialize_av1_v4r3_ordinal_window_terminal,
+)
+from mediaforce.tuning.av1_validation_v4r3_runner_admission import (
+    assert_av1_v4r3_execution_claim_chain,
+    assert_av1_v4r3_runner_admission,
+    build_av1_v4r3_runner_admission,
+    deserialize_av1_v4r3_execution_claim,
+    deserialize_av1_v4r3_runner_admission,
+    serialize_av1_v4r3_runner_admission,
 )
 
 
@@ -89,6 +102,13 @@ class AV1V4R3OrdinalWindowPairPublication:
     preflight: Mapping[str, Any]
     plan_created: bool
     preflight_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AV1V4R3RunnerStartPublication:
+    claim: Mapping[str, Any]
+    admission: Mapping[str, Any]
+    started: Mapping[str, Any]
 
 
 def av1_v4r3_ordinal_window_registry_hmac_id(
@@ -273,6 +293,125 @@ def publish_av1_v4r3_ordinal_window_started(
         return started
 
 
+def publish_av1_v4r3_runner_admission_and_started(
+    *,
+    binding: AV1V4R3OrdinalWindowRegistryBinding,
+    plan: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+    execution_claim: Mapping[str, Any],
+    source_path_hmac_id: str,
+    instance_path_hmac_ids: Mapping[str, str],
+    quality_temp_hmac_id: str,
+    quality_temp_key_id: str,
+    production_stream_plan: Mapping[str, Any],
+    stream_budget_ledger: Mapping[str, Any],
+    transform_plan_id: str,
+    returned_stream_budget_ledger: Mapping[str, Any],
+    clock: Clock,
+) -> AV1V4R3RunnerStartPublication:
+    """Atomically admit and start exactly one execution-authorized ordinal."""
+
+    _assert_clock(clock)
+    wrote_prefix = False
+    with _locked_registry(binding.registry) as ctx:
+        ctx.assert_no_terminal()
+        plan_payload, preflight_payload = ctx.load_plan_preflight_pair(binding, plan)
+        sequencing_payload = ctx.load_matching_grant(plan_payload, sequencing_grant)
+        ordinal = int(sequencing_payload["ordinal"])
+        execution_grant_payload = ctx.load_execution_grant(ordinal)
+        _assert_same_record(execution_grant_payload, execution_grant, "execution grant")
+        execution_claim_payload = ctx.load_execution_claim(
+            str(execution_grant_payload["grant_id"])
+        )
+        _assert_same_record(execution_claim_payload, execution_claim, "execution claim")
+        try:
+            assert_av1_v4r3_execution_grant_chain(
+                plan=plan_payload,
+                preflight=preflight_payload,
+                sequencing_grant=sequencing_payload,
+                execution_grant=execution_grant_payload,
+            )
+            assert_av1_v4r3_execution_claim_chain(
+                execution_claim=execution_claim_payload,
+                execution_grant=execution_grant_payload,
+                sequencing_grant=sequencing_payload,
+            )
+        except ValueError as exc:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 runner execution authority chain is invalid"
+            ) from exc
+        ctx.assert_no_record(_claim_name(ordinal), "claim", ordinal)
+        ctx.assert_no_record(
+            _runner_admission_name(ordinal), "runner admission", ordinal
+        )
+        ctx.assert_no_record(_started_name(ordinal), "started", ordinal)
+        ctx.assert_no_record(_outcome_name(ordinal), "outcome", ordinal)
+        now = ctx.now(clock)
+        ctx.assert_next_execution_ordinal_admissible(
+            plan_payload,
+            preflight_payload,
+            ordinal,
+            now,
+        )
+        ctx.assert_grant_open_for_admission(sequencing_payload, now)
+        timestamp = _format_ts(now)
+        claim = build_av1_v4r3_ordinal_window_claim(
+            plan=plan_payload,
+            grant=sequencing_payload,
+            claimed_at=timestamp,
+        )
+        admission = build_av1_v4r3_runner_admission(
+            plan=plan_payload,
+            execution_claim=execution_claim_payload,
+            execution_grant=execution_grant_payload,
+            sequencing_grant=sequencing_payload,
+            preflight=preflight_payload,
+            admitted_at=timestamp,
+            source_path_hmac_id=source_path_hmac_id,
+            instance_path_hmac_ids=instance_path_hmac_ids,
+            quality_temp_hmac_id=quality_temp_hmac_id,
+            quality_temp_key_id=quality_temp_key_id,
+            production_stream_plan=production_stream_plan,
+            stream_budget_ledger=stream_budget_ledger,
+            transform_plan_id=transform_plan_id,
+            returned_stream_budget_ledger=returned_stream_budget_ledger,
+        )
+        started = build_av1_v4r3_ordinal_window_started(
+            plan=plan_payload,
+            grant=sequencing_payload,
+            claim=claim,
+            started_at=timestamp,
+        )
+        try:
+            ctx.write(
+                _claim_name(ordinal), serialize_av1_v4r3_ordinal_window_claim(claim)
+            )
+            wrote_prefix = True
+            ctx.write(
+                _runner_admission_name(ordinal),
+                serialize_av1_v4r3_runner_admission(admission),
+            )
+            ctx.write(
+                _started_name(ordinal),
+                serialize_av1_v4r3_ordinal_window_started(started),
+            )
+            _assert_same_record(ctx.load_claim(ordinal), claim, "claim")
+            _assert_same_record(
+                ctx.load_runner_admission(ordinal), admission, "runner admission"
+            )
+            _assert_same_record(ctx.load_started(ordinal), started, "started")
+        except BaseException:
+            if wrote_prefix:
+                ctx.publish_terminal(plan_payload)
+            raise
+        return AV1V4R3RunnerStartPublication(
+            claim=claim,
+            admission=admission,
+            started=started,
+        )
+
+
 def publish_av1_v4r3_ordinal_window_outcome(
     *,
     binding: AV1V4R3OrdinalWindowRegistryBinding,
@@ -388,13 +527,26 @@ class _RegistryContext:
 
     def now(self, clock: Clock) -> datetime:
         if self._now is None:
-            current = clock()
-            if current.tzinfo is None or current.utcoffset() is None:
-                raise AV1V4R3OrdinalWindowRegistryError(
-                    "AV1 v4 r3 ordinal window registry clock must be timezone-aware"
-                )
-            self._now = current.astimezone(UTC).replace(microsecond=0)
+            self._now = self._read_clock(clock)
         return self._now
+
+    def fresh_now(self, clock: Clock) -> datetime:
+        current = self._read_clock(clock)
+        if self._now is not None and current < self._now:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window registry clock moved backward"
+            )
+        self._now = current
+        return current
+
+    @staticmethod
+    def _read_clock(clock: Clock) -> datetime:
+        current = clock()
+        if current.tzinfo is None or current.utcoffset() is None:
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 ordinal window registry clock must be timezone-aware"
+            )
+        return current.astimezone(UTC).replace(microsecond=0)
 
     def exists(self, filename: str) -> bool:
         _assert_registry_filename(filename)
@@ -734,6 +886,21 @@ class _RegistryContext:
             self.read(_claim_name(ordinal))
         )
 
+    def load_execution_grant(self, ordinal: int) -> dict[str, Any]:
+        return deserialize_av1_v4r3_execution_grant(
+            self.read(_execution_grant_name(ordinal))
+        )
+
+    def load_execution_claim(self, grant_id: str) -> dict[str, Any]:
+        return deserialize_av1_v4r3_execution_claim(
+            self.read(_execution_claim_name(grant_id))
+        )
+
+    def load_runner_admission(self, ordinal: int) -> dict[str, Any]:
+        return deserialize_av1_v4r3_runner_admission(
+            self.read(_runner_admission_name(ordinal))
+        )
+
     def load_started(self, ordinal: int) -> dict[str, Any]:
         return deserialize_av1_v4r3_ordinal_window_started(
             self.read(_started_name(ordinal))
@@ -822,6 +989,142 @@ class _RegistryContext:
                 raise AV1V4R3OrdinalWindowRegistryError(
                     "AV1 v4 r3 ordinal window clock moved before prior outcome"
                 )
+
+    def assert_next_execution_ordinal_admissible(
+        self,
+        plan: Mapping[str, Any],
+        preflight: Mapping[str, Any],
+        ordinal: int,
+        now: datetime,
+    ) -> None:
+        self.assert_next_ordinal_admissible(plan, ordinal, now)
+        for prior in range(1, ordinal):
+            try:
+                sequencing_grant = self.load_grant(prior)
+                execution_grant = self.load_execution_grant(prior)
+                execution_claim = self.load_execution_claim(
+                    str(execution_grant["grant_id"])
+                )
+                admission = self.load_runner_admission(prior)
+                assert_av1_v4r3_execution_grant_chain(
+                    plan=plan,
+                    preflight=preflight,
+                    sequencing_grant=sequencing_grant,
+                    execution_grant=execution_grant,
+                )
+                assert_av1_v4r3_execution_claim_chain(
+                    execution_claim=execution_claim,
+                    execution_grant=execution_grant,
+                    sequencing_grant=sequencing_grant,
+                )
+                assert_av1_v4r3_runner_admission(admission)
+                self._assert_prior_execution_admission(
+                    prior=prior,
+                    sequencing_grant=sequencing_grant,
+                    execution_grant=execution_grant,
+                    execution_claim=execution_claim,
+                    admission=admission,
+                    preflight=preflight,
+                )
+            except (KeyError, OSError, ValueError) as exc:
+                self.publish_terminal(plan)
+                raise AV1V4R3OrdinalWindowRegistryError(
+                    "AV1 v4 r3 prior execution admission is incomplete"
+                ) from exc
+
+    def _assert_prior_execution_admission(
+        self,
+        *,
+        prior: int,
+        sequencing_grant: Mapping[str, Any],
+        execution_grant: Mapping[str, Any],
+        execution_claim: Mapping[str, Any],
+        admission: Mapping[str, Any],
+        preflight: Mapping[str, Any],
+    ) -> None:
+        started = self.load_started(prior)
+        readiness = next(
+            (
+                object_dict(item)
+                for item in object_list(preflight.get("ordinal_readiness"))
+                if object_dict(item).get("ordinal") == prior
+            ),
+            {},
+        )
+        pairs = (
+            (admission.get("ordinal"), prior),
+            (admission.get("execution_grant_id"), execution_grant.get("grant_id")),
+            (
+                admission.get("execution_grant_payload_sha256"),
+                execution_grant.get("payload_sha256"),
+            ),
+            (admission.get("execution_claim_id"), execution_claim.get("claim_id")),
+            (
+                admission.get("execution_claim_payload_sha256"),
+                execution_claim.get("payload_sha256"),
+            ),
+            (admission.get("plan_id"), execution_grant.get("plan_id")),
+            (
+                admission.get("plan_payload_sha256"),
+                execution_grant.get("plan_payload_sha256"),
+            ),
+            (admission.get("preflight_id"), execution_grant.get("preflight_id")),
+            (
+                admission.get("preflight_payload_sha256"),
+                execution_grant.get("preflight_payload_sha256"),
+            ),
+            (
+                admission.get("sequencing_grant_id"),
+                sequencing_grant.get("grant_id"),
+            ),
+            (
+                admission.get("sequencing_grant_payload_sha256"),
+                sequencing_grant.get("payload_sha256"),
+            ),
+            (
+                admission.get("owner_principal"),
+                execution_grant.get("owner_principal"),
+            ),
+            (admission.get("asset_id"), execution_grant.get("asset_id")),
+            (admission.get("closure_id"), execution_grant.get("closure_id")),
+            (
+                admission.get("invocation_sha256"),
+                execution_grant.get("invocation_sha256"),
+            ),
+            (
+                admission.get("path_privacy_key_id"),
+                execution_grant.get("path_privacy_key_id"),
+            ),
+            (admission.get("asset_id"), readiness.get("asset_id")),
+            (admission.get("closure_id"), readiness.get("closure_id")),
+            (
+                admission.get("invocation_sha256"),
+                readiness.get("invocation_sha256"),
+            ),
+            (
+                admission.get("transform_plan_id"),
+                readiness.get("transform_plan_id"),
+            ),
+            (admission.get("size_goal_id"), readiness.get("size_goal_id")),
+            (
+                admission.get("ledger_closure_id"),
+                readiness.get("ledger_closure_id"),
+            ),
+        )
+        admitted_at = _parse_ts(admission["admitted_at"])
+        if (
+            any(left != right for left, right in pairs)
+            or admitted_at < _parse_ts(execution_claim["claimed_at"])
+            or admitted_at > _parse_ts(started["started_at"])
+        ):
+            raise AV1V4R3OrdinalWindowRegistryError(
+                "AV1 v4 r3 prior execution admission chain is invalid"
+            )
+        self.assert_grant_open_for_admission(sequencing_grant, admitted_at)
+        assert_av1_v4r3_execution_grant_active(
+            execution_grant,
+            as_of=str(admission["admitted_at"]),
+        )
 
     def derive_prior_success_high_water(
         self,
@@ -1031,6 +1334,7 @@ def _is_registry_artifact_filename(filename: str) -> bool:
             _started_name(ordinal),
             _outcome_name(ordinal),
             _execution_grant_name(ordinal),
+            _runner_admission_name(ordinal),
         }
         for ordinal in range(1, AV1_V4R3_OW_ORDINAL_COUNT + 1)
     )
@@ -1156,6 +1460,10 @@ def _outcome_name(ordinal: int) -> str:
 
 def _execution_grant_name(ordinal: int) -> str:
     return f"ordinal_{ordinal:02d}.execution-grant.json"
+
+
+def _runner_admission_name(ordinal: int) -> str:
+    return f"ordinal_{ordinal:02d}.runner-admission.json"
 
 
 def _execution_claim_name(grant_id: str) -> str:
