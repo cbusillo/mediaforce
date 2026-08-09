@@ -2856,3 +2856,32 @@ or media activity. Runner admission uses only the canonical production
 stream-plan and ledger identity parsers; it does not resolve, search, persist,
 or execute them. No publication or custody operation exists in this slice, so
 implementation tests create no durable or actionable owner authority.
+
+### Owner execution-grant and claim custody
+
+`mediaforce/tuning/av1_validation_v4r3_execution_custody.py` adds the separate
+owner-only custody boundary. It sequentially validates preparation custody and
+the HMAC-bound ordinal registry, remeasures the reviewed repository under the
+ordinal lock, custody-loads the canonical plan/preflight pair and sequencing
+grant, and publishes one byte-idempotent execution grant for the selected
+ordinal. It accepts an execution decision only when the owner principal is
+repeated exactly and the current time is inside both the sequencing admission
+window and the new execution grant.
+
+The execution claim is the irreversible consumption point. Its final filename
+is derived from the validated execution-grant ID and opened directly with
+`O_CREAT|O_EXCL|O_NOFOLLOW` at mode `0600` while the owner-only ordinal registry
+is locked. There is deliberately no temporary claim file and no rollback after
+final-path creation: a complete, partial, malformed, symlink, hardlink, or
+otherwise pre-existing claim target means the grant is burned and cannot be
+retried. A crash before claim creation leaves a byte-identical grant-only state
+that may be retried; any state after claim creation requires owner
+investigation and remains non-resumable.
+
+`scripts/claim_av1_v4r3_execution_grant.py` exposes only the combined
+publish-and-claim operation. It emits JSON containing public identities,
+authority booleans, and creation state, never registry/repository paths or key
+bytes. This operation still performs no media read, runner callback, encoder,
+evidence publication, activation, or dogfood action. The next production
+operation must custody-load this retained claim and revalidate immediately
+before media access.

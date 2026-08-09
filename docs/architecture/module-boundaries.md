@@ -424,6 +424,15 @@ Guidance:
     source/instance/temp, canonical production stream-plan and ledger payload
     identities, and frozen size-goal, ledger-closure, and transform-plan
     identities without performing a production runtime operation
+  - `av1_validation_v4r3_execution_custody.py` is the owner-only private I/O
+    boundary for per-ordinal execution authority; it sequentially revalidates
+    preparation and ordinal custody, publishes one canonical execution grant,
+    and burns one claim through direct final-path exclusive creation without
+    importing or invoking the media runner
+  - `av1_validation_v4r3_ordinal_window_registry.py` owns execution-grant and
+    claim file custody alongside sequencing state; execution grants use the
+    repairable temporary-link publisher, while execution claims use the
+    non-rollback final-path burn writer under the same descriptor lock
   - `av1_validation_v4r3_ordinal_window_registry.py` is the owner-only local I/O
     boundary for those records and the canonical `preflight.json`: callers
     supply a private registry binding for an absolute owner-only mode-`0700`
