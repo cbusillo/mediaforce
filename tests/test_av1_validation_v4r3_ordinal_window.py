@@ -689,6 +689,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 "failure_phase",
                 "failure_class",
                 "failure_search_status",
+                "failure_search_reason",
                 "outcome_id",
                 "payload_sha256",
             ):
@@ -706,7 +707,34 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
             with self.assertRaises(AV1V4R3OrdinalWindowError):
                 pure_module.assert_av1_v4r3_ordinal_window_outcome(tampered)
 
-    def test_schema_v2_rejects_invalid_failure_semantics(self) -> None:
+    def test_schema_v2_outcome_remains_readable(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            plan = _make_plan(binding)
+            _grant, _claim, _started, outcome = _publish_grant_claim_start_outcome(
+                binding, plan, 1, success=False
+            )
+            legacy = dict(outcome)
+            for field in (
+                "failure_search_reason",
+                "outcome_id",
+                "payload_sha256",
+            ):
+                legacy.pop(field, None)
+            legacy["schema_version"] = 2
+            legacy["contract_version"] = "av1v4r3owout2"
+            legacy = pure_module._bind_outcome_identity(legacy)
+            serialized = pure_module.serialize_av1_v4r3_ordinal_window_outcome(legacy)
+            self.assertEqual(
+                pure_module.deserialize_av1_v4r3_ordinal_window_outcome(serialized),
+                legacy,
+            )
+            tampered = dict(legacy)
+            tampered["failure_search_reason"] = "target_band_violates_quality_floor"
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                pure_module.assert_av1_v4r3_ordinal_window_outcome(tampered)
+
+    def test_schema_v3_rejects_invalid_failure_semantics(self) -> None:
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
@@ -736,7 +764,7 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 with self.assertRaises(AV1V4R3OrdinalWindowError):
                     pure_module.assert_av1_v4r3_ordinal_window_outcome(invalid)
 
-    def test_schema_v2_requires_exact_failure_fields(self) -> None:
+    def test_schema_v3_requires_exact_failure_fields(self) -> None:
         with TemporaryDirectory() as raw:
             binding = _binding(_make_registry(Path(raw)))
             plan = _make_plan(binding)
@@ -747,12 +775,103 @@ class RegistryCustodyAndTimingTests(unittest.TestCase):
                 "failure_phase",
                 "failure_class",
                 "failure_search_status",
+                "failure_search_reason",
             ):
                 with self.subTest(field=field):
                     incomplete = dict(outcome)
                     incomplete.pop(field)
                     with self.assertRaises(AV1V4R3OrdinalWindowError):
                         pure_module.assert_av1_v4r3_ordinal_window_outcome(incomplete)
+
+    def test_schema_v3_accepts_only_bounded_quality_conflict_reasons(self) -> None:
+        reasons = (
+            "all_candidates_violate_quality_floor",
+            "target_band_violates_quality_floor",
+            "target_requires_crossing_quality_floor",
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason), TemporaryDirectory() as raw:
+                binding = _binding(_make_registry(Path(raw)))
+                plan = _make_plan(binding)
+                _grant, _claim, started, _outcome = (
+                    _publish_grant_claim_start_outcome(binding, plan, 1, success=False)
+                )
+                outcome = pure_module.build_av1_v4r3_ordinal_window_outcome(
+                    plan=plan,
+                    started=started,
+                    outcome_at="2026-08-08T07:18:00Z",
+                    success=False,
+                    failure_phase="production_search",
+                    failure_class="target_size_search_error",
+                    failure_search_status="quality_conflict",
+                    failure_search_reason=reason,
+                )
+                self.assertEqual(outcome["failure_search_reason"], reason)
+
+    def test_schema_v3_rejects_misbound_or_unknown_search_reason(self) -> None:
+        invalid_fields = (
+            {
+                "success": True,
+                "failure_phase": None,
+                "failure_class": None,
+                "failure_search_status": None,
+                "failure_search_reason": "target_band_violates_quality_floor",
+            },
+            {
+                "success": False,
+                "failure_phase": "production_search",
+                "failure_class": "quality_search_error",
+                "failure_search_status": None,
+                "failure_search_reason": "target_band_violates_quality_floor",
+            },
+            {
+                "success": False,
+                "failure_phase": "production_search",
+                "failure_class": "target_size_search_error",
+                "failure_search_status": "bound_exhausted",
+                "failure_search_reason": "target_band_violates_quality_floor",
+            },
+            {
+                "success": False,
+                "failure_phase": "production_search",
+                "failure_class": "target_size_search_error",
+                "failure_search_status": "quality_conflict",
+                "failure_search_reason": "future_private_reason",
+            },
+            {
+                "success": False,
+                "failure_phase": "production_search",
+                "failure_class": "target_size_search_error",
+                "failure_search_status": "quality_conflict",
+                "failure_search_reason": ["target_band_violates_quality_floor"],
+            },
+        )
+        for fields in invalid_fields:
+            with self.subTest(fields=fields), TemporaryDirectory() as raw:
+                binding = _binding(_make_registry(Path(raw)))
+                plan = _make_plan(binding)
+                _grant, _claim, started, _outcome = (
+                    _publish_grant_claim_start_outcome(binding, plan, 1, success=False)
+                )
+                with self.assertRaises(AV1V4R3OrdinalWindowError):
+                    pure_module.build_av1_v4r3_ordinal_window_outcome(
+                        plan=plan,
+                        started=started,
+                        outcome_at="2026-08-08T07:18:00Z",
+                        **fields,
+                    )
+
+    def test_outcome_rejects_boolean_schema_version(self) -> None:
+        with TemporaryDirectory() as raw:
+            binding = _binding(_make_registry(Path(raw)))
+            plan = _make_plan(binding)
+            _grant, _claim, _started, outcome = _publish_grant_claim_start_outcome(
+                binding, plan, 1, success=True
+            )
+            invalid = dict(outcome)
+            invalid["schema_version"] = True
+            with self.assertRaises(AV1V4R3OrdinalWindowError):
+                pure_module.assert_av1_v4r3_ordinal_window_outcome(invalid)
 
     def test_successful_ordinal_eight_publishes_success_terminal(self) -> None:
         with TemporaryDirectory() as raw:

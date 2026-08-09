@@ -36,6 +36,7 @@ from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
     build_av1_v4_r3_all_closure_payloads,
 )
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window import (
+    AV1_V4R3_OW_FAILURE_SEARCH_REASONS,
     AV1_V4R3_OW_FAILURE_SEARCH_STATUSES,
 )
 from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
@@ -109,11 +110,13 @@ class AV1V4R3OneOrdinalRunnerError(RuntimeError):
         failure_phase: str | None = None,
         failure_class: str | None = None,
         failure_search_status: str | None = None,
+        failure_search_reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.failure_phase = failure_phase
         self.failure_class = failure_class
         self.failure_search_status = failure_search_status
+        self.failure_search_reason = failure_search_reason
 
 
 class _ExecutionAuthorityError(RuntimeError):
@@ -150,6 +153,7 @@ class _FailureClassification:
     phase: str
     failure_class: str
     search_status: str | None = None
+    search_reason: str | None = None
 
 
 def run_av1_v4r3_one_ordinal(
@@ -267,6 +271,7 @@ def run_av1_v4r3_one_ordinal(
                 failure_phase=failure.phase,
                 failure_class=failure.failure_class,
                 failure_search_status=failure.search_status,
+                failure_search_reason=failure.search_reason,
             )
         except Exception as terminal_exc:
             _seal_terminal(ordinal_binding, plan, ordinal, clock)
@@ -280,6 +285,7 @@ def run_av1_v4r3_one_ordinal(
             failure_phase=failure.phase,
             failure_class=failure.failure_class,
             failure_search_status=failure.search_status,
+            failure_search_reason=failure.search_reason,
         ) from failure_exception
 
     try:
@@ -312,11 +318,21 @@ def _classify_failure(exc: BaseException, *, phase: str) -> _FailureClassificati
     if phase == "runtime_identity":
         return _FailureClassification(phase=phase, failure_class="runtime_identity_error")
     if isinstance(exc, TargetSizeSearchError):
+        raw_reason = (
+            exc.trace.get("selection_reason") if isinstance(exc.trace, dict) else None
+        )
         return _FailureClassification(
             phase=phase,
             failure_class="target_size_search_error",
             search_status=(
                 exc.status if exc.status in AV1_V4R3_OW_FAILURE_SEARCH_STATUSES else None
+            ),
+            search_reason=(
+                raw_reason
+                if exc.status == "quality_conflict"
+                and isinstance(raw_reason, str)
+                and raw_reason in AV1_V4R3_OW_FAILURE_SEARCH_REASONS
+                else None
             ),
         )
     if isinstance(exc, SampleEncodeError):

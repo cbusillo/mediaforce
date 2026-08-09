@@ -2912,11 +2912,16 @@ execution authority. Missing, malformed, partial, duplicated, or mismatched
 records fail closed and seal the run terminally. Search exceptions and returned
 ledger/source/stream/transform identity mismatches publish a failure outcome;
 operator-facing errors are fixed and path-free. Failure outcome schema v2 and
-the JSON CLI expose only a closed phase, failure-class token, and optional
-target-size search status. Exception text, argv, stderr, paths, CRFs, media
-facts, and raw traces are never persisted or returned.
-Historical schema-v1 outcome artifacts remain canonically readable; newly
-created outcomes use schema v2 and explicit null failure fields on success.
+the JSON CLI introduced a closed phase, failure-class token, and optional
+target-size search status. Schema v3 additionally permits one of three bounded
+quality-conflict reasons: `target_band_violates_quality_floor`,
+`target_requires_crossing_quality_floor`, or
+`all_candidates_violate_quality_floor`. The reason is null for successes,
+non-target-size failures, non-quality-conflict statuses, and unknown future
+tokens. Exception text, argv, stderr, paths, CRFs, media facts, and raw traces
+are never persisted or returned. Historical schema-v1 and schema-v2 outcome
+artifacts remain canonically readable; newly created outcomes use schema v3 and
+explicit null failure fields on success.
 
 `scripts/run_av1_v4r3_one_ordinal.py` is the explicit JSON-only owner entrypoint.
 It requires the owner principal to be repeated exactly and can operate only on

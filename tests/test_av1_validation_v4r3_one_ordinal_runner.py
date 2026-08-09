@@ -93,6 +93,7 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
             self.assertEqual(result.ordinal, 1)
             self.assertEqual(len(calls), 1)
             self.assertTrue((ordinal.registry / "ordinal_01.outcome.json").exists())
+            self.assertIsNone(result.outcome["failure_search_reason"])
             self.assertFalse((ordinal.registry / "terminal.json").exists())
 
             with (
@@ -276,7 +277,8 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
             "AV1 v4 r3 one-ordinal execution failed",
             failure_phase="production_search",
             failure_class="target_size_search_error",
-            failure_search_status="bound_exhausted",
+            failure_search_status="quality_conflict",
+            failure_search_reason="target_band_violates_quality_floor",
         )
         with (
             patch.object(script_module, "_load_mapping", return_value=_rights()),
@@ -301,7 +303,10 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
         payload = json.loads(output.call_args.args[0])
         self.assertEqual(payload["failure_phase"], "production_search")
         self.assertEqual(payload["failure_class"], "target_size_search_error")
-        self.assertEqual(payload["failure_search_status"], "bound_exhausted")
+        self.assertEqual(payload["failure_search_status"], "quality_conflict")
+        self.assertEqual(
+            payload["failure_search_reason"], "target_band_violates_quality_floor"
+        )
         self.assertNotIn("/private", str(payload))
 
     def test_successful_execution_admission_unlocks_next_ordinal_authority(
@@ -489,6 +494,7 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
             outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
             self.assertEqual(outcome["failure_phase"], "runtime_identity")
             self.assertEqual(outcome["failure_class"], "runtime_identity_error")
+            self.assertIsNone(outcome["failure_search_reason"])
 
     def test_sample_encode_failure_publishes_classification(self) -> None:
         with TemporaryDirectory() as raw:
@@ -525,6 +531,7 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
             self.assertEqual(outcome["failure_phase"], "production_search")
             self.assertEqual(outcome["failure_class"], "sample_encode_error")
             self.assertIsNone(outcome["failure_search_status"])
+            self.assertIsNone(outcome["failure_search_reason"])
 
     def test_target_size_failure_publishes_bounded_search_status(self) -> None:
         with TemporaryDirectory() as raw:
@@ -567,6 +574,111 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
             self.assertEqual(outcome["failure_phase"], "production_search")
             self.assertEqual(outcome["failure_class"], "target_size_search_error")
             self.assertEqual(outcome["failure_search_status"], "bound_exhausted")
+            self.assertIsNone(captured.exception.failure_search_reason)
+            self.assertIsNone(outcome["failure_search_reason"])
+
+    def test_quality_conflict_publishes_bounded_search_reason(self) -> None:
+        reasons = (
+            "all_candidates_violate_quality_floor",
+            "target_band_violates_quality_floor",
+            "target_requires_crossing_quality_floor",
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason), TemporaryDirectory() as raw:
+                preparation, ordinal, repository = _prepared(Path(raw))
+                _claim(preparation, ordinal, repository)
+
+                def search(
+                    _source: Path,
+                    _policy: object,
+                    **_kwargs: object,
+                ) -> QualitySearchResult:
+                    raise TargetSizeSearchError(
+                        "/private/quality conflict",
+                        status="quality_conflict",
+                        trace={
+                            "selection_reason": reason,
+                            "private_path": "/private/source.mkv",
+                        },
+                    )
+
+                with (
+                    patch.object(
+                        preflight_module,
+                        "_measure_clean_repository",
+                        return_value=repository,
+                    ),
+                    self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
+                ):
+                    run_av1_v4r3_one_ordinal(
+                        preparation_binding=preparation,
+                        ordinal_binding=ordinal,
+                        rights_attestation=_rights(),
+                        owner_principal="owner:test",
+                        confirmed_owner_principal="owner:test",
+                        ordinal=1,
+                        search_quality_for_source=search,
+                        clock=_sequence_clock(
+                            datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                            datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                        ),
+                    )
+                self.assertEqual(captured.exception.failure_search_reason, reason)
+                outcome = json.loads(
+                    (ordinal.registry / "ordinal_01.outcome.json").read_text()
+                )
+                self.assertEqual(outcome["failure_search_reason"], reason)
+                self.assertNotIn("/private", str(outcome))
+
+    def test_unknown_or_non_text_search_reason_degrades_to_null(self) -> None:
+        reasons: tuple[object, ...] = (
+            "future_private_reason",
+            "/private/source.mkv",
+            {"private_path": "/private/source.mkv"},
+            None,
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason), TemporaryDirectory() as raw:
+                preparation, ordinal, repository = _prepared(Path(raw))
+                _claim(preparation, ordinal, repository)
+
+                def search(
+                    _source: Path,
+                    _policy: object,
+                    **_kwargs: object,
+                ) -> QualitySearchResult:
+                    raise TargetSizeSearchError(
+                        "private detail",
+                        status="quality_conflict",
+                        trace={"selection_reason": reason},
+                    )
+
+                with (
+                    patch.object(
+                        preflight_module,
+                        "_measure_clean_repository",
+                        return_value=repository,
+                    ),
+                    self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
+                ):
+                    run_av1_v4r3_one_ordinal(
+                        preparation_binding=preparation,
+                        ordinal_binding=ordinal,
+                        rights_attestation=_rights(),
+                        owner_principal="owner:test",
+                        confirmed_owner_principal="owner:test",
+                        ordinal=1,
+                        search_quality_for_source=search,
+                        clock=_sequence_clock(
+                            datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                            datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                        ),
+                    )
+                self.assertIsNone(captured.exception.failure_search_reason)
+                outcome = json.loads(
+                    (ordinal.registry / "ordinal_01.outcome.json").read_text()
+                )
+                self.assertIsNone(outcome["failure_search_reason"])
 
     def test_interruption_publishes_classification_before_terminal(self) -> None:
         with TemporaryDirectory() as raw:
@@ -601,6 +713,7 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
             self.assertEqual(outcome["failure_phase"], "production_search")
             self.assertEqual(outcome["failure_class"], "interrupted")
             self.assertIsNone(outcome["failure_search_status"])
+            self.assertIsNone(outcome["failure_search_reason"])
             self.assertTrue((ordinal.registry / "terminal.json").exists())
 
     def test_quality_and_contract_failures_publish_distinct_classes(self) -> None:
@@ -649,6 +762,7 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
                     (ordinal.registry / "ordinal_01.outcome.json").read_text()
                 )
                 self.assertEqual(outcome["failure_class"], expected_class)
+                self.assertIsNone(outcome["failure_search_reason"])
 
     def test_unpublishable_target_size_status_is_omitted(self) -> None:
         with TemporaryDirectory() as raw:
@@ -681,8 +795,10 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
                 )
             self.assertEqual(captured.exception.failure_class, "target_size_search_error")
             self.assertIsNone(captured.exception.failure_search_status)
+            self.assertIsNone(captured.exception.failure_search_reason)
             outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
             self.assertIsNone(outcome["failure_search_status"])
+            self.assertIsNone(outcome["failure_search_reason"])
 
 
 def _quality_result(
