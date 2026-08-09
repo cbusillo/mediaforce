@@ -65,7 +65,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             search_quality_for_source=search_quality_for_source,
         )
     except BaseException as exc:
-        print(_json({"ok": False, "error": _sanitize_error(exc)}))
+        payload: dict[str, Any] = {"ok": False, "error": _sanitize_error(exc)}
+        if isinstance(exc, AV1V4R3OneOrdinalRunnerError) and exc.failure_phase:
+            payload.update(
+                {
+                    "failure_phase": exc.failure_phase,
+                    "failure_class": exc.failure_class,
+                    "failure_search_status": exc.failure_search_status,
+                }
+            )
+        print(_json(payload))
         return 1
     print(_json(_summary(result)))
     return 0

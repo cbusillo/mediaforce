@@ -9,7 +9,11 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from mediaforce.encoding.quality import QualitySearchResult
+from mediaforce.encoding.quality import (
+    QualitySearchError,
+    QualitySearchResult,
+    SampleEncodeError,
+)
 from mediaforce.tuning import av1_validation_v4r3_execution_custody as custody_module
 from mediaforce.tuning import (
     av1_validation_v4r3_execution_preflight_operation as preflight_module,
@@ -20,6 +24,9 @@ from mediaforce.tuning.av1_validation_v4r3_execution_custody import (
 )
 from mediaforce.tuning.av1_validation_v4r3_invocation_closure import (
     av1_v4_r3_transform_plan_payload,
+)
+from mediaforce.tuning.av1_validation_v4_qualification_search import (
+    V4QualificationContractError,
 )
 from mediaforce.tuning.av1_validation_v4r3_one_ordinal_runner import (
     AV1V4R3OneOrdinalRunnerError,
@@ -32,6 +39,7 @@ from mediaforce.tuning.av1_validation_v4r3_ordinal_window_registry import (
 from mediaforce.tuning.av1_validation_v4r3_runner_admission import (
     serialize_av1_v4r3_runner_admission,
 )
+from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from scripts import run_av1_v4r3_one_ordinal as script_module
 from tests.test_av1_validation_v4r3_execution_custody import _claim, _prepared
 from tests.test_av1_validation_v4r3_preparation_custody import _rights
@@ -138,8 +146,15 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
                 )
 
             self.assertNotIn("/Volumes", str(captured.exception))
+            self.assertEqual(captured.exception.failure_phase, "production_search")
+            self.assertEqual(captured.exception.failure_class, "unexpected_error")
+            self.assertIsNone(captured.exception.failure_search_status)
             self.assertTrue((ordinal.registry / "ordinal_01.outcome.json").exists())
             self.assertTrue((ordinal.registry / "terminal.json").exists())
+            outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
+            self.assertEqual(outcome["failure_phase"], "production_search")
+            self.assertEqual(outcome["failure_class"], "unexpected_error")
+            self.assertIsNone(outcome["failure_search_status"])
 
     def test_json_cli_never_reports_private_paths(self) -> None:
         fake_result = SimpleNamespace(
@@ -255,6 +270,39 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
                 )
             self.assertEqual(calls, 0)
             self.assertTrue((ordinal.registry / "terminal.json").exists())
+
+    def test_json_cli_reports_bounded_failure_classification(self) -> None:
+        error = AV1V4R3OneOrdinalRunnerError(
+            "AV1 v4 r3 one-ordinal execution failed",
+            failure_phase="production_search",
+            failure_class="target_size_search_error",
+            failure_search_status="bound_exhausted",
+        )
+        with (
+            patch.object(script_module, "_load_mapping", return_value=_rights()),
+            patch.object(
+                script_module, "run_av1_v4r3_one_ordinal", side_effect=error
+            ),
+            patch("builtins.print") as output,
+        ):
+            status = script_module.main(
+                [
+                    "--repository-root", "/private/repository",
+                    "--preparation-registry", "/private/preparation",
+                    "--ordinal-registry", "/private/ordinal",
+                    "--run-registry-id", "av1v4r3runreg_" + "e" * 64,
+                    "--rights-attestation", "/private/rights.json",
+                    "--ordinal", "1",
+                    "--owner-principal", "owner:test",
+                    "--confirm-owner-principal", "owner:test",
+                ]
+            )
+        self.assertEqual(status, 1)
+        payload = json.loads(output.call_args.args[0])
+        self.assertEqual(payload["failure_phase"], "production_search")
+        self.assertEqual(payload["failure_class"], "target_size_search_error")
+        self.assertEqual(payload["failure_search_status"], "bound_exhausted")
+        self.assertNotIn("/private", str(payload))
 
     def test_successful_execution_admission_unlocks_next_ordinal_authority(
         self,
@@ -420,7 +468,7 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
                     "_measure_clean_repository",
                     return_value=repository,
                 ),
-                self.assertRaises(AV1V4R3OneOrdinalRunnerError),
+                self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
             ):
                 run_av1_v4r3_one_ordinal(
                     preparation_binding=preparation,
@@ -436,6 +484,205 @@ class AV1V4R3OneOrdinalRunnerTests(unittest.TestCase):
                     ),
                 )
             self.assertTrue((ordinal.registry / "terminal.json").exists())
+            self.assertEqual(captured.exception.failure_phase, "runtime_identity")
+            self.assertEqual(captured.exception.failure_class, "runtime_identity_error")
+            outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
+            self.assertEqual(outcome["failure_phase"], "runtime_identity")
+            self.assertEqual(outcome["failure_class"], "runtime_identity_error")
+
+    def test_sample_encode_failure_publishes_classification(self) -> None:
+        with TemporaryDirectory() as raw:
+            preparation, ordinal, repository = _prepared(Path(raw))
+            _claim(preparation, ordinal, repository)
+
+            def search(_source: Path, _policy: object, **_kwargs: object) -> QualitySearchResult:
+                raise SampleEncodeError("/private/tool failure")
+
+            with (
+                patch.object(
+                    preflight_module,
+                    "_measure_clean_repository",
+                    return_value=repository,
+                ),
+                self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
+            ):
+                run_av1_v4r3_one_ordinal(
+                    preparation_binding=preparation,
+                    ordinal_binding=ordinal,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    confirmed_owner_principal="owner:test",
+                    ordinal=1,
+                    search_quality_for_source=search,
+                    clock=_sequence_clock(
+                        datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                        datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                    ),
+                )
+            self.assertEqual(captured.exception.failure_phase, "production_search")
+            self.assertEqual(captured.exception.failure_class, "sample_encode_error")
+            outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
+            self.assertEqual(outcome["failure_phase"], "production_search")
+            self.assertEqual(outcome["failure_class"], "sample_encode_error")
+            self.assertIsNone(outcome["failure_search_status"])
+
+    def test_target_size_failure_publishes_bounded_search_status(self) -> None:
+        with TemporaryDirectory() as raw:
+            preparation, ordinal, repository = _prepared(Path(raw))
+            _claim(preparation, ordinal, repository)
+
+            def search(_source: Path, _policy: object, **_kwargs: object) -> QualitySearchResult:
+                raise TargetSizeSearchError(
+                    "/private/search exhausted",
+                    status="bound_exhausted",
+                    trace={"private_path": "/private/source.mkv"},
+                )
+
+            with (
+                patch.object(
+                    preflight_module,
+                    "_measure_clean_repository",
+                    return_value=repository,
+                ),
+                self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
+            ):
+                run_av1_v4r3_one_ordinal(
+                    preparation_binding=preparation,
+                    ordinal_binding=ordinal,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    confirmed_owner_principal="owner:test",
+                    ordinal=1,
+                    search_quality_for_source=search,
+                    clock=_sequence_clock(
+                        datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                        datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                    ),
+                )
+            self.assertEqual(captured.exception.failure_phase, "production_search")
+            self.assertEqual(captured.exception.failure_class, "target_size_search_error")
+            self.assertEqual(captured.exception.failure_search_status, "bound_exhausted")
+            self.assertNotIn("/private", str(captured.exception))
+            outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
+            self.assertEqual(outcome["failure_phase"], "production_search")
+            self.assertEqual(outcome["failure_class"], "target_size_search_error")
+            self.assertEqual(outcome["failure_search_status"], "bound_exhausted")
+
+    def test_interruption_publishes_classification_before_terminal(self) -> None:
+        with TemporaryDirectory() as raw:
+            preparation, ordinal, repository = _prepared(Path(raw))
+            _claim(preparation, ordinal, repository)
+
+            def search(_source: Path, _policy: object, **_kwargs: object) -> QualitySearchResult:
+                raise KeyboardInterrupt("/private/interrupted")
+
+            with (
+                patch.object(
+                    preflight_module,
+                    "_measure_clean_repository",
+                    return_value=repository,
+                ),
+                self.assertRaises(KeyboardInterrupt) as captured,
+            ):
+                run_av1_v4r3_one_ordinal(
+                    preparation_binding=preparation,
+                    ordinal_binding=ordinal,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    confirmed_owner_principal="owner:test",
+                    ordinal=1,
+                    search_quality_for_source=search,
+                    clock=_sequence_clock(
+                        datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                        datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                    ),
+                )
+            outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
+            self.assertEqual(outcome["failure_phase"], "production_search")
+            self.assertEqual(outcome["failure_class"], "interrupted")
+            self.assertIsNone(outcome["failure_search_status"])
+            self.assertTrue((ordinal.registry / "terminal.json").exists())
+
+    def test_quality_and_contract_failures_publish_distinct_classes(self) -> None:
+        cases = (
+            (QualitySearchError("private detail"), "quality_search_error"),
+            (
+                V4QualificationContractError("private detail"),
+                "qualification_contract_error",
+            ),
+        )
+        for failure, expected_class in cases:
+            with self.subTest(expected_class=expected_class), TemporaryDirectory() as raw:
+                preparation, ordinal, repository = _prepared(Path(raw))
+                _claim(preparation, ordinal, repository)
+
+                def search(
+                    _source: Path,
+                    _policy: object,
+                    **_kwargs: object,
+                ) -> QualitySearchResult:
+                    raise failure
+
+                with (
+                    patch.object(
+                        preflight_module,
+                        "_measure_clean_repository",
+                        return_value=repository,
+                    ),
+                    self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
+                ):
+                    run_av1_v4r3_one_ordinal(
+                        preparation_binding=preparation,
+                        ordinal_binding=ordinal,
+                        rights_attestation=_rights(),
+                        owner_principal="owner:test",
+                        confirmed_owner_principal="owner:test",
+                        ordinal=1,
+                        search_quality_for_source=search,
+                        clock=_sequence_clock(
+                            datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                            datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                        ),
+                    )
+                self.assertEqual(captured.exception.failure_class, expected_class)
+                outcome = json.loads(
+                    (ordinal.registry / "ordinal_01.outcome.json").read_text()
+                )
+                self.assertEqual(outcome["failure_class"], expected_class)
+
+    def test_unpublishable_target_size_status_is_omitted(self) -> None:
+        with TemporaryDirectory() as raw:
+            preparation, ordinal, repository = _prepared(Path(raw))
+            _claim(preparation, ordinal, repository)
+
+            def search(_source: Path, _policy: object, **_kwargs: object) -> QualitySearchResult:
+                raise TargetSizeSearchError("not a failure status", status="selected", trace={})
+
+            with (
+                patch.object(
+                    preflight_module,
+                    "_measure_clean_repository",
+                    return_value=repository,
+                ),
+                self.assertRaises(AV1V4R3OneOrdinalRunnerError) as captured,
+            ):
+                run_av1_v4r3_one_ordinal(
+                    preparation_binding=preparation,
+                    ordinal_binding=ordinal,
+                    rights_attestation=_rights(),
+                    owner_principal="owner:test",
+                    confirmed_owner_principal="owner:test",
+                    ordinal=1,
+                    search_quality_for_source=search,
+                    clock=_sequence_clock(
+                        datetime(2026, 8, 8, 4, 20, tzinfo=UTC),
+                        datetime(2026, 8, 8, 4, 21, tzinfo=UTC),
+                    ),
+                )
+            self.assertEqual(captured.exception.failure_class, "target_size_search_error")
+            self.assertIsNone(captured.exception.failure_search_status)
+            outcome = json.loads((ordinal.registry / "ordinal_01.outcome.json").read_text())
+            self.assertIsNone(outcome["failure_search_status"])
 
 
 def _quality_result(
