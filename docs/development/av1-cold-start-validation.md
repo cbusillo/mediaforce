@@ -2952,3 +2952,58 @@ failure is absorbing. The claim command irreversibly burns one ordinal's
 execution authority, and the runner executes only that already-claimed ordinal.
 `OWNER_RESULT_LOG` must be an owner-only path outside the repository; its single
 JSON line is the durable public result, including schema-v2 fallback diagnostics.
+
+## Manifest revision 4 — conflict-cartography contracts
+
+Revision 3 is terminal and non-retryable. Its fresh schema-v3 cohort completed
+the Sintel baseline and guided ordinals, then the Tears of Steel baseline
+reported the bounded reason `target_band_violates_quality_floor`. Revision 4 is
+a distinct implementation-only lineage for mapping such policy conflicts; it
+does not reinterpret, resume, convert, or reuse revision-3 artifacts, keys,
+registries, grants, claims, HMAC domains, or outcomes.
+
+`mediaforce/tuning/av1_validation_v4r4_contract.py` defines the pure revision-4
+contract candidate. It retains the four frozen sources, execution order,
+production policy values, and inherited `2027-02-02T18:53:35Z` expiry while
+using revision-4-only identities. The policy-values digest
+`sha256:99b151e2f234d1c820eb6097213ecf8ce9afc1ceda8ea46635ddeaa8bc6f5037`
+hashes the policy values alone and therefore equals the revision-3 policy-values
+digest; the manifest identity envelope is distinct at
+`av1vmanifest4r4_7d3d62b272d048e7ac4aaa397eace2a0`. The contract freezes the
+content class before outcomes, the eight ordinal cells, new warm-start
+identities, the three quality-conflict reasons, both bounded diagnostic
+vocabularies, and the first three positive controls. Every authority field is
+false. Gate G1 must accept these exact constants in code review before the
+implementation slice merges.
+
+`mediaforce/tuning/av1_validation_v4r4_diagnostics.py` recomputes bounded
+diagnostics from validated internal candidate observations. A conflict is
+bounded only for the exact
+`production_search / target_size_search_error / quality_conflict` tuple and one
+of the three frozen reasons. The classifier independently checks runtime policy
+values, binds target and source-cap bytes to the frozen ordinal, applies the
+literal reason-specific candidate pools and deterministic ordering, rejects
+missing, non-positive, non-finite, cap-only, or contradictory inputs, and
+returns only a reason plus quality-gap and size-gap tokens. Raw CRFs, scores,
+bytes, counts, paths, argv, stderr, traces, media facts, and timings are not
+part of the public diagnostic payload.
+
+`mediaforce/tuning/av1_validation_v4r4_outcome.py` defines outcomes with exactly
+one disposition: `selected_success`, `bounded_quality_conflict`, or
+`fatal_failure`. There is no `success` boolean. Selected and bounded-conflict
+outcomes advance traversal; fatal outcomes do not. Positive-control
+observations are bounded and independently recomputable from each artifact, so
+a divergence can only be represented as fatal. The pure terminal contract
+derives selected, conflict, and traversed counts separately; reports
+`traversal_complete`, termination kind, and the frozen policy verdict; sum-checks
+reason and band maps; and applies the preregistered total map-to-lever rule.
+Complete traversal can therefore coexist with a negative policy verdict. The
+map chooses only an investigation or policy-lever class and never a policy
+value.
+
+This revision-4 slice performs no filesystem, registry, database, subprocess,
+or media operation and creates no preparation, execution, evidence,
+publication, activation, or dogfood authority. Registry sequencing, runner/CLI,
+and preparation/custody remain separate implementation slices. Real
+preparation, each media ordinal, any successor policy, and dogfood each require
+their later explicit owner gate.
