@@ -3037,3 +3037,55 @@ verdict are still derived by the frozen pure outcome contract.
 This registry slice is covered only by temporary synthetic tests. It creates no
 real registry, grant, claim, preparation, media read, execution, publication,
 activation, or dogfood authority, and it does not alter any revision-3 module.
+
+The one-ordinal runner slice adds a separate revision-4 execution-authority
+boundary. `mediaforce/tuning/av1_validation_v4r4_execution_authority.py` is
+verify-only: it can assert and deserialize owner-created execution grants and
+claims and recompute their public IDs, but it exposes no `build_*`,
+`serialize_*`, `publish_*`, or `materialize_*` API for either artifact. An
+execution grant authorizes exactly one ordinal and only the three fields needed
+to read media and execute the qualification/runtime callback; every other v4
+authority field remains false. The execution claim binds the exact grant,
+owner, plan, sequencing claim, ordinal, and claim time and is consumed as a
+single-use ordinal-slot artifact.
+
+`mediaforce/tuning/av1_validation_v4r4_runner_admission.py` is the public,
+non-authorizing admission record created by the runner. It binds the plan,
+sequencing grant and claim, execution grant and claim, ordinal layout, content
+class, configuration, frozen policy digest, runtime policy values, the
+precomputed qualification-search invocation digest, and the canonical stream
+budget ledger and production stream-plan identities. All authority fields are
+false. Admission records do not carry paths, raw runtime facts, traces, CRFs,
+scores, byte observations, media facts, command lines, stderr, timings, or
+arbitrary exception text.
+
+`mediaforce/tuning/av1_validation_v4r4_ordinal_registry.py` now also accepts
+ordinal-derived execution-grant, execution-claim, and runner-admission
+filenames. The runner entry uses one locked registry transaction to verify the
+full plan/sequencing/execution/admission chain, require the canonical burned
+claim, reject prior admission/start/outcome/terminal state, publish the
+non-authorizing admission, and then publish `started`. Existing revision-4
+sequencing artifacts and revision-3 schemas are not renamed, converted, or
+reinterpreted.
+
+`mediaforce/tuning/av1_validation_v4r4_one_ordinal_runner.py` builds the real
+frozen production stream budget ledger and stream plan, admits the ordinal, then
+invokes `run_v4_qualification_search` with the injected
+`search_quality_for_source` function and private runtime inputs from the CLI
+request file. Bounded-quality-conflict diagnostics are recomputed only from
+validated `TargetSizeSearchError.trace["candidates"]`, never from
+`best_reachable_candidate` or fallback candidate fields. Selected success and
+bounded quality conflict advance traversal; malformed candidate data,
+non-finite numbers, policy drift, unexpected statuses, callback errors,
+identity drift, and positive-control divergence publish a fatal outcome after
+`started` and are absorbed by the terminal seal. The checkout-only
+`scripts/run_av1_v4r4_one_ordinal.py` accepts `--registry-key-file` and
+`--runtime-request`, emits exactly one public JSON line with `completed`,
+`disposition`, and nullable bounded-conflict diagnostics, and exits `0` for
+`selected_success`, `2` for `bounded_quality_conflict`, and `1` for
+`fatal_failure` or pre-run failure. It is intentionally not a `pyproject.toml`
+entrypoint.
+
+This runner slice remains synthetic-only in tests. Issue #409 is still
+preparation-only: it must not create real execution authority, claims, media
+reads, runtime callbacks, dogfood runs, or public activation.

@@ -48,6 +48,22 @@ from mediaforce.tuning.av1_validation_v4r4_outcome import (
 )
 
 
+def _execution_chain_assertion() -> Any:
+    from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
+        assert_av1_v4r4_execution_chain,
+    )
+
+    return assert_av1_v4r4_execution_chain
+
+
+def _runner_admission_chain_assertion() -> Any:
+    from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
+        assert_av1_v4r4_runner_admission_chain,
+    )
+
+    return assert_av1_v4r4_runner_admission_chain
+
+
 AV1_V4R4_OR_PLAN_SCHEMA = "mediaforce.av1_cold_start_v4r4_ordinal_registry_plan"
 AV1_V4R4_OR_PLAN_SCHEMA_VERSION = 1
 AV1_V4R4_OR_PLAN_CONTRACT_VERSION = "av1v4r4ordregplan1"
@@ -201,6 +217,13 @@ class AV1V4R4OrdinalRegistryGrantPublication:
 class AV1V4R4OrdinalRegistryOutcomePublication:
     outcome_publication: Mapping[str, Any]
     terminal_publication: Mapping[str, Any] | None
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AV1V4R4OrdinalRegistryAdmissionStartPublication:
+    admission: Mapping[str, Any]
+    started: Mapping[str, Any]
     created: bool
 
 
@@ -860,6 +883,61 @@ def deserialize_av1_v4r4_ordinal_registry_terminal_publication(
     )
 
 
+def serialize_av1_v4r4_ordinal_registry_runner_admission(
+    payload: Mapping[str, Any],
+) -> bytes:
+    from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
+        serialize_av1_v4r4_runner_admission,
+    )
+
+    return serialize_av1_v4r4_runner_admission(payload)
+
+
+def deserialize_av1_v4r4_ordinal_registry_runner_admission(
+    data: bytes,
+) -> dict[str, Any]:
+    from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
+        deserialize_av1_v4r4_runner_admission,
+    )
+
+    try:
+        return deserialize_av1_v4r4_runner_admission(data)
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry runner admission bytes are invalid"
+        ) from exc
+
+
+def deserialize_av1_v4r4_ordinal_registry_execution_grant(
+    data: bytes,
+) -> dict[str, Any]:
+    from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
+        deserialize_av1_v4r4_execution_grant,
+    )
+
+    try:
+        return deserialize_av1_v4r4_execution_grant(data)
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry execution grant bytes are invalid"
+        ) from exc
+
+
+def deserialize_av1_v4r4_ordinal_registry_execution_claim(
+    data: bytes,
+) -> dict[str, Any]:
+    from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
+        deserialize_av1_v4r4_execution_claim,
+    )
+
+    try:
+        return deserialize_av1_v4r4_execution_claim(data)
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry execution claim bytes are invalid"
+        ) from exc
+
+
 def publish_av1_v4r4_ordinal_registry_plan(
     *,
     binding: AV1V4R4OrdinalRegistryBinding,
@@ -966,59 +1044,92 @@ def publish_av1_v4r4_ordinal_registry_claim(
         return claim
 
 
-def publish_av1_v4r4_ordinal_registry_started(
+def publish_av1_v4r4_ordinal_registry_runner_admission_started(
     *,
     binding: AV1V4R4OrdinalRegistryBinding,
     plan: Mapping[str, Any],
-    grant: Mapping[str, Any],
-    claim: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    sequencing_claim: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+    execution_claim: Mapping[str, Any],
+    admission: Mapping[str, Any],
     clock: Clock,
-) -> dict[str, Any]:
+) -> AV1V4R4OrdinalRegistryAdmissionStartPublication:
+    """Atomically publish non-authorizing admission and started for one ordinal."""
+
+    from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
+        serialize_av1_v4r4_runner_admission,
+    )
+
     _assert_clock(clock)
     with _locked_registry(binding.registry) as ctx:
         ctx.assert_supported_artifacts()
         plan_payload = ctx.load_matching_plan(binding, plan)
-        grant_payload = ctx.load_matching_grant(plan_payload, grant)
-        ordinal = int(grant_payload["ordinal"])
-        claim_payload = ctx.load_claim(ordinal)
-        _assert_same_record(claim_payload, claim, "claim")
-        _assert_record_binds_grant(claim_payload, grant_payload, "claim")
-        _assert_record_within_grant(
-            _parse_ts(claim_payload["claimed_at"]),
-            grant_payload,
-            "claim",
-        )
+        seq_grant_hint = dict(sequencing_grant)
+        seq_claim_hint = dict(sequencing_claim)
+        exec_grant_hint = dict(execution_grant)
+        exec_claim_hint = dict(execution_claim)
+        admission_payload = dict(admission)
+
+        seq_grant = ctx.load_matching_grant(plan_payload, seq_grant_hint)
+        ordinal = int(seq_grant["ordinal"])
+        seq_claim = ctx.load_claim(ordinal)
+        _assert_same_record(seq_claim, seq_claim_hint, "claim")
+        _assert_record_binds_grant(seq_claim, seq_grant, "claim")
+        exec_grant = ctx.load_execution_grant(ordinal)
+        exec_claim = ctx.load_execution_claim(ordinal)
+        _assert_same_record(exec_grant, exec_grant_hint, "execution grant")
+        _assert_same_record(exec_claim, exec_claim_hint, "execution claim")
+
         now = ctx.read_clock(clock)
         ctx.assert_next_ordinal_admissible(plan_payload, ordinal, now)
-        if ctx.exists(_started_name(ordinal)):
-            started = ctx.load_started(ordinal)
-            _assert_record_binds_plan(started, plan_payload, "started")
-            _assert_record_binds_grant(started, grant_payload, "started")
-            _assert_record_binds_claim(started, claim_payload, "started")
-            _assert_record_within_grant(
-                _parse_ts(started["started_at"]),
-                grant_payload,
-                "start",
-            )
-            if _parse_ts(started["started_at"]) < _parse_ts(claim_payload["claimed_at"]):
+        if ctx.exists(_admission_name(ordinal)) or ctx.exists(_started_name(ordinal)):
+            if ctx.exists(_admission_name(ordinal)) and ctx.exists(_started_name(ordinal)):
+                existing_admission = ctx.load_runner_admission(ordinal)
+                existing_started = ctx.load_started(ordinal)
+                _assert_same_record(existing_admission, admission_payload, "runner admission")
+                _assert_record_binds_plan(existing_started, plan_payload, "started")
+                _assert_record_binds_grant(existing_started, seq_grant, "started")
+                _assert_record_binds_claim(existing_started, seq_claim, "started")
                 raise AV1V4R4OrdinalRegistryError(
-                    "AV1 v4 r4 ordinal registry clock moved backward"
+                    "AV1 v4 r4 ordinal registry runner admission was already used"
                 )
-            return started
-        if now < _parse_ts(claim_payload["claimed_at"]):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry has an incomplete publication"
+            )
+        if ctx.exists(_outcome_name(ordinal)):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry outcome already exists"
+            )
+
+        _assert_full_execution_and_admission_chain(
+            plan=plan_payload,
+            sequencing_grant=seq_grant,
+            sequencing_claim=seq_claim,
+            execution_grant=exec_grant,
+            execution_claim=exec_claim,
+            admission=admission_payload,
+            now=now,
+        )
+        if now < _parse_ts(seq_claim["claimed_at"]):
             ctx.publish_terminal(plan_payload, now)
             raise AV1V4R4OrdinalRegistryError(
                 "AV1 v4 r4 ordinal registry clock moved backward"
             )
-        _assert_grant_open(grant_payload, now)
+        _assert_grant_open(seq_grant, now)
         started = build_av1_v4r4_ordinal_registry_started(
             plan=plan_payload,
-            grant=grant_payload,
-            claim=claim_payload,
+            grant=seq_grant,
+            claim=seq_claim,
             started_at=_format_ts(now),
         )
+        ctx.write(_admission_name(ordinal), serialize_av1_v4r4_runner_admission(admission_payload))
         ctx.write(_started_name(ordinal), serialize_av1_v4r4_ordinal_registry_started(started))
-        return started
+        return AV1V4R4OrdinalRegistryAdmissionStartPublication(
+            admission=admission_payload,
+            started=started,
+            created=True,
+        )
 
 
 def publish_av1_v4r4_ordinal_registry_outcome(
@@ -1034,12 +1145,25 @@ def publish_av1_v4r4_ordinal_registry_outcome(
         ctx.assert_supported_artifacts()
         plan_payload = ctx.load_matching_plan(binding, plan)
         started_hint = dict(started)
-        assert_av1_v4r4_ordinal_registry_started(started_hint)
+        try:
+            assert_av1_v4r4_ordinal_registry_started(started_hint)
+        except Exception as exc:
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry started binding is invalid"
+            ) from exc
         outcome_payload = dict(outcome)
-        assert_av1_v4r4_outcome(outcome_payload)
+        try:
+            assert_av1_v4r4_outcome(outcome_payload)
+        except Exception as exc:
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry outcome binding is invalid"
+            ) from exc
         ordinal = int(outcome_payload["ordinal"])
         grant_payload = ctx.load_grant(ordinal)
         claim_payload = ctx.load_claim(ordinal)
+        execution_grant = ctx.load_execution_grant(ordinal)
+        execution_claim = ctx.load_execution_claim(ordinal)
+        admission = ctx.load_runner_admission(ordinal)
         started_payload = ctx.load_started(ordinal)
         _assert_same_record(started_payload, started_hint, "started")
         _assert_record_binds_plan(started_payload, plan_payload, "started")
@@ -1060,12 +1184,24 @@ def publish_av1_v4r4_ordinal_registry_outcome(
             "start",
         )
         now = ctx.read_clock(clock)
+        _assert_full_execution_and_admission_chain(
+            plan=plan_payload,
+            sequencing_grant=grant_payload,
+            sequencing_claim=claim_payload,
+            execution_grant=execution_grant,
+            execution_claim=execution_claim,
+            admission=admission,
+            now=_parse_ts(started_payload["started_at"]),
+        )
         if ctx.exists(_outcome_name(ordinal)):
             existing = ctx.load_outcome_publication(ordinal)
             ctx.assert_chain_binding_and_time(
                 plan_payload,
                 grant_payload,
                 claim_payload,
+                execution_grant,
+                execution_claim,
+                admission,
                 started_payload,
                 existing,
             )
@@ -1388,6 +1524,27 @@ class _RegistryContext:
         _assert_payload_ordinal_matches_slot(payload, ordinal, "claim")
         return payload
 
+    def load_execution_grant(self, ordinal: int) -> dict[str, Any]:
+        payload = deserialize_av1_v4r4_ordinal_registry_execution_grant(
+            self.read(_execution_grant_name(ordinal))
+        )
+        _assert_payload_ordinal_matches_slot(payload, ordinal, "execution grant")
+        return payload
+
+    def load_execution_claim(self, ordinal: int) -> dict[str, Any]:
+        payload = deserialize_av1_v4r4_ordinal_registry_execution_claim(
+            self.read(_execution_claim_name(ordinal))
+        )
+        _assert_payload_ordinal_matches_slot(payload, ordinal, "execution claim")
+        return payload
+
+    def load_runner_admission(self, ordinal: int) -> dict[str, Any]:
+        payload = deserialize_av1_v4r4_ordinal_registry_runner_admission(
+            self.read(_admission_name(ordinal))
+        )
+        _assert_payload_ordinal_matches_slot(payload, ordinal, "runner admission")
+        return payload
+
     def load_started(self, ordinal: int) -> dict[str, Any]:
         payload = deserialize_av1_v4r4_ordinal_registry_started(
             self.read(_started_name(ordinal))
@@ -1522,20 +1679,29 @@ class _RegistryContext:
             present = {
                 "grant": self.exists(_grant_name(ordinal)),
                 "claim": self.exists(_claim_name(ordinal)),
+                "execution_grant": self.exists(_execution_grant_name(ordinal)),
+                "execution_claim": self.exists(_execution_claim_name(ordinal)),
+                "admission": self.exists(_admission_name(ordinal)),
                 "started": self.exists(_started_name(ordinal)),
                 "outcome": self.exists(_outcome_name(ordinal)),
             }
-            if not any(present.values()) or not all(present.values()):
+            if not any(present.values()) or not _admitted_slot_complete(present):
                 return prefix, last_at
             try:
                 grant = self.load_grant(ordinal)
                 claim = self.load_claim(ordinal)
+                execution_grant = self.load_execution_grant(ordinal)
+                execution_claim = self.load_execution_claim(ordinal)
+                admission = self.load_runner_admission(ordinal)
                 started = self.load_started(ordinal)
                 outcome_publication = self.load_outcome_publication(ordinal)
                 outcome_at = self.assert_chain_binding_and_time(
                     plan,
                     grant,
                     claim,
+                    execution_grant,
+                    execution_claim,
+                    admission,
                     started,
                     outcome_publication,
                     not_before=last_at,
@@ -1561,24 +1727,33 @@ class _RegistryContext:
             present = {
                 "grant": self.exists(_grant_name(ordinal)),
                 "claim": self.exists(_claim_name(ordinal)),
+                "execution_grant": self.exists(_execution_grant_name(ordinal)),
+                "execution_claim": self.exists(_execution_claim_name(ordinal)),
+                "admission": self.exists(_admission_name(ordinal)),
                 "started": self.exists(_started_name(ordinal)),
                 "outcome": self.exists(_outcome_name(ordinal)),
             }
             if not any(present.values()):
                 self.assert_no_later_publications(ordinal)
                 return prefix, last_at
-            if not all(present.values()):
+            if not _admitted_slot_complete(present):
                 raise AV1V4R4OrdinalRegistryError(
                     "AV1 v4 r4 ordinal registry has an incomplete publication"
                 )
             grant = self.load_grant(ordinal)
             claim = self.load_claim(ordinal)
+            execution_grant = self.load_execution_grant(ordinal)
+            execution_claim = self.load_execution_claim(ordinal)
+            admission = self.load_runner_admission(ordinal)
             started = self.load_started(ordinal)
             outcome_publication = self.load_outcome_publication(ordinal)
             outcome_at = self.assert_chain_binding_and_time(
                 plan,
                 grant,
                 claim,
+                execution_grant,
+                execution_claim,
+                admission,
                 started,
                 outcome_publication,
                 not_before=last_at,
@@ -1605,6 +1780,9 @@ class _RegistryContext:
                 for name in (
                     _grant_name(later),
                     _claim_name(later),
+                    _execution_grant_name(later),
+                    _execution_claim_name(later),
+                    _admission_name(later),
                     _started_name(later),
                     _outcome_name(later),
                 )
@@ -1618,6 +1796,9 @@ class _RegistryContext:
         plan: Mapping[str, Any],
         grant: Mapping[str, Any],
         claim: Mapping[str, Any],
+        execution_grant: Mapping[str, Any],
+        execution_claim: Mapping[str, Any],
+        admission: Mapping[str, Any],
         started: Mapping[str, Any],
         outcome_publication: Mapping[str, Any],
         *,
@@ -1631,6 +1812,15 @@ class _RegistryContext:
         _assert_record_binds_grant(started, grant, "started")
         _assert_record_binds_claim(started, claim, "started")
         _assert_record_binds_started(outcome_publication, started, "outcome")
+        _assert_full_execution_and_admission_chain(
+            plan=plan,
+            sequencing_grant=grant,
+            sequencing_claim=claim,
+            execution_grant=execution_grant,
+            execution_claim=execution_claim,
+            admission=admission,
+            now=_parse_ts(started["started_at"]),
+        )
         ordinal = grant["ordinal"]
         if (
             claim["ordinal"] != ordinal
@@ -2051,6 +2241,51 @@ def _outcome_absorbs(outcome: Mapping[str, Any]) -> bool:
     )
 
 
+def _admitted_slot_complete(present: Mapping[str, bool]) -> bool:
+    return bool(
+        present.get("grant")
+        and present.get("claim")
+        and present.get("execution_grant")
+        and present.get("execution_claim")
+        and present.get("admission")
+        and present.get("started")
+        and present.get("outcome")
+    )
+
+
+def _assert_full_execution_and_admission_chain(
+    *,
+    plan: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    sequencing_claim: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+    execution_claim: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    now: datetime,
+) -> None:
+    try:
+        _execution_chain_assertion()(
+            plan=plan,
+            sequencing_grant=sequencing_grant,
+            sequencing_claim=sequencing_claim,
+            execution_grant=execution_grant,
+            execution_claim=execution_claim,
+            now=now,
+        )
+        _runner_admission_chain_assertion()(
+            admission=admission,
+            plan=plan,
+            sequencing_grant=sequencing_grant,
+            sequencing_claim=sequencing_claim,
+            execution_grant=execution_grant,
+            execution_claim=execution_claim,
+        )
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry execution/admission chain is invalid"
+        ) from exc
+
+
 def _normalize_registry_path(registry: Path) -> str:
     if not isinstance(registry, Path):
         registry = Path(registry)
@@ -2192,6 +2427,21 @@ def _claim_name(ordinal: int) -> str:
     return f"v4r4-ordinal-{ordinal:02d}-sequencing-claim.json"
 
 
+def _execution_grant_name(ordinal: int) -> str:
+    _layout_for_ordinal(ordinal)
+    return f"v4r4-ordinal-{ordinal:02d}-execution-grant.json"
+
+
+def _execution_claim_name(ordinal: int) -> str:
+    _layout_for_ordinal(ordinal)
+    return f"v4r4-ordinal-{ordinal:02d}-execution-claim.json"
+
+
+def _admission_name(ordinal: int) -> str:
+    _layout_for_ordinal(ordinal)
+    return f"v4r4-ordinal-{ordinal:02d}-runner-admission.json"
+
+
 def _started_name(ordinal: int) -> str:
     _layout_for_ordinal(ordinal)
     return f"v4r4-ordinal-{ordinal:02d}-started.json"
@@ -2208,7 +2458,15 @@ def _is_registry_artifact_filename(name: str) -> bool:
     return any(
         name == builder(ordinal)
         for ordinal in range(1, AV1_V4R4_ORDINAL_COUNT + 1)
-        for builder in (_grant_name, _claim_name, _started_name, _outcome_name)
+        for builder in (
+            _grant_name,
+            _claim_name,
+            _execution_grant_name,
+            _execution_claim_name,
+            _admission_name,
+            _started_name,
+            _outcome_name,
+        )
     )
 
 
