@@ -16,12 +16,11 @@ from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
 from tests.test_av1_validation_v4r4_execution_authority import (
     _execution_claim,
     _execution_grant,
+    _prepared_chain,
     _private_canonical_bytes,
     _sequencing_claim,
-    _sequencing_grant,
 )
 from tests.test_av1_validation_v4r4_one_ordinal_runner import _write_authority_files
-from tests.test_av1_validation_v4r4_ordinal_registry import _publish_plan
 from tests.test_av1_validation_v4r4_runner_admission import _admission
 
 
@@ -33,6 +32,8 @@ def test_registry_extension_accepts_execution_and_admission_filenames(tmp_path: 
         ctx["seq_claim"],
         ctx["exec_grant"],
         ctx["exec_claim"],
+        qualification_request=ctx["request"],
+        execution_preflight=ctx["preflight"],
     )
 
     started = publish_av1_v4r4_ordinal_registry_runner_admission_started(
@@ -82,6 +83,8 @@ def test_registry_extension_rejects_partial_admission_crash(tmp_path: Path) -> N
         ctx["seq_claim"],
         ctx["exec_grant"],
         ctx["exec_claim"],
+        qualification_request=ctx["request"],
+        execution_preflight=ctx["preflight"],
     )
     admission_file = ctx["binding"].registry / "v4r4-ordinal-01-runner-admission.json"
     admission_file.write_bytes(serialize_av1_v4r4_runner_admission(admission))
@@ -125,20 +128,30 @@ def test_registry_extension_loads_canonical_execution_authority(tmp_path: Path) 
                 ctx["seq_claim"],
                 ctx["exec_grant"],
                 ctx["exec_claim"],
+                qualification_request=ctx["request"],
+                execution_preflight=ctx["preflight"],
             ),
             clock=ctx["clock"],
         )
 
 
 def _extension_context(tmp_path: Path) -> dict[str, object]:
-    binding, plan, clock = _publish_plan(tmp_path)
-    seq_grant = _sequencing_grant(binding, plan, clock)
+    prepared = _prepared_chain(tmp_path)
+    binding, plan, clock = prepared.binding, prepared.plan, prepared.clock
+    seq_grant = prepared.sequencing_grant
     seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
-    exec_grant = _execution_grant(plan, seq_grant)
+    exec_grant = _execution_grant(
+        plan,
+        seq_grant,
+        qualification_request=prepared.request,
+        execution_preflight=prepared.preflight,
+    )
     exec_claim = _execution_claim(plan, seq_claim, exec_grant)
     _write_authority_files(binding, plan, seq_grant, seq_claim, exec_grant, exec_claim)
     return {
         "binding": binding,
+        "request": prepared.request,
+        "preflight": prepared.preflight,
         "plan": plan,
         "clock": clock,
         "seq_grant": seq_grant,

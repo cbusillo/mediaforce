@@ -25,11 +25,11 @@ from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from tests.test_av1_validation_v4r4_execution_authority import (
     _execution_claim,
     _execution_grant,
+    _prepared_chain,
     _private_canonical_bytes,
     _sequencing_claim,
     _sequencing_grant,
 )
-from tests.test_av1_validation_v4r4_ordinal_registry import _publish_plan
 
 
 class FrozenClock:
@@ -211,7 +211,7 @@ def test_runner_admission_is_single_use_and_guided_after_conflict_needs_fresh_au
         plan=fresh["plan"],
         ordinal=5,
         clock=fresh["clock"],
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=str(fresh["plan"]["plan_closes_at"]),
     )
     assert grant5["ordinal"] == 5
 
@@ -224,10 +224,8 @@ def test_cli_exact_json_keys_exit_codes_and_empty_stderr(tmp_path: Path, capsys:
         ("fatal", 1),
     ):
         ctx = _authority_context(tmp_path / disposition, ordinal=4)
-        request_file = _runtime_request_file(tmp_path / disposition)
-        key_file = tmp_path / disposition / "registry.key"
-        key_file.write_bytes(b"k" * 32)
-        key_file.chmod(0o600)
+        request_file = _runtime_request_file(tmp_path / disposition, ctx)
+        key_file = ctx["registry_key_file"]
         if disposition == "selected":
             cli.search_quality_for_source = lambda *_args, **kwargs: _quality_result(
                 kwargs["stream_budget_ledger"],
@@ -242,7 +240,7 @@ def test_cli_exact_json_keys_exit_codes_and_empty_stderr(tmp_path: Path, capsys:
             cli.search_quality_for_source = lambda *_args, **_kwargs: _raise(RuntimeError("/Users/private"))
         with patch(
             "mediaforce.tuning.av1_validation_v4r4_one_ordinal_runner._utc_now",
-            lambda: datetime(2026, 8, 10, 0, 0, 30, tzinfo=UTC),
+            lambda: datetime(2026, 8, 10, 4, 0, 30, tzinfo=UTC),
         ):
             code = cli.main(
                 [
@@ -252,6 +250,10 @@ def test_cli_exact_json_keys_exit_codes_and_empty_stderr(tmp_path: Path, capsys:
                     str(key_file),
                     "--plan",
                     str(ctx["plan_file"]),
+                    "--qualification-request",
+                    str(ctx["request_file"]),
+                    "--execution-preflight",
+                    str(ctx["preflight_file"]),
                     "--sequencing-grant",
                     str(ctx["seq_grant_file"]),
                     "--sequencing-claim",
@@ -350,16 +352,29 @@ def test_cli_rejects_registry_key_file_custody_without_leaking(
 
 
 def _authority_context(tmp_path: Path, *, ordinal: int) -> dict[str, Any]:
-    binding, plan, clock = _publish_plan(tmp_path)
+    prepared = _prepared_chain(tmp_path)
+    binding, plan, clock = prepared.binding, prepared.plan, prepared.clock
     for prior in range(1, ordinal):
-        seq_grant = _sequencing_grant(binding, plan, clock, ordinal=prior)
+        seq_grant = (
+            prepared.sequencing_grant
+            if prior == 1
+            else _sequencing_grant(binding, plan, clock, ordinal=prior)
+        )
         seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
-        exec_grant = _execution_grant(plan, seq_grant)
+        exec_grant = _execution_grant(
+            plan,
+            seq_grant,
+            qualification_request=prepared.request,
+            execution_preflight=prepared.preflight,
+        )
         exec_claim = _execution_claim(plan, seq_claim, exec_grant)
         _write_authority_files(binding, plan, seq_grant, seq_claim, exec_grant, exec_claim)
         _run(
             {
                 "binding": binding,
+                "request": prepared.request,
+                "preflight": prepared.preflight,
+                "private_inputs": prepared.private_inputs,
                 "plan": plan,
                 "clock": clock,
                 "seq_grant": seq_grant,
@@ -375,13 +390,25 @@ def _authority_context(tmp_path: Path, *, ordinal: int) -> dict[str, Any]:
                 kwargs.get("warm_start"),
             ),
         )
-    seq_grant = _sequencing_grant(binding, plan, clock, ordinal=ordinal)
+    seq_grant = (
+        prepared.sequencing_grant
+        if ordinal == 1
+        else _sequencing_grant(binding, plan, clock, ordinal=ordinal)
+    )
     seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
-    exec_grant = _execution_grant(plan, seq_grant)
+    exec_grant = _execution_grant(
+        plan,
+        seq_grant,
+        qualification_request=prepared.request,
+        execution_preflight=prepared.preflight,
+    )
     exec_claim = _execution_claim(plan, seq_claim, exec_grant)
     files = _write_authority_files(binding, plan, seq_grant, seq_claim, exec_grant, exec_claim)
     return {
         "binding": binding,
+        "request": prepared.request,
+        "preflight": prepared.preflight,
+        "private_inputs": prepared.private_inputs,
         "plan": plan,
         "clock": clock,
         "seq_grant": seq_grant,
@@ -390,6 +417,12 @@ def _authority_context(tmp_path: Path, *, ordinal: int) -> dict[str, Any]:
         "exec_claim": exec_claim,
         "target": int(seq_grant["target_size_bytes"]),
         "cap": int(seq_grant["source_cap_total_bytes"]),
+        "request_file": Path(prepared.private_inputs["preparation_registry"])
+        / "v4r4-qualification-request.json",
+        "preflight_file": Path(prepared.private_inputs["preparation_registry"])
+        / "v4r4-execution-preflight.json",
+        "registry_key_file": Path(prepared.private_inputs["preparation_registry"])
+        / "v4r4-path-privacy.key",
         **files,
     }
 
@@ -401,12 +434,14 @@ def _run(ctx: Mapping[str, Any], callback: Callable[..., QualitySearchResult]) -
     ):
         return run_av1_v4r4_one_ordinal(
             binding=ctx["binding"],
+            qualification_request=ctx["request"],
+            execution_preflight=ctx["preflight"],
             plan=ctx["plan"],
             sequencing_grant=ctx["seq_grant"],
             sequencing_claim=ctx["seq_claim"],
             execution_grant=ctx["exec_grant"],
             execution_claim=ctx["exec_claim"],
-            runtime_inputs=_runtime_inputs(),
+            runtime_inputs=_runtime_inputs(ctx),
             search_quality_for_source=callback,
         )
 
@@ -564,27 +599,35 @@ def _conflict_error(
     )
 
 
-def _runtime_inputs() -> AV1V4R4OneOrdinalRuntimeInputs:
+def _runtime_inputs(ctx: Mapping[str, Any]) -> AV1V4R4OneOrdinalRuntimeInputs:
+    ordinal = int(ctx["seq_grant"]["ordinal"])
+    asset_id = str(ctx["seq_grant"]["asset_id"])
+    invocation = next(
+        item
+        for item in ctx["request"]["invocation_digests"]
+        if item["ordinal"] == ordinal
+    )
     return AV1V4R4OneOrdinalRuntimeInputs(
-        source_path=Path("/tmp/mediaforce-v4r4-source.mkv"),
-        quality_temp_path=Path("/tmp/mediaforce-v4r4-quality"),
-        width=1920,
-        height=1080,
-        source_codec="h264",
+        source_path=Path(ctx["private_inputs"]["source_paths"][asset_id]),
+        quality_temp_path=Path(ctx["private_inputs"]["quality_temp_paths"][asset_id]),
+        width=int(invocation["width"]),
+        height=int(invocation["height"]),
+        source_codec=str(invocation["source_codec"]),
     )
 
 
-def _runtime_request_file(tmp_path: Path) -> Path:
+def _runtime_request_file(tmp_path: Path, ctx: Mapping[str, Any]) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     request = tmp_path / "runtime-request.json"
+    runtime_inputs = _runtime_inputs(ctx)
     request.write_bytes(
         canonical_json_bytes(
             {
-                "source_path": "/tmp/mediaforce-v4r4-source.mkv",
-                "quality_temp_path": "/tmp/mediaforce-v4r4-quality",
-                "width": 1920,
-                "height": 1080,
-                "source_codec": "h264",
+                "source_path": str(runtime_inputs.source_path),
+                "quality_temp_path": str(runtime_inputs.quality_temp_path),
+                "width": runtime_inputs.width,
+                "height": runtime_inputs.height,
+                "source_codec": runtime_inputs.source_codec,
             }
         )
         + b"\n"

@@ -14,12 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.type_defs import object_dict, object_list
-from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart
+from mediaforce.encoding.quality import QualitySearchResult
 from mediaforce.encoding.streams import resolve_stream_plan
-from mediaforce.tuning.av1_validation_v4_qualification_search import (
-    av1_validation_v4_qualification_search_invocation_sha256,
-    run_v4_qualification_search,
-)
+from mediaforce.tuning.av1_validation_v4_qualification_search import run_v4_qualification_search
 from mediaforce.tuning.av1_validation_v4r4_contract import (
     AV1_V4R4_POLICY_VALUES,
     AV1_V4R4_SOURCE_LAYOUT,
@@ -29,6 +26,13 @@ from mediaforce.tuning.av1_validation_v4r4_diagnostics import (
     AV1V4R4CandidateObservation,
     AV1V4R4RuntimePolicy,
     classify_av1_v4r4_conflict,
+)
+from mediaforce.tuning.av1_validation_v4r4_invocation import (
+    av1_v4r4_mode_for_ordinal,
+    av1_v4r4_runner_invocation_sha256,
+    av1_v4r4_search_kwargs_for_inputs,
+    av1_v4r4_video_policy_for_ordinal,
+    av1_v4r4_warm_start_for_ordinal,
 )
 from mediaforce.tuning.av1_validation_v4r4_outcome import build_av1_v4r4_outcome
 from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
@@ -90,6 +94,8 @@ class AV1V4R4OneOrdinalRuntimeInputs:
 def run_av1_v4r4_one_ordinal(
     *,
     binding: AV1V4R4OrdinalRegistryBinding,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
     plan: Mapping[str, Any],
     sequencing_grant: Mapping[str, Any],
     sequencing_claim: Mapping[str, Any],
@@ -104,9 +110,9 @@ def run_av1_v4r4_one_ordinal(
     ordinal = _ordinal_from_chain(sequencing_grant, sequencing_claim, execution_grant, execution_claim)
     layout = av1_v4r4_ordinal_layout()[ordinal - 1]
     runtime_policy = _runtime_policy(ordinal)
-    video_policy = _video_policy_for_ordinal(ordinal)
-    mode = "guided" if layout["warm_start"] is not None else "baseline"
-    warm_start = _warm_start_for_ordinal(ordinal)
+    video_policy = av1_v4r4_video_policy_for_ordinal(ordinal)
+    mode = av1_v4r4_mode_for_ordinal(ordinal)
+    warm_start = av1_v4r4_warm_start_for_ordinal(ordinal)
     search_kwargs = _search_kwargs(runtime_inputs)
     runtime_item = _runtime_item(ordinal, video_policy)
     stream_plan = resolve_stream_plan(runtime_item)
@@ -126,14 +132,17 @@ def run_av1_v4r4_one_ordinal(
         ).resolve(float(_source_for_ordinal(ordinal)["duration_seconds"])),
         stream_plan=stream_plan,
     )
-    invocation_sha256 = av1_validation_v4_qualification_search_invocation_sha256(
+    invocation_sha256 = av1_v4r4_runner_invocation_sha256(
+        ordinal=ordinal,
         source_path=runtime_inputs.source_path,
-        video_policy=video_policy,
-        mode=mode,
-        warm_start=warm_start,
-        extra_search_kwargs=search_kwargs,
+        quality_temp_path=runtime_inputs.quality_temp_path,
+        source_codec=runtime_inputs.source_codec,
+        width=runtime_inputs.width,
+        height=runtime_inputs.height,
     )
     admission = build_av1_v4r4_runner_admission(
+        qualification_request=qualification_request,
+        execution_preflight=execution_preflight,
         plan=plan,
         sequencing_grant=sequencing_grant,
         sequencing_claim=sequencing_claim,
@@ -373,63 +382,6 @@ def _guided_fallback_selected(trace: Any) -> bool | None:
     return None
 
 
-def _video_policy_for_ordinal(ordinal: int) -> dict[str, Any]:
-    layout = av1_v4r4_ordinal_layout()[ordinal - 1]
-    return {
-        "encoder": AV1_V4R4_POLICY_VALUES["encoder"],
-        "pixel_format": AV1_V4R4_POLICY_VALUES["pixel_format"],
-        "preset": AV1_V4R4_POLICY_VALUES["preset"],
-        "quality_metric": AV1_V4R4_POLICY_VALUES["quality_metric"],
-        "target_vmaf": AV1_V4R4_POLICY_VALUES["target_vmaf"],
-        "target_xpsnr": AV1_V4R4_POLICY_VALUES["target_xpsnr"],
-        "min_target_vmaf": AV1_V4R4_POLICY_VALUES["min_target_vmaf"],
-        "min_target_xpsnr": AV1_V4R4_POLICY_VALUES["min_target_xpsnr"],
-        "target_size_bytes": layout["target_size_bytes"],
-        "target_size_mb": AV1_V4R4_POLICY_VALUES["target_size_mb"],
-        "target_runtime_minutes": AV1_V4R4_POLICY_VALUES["target_runtime_minutes"],
-        "size_goal_schema_version": AV1_V4R4_POLICY_VALUES["size_goal_schema_version"],
-        "size_goal_mode": "absolute",
-        "size_goal_source": "av1_v4r4_frozen_ordinal_layout",
-        "sample_projection_tolerance_percent": AV1_V4R4_POLICY_VALUES["sample_projection_tolerance_percent"],
-        "final_output_tolerance_percent": AV1_V4R4_POLICY_VALUES["final_output_tolerance_percent"],
-        "compression_intent_schema_version": AV1_V4R4_POLICY_VALUES["compression_intent_schema_version"],
-        "compression_intent": AV1_V4R4_POLICY_VALUES["compression_intent"],
-        "compression_intent_source": AV1_V4R4_POLICY_VALUES["compression_intent_source"],
-        "compression_intent_confirmed": AV1_V4R4_POLICY_VALUES["compression_intent_confirmed"],
-        "min_crf": AV1_V4R4_POLICY_VALUES["min_crf"],
-        "max_crf": AV1_V4R4_POLICY_VALUES["max_crf"],
-        "target_search_max_crf": AV1_V4R4_POLICY_VALUES["target_search_max_crf"],
-        "max_encoded_percent": AV1_V4R4_POLICY_VALUES["max_encoded_percent"],
-        "default_grain": AV1_V4R4_POLICY_VALUES["default_grain"],
-        "grain_denoise": AV1_V4R4_POLICY_VALUES["grain_denoise"],
-        "thorough": AV1_V4R4_POLICY_VALUES["thorough"],
-        "max_height": AV1_V4R4_POLICY_VALUES["max_height"],
-        "resolution_intent_mode": AV1_V4R4_POLICY_VALUES["resolution_intent_mode"],
-        "resolution_intent_source": AV1_V4R4_POLICY_VALUES["resolution_intent_source"],
-        "downsample_algorithm": AV1_V4R4_POLICY_VALUES["downsample_algorithm"],
-        "black_bar_handling": AV1_V4R4_POLICY_VALUES["black_bar_handling"],
-        "black_bar_detect_samples": AV1_V4R4_POLICY_VALUES["black_bar_detect_samples"],
-        "black_bar_detect_seconds": AV1_V4R4_POLICY_VALUES["black_bar_detect_seconds"],
-        "crop": AV1_V4R4_POLICY_VALUES["crop"],
-    }
-
-
-def _warm_start_for_ordinal(ordinal: int) -> QualitySearchWarmStart | None:
-    payload = object_dict(av1_v4r4_ordinal_layout()[ordinal - 1]["warm_start"])
-    if not payload:
-        return None
-    return QualitySearchWarmStart(
-        requested_crf=float(payload["requested_crf"]),
-        candidate_crf=int(payload["candidate_crf"]),
-        search_signature_id=str(payload["search_signature_id"]),
-        cohort_id=str(payload["cohort_id"]),
-        source=str(payload["source"]),
-        confidence=None,
-        provenance_id=None,
-        review_risks=(),
-    )
-
-
 def _runtime_item(ordinal: int, video_policy: Mapping[str, Any]) -> dict[str, Any]:
     source = _source_for_ordinal(ordinal)
     return {
@@ -455,15 +407,23 @@ def _source_for_ordinal(ordinal: int) -> Mapping[str, Any]:
     raise AV1V4R4OneOrdinalRunnerError("AV1 v4 r4 source layout binding is invalid")
 
 
+def _video_policy_for_ordinal(ordinal: int) -> dict[str, Any]:
+    return av1_v4r4_video_policy_for_ordinal(ordinal)
+
+
+def _warm_start_for_ordinal(ordinal: int) -> Any:
+    return av1_v4r4_warm_start_for_ordinal(ordinal)
+
+
 def _search_kwargs(runtime_inputs: AV1V4R4OneOrdinalRuntimeInputs) -> dict[str, Any]:
     if not isinstance(runtime_inputs, AV1V4R4OneOrdinalRuntimeInputs):
         raise AV1V4R4OneOrdinalRunnerError("AV1 v4 r4 private runtime inputs are invalid")
-    return {
-        "source_codec": runtime_inputs.source_codec,
-        "width": runtime_inputs.width,
-        "height": runtime_inputs.height,
-        "quality_temp_dir": runtime_inputs.quality_temp_path,
-    }
+    return av1_v4r4_search_kwargs_for_inputs(
+        source_codec=runtime_inputs.source_codec,
+        width=runtime_inputs.width,
+        height=runtime_inputs.height,
+        quality_temp_path=runtime_inputs.quality_temp_path,
+    )
 
 
 def _assert_returned_trace_bindings(

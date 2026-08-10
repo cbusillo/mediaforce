@@ -23,6 +23,10 @@ from mediaforce.tuning.av1_validation_v4r4_one_ordinal_runner import (
     AV1V4R4OneOrdinalRuntimeInputs,
     run_av1_v4r4_one_ordinal,
 )
+from mediaforce.tuning.av1_validation_v4r4_preparation import (
+    deserialize_av1_v4r4_execution_preflight,
+    deserialize_av1_v4r4_qualification_request,
+)
 from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
     av1_v4r4_ordinal_registry_binding,
     deserialize_av1_v4r4_ordinal_registry_claim,
@@ -64,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--registry-key-file", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--qualification-request", type=Path, required=True)
+    parser.add_argument("--execution-preflight", type=Path, required=True)
     parser.add_argument("--sequencing-grant", type=Path, required=True)
     parser.add_argument("--sequencing-claim", type=Path, required=True)
     parser.add_argument("--execution-grant", type=Path, required=True)
@@ -76,6 +82,12 @@ def main(argv: list[str] | None = None) -> int:
         runtime_inputs = _load_runtime_inputs(args.runtime_request)
         result = run_av1_v4r4_one_ordinal(
             binding=binding,
+            qualification_request=deserialize_av1_v4r4_qualification_request(
+                args.qualification_request.read_bytes()
+            ),
+            execution_preflight=deserialize_av1_v4r4_execution_preflight(
+                args.execution_preflight.read_bytes()
+            ),
             plan=deserialize_av1_v4r4_ordinal_registry_plan(args.plan.read_bytes()),
             sequencing_grant=deserialize_av1_v4r4_ordinal_registry_grant(args.sequencing_grant.read_bytes()),
             sequencing_claim=deserialize_av1_v4r4_ordinal_registry_claim(args.sequencing_claim.read_bytes()),
@@ -87,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         public = dict(result.public_result)
         _emit(public)
         return _EXIT_BY_DISPOSITION[str(public["disposition"])]
-    except BaseException:
+    except Exception:
         _emit(_ERROR_RESULT)
         return 1
 
