@@ -21,6 +21,7 @@ from mediaforce.tuning.stream_budget import StreamBudgetLedger
 
 
 AV1_VALIDATION_V4_QUALIFICATION_SOURCE = "av1_cold_start_v4_qualification"
+AV1_VALIDATION_V4R4_QUALIFICATION_SOURCE = "av1_cold_start_v4r4_qualification"
 AV1_VALIDATION_V4_CONTRACT_VERSION = "av1vq4s1"
 AV1_VALIDATION_V4_QUALIFICATION_SEARCH_SCHEMA = (
     "mediaforce.av1_cold_start_v4_qualification_search_invocation"
@@ -220,7 +221,10 @@ def _validate_guided_warm_start(warm_start: QualitySearchWarmStart) -> None:
         raise V4QualificationContractError(
             "V3 validation-harness source is rejected in v4 qualification search"
         )
-    if warm_start.source != AV1_VALIDATION_V4_QUALIFICATION_SOURCE:
+    if warm_start.source not in {
+        AV1_VALIDATION_V4_QUALIFICATION_SOURCE,
+        AV1_VALIDATION_V4R4_QUALIFICATION_SOURCE,
+    }:
         raise V4QualificationContractError(
             f"Guided warm_start source must be {AV1_VALIDATION_V4_QUALIFICATION_SOURCE!r},"
             f" got {warm_start.source!r}"
@@ -233,15 +237,25 @@ def _validate_guided_warm_start(warm_start: QualitySearchWarmStart) -> None:
         raise V4QualificationContractError(
             "Guided warm_start requires a nonempty cohort_id"
         )
+    signature_prefix = (
+        "av1v4r4sig_"
+        if warm_start.source == AV1_VALIDATION_V4R4_QUALIFICATION_SOURCE
+        else "acss1_"
+    )
+    cohort_prefix = (
+        "av1v4r4cohort_"
+        if warm_start.source == AV1_VALIDATION_V4R4_QUALIFICATION_SOURCE
+        else "acsh1_"
+    )
     if (
-        not warm_start.search_signature_id.startswith("acss1_")
+        not warm_start.search_signature_id.startswith(signature_prefix)
         or not _SAFE_ID_RE.fullmatch(warm_start.search_signature_id)
     ):
         raise V4QualificationContractError(
             "Guided warm_start search_signature_id is invalid"
         )
     if (
-        not warm_start.cohort_id.startswith("acsh1_")
+        not warm_start.cohort_id.startswith(cohort_prefix)
         or not _SAFE_ID_RE.fullmatch(warm_start.cohort_id)
     ):
         raise V4QualificationContractError(

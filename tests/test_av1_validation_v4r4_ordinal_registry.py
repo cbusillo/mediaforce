@@ -46,7 +46,7 @@ from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
     publish_av1_v4r4_ordinal_registry_grant_with_status,
     publish_av1_v4r4_ordinal_registry_outcome,
     publish_av1_v4r4_ordinal_registry_plan,
-    publish_av1_v4r4_ordinal_registry_started,
+    publish_av1_v4r4_ordinal_registry_runner_admission_started,
     publish_av1_v4r4_ordinal_registry_terminal,
     reconcile_av1_v4r4_ordinal_registry,
 )
@@ -160,6 +160,67 @@ def _publish_plan(
     return binding, plan, clock
 
 
+def _execution_and_admission_for_test(
+    plan: dict[str, object],
+    grant: dict[str, object],
+    claim: dict[str, object],
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    from tests.test_av1_validation_v4r4_execution_authority import (
+        _execution_claim,
+        _execution_grant,
+    )
+    from tests.test_av1_validation_v4r4_runner_admission import _admission
+
+    exec_grant = _execution_grant(plan, grant)
+    exec_claim = _execution_claim(plan, claim, exec_grant)
+    admission = _admission(plan, grant, claim, exec_grant, exec_claim)
+    return exec_grant, exec_claim, admission
+
+
+def _write_private_execution_artifacts(
+    binding: AV1V4R4OrdinalRegistryBinding,
+    ordinal: int,
+    exec_grant: dict[str, object],
+    exec_claim: dict[str, object],
+) -> None:
+    from tests.test_av1_validation_v4r4_execution_authority import _private_canonical_bytes
+
+    for filename, payload in (
+        (f"v4r4-ordinal-{ordinal:02d}-execution-grant.json", exec_grant),
+        (f"v4r4-ordinal-{ordinal:02d}-execution-claim.json", exec_claim),
+    ):
+        path = binding.registry / filename
+        path.write_bytes(_private_canonical_bytes(payload))
+        path.chmod(0o600)
+
+
+def _publish_admitted_started(
+    *,
+    binding: AV1V4R4OrdinalRegistryBinding,
+    plan: dict[str, object],
+    grant: dict[str, object],
+    claim: dict[str, object],
+    clock: TickClock,
+) -> dict[str, object]:
+    ordinal = int(grant["ordinal"])
+    exec_grant, exec_claim, admission = _execution_and_admission_for_test(
+        plan,
+        grant,
+        claim,
+    )
+    _write_private_execution_artifacts(binding, ordinal, exec_grant, exec_claim)
+    return publish_av1_v4r4_ordinal_registry_runner_admission_started(
+        binding=binding,
+        plan=plan,
+        sequencing_grant=grant,
+        sequencing_claim=claim,
+        execution_grant=exec_grant,
+        execution_claim=exec_claim,
+        admission=admission,
+        clock=clock,
+    ).started
+
+
 def _run_ordinal(
     *,
     binding: AV1V4R4OrdinalRegistryBinding,
@@ -181,7 +242,7 @@ def _run_ordinal(
         grant=grant,
         clock=clock,
     )
-    started = publish_av1_v4r4_ordinal_registry_started(
+    started = _publish_admitted_started(
         binding=binding,
         plan=plan,
         grant=grant,
@@ -251,14 +312,14 @@ def test_ordinal_four_eligible_after_ordinal_three_bounded_conflict_requires_fre
     assert grant4["grant_id"] != grant1["grant_id"]
     assert claim4["claim_id"] != claim1["claim_id"]
     with pytest.raises(AV1V4R4OrdinalRegistryError, match="immutable"):
-        publish_av1_v4r4_ordinal_registry_started(
+        _publish_admitted_started(
             binding=binding,
             plan=plan,
             grant=grant4,
             claim=claim1,
             clock=clock,
         )
-    started4 = publish_av1_v4r4_ordinal_registry_started(
+    started4 = _publish_admitted_started(
         binding=binding,
         plan=plan,
         grant=grant4,
@@ -373,7 +434,7 @@ def test_same_second_started_outcome_is_valid_and_reconciles(tmp_path: Path) -> 
         clock=clock,
     )
     clock.current = instant
-    started = publish_av1_v4r4_ordinal_registry_started(
+    started = _publish_admitted_started(
         binding=binding,
         plan=plan,
         grant=grant,
@@ -553,8 +614,11 @@ def test_incomplete_publication_gap_duplicate_and_clock_regression_seal(
         clock=clock_clock,
     )
     clock_clock.current = datetime(2026, 8, 10, 0, 0, 1, tzinfo=UTC)
-    with pytest.raises(AV1V4R4OrdinalRegistryError, match="clock moved backward"):
-        publish_av1_v4r4_ordinal_registry_started(
+    with pytest.raises(
+        AV1V4R4OrdinalRegistryError,
+        match="execution/admission chain is invalid",
+    ):
+        _publish_admitted_started(
             binding=clock_binding,
             plan=clock_plan,
             grant=grant,
@@ -606,7 +670,7 @@ def test_loaders_reject_payload_ordinal_mismatched_to_filename(
         grant=grant2,
         clock=clock,
     )
-    started2 = publish_av1_v4r4_ordinal_registry_started(
+    started2 = _publish_admitted_started(
         binding=binding,
         plan=plan,
         grant=grant2,
@@ -624,18 +688,19 @@ def test_loaders_reject_payload_ordinal_mismatched_to_filename(
     slot3 = binding.registry / "v4r4-ordinal-03-sequencing-grant.json"
     slot3.write_bytes(serialize_av1_v4r4_ordinal_registry_grant(grant2))
     slot3.chmod(0o600)
-    (binding.registry / "v4r4-ordinal-03-sequencing-claim.json").write_bytes(
-        serialize_av1_v4r4_ordinal_registry_claim(claim2)
-    )
-    (binding.registry / "v4r4-ordinal-03-sequencing-claim.json").chmod(0o600)
-    (binding.registry / "v4r4-ordinal-03-started.json").write_bytes(
-        serialize_av1_v4r4_ordinal_registry_started(started2)
-    )
-    (binding.registry / "v4r4-ordinal-03-started.json").chmod(0o600)
-    (binding.registry / "v4r4-ordinal-03-outcome-publication.json").write_bytes(
-        (binding.registry / "v4r4-ordinal-02-outcome-publication.json").read_bytes()
-    )
-    (binding.registry / "v4r4-ordinal-03-outcome-publication.json").chmod(0o600)
+    for suffix in (
+        "sequencing-claim",
+        "execution-grant",
+        "execution-claim",
+        "runner-admission",
+        "started",
+        "outcome-publication",
+    ):
+        copied = binding.registry / f"v4r4-ordinal-03-{suffix}.json"
+        copied.write_bytes(
+            (binding.registry / f"v4r4-ordinal-02-{suffix}.json").read_bytes()
+        )
+        copied.chmod(0o600)
 
     with pytest.raises(AV1V4R4OrdinalRegistryError, match="filename ordinal"):
         reconcile_av1_v4r4_ordinal_registry(
@@ -672,6 +737,45 @@ def test_terminal_load_recomputes_against_validated_registry_prefix(
         serialize_av1_v4r4_ordinal_registry_terminal_publication(stale)
     )
     terminal_file.chmod(0o600)
+
+    with pytest.raises(AV1V4R4OrdinalRegistryError, match="terminal is stale"):
+        publish_av1_v4r4_ordinal_registry_terminal(
+            binding=binding,
+            plan=plan,
+            clock=clock,
+        )
+
+
+def test_terminal_rejects_rebound_execution_chain_after_publication(
+    tmp_path: Path,
+) -> None:
+    binding, plan, clock = _publish_plan(tmp_path)
+    for ordinal in range(1, 3):
+        _run_ordinal(
+            binding=binding,
+            plan=plan,
+            clock=clock,
+            ordinal=ordinal,
+            outcome=_selected(ordinal),
+        )
+    publish_av1_v4r4_ordinal_registry_terminal(
+        binding=binding,
+        plan=plan,
+        clock=clock,
+    )
+
+    from tests.test_av1_validation_v4r4_execution_authority import (
+        _private_canonical_bytes,
+        _rebind_execution_claim,
+    )
+
+    execution_claim_file = binding.registry / "v4r4-ordinal-02-execution-claim.json"
+    execution_claim = json.loads(execution_claim_file.read_bytes())
+    execution_claim = _rebind_execution_claim(
+        {**execution_claim, "owner_principal": "rebound.mediaforce"}
+    )
+    execution_claim_file.write_bytes(_private_canonical_bytes(execution_claim))
+    execution_claim_file.chmod(0o600)
 
     with pytest.raises(AV1V4R4OrdinalRegistryError, match="terminal is stale"):
         publish_av1_v4r4_ordinal_registry_terminal(
@@ -737,8 +841,11 @@ def test_loaded_grant_claim_and_start_times_must_fit_windows(
     claim_file = claim_binding.registry / "v4r4-ordinal-01-sequencing-claim.json"
     claim_file.write_bytes(serialize_av1_v4r4_ordinal_registry_claim(bad_claim))
     claim_file.chmod(0o600)
-    with pytest.raises(AV1V4R4OrdinalRegistryError, match="claim is outside"):
-        publish_av1_v4r4_ordinal_registry_started(
+    with pytest.raises(
+        AV1V4R4OrdinalRegistryError,
+        match="execution/admission chain is invalid",
+    ):
+        _publish_admitted_started(
             binding=claim_binding,
             plan=claim_plan,
             grant=claim_grant,
@@ -760,7 +867,7 @@ def test_loaded_grant_claim_and_start_times_must_fit_windows(
         grant=start_grant,
         clock=start_clock,
     )
-    started = publish_av1_v4r4_ordinal_registry_started(
+    started = _publish_admitted_started(
         binding=start_binding,
         plan=start_plan,
         grant=start_grant,
@@ -913,6 +1020,11 @@ def test_reconcile_seals_cross_ordinal_clock_regression(tmp_path: Path) -> None:
         id_prefix="av1v4r4ordclaim_",
         domain=av1_v4r4_identity_domain("ordinal-registry-claim"),
     )
+    exec_grant, exec_claim, admission = _execution_and_admission_for_test(
+        plan,
+        grant,
+        claim,
+    )
     started["grant_id"] = grant["grant_id"]
     started["grant_payload_sha256"] = grant["payload_sha256"]
     started["claim_id"] = claim["claim_id"]
@@ -935,12 +1047,22 @@ def test_reconcile_seals_cross_ordinal_clock_regression(tmp_path: Path) -> None:
         domain=av1_v4r4_identity_domain("ordinal-registry-outcome"),
     )
 
+    from tests.test_av1_validation_v4r4_execution_authority import _private_canonical_bytes
+    from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
+        serialize_av1_v4r4_runner_admission,
+    )
+
     replacements = {
         "v4r4-ordinal-02-sequencing-grant.json": serialize_av1_v4r4_ordinal_registry_grant(
             grant
         ),
         "v4r4-ordinal-02-sequencing-claim.json": serialize_av1_v4r4_ordinal_registry_claim(
             claim
+        ),
+        "v4r4-ordinal-02-execution-grant.json": _private_canonical_bytes(exec_grant),
+        "v4r4-ordinal-02-execution-claim.json": _private_canonical_bytes(exec_claim),
+        "v4r4-ordinal-02-runner-admission.json": serialize_av1_v4r4_runner_admission(
+            admission
         ),
         "v4r4-ordinal-02-started.json": serialize_av1_v4r4_ordinal_registry_started(
             started
