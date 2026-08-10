@@ -988,12 +988,20 @@ def _probe_open_tool_version(handle: _ToolBinary, argv: list[str]) -> str:
                         raise OSError("short tool snapshot write")
                     view = view[written:]
             os.fsync(descriptor)
+            written_metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(written_metadata.st_mode)
+                or stat.S_IMODE(written_metadata.st_mode) != 0o500
+                or written_metadata.st_uid != os.geteuid()
+                or written_metadata.st_nlink != 1
+            ):
+                raise AV1V4R4PreparationFlowError("tool snapshot custody is invalid")
+            os.close(descriptor)
+            descriptor = -1
+            descriptor = os.open(snapshot, os.O_RDONLY | _no_follow_flag())
             snapshot_metadata = os.fstat(descriptor)
             if (
-                not stat.S_ISREG(snapshot_metadata.st_mode)
-                or stat.S_IMODE(snapshot_metadata.st_mode) != 0o500
-                or snapshot_metadata.st_uid != os.geteuid()
-                or snapshot_metadata.st_nlink != 1
+                not _same_file_snapshot(written_metadata, snapshot_metadata)
                 or _hash_open_file(descriptor, snapshot_metadata, "tool snapshot")
                 != handle.binary_sha256
             ):
@@ -1017,7 +1025,8 @@ def _probe_open_tool_version(handle: _ToolBinary, argv: list[str]) -> str:
         except OSError as exc:
             raise AV1V4R4PreparationFlowError("tool snapshot creation failed") from exc
         finally:
-            os.close(descriptor)
+            if descriptor >= 0:
+                os.close(descriptor)
 
 
 def _probe_tool_version_path(path: Path, argv: list[str]) -> str:
