@@ -3007,3 +3007,33 @@ publication, activation, or dogfood authority. Registry sequencing, runner/CLI,
 and preparation/custody remain separate implementation slices. Real
 preparation, each media ordinal, any successor policy, and dogfood each require
 their later explicit owner gate.
+
+The follow-on registry slice adds
+`mediaforce/tuning/av1_validation_v4r4_ordinal_registry.py`, an owner-only
+immutable sequencing registry for the pure r4r4 artifacts. It defines distinct
+r4 plan, sequencing grant, sequencing claim, started, outcome-publication, and
+terminal-publication schemas, filenames, IDs, and identity domains. The registry
+is an owner-only directory and accepts only its revision-4 filenames; revision-3
+ordinal-window artifacts are rejected instead of migrated or reused. Registry
+IDs are HMAC-derived from the private path, but the public artifacts and error
+messages remain path-free. The private binding can only be constructed with
+`av1_v4r4_ordinal_registry_binding(registry, key=...)`, which keeps the
+owner-only path local while exposing only the keyed registry ID to public
+artifacts.
+
+The r4 registry state machine admits ordinals `1..8` only in strict increasing
+order. Each ordinal gets one sequencing claim burn; repeated owner publication
+of the same plan, grant, or claim is idempotent, while substitution, retry,
+backfill, duplicate outcomes, gaps, incomplete publication, and clock regression
+seal the registry. `selected_success` and `bounded_quality_conflict` advance the
+high-water mark; `fatal_failure` and positive-control divergence are absorbing.
+Terminal derivation validates each contiguous grant, claim, started, and outcome
+publication chain before using it; existing terminal publications are
+recomputed from that validated prefix and rejected if stale or rebound. The
+terminal publication wraps the pure r4 terminal, so selected/conflict/traversed
+counts, reason and band maps, traversal completeness, termination kind, and
+verdict are still derived by the frozen pure outcome contract.
+
+This registry slice is covered only by temporary synthetic tests. It creates no
+real registry, grant, claim, preparation, media read, execution, publication,
+activation, or dogfood authority, and it does not alter any revision-3 module.
