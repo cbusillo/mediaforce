@@ -3089,3 +3089,80 @@ entrypoint.
 This runner slice remains synthetic-only in tests. Issue #409 is still
 preparation-only: it must not create real execution authority, claims, media
 reads, runtime callbacks, dogfood runs, or public activation.
+
+### Manifest revision 4 — owner preparation and custody
+
+`mediaforce/tuning/av1_validation_v4r4_preparation.py` defines the pure
+revision-4 owner-preparation contracts. The new rights rollover, preparation
+grant, consumed claim, path-privacy key custody, effective config snapshot,
+prepared bundle, terminal measurement, owner freeze, qualification request, and
+execution preflight are all revision-4-only and reject every revision-3 schema,
+ID prefix, grant namespace, registry token, or artifact filename. The pure
+artifacts bind protocol `4`, manifest revision `4`, exact manifest ID
+`av1vmanifest4r4_7d3d62b272d048e7ac4aaa397eace2a0`, manifest digest
+`sha256:bb7c1d865a618a1b0ba4ccd5b63895d8c3ecc0c3384e0fe359cf0626cb959b67`,
+policy digest
+`sha256:99b151e2f234d1c820eb6097213ecf8ce9afc1ceda8ea46635ddeaa8bc6f5037`,
+all four frozen source digests, and the eight frozen ordinal/invocation
+identities derived from the current revision-4 ordinal layout.
+
+The public artifacts remain path-free and authority-free. Only the owner-only
+effective config snapshot keeps the private source, instance, and quality-temp
+paths under registry custody. Revision-4 path privacy uses new HMAC domains and
+ID prefixes: `av1vpathkey4r4_`, `av1vpath4r4_`, `av1vsource4r4_`,
+`av1v4r4qtemp_`, `av1v4r4confighmac_`, `av1v4r4toolchain_`,
+`av1v4r4runtime_`, `av1vclosure4r4_`, and the r4 preparation/freeze/request/
+preflight IDs. The prepared bundle deliberately leaves ordinal registry,
+sequencing, execution, runner-admission, and runtime execution bindings null and
+marks the next stage as `execution_authority`.
+
+`mediaforce/tuning/av1_validation_v4r4_preparation_registry.py` is the
+owner-only descriptor-relative custody boundary. It creates and validates an
+owner-only `0700` private preparation registry; publishes immutable singleton
+grant, consumed claim, and path-privacy-key custody artifacts; stores the raw
+path-privacy key as exactly 32 bytes with mode `0600`; and never serializes key
+material into any public artifact. Grant consumption is single-use and
+restart-safe: either the claim, key, and custody all validate canonically, or
+the flow fails closed and rolls back incomplete key publication.
+
+`mediaforce/tuning/av1_validation_v4r4_preparation_flow.py` is the sole
+revision-4 owner orchestration boundary for issue #409. It remeasures a clean
+repository before authority, re-verifies all four frozen source digests before
+any sequencing or execution authority, hashes and probes only the three trusted
+tool binaries with the exact argv map `{ab_av1:["--version"], ffmpeg:["-version"],
+ffprobe:["-version"]}`, builds the path-free bundle, records a terminal
+measurement, freezes the reviewed cohort, materializes a non-authorizing
+qualification request and execution preflight, derives the retained ordinal
+registry binding from the private preparation key, publishes the revision-4
+ordinal plan and preflight before publishing only the ordinal-1 sequencing
+grant. A preflight failure therefore cannot leave sequencing authority behind.
+
+The stop line is explicit and enforced. The flow stops before any sequencing
+claim, execution grant, execution claim, runtime request/callback, runner
+admission, started publication, outcome publication, terminal publication, media
+processing, evidence creation, activation, or dogfood authority. Public CLI
+state is therefore `ready_for_execution_authority_decision`, not dogfood-ready.
+
+The new JSON-only owner entrypoint is
+`scripts/prepare_av1_v4r4_preparation_custody_readiness.py`. It accepts one
+request object on stdin, requires the owner principal to be repeated exactly,
+emits one fixed schema/path-free JSON line, and returns only public IDs,
+creation booleans, deadlines, false authority fields, and the exact
+next-owner-decision boundary.
+Private registry paths, source paths, key bytes, raw media facts, command lines,
+stderr, and exception text do not appear in public output.
+
+The explicit revision-4 owner sequence is now:
+
+1. `uv run python scripts/prepare_av1_v4r4_preparation_custody_readiness.py < request.json`
+2. A later owner-only execution-authority command may publish an execution
+grant or abort.
+3. All later sequencing claim, runtime execution, evidence, activation, and
+dogfood steps remain out of scope for issue #409.
+
+Tests for this slice use only temporary synthetic custody. They cover success,
+path-free CLI output, owner mismatch, invalid ordinal-1 windows, source-digest
+drift, restart sealing, raw key custody, revision-3 artifact rejection,
+measurement probe argv, clean-repository binding, and the absence of any
+sequencing-claim, execution, runner-admission, started, outcome, or terminal
+artifacts at the stop line.

@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -31,24 +32,26 @@ from mediaforce.tuning.stream_budget import build_stream_budget_ledger
 from tests.test_av1_validation_v4r4_execution_authority import (
     _execution_claim,
     _execution_grant,
+    _prepared_chain,
     _private_canonical_bytes,
     _sequencing_claim,
-    _sequencing_grant,
 )
-from tests.test_av1_validation_v4r4_ordinal_registry import _publish_plan
 
 
 def test_runner_admission_binds_all_public_chain_and_policy_values(tmp_path: Path) -> None:
-    binding, plan, clock = _publish_plan(tmp_path)
-    seq_grant = _sequencing_grant(binding, plan, clock)
+    prepared = _prepared_chain(tmp_path)
+    binding, plan, clock = prepared.binding, prepared.plan, prepared.clock
+    seq_grant = prepared.sequencing_grant
     seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
-    exec_grant = _execution_grant(plan, seq_grant)
+    exec_grant = _execution_grant(plan, seq_grant, qualification_request=prepared.request, execution_preflight=prepared.preflight)
     exec_claim = _execution_claim(plan, seq_claim, exec_grant)
 
-    admission = _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim)
+    admission = _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim, qualification_request=prepared.request, execution_preflight=prepared.preflight)
 
     assert_av1_v4r4_runner_admission(admission)
     assert_av1_v4r4_runner_admission_chain(
+        qualification_request=prepared.request,
+        execution_preflight=prepared.preflight,
         admission=admission,
         plan=plan,
         sequencing_grant=seq_grant,
@@ -64,12 +67,13 @@ def test_runner_admission_binds_all_public_chain_and_policy_values(tmp_path: Pat
 
 
 def test_runner_admission_rejects_runtime_policy_drift_and_private_text(tmp_path: Path) -> None:
-    binding, plan, clock = _publish_plan(tmp_path)
-    seq_grant = _sequencing_grant(binding, plan, clock)
+    prepared = _prepared_chain(tmp_path)
+    binding, plan, clock = prepared.binding, prepared.plan, prepared.clock
+    seq_grant = prepared.sequencing_grant
     seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
-    exec_grant = _execution_grant(plan, seq_grant)
+    exec_grant = _execution_grant(plan, seq_grant, qualification_request=prepared.request, execution_preflight=prepared.preflight)
     exec_claim = _execution_claim(plan, seq_claim, exec_grant)
-    admission = _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim)
+    admission = _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim, qualification_request=prepared.request, execution_preflight=prepared.preflight)
 
     drifted = deepcopy(admission)
     drifted["runtime_policy"]["metric_target"] = 84.0
@@ -88,16 +92,19 @@ def test_runner_admission_rejects_runtime_policy_drift_and_private_text(tmp_path
 
 
 def test_runner_admission_chain_rejects_forged_execution_claim(tmp_path: Path) -> None:
-    binding, plan, clock = _publish_plan(tmp_path)
-    seq_grant = _sequencing_grant(binding, plan, clock)
+    prepared = _prepared_chain(tmp_path)
+    binding, plan, clock = prepared.binding, prepared.plan, prepared.clock
+    seq_grant = prepared.sequencing_grant
     seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
-    exec_grant = _execution_grant(plan, seq_grant)
+    exec_grant = _execution_grant(plan, seq_grant, qualification_request=prepared.request, execution_preflight=prepared.preflight)
     exec_claim = _execution_claim(plan, seq_claim, exec_grant)
-    admission = _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim)
+    admission = _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim, qualification_request=prepared.request, execution_preflight=prepared.preflight)
     forged_claim = {**exec_claim, "execution_claim_id": "av1v4r4execclaim_" + "0" * 32}
 
     with pytest.raises(AV1V4R4RunnerAdmissionError, match="chain binding"):
         assert_av1_v4r4_runner_admission_chain(
+            qualification_request=prepared.request,
+            execution_preflight=prepared.preflight,
             admission=admission,
             plan=plan,
             sequencing_grant=seq_grant,
@@ -107,12 +114,33 @@ def test_runner_admission_chain_rejects_forged_execution_claim(tmp_path: Path) -
         )
 
 
+def test_runner_admission_requires_owner_prepared_invocation(tmp_path: Path) -> None:
+    prepared = _prepared_chain(tmp_path)
+    binding, plan, clock = prepared.binding, prepared.plan, prepared.clock
+    seq_grant = prepared.sequencing_grant
+    seq_claim = _sequencing_claim(binding, plan, seq_grant, clock)
+    exec_grant = _execution_grant(
+        plan,
+        seq_grant,
+        qualification_request=prepared.request,
+        execution_preflight=prepared.preflight,
+        prepared_invocation_sha256="sha256:" + "0" * 64,
+    )
+    exec_claim = _execution_claim(plan, seq_claim, exec_grant)
+
+    with pytest.raises(AV1V4R4RunnerAdmissionError, match="preparation"):
+        _admission(plan, seq_grant, seq_claim, exec_grant, exec_claim, qualification_request=prepared.request, execution_preflight=prepared.preflight)
+
+
 def _admission(
     plan: Mapping[str, Any],
     seq_grant: Mapping[str, Any],
     seq_claim: Mapping[str, Any],
     exec_grant: Mapping[str, Any],
     exec_claim: Mapping[str, Any],
+    *,
+    qualification_request: Mapping[str, Any] | None = None,
+    execution_preflight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     ordinal = int(exec_claim["ordinal"])
     video_policy = _video_policy_for_ordinal(ordinal)
@@ -138,18 +166,22 @@ def _admission(
         "height": 1080,
         "quality_temp_dir": Path("/tmp/mediaforce-v4r4-quality"),
     }
-    return build_av1_v4r4_runner_admission(
+    call = lambda: build_av1_v4r4_runner_admission(
+        qualification_request=qualification_request or {},
+        execution_preflight=execution_preflight or {},
         plan=plan,
         sequencing_grant=seq_grant,
         sequencing_claim=seq_claim,
         execution_grant=exec_grant,
         execution_claim=exec_claim,
-        invocation_sha256=av1_validation_v4_qualification_search_invocation_sha256(
-            source_path=Path("/tmp/mediaforce-v4r4-source.mkv"),
-            video_policy=video_policy,
-            mode=mode,
-            warm_start=warm_start,
-            extra_search_kwargs=search_kwargs,
+        invocation_sha256=(
+            next(
+                item["invocation_sha256"]
+                for item in qualification_request["invocation_digests"]
+                if item["ordinal"] == ordinal
+            )
+            if qualification_request is not None
+            else str(exec_grant["prepared_invocation_sha256"])
         ),
         stream_budget_ledger=ledger.to_payload(),
         production_stream_plan=stream_plan.to_payload(),
@@ -163,3 +195,9 @@ def _admission(
         total_target_bytes=int(seq_grant["target_size_bytes"]),
         source_cap_total_bytes=int(seq_grant["source_cap_total_bytes"]),
     )
+    if qualification_request is not None and execution_preflight is not None:
+        return call()
+    with patch(
+        "mediaforce.tuning.av1_validation_v4r4_runner_admission.assert_av1_v4r4_execution_preparation_chain"
+    ):
+        return call()

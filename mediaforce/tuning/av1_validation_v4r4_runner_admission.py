@@ -29,6 +29,7 @@ from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
     AV1V4R4ExecutionAuthorityError,
     assert_av1_v4r4_execution_claim,
     assert_av1_v4r4_execution_grant,
+    assert_av1_v4r4_execution_preparation_chain,
 )
 from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
     assert_av1_v4r4_ordinal_registry_claim,
@@ -98,6 +99,8 @@ class AV1V4R4RunnerAdmissionError(ValueError):
 
 def build_av1_v4r4_runner_admission(
     *,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
     plan: Mapping[str, Any],
     sequencing_grant: Mapping[str, Any],
     sequencing_claim: Mapping[str, Any],
@@ -131,7 +134,23 @@ def build_av1_v4r4_runner_admission(
         raise AV1V4R4RunnerAdmissionError(
             "AV1 v4 r4 runner admission chain binding is invalid"
         ) from exc
+    try:
+        assert_av1_v4r4_execution_preparation_chain(
+            qualification_request=qualification_request,
+            execution_preflight=execution_preflight,
+            plan=plan_payload,
+            sequencing_grant=seq_grant_payload,
+            execution_grant=exec_grant_payload,
+        )
+    except AV1V4R4ExecutionAuthorityError as exc:
+        raise AV1V4R4RunnerAdmissionError(
+            "AV1 v4 r4 runner admission preparation binding is invalid"
+        ) from exc
     ordinal = exec_claim_payload["ordinal"]
+    if invocation_sha256 != exec_grant_payload["prepared_invocation_sha256"]:
+        raise AV1V4R4RunnerAdmissionError(
+            "AV1 v4 r4 runner admission invocation is not owner-prepared"
+        )
     layout = _layout_for_ordinal(ordinal)
     runtime_policy = {
         "metric_name": metric_name,
@@ -233,6 +252,34 @@ def assert_av1_v4r4_runner_admission(payload: Mapping[str, Any]) -> None:
 
 def assert_av1_v4r4_runner_admission_chain(
     *,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    sequencing_claim: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+    execution_claim: Mapping[str, Any],
+) -> None:
+    assert_av1_v4r4_execution_preparation_chain(
+        qualification_request=qualification_request,
+        execution_preflight=execution_preflight,
+        plan=plan,
+        sequencing_grant=sequencing_grant,
+        execution_grant=execution_grant,
+    )
+    _assert_av1_v4r4_runner_admission_runtime_chain(
+        admission=admission,
+        plan=plan,
+        sequencing_grant=sequencing_grant,
+        sequencing_claim=sequencing_claim,
+        execution_grant=execution_grant,
+        execution_claim=execution_claim,
+    )
+
+
+def _assert_av1_v4r4_runner_admission_runtime_chain(
+    *,
     admission: Mapping[str, Any],
     plan: Mapping[str, Any],
     sequencing_grant: Mapping[str, Any],
@@ -278,6 +325,10 @@ def assert_av1_v4r4_runner_admission_chain(
         or exec_grant_payload["ordinal"] != expected["ordinal"]
     ):
         raise AV1V4R4RunnerAdmissionError("AV1 v4 r4 runner admission ordinal chain is invalid")
+    if admission_payload["invocation_sha256"] != exec_grant_payload["prepared_invocation_sha256"]:
+        raise AV1V4R4RunnerAdmissionError(
+            "AV1 v4 r4 runner admission invocation is not owner-prepared"
+        )
 
 
 def av1_v4r4_runner_stream_budget_ledger_identity(

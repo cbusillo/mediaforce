@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from mediaforce.core.evidence import canonical_json_bytes, stable_json_hash
-from mediaforce.core.type_defs import object_dict
+from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.tuning.av1_validation_v4 import (
     AV1_VALIDATION_V4_FALSE_AUTHORITY_FIELDS,
     av1_validation_v4_contains_private_text,
@@ -34,6 +34,11 @@ from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
     assert_av1_v4r4_ordinal_registry_claim,
     assert_av1_v4r4_ordinal_registry_grant,
     assert_av1_v4r4_ordinal_registry_plan,
+)
+from mediaforce.tuning.av1_validation_v4r4_preparation import (
+    AV1V4R4PreparationError,
+    assert_av1_v4r4_execution_preflight,
+    assert_av1_v4r4_qualification_request,
 )
 
 
@@ -65,10 +70,15 @@ _GRANT_KEYS = _COMMON_KEYS | {
     "execution_grant_id",
     "payload_sha256",
     "owner_principal",
+    "qualification_request_id",
+    "qualification_request_payload_sha256",
+    "execution_preflight_id",
+    "execution_preflight_payload_sha256",
     "plan_id",
     "plan_payload_sha256",
     "sequencing_grant_id",
     "sequencing_grant_payload_sha256",
+    "prepared_invocation_sha256",
     "ordinal",
     "asset_id",
     "content_class",
@@ -96,6 +106,8 @@ _CLAIM_KEYS = _COMMON_KEYS | {
 
 _EXECUTION_GRANT_ID_RE = re.compile(r"av1v4r4execgrant_[0-9a-f]{32}\Z")
 _EXECUTION_CLAIM_ID_RE = re.compile(r"av1v4r4execclaim_[0-9a-f]{32}\Z")
+_REQUEST_ID_RE = re.compile(r"av1v4r4req_[0-9a-f]{32}\Z")
+_PREFLIGHT_ID_RE = re.compile(r"av1v4r4preflight_[0-9a-f]{32}\Z")
 _PLAN_ID_RE = re.compile(r"av1v4r4ordplan_[0-9a-f]{32}\Z")
 _SEQUENCING_GRANT_ID_RE = re.compile(r"av1v4r4ordgrant_[0-9a-f]{32}\Z")
 _SEQUENCING_CLAIM_ID_RE = re.compile(r"av1v4r4ordclaim_[0-9a-f]{32}\Z")
@@ -151,6 +163,20 @@ def assert_av1_v4r4_execution_grant(payload: Mapping[str, Any]) -> None:
     if not _OWNER_PRINCIPAL_RE.fullmatch(str(materialized.get("owner_principal") or "")):
         raise AV1V4R4ExecutionAuthorityError("AV1 v4 r4 execution owner principal is invalid")
     if (
+        not _REQUEST_ID_RE.fullmatch(str(materialized.get("qualification_request_id") or ""))
+        or not _SHA256_RE.fullmatch(
+            str(materialized.get("qualification_request_payload_sha256") or "")
+        )
+        or not _PREFLIGHT_ID_RE.fullmatch(str(materialized.get("execution_preflight_id") or ""))
+        or not _SHA256_RE.fullmatch(
+            str(materialized.get("execution_preflight_payload_sha256") or "")
+        )
+        or not _SHA256_RE.fullmatch(str(materialized.get("prepared_invocation_sha256") or ""))
+    ):
+        raise AV1V4R4ExecutionAuthorityError(
+            "AV1 v4 r4 execution grant preparation binding is invalid"
+        )
+    if (
         not _PLAN_ID_RE.fullmatch(str(materialized.get("plan_id") or ""))
         or not _SHA256_RE.fullmatch(str(materialized.get("plan_payload_sha256") or ""))
         or not _SEQUENCING_GRANT_ID_RE.fullmatch(str(materialized.get("sequencing_grant_id") or ""))
@@ -205,6 +231,34 @@ def assert_av1_v4r4_execution_claim(payload: Mapping[str, Any]) -> None:
 
 
 def assert_av1_v4r4_execution_chain(
+    *,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    sequencing_claim: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+    execution_claim: Mapping[str, Any],
+    now: datetime,
+) -> None:
+    assert_av1_v4r4_execution_preparation_chain(
+        qualification_request=qualification_request,
+        execution_preflight=execution_preflight,
+        plan=plan,
+        sequencing_grant=sequencing_grant,
+        execution_grant=execution_grant,
+    )
+    _assert_av1_v4r4_execution_runtime_chain(
+        plan=plan,
+        sequencing_grant=sequencing_grant,
+        sequencing_claim=sequencing_claim,
+        execution_grant=execution_grant,
+        execution_claim=execution_claim,
+        now=now,
+    )
+
+
+def _assert_av1_v4r4_execution_runtime_chain(
     *,
     plan: Mapping[str, Any],
     sequencing_grant: Mapping[str, Any],
@@ -279,6 +333,75 @@ def assert_av1_v4r4_execution_chain(
     if not plan_opens <= claimed_at < plan_closes:
         raise AV1V4R4ExecutionAuthorityError(
             "AV1 v4 r4 execution claim is outside the plan interval"
+        )
+
+
+def assert_av1_v4r4_execution_preparation_chain(
+    *,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+) -> None:
+    request_payload = dict(qualification_request)
+    preflight_payload = dict(execution_preflight)
+    plan_payload = dict(plan)
+    seq_grant_payload = dict(sequencing_grant)
+    exec_grant_payload = dict(execution_grant)
+    try:
+        assert_av1_v4r4_qualification_request(request_payload)
+        assert_av1_v4r4_execution_preflight(preflight_payload)
+    except AV1V4R4PreparationError as exc:
+        raise AV1V4R4ExecutionAuthorityError(
+            "AV1 v4 r4 execution preparation chain is invalid"
+        ) from exc
+    assert_av1_v4r4_ordinal_registry_plan(plan_payload)
+    assert_av1_v4r4_ordinal_registry_grant(seq_grant_payload)
+    assert_av1_v4r4_execution_grant(exec_grant_payload)
+    ordinal = int(exec_grant_payload["ordinal"])
+    invocations = [
+        object_dict(item)
+        for item in object_list(request_payload.get("invocation_digests"))
+    ]
+    prepared = next(
+        (item for item in invocations if item.get("ordinal") == ordinal),
+        None,
+    )
+    if (
+        prepared is None
+        or preflight_payload["qualification_request_id"]
+        != request_payload["request_id"]
+        or preflight_payload["qualification_request_payload_sha256"]
+        != request_payload["payload_sha256"]
+        or preflight_payload["plan_id"] != plan_payload["plan_id"]
+        or preflight_payload["plan_payload_sha256"]
+        != plan_payload["payload_sha256"]
+        or preflight_payload["ordinal_registry_id"] != plan_payload["registry_id"]
+        or preflight_payload["owner_principal"] != request_payload["owner_principal"]
+        or exec_grant_payload["qualification_request_id"]
+        != request_payload["request_id"]
+        or exec_grant_payload["qualification_request_payload_sha256"]
+        != request_payload["payload_sha256"]
+        or exec_grant_payload["execution_preflight_id"]
+        != preflight_payload["preflight_id"]
+        or exec_grant_payload["execution_preflight_payload_sha256"]
+        != preflight_payload["payload_sha256"]
+        or exec_grant_payload["owner_principal"] != request_payload["owner_principal"]
+        or exec_grant_payload["plan_id"] != plan_payload["plan_id"]
+        or exec_grant_payload["plan_payload_sha256"] != plan_payload["payload_sha256"]
+        or seq_grant_payload["plan_id"] != plan_payload["plan_id"]
+        or seq_grant_payload["plan_payload_sha256"] != plan_payload["payload_sha256"]
+        or exec_grant_payload["sequencing_grant_id"] != seq_grant_payload["grant_id"]
+        or exec_grant_payload["sequencing_grant_payload_sha256"]
+        != seq_grant_payload["payload_sha256"]
+        or exec_grant_payload["prepared_invocation_sha256"]
+        != prepared.get("invocation_sha256")
+        or exec_grant_payload["asset_id"] != prepared.get("asset_id")
+        or exec_grant_payload["configuration"] != prepared.get("configuration")
+    ):
+        raise AV1V4R4ExecutionAuthorityError(
+            "AV1 v4 r4 execution preparation chain binding is invalid"
         )
 
 

@@ -50,18 +50,18 @@ from mediaforce.tuning.av1_validation_v4r4_outcome import (
 
 def _execution_chain_assertion() -> Any:
     from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
-        assert_av1_v4r4_execution_chain,
+        _assert_av1_v4r4_execution_runtime_chain,
     )
 
-    return assert_av1_v4r4_execution_chain
+    return _assert_av1_v4r4_execution_runtime_chain
 
 
 def _runner_admission_chain_assertion() -> Any:
     from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
-        assert_av1_v4r4_runner_admission_chain,
+        _assert_av1_v4r4_runner_admission_runtime_chain,
     )
 
-    return assert_av1_v4r4_runner_admission_chain
+    return _assert_av1_v4r4_runner_admission_runtime_chain
 
 
 AV1_V4R4_OR_PLAN_SCHEMA = "mediaforce.av1_cold_start_v4r4_ordinal_registry_plan"
@@ -210,6 +210,12 @@ class AV1V4R4OrdinalRegistryBinding:
 @dataclass(frozen=True, slots=True)
 class AV1V4R4OrdinalRegistryGrantPublication:
     grant: Mapping[str, Any]
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AV1V4R4OrdinalRegistryPlanPublication:
+    plan: Mapping[str, Any]
     created: bool
 
 
@@ -943,6 +949,19 @@ def publish_av1_v4r4_ordinal_registry_plan(
     binding: AV1V4R4OrdinalRegistryBinding,
     plan: Mapping[str, Any],
 ) -> dict[str, Any]:
+    return dict(
+        publish_av1_v4r4_ordinal_registry_plan_with_status(
+            binding=binding,
+            plan=plan,
+        ).plan
+    )
+
+
+def publish_av1_v4r4_ordinal_registry_plan_with_status(
+    *,
+    binding: AV1V4R4OrdinalRegistryBinding,
+    plan: Mapping[str, Any],
+) -> AV1V4R4OrdinalRegistryPlanPublication:
     plan_payload = dict(plan)
     assert_av1_v4r4_ordinal_registry_plan(plan_payload)
     with _locked_registry(binding.registry) as ctx:
@@ -955,9 +974,21 @@ def publish_av1_v4r4_ordinal_registry_plan(
         if ctx.exists(_PLAN_NAME):
             existing = ctx.load_plan()
             _assert_same_record(existing, plan_payload, "plan")
-            return existing
+            return AV1V4R4OrdinalRegistryPlanPublication(plan=existing, created=False)
         ctx.write(_PLAN_NAME, serialize_av1_v4r4_ordinal_registry_plan(plan_payload))
-        return plan_payload
+        return AV1V4R4OrdinalRegistryPlanPublication(plan=plan_payload, created=True)
+
+
+def load_av1_v4r4_ordinal_registry_plan(
+    binding: AV1V4R4OrdinalRegistryBinding,
+) -> dict[str, Any] | None:
+    with _locked_registry(binding.registry) as context:
+        context.assert_supported_artifacts()
+        if not context.exists(_PLAN_NAME):
+            return None
+        plan = context.load_plan()
+        _assert_binding_matches_plan(binding, plan)
+        return dict(plan)
 
 
 def publish_av1_v4r4_ordinal_registry_grant_with_status(
@@ -979,6 +1010,11 @@ def publish_av1_v4r4_ordinal_registry_grant_with_status(
             grant = ctx.load_grant(ordinal)
             _assert_record_binds_plan(grant, plan_payload, "grant")
             _assert_grant_within_plan(grant, plan_payload)
+            _assert_grant_open(grant, now)
+            if grant.get("valid_until") != valid_until:
+                raise AV1V4R4OrdinalRegistryError(
+                    "AV1 v4 r4 ordinal registry retained grant deadline conflicts"
+                )
             return AV1V4R4OrdinalRegistryGrantPublication(grant=grant, created=False)
         grant = build_av1_v4r4_ordinal_registry_grant(
             plan=plan_payload,
