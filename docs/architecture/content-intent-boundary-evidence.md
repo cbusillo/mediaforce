@@ -103,12 +103,11 @@ scopes require at least three independent acceptable source IDs and bounded
 dispersion before becoming actionable; rejection-only sources and repeated
 observations from one item cannot unlock a folder, class, or operator prior.
 
-The replay result is advisory starting-point state for the bounded prior work.
+The replay result is advisory starting-point state for bounded cold-start work.
 It does not authorize size growth, alter quality floors, or bypass measured
 search. `docs/architecture/av1-cold-start-priors.md` defines how this private
-local posterior is combined with the independently versioned public bundle and
-converted into one measured first-probe hint or an explicit no-recommendation
-outcome.
+local evidence can provide one measured first-probe hint or an explicit
+no-recommendation outcome.
 
 ## Privacy and storage
 

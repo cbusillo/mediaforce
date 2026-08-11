@@ -36,8 +36,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 - `docs/architecture/content-intent-boundary-evidence.md`: append-only visual
   size boundaries, compatibility, correction-safe replay, and private local
   content-by-intent personalization
-- `docs/architecture/av1-cold-start-priors.md`: versioned public AV1 priors,
-  private local overlays, confidence, compatibility, and measured fallback
+- `docs/architecture/av1-cold-start-priors.md`: local accepted-outcome
+  recommendations, compatibility, confidence, and measured fallback
 - `docs/architecture/quality-search-memory.md`: read-only accepted-outcome
   cohorts, signature invalidation, robust CRF summaries, and authority limits
 - `docs/architecture/advisor-routing.md`: evaluated task routing, Codex Lab

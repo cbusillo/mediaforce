@@ -19,10 +19,7 @@ from mediaforce.core.db_migrations import _alembic_config, _alembic_script_locat
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.evidence import stable_source_id
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
-from mediaforce.tuning.av1_cold_start import (
-    load_packaged_av1_cold_start_bundle,
-    plan_av1_cold_start,
-)
+from mediaforce.tuning.av1_cold_start import plan_av1_cold_start
 from mediaforce.tuning.compression_intent import CompressionIntentLevel, CompressionIntentV1
 from mediaforce.tuning.content_intent_observations import (
     AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
@@ -944,7 +941,6 @@ class ContentIntentObservationTests(unittest.TestCase):
             configured_min_crf=18,
             configured_max_crf=38,
             as_of="2026-07-27T12:00:00Z",
-            bundle_result=load_packaged_av1_cold_start_bundle(),
         )
 
         self.assertTrue(prediction.recommended)

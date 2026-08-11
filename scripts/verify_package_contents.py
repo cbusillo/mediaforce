@@ -9,13 +9,6 @@ import tarfile
 from typing import Callable, Iterable
 import zipfile
 
-from mediaforce.tuning.av1_cold_start import (
-    AV1ColdStartContractError,
-    assert_av1_cold_start_public_payload_safe,
-)
-
-
-PUBLIC_PRIOR_PATH = PurePosixPath("mediaforce/tuning/data/av1_cold_start_priors_v1.json")
 PACKAGED_DEFAULTS_PATH = PurePosixPath("mediaforce/package_defaults/defaults.toml")
 FORBIDDEN_COMPONENTS = frozenset({
     ".idea",
@@ -88,35 +81,14 @@ class _ArchiveView:
 def verify_package_archives(
         archives: Iterable[Path],
         *,
-        source_artifact: Path,
         source_defaults: Path | None = None,
 ) -> list[dict[str, object]]:
-    source_bytes = source_artifact.read_bytes()
     default_bytes = source_defaults.read_bytes() if source_defaults is not None else None
     summaries = []
     for archive in archives:
         view = _archive_members(archive)
         try:
             _reject_forbidden_members(archive, (member.path for member in view.members))
-            matches = [member for member in view.members if _is_public_prior(member.path)]
-            if len(matches) != 1:
-                raise PackageContentsError(
-                    f"{archive.name} must contain exactly one public AV1 prior artifact; "
-                    f"found {[str(member.path) for member in matches]}"
-                )
-            artifact_bytes = matches[0].read()
-            if artifact_bytes != source_bytes:
-                raise PackageContentsError(
-                    f"{archive.name} AV1 prior bytes differ from the checked-in artifact"
-                )
-            try:
-                assert_av1_cold_start_public_payload_safe(
-                    json.loads(artifact_bytes.decode("utf-8"))
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError, AV1ColdStartContractError) as exc:
-                raise PackageContentsError(
-                    f"{archive.name} AV1 prior violates the public privacy contract"
-                ) from exc
             default_matches: list[_ArchiveMember] = []
             if default_bytes is not None:
                 default_matches = [
@@ -133,7 +105,6 @@ def verify_package_archives(
                 {
                     "archive": archive.name,
                     "member_count": len(view.members),
-                    "public_prior": str(matches[0].path),
                     "packaged_defaults": (
                         str(default_matches[0].path) if default_bytes is not None else None
                     ),
@@ -194,7 +165,6 @@ def _reject_forbidden_members(archive: Path, members: Iterable[PurePosixPath]) -
                 or member_name.endswith(FORBIDDEN_SUFFIXES)
                 or member_name.endswith(FORBIDDEN_SECRET_SUFFIXES)
                 or _without_sdist_root(member) in FORBIDDEN_RUNTIME_PACKAGE_PATHS
-                or (_has_public_prior_suffix(member) and not _is_public_prior(member))
         ):
             rejected.append(str(member))
     if rejected:
@@ -205,15 +175,6 @@ def _without_sdist_root(member: PurePosixPath) -> PurePosixPath:
     if len(member.parts) > 1 and SDIST_ROOT_RE.fullmatch(member.parts[0]):
         return PurePosixPath(*member.parts[1:])
     return member
-
-
-def _is_public_prior(member: PurePosixPath) -> bool:
-    return _without_sdist_root(member) == PUBLIC_PRIOR_PATH
-
-
-def _has_public_prior_suffix(member: PurePosixPath) -> bool:
-    expected_parts = PUBLIC_PRIOR_PATH.parts
-    return member.parts[-len(expected_parts):] == expected_parts
 
 
 def _scan_archive_text(archive: Path, members: Iterable[_ArchiveMember]) -> None:
@@ -263,14 +224,9 @@ def _scannable_member(member: PurePosixPath) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Verify Mediaforce wheel/sdist privacy and AV1 prior contents."
+        description="Verify Mediaforce wheel/sdist privacy and install-safe defaults."
     )
     parser.add_argument("archives", nargs="+", type=Path)
-    parser.add_argument(
-        "--source-artifact",
-        type=Path,
-        default=Path("mediaforce/tuning/data/av1_cold_start_priors_v1.json"),
-    )
     parser.add_argument(
         "--source-defaults",
         type=Path,
@@ -279,7 +235,6 @@ def main() -> int:
     args = parser.parse_args()
     summaries = verify_package_archives(
         args.archives,
-        source_artifact=args.source_artifact,
         source_defaults=args.source_defaults,
     )
     print(json.dumps({"status": "ok", "archives": summaries}, sort_keys=True))

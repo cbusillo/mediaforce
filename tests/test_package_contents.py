@@ -8,177 +8,53 @@ import tomllib
 import unittest
 import zipfile
 
-from scripts.verify_package_contents import PackageContentsError, verify_package_archives
 from mediaforce.core.config import _source_checkout_default_config_path
+from scripts.verify_package_contents import PackageContentsError, verify_package_archives
 
 
 class PackageContentsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
-        self.source_artifact = self.root / "av1_cold_start_priors_v1.json"
-        self.source_artifact.write_bytes(b'{"safe":true}\n')
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_verifier_accepts_one_identical_public_artifact(self) -> None:
-        wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": self.source_artifact.read_bytes(),
-                "mediaforce/__init__.py": b"",
-            }
-        )
-        sdist = self._sdist(
-            {
-                "mediaforce-0.1.0/mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "mediaforce-0.1.0/pyproject.toml": b"[project]\nname='mediaforce'\n",
-            }
-        )
+    def test_verifier_accepts_wheel_and_sdist_without_runtime_state(self) -> None:
+        wheel = self._wheel({"mediaforce/__init__.py": b"", "README.md": b"safe"})
+        sdist = self._sdist({"mediaforce-0.1.0/README.md": b"safe"})
 
-        summaries = verify_package_archives(
-            [wheel, sdist],
-            source_artifact=self.source_artifact,
-        )
+        summaries = verify_package_archives([wheel, sdist])
 
-        self.assertEqual(len(summaries), 2)
+        self.assertEqual([summary["member_count"] for summary in summaries], [2, 1])
 
-    def test_verifier_rejects_private_members_and_duplicate_artifacts(self) -> None:
-        private_wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": self.source_artifact.read_bytes(),
-                "frontend/.idea/workspace.xml": b"private",
-            },
-            name="private.whl",
+    def test_verifier_rejects_private_members_and_paths(self) -> None:
+        cases = (
+            ("frontend/.idea/workspace.xml", b"private", "forbidden"),
+            ("mediaforce/.env.local", b"TOKEN=private", "forbidden"),
+            ("state/library.sqlite3-wal", b"private", "forbidden"),
+            ("../runtime.sqlite3", b"private", "forbidden"),
+            ("notes.txt", b"generated from /Users/alice/private/library.sqlite3", "machine-specific"),
+            ("notes.txt", b"generated from /tmp/private-training-export.json", "temporary path"),
         )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([private_wheel], source_artifact=self.source_artifact)
-
-        env_wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "mediaforce/.env.local": b"TOKEN=private",
-            },
-            name="env-local.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([env_wheel], source_artifact=self.source_artifact)
-
-        nested_env_wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "mediaforce/.env.local/secret.txt": b"TOKEN=private",
-            },
-            name="nested-env-local.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([nested_env_wheel], source_artifact=self.source_artifact)
-
-        sidecar_wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "state/library.sqlite3-wal": b"private",
-            },
-            name="sqlite-sidecar.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([sidecar_wheel], source_artifact=self.source_artifact)
+        for index, (member, payload, message) in enumerate(cases):
+            with self.subTest(member=member):
+                archive = self._wheel({member: payload}, name=f"forbidden-{index}.whl")
+                with self.assertRaisesRegex(PackageContentsError, message):
+                    verify_package_archives([archive])
 
         private_config = self._sdist(
             {
-                "mediaforce-0.1.0/mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
+                "mediaforce-0.1.0/config/folder-defaults.toml": (
+                    b'path_prefix = "tv/Private"\n'
                 ),
-                "mediaforce-0.1.0/config/folder-defaults.toml": b'path_prefix = "tv/Private"\n',
             },
             name="private-config.tar.gz",
         )
         with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([private_config], source_artifact=self.source_artifact)
+            verify_package_archives([private_config])
 
-        traversal_wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": self.source_artifact.read_bytes(),
-                "../runtime.sqlite3": b"private",
-            },
-            name="traversal.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([traversal_wheel], source_artifact=self.source_artifact)
-
-        duplicate_sdist = self._sdist(
-            {
-                "mediaforce-0.1.0/mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "mediaforce-0.1.0/extra/mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-            },
-            name="duplicate.tar.gz",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([duplicate_sdist], source_artifact=self.source_artifact)
-
-        impersonator_sdist = self._sdist(
-            {
-                "mediaforce-junk/mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-            },
-            name="impersonator.tar.gz",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "forbidden"):
-            verify_package_archives([impersonator_sdist], source_artifact=self.source_artifact)
-
-    def test_verifier_rejects_artifact_byte_drift_and_private_tokens(self) -> None:
-        drifted = self._wheel(
-            {"mediaforce/tuning/data/av1_cold_start_priors_v1.json": b'{"safe":false}\n'},
-            name="drifted.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "differ"):
-            verify_package_archives([drifted], source_artifact=self.source_artifact)
-
-        private_source = self.root / "private-prior.json"
-        private_source.write_bytes(b'{"source_path":"/Users/example/media.mkv"}\n')
-        private_prior = self._wheel(
-            {"mediaforce/tuning/data/av1_cold_start_priors_v1.json": private_source.read_bytes()},
-            name="private-prior.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "privacy contract"):
-            verify_package_archives([private_prior], source_artifact=private_source)
-
-        machine_path = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": self.source_artifact.read_bytes(),
-                "notes.txt": b"generated from /Users/alice/private/library.sqlite3",
-            },
-            name="machine-path.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "machine-specific"):
-            verify_package_archives([machine_path], source_artifact=self.source_artifact)
-
-        temporary_path = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "notes.txt": b"generated from /tmp/private-training-export.json",
-            },
-            name="temporary-path.whl",
-        )
-        with self.assertRaisesRegex(PackageContentsError, "temporary path"):
-            verify_package_archives([temporary_path], source_artifact=self.source_artifact)
-
-    def test_install_safe_defaults_are_public_and_byte_identical(self) -> None:
+    def test_install_safe_defaults_are_byte_identical(self) -> None:
         source_defaults_resource = resources.files("mediaforce.package_defaults").joinpath(
             "defaults.toml"
         )
@@ -200,17 +76,11 @@ class PackageContentsTests(unittest.TestCase):
         self.assertEqual(normalized_source, defaults)
 
         wheel = self._wheel(
-            {
-                "mediaforce/tuning/data/av1_cold_start_priors_v1.json": (
-                    self.source_artifact.read_bytes()
-                ),
-                "mediaforce/package_defaults/defaults.toml": default_bytes,
-            },
+            {"mediaforce/package_defaults/defaults.toml": default_bytes},
             name="install-safe.whl",
         )
         summaries = verify_package_archives(
             [wheel],
-            source_artifact=self.source_artifact,
             source_defaults=Path(str(source_defaults_resource)),
         )
 
