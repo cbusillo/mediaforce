@@ -10,7 +10,7 @@ The live path is:
 
 1. Resolve explicit compression intent and the whole-item size goal.
 2. Measure source and stream facts.
-3. Read compatible accepted local outcomes and the shipped public bundle.
+3. Read compatible accepted local outcomes from the runtime database.
 4. Return one bounded first-probe recommendation or a no-recommendation reason.
 5. Run the normal measured target-size search with unchanged quality and size
    safeguards.
@@ -22,17 +22,14 @@ The live path is:
 The recommendation never changes target bytes, quality floors, stream budgets,
 resolution, cadence, transforms, audio, subtitles, promotion, or saved policy.
 
-## Evidence Sources
+## Evidence Source
 
-The predictor keeps public and local evidence separate:
-
-- `mediaforce/tuning/data/av1_cold_start_priors_v1.json` is the checked-in
-  aggregate bundle. It currently remains `validation_pending` with no active
-  cells, so a new installation receives `no_public_evidence` rather than an
-  invented recommendation.
-- The runtime database contains append-only accepted and rejected operator
-  outcomes. Compatible local evidence may recommend a first probe without
-  modifying the checked-in bundle.
+The predictor uses only append-only accepted and rejected operator outcomes
+from the runtime database. The observation loader filters by the request's
+content-intent compatibility identity before replay, and the planner further
+restricts rows to the requested item, content profile, or selected local
+cohort. No public prior, checked-in bundle, or package resource participates in
+the recommendation.
 
 Missing, stale, low-confidence, incompatible, conflicting, future-dated, or
 out-of-range evidence returns no recommendation. Full measured search remains
@@ -62,9 +59,9 @@ defaults to preservation.
 ## Advisor Boundary
 
 The LLM-backed advisor may rank and explain one candidate from deterministic
-facts and compatible memory. It cannot invent numeric authority or bypass the
-search engine. The recommendation payload stays schema-bound and records its
-source, confidence, compatibility, and fallback reason.
+facts and compatible local memory. It cannot invent numeric authority or bypass
+the search engine. The recommendation payload stays schema-bound and records
+its local source, confidence, compatibility, and fallback reason.
 
 Accepted and rejected outcomes remain explicit records rather than hidden
 mutable model state. This keeps later recommendations explainable and allows

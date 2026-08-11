@@ -297,9 +297,9 @@ Guidance:
     correction-safe persistence, compatibility identities, and deterministic
     local item/folder/content-class/operator replay
 - `av1_cold_start.py`
-  - versioned public prior schema/resource loading, semantic compatibility,
-    private replay overlay, bounded CRF prediction, confidence, provenance, and
-    no-recommendation behavior
+  - request/runtime compatibility, compatible local content-intent replay,
+    bounded CRF prediction, confidence, provenance, and no-recommendation
+    behavior
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
@@ -329,10 +329,10 @@ Guidance:
   and replay under `mediaforce/tuning/content_intent_observations.py`. Runtime
   review actions may emit explicit events, but they must not independently
   infer compatibility, relabel history, or mutate derived personalization.
-- Keep shipped AV1 prior parsing, matching, public/local separation, and
-  first-probe recommendation under `mediaforce/tuning/av1_cold_start.py`.
-  Public bundle rows never enter the observation log, and local replay never
-  writes back into package data.
+- Keep AV1 first-probe request validation, compatible local content-intent
+  replay, prediction, and fallback behavior under
+  `mediaforce/tuning/av1_cold_start.py`. The module has no shipped prior bundle
+  or public evidence state machine; local replay remains read-only.
 - Keep install-safe package defaults under `mediaforce/package_defaults/`.
   Operator config, folder overrides, and machine-local paths remain under root
   `config/` and never become package data.
