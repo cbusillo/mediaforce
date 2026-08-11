@@ -8,7 +8,6 @@
     "architecture": "docs/architecture/module-boundaries.md",
     "databaseTooling": "docs/development/database-tooling.md",
     "packageBuilds": "docs/development/package-builds.md",
-    "av1ColdStartValidation": "docs/development/av1-cold-start-validation.md",
     "workstationUi": "docs/style/workstation-ui.md",
     "style": [
       "docs/style/index.md",
@@ -27,7 +26,7 @@
     "test": {
       "backendCi": "uv run --with pytest pytest -q -k \"not test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues and not test_bootstrap_remote_macos_routes_xcode_issue_to_request_helper and not test_remote_host_status_targets_current_machine_without_ssh_probe and not test_ffmpeg_hwaccel_included_when_videotoolbox_available\"",
       "backendFull": "uv run --with pytest pytest",
-      "fileIntegrityMacos": "uv run --with pytest pytest -q tests/test_file_integrity.py tests/test_av1_validation_partition.py tests/test_av1_validation_derivation.py",
+      "fileIntegrityMacos": "uv run --with pytest pytest -q tests/test_file_integrity.py",
       "frontend": "npm --prefix frontend test"
     },
     "lint": {

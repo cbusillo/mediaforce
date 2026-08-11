@@ -1,8 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="PyToolsState">
+    <option name="tools">
+      <map>
+        <entry key="ruff">
+          <value>
+            <ToolEntry>
+              <option name="enabled" value="true" />
+              <option name="discoveryMode" value="PATH" />
+            </ToolEntry>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
   <component name="RuffConfiguration">
-    <option name="enabled" value="true" />
-    <option name="executableDiscoveryMode" value="PATH" />
     <option name="formatting" value="false" />
     <option name="sortImports" value="false" />
   </component>

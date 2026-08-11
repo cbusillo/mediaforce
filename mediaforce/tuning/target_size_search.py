@@ -38,7 +38,6 @@ TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
 MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
 MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
-AV1_VALIDATION_WARM_START_SOURCE = "av1_validation_harness"
 
 SearchStatus = Literal["selected", "infeasible", "bound_exhausted", "quality_conflict", "needs_review"]
 CurveShape = Literal["single_point", "monotonic", "non_monotonic"]
@@ -157,7 +156,6 @@ def search_target_size(
         search_max_crf: int | None = None,
         warm_start: QualitySearchWarmStart | None = None,
         expected_search_signature_id: str | None = None,
-        _allow_validation_warm_start: bool = False,
 ) -> QualitySearchResult:
     _validate_search_inputs(stream_budget_ledger)
     compression_intent = compression_intent_from_policy(video_policy)
@@ -234,7 +232,6 @@ def search_target_size(
         run_sample=run_sample,
         expected_search_signature_id=expected_search_signature_id,
         compression_intent=compression_intent,
-        allow_validation_warm_start=_allow_validation_warm_start,
     )
     if warm_result is not None:
         return warm_result
@@ -347,19 +344,9 @@ def _try_target_size_warm_start(
         run_sample: Callable[[int], SampleEncodeResult],
         expected_search_signature_id: str | None,
         compression_intent: CompressionIntentV1,
-        allow_validation_warm_start: bool,
 ) -> tuple[QualitySearchResult | None, dict[str, Any] | None]:
     if warm_start is None:
         return None, None
-    if warm_start.source == AV1_VALIDATION_WARM_START_SOURCE and not allow_validation_warm_start:
-        return None, _target_warm_start_trace(
-            warm_start,
-            status="guard_rejected",
-            attempted=False,
-            duration_seconds=0.0,
-            candidate_count=0,
-            fallback_reason="invalid_hint_contract",
-        )
     candidate_crf = warm_start.candidate_crf
     if (
             isinstance(candidate_crf, bool)

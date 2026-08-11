@@ -25,13 +25,17 @@ from mediaforce.tuning.av1_cold_start import (
 )
 from mediaforce.tuning.compression_intent import CompressionIntentLevel, CompressionIntentV1
 from mediaforce.tuning.content_intent_observations import (
+    AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
     ContentIntentBoundaryCompatibilityV1,
     ContentIntentBoundaryObservation,
     ContentIntentObservationConflictError,
+    _observation_has_derivation_provenance,
+    _rehash_observation,
     append_content_intent_boundary_observation,
     build_content_intent_boundary_compatibility,
     build_visual_content_intent_observation,
     content_intent_stream_plan_id,
+    content_intent_replay_scope_rows,
     correct_content_intent_boundary_observation,
     load_current_content_intent_boundary_observations,
     record_visual_content_intent_observation,
@@ -664,6 +668,60 @@ class ContentIntentObservationTests(unittest.TestCase):
             compatibility_key=original.compatibility_key,
         )
         self.assertEqual(withdrawn_state.item_boundary.status, "empty")
+
+    def test_derivation_quarantine_cannot_be_lifted_by_correction(self) -> None:
+        observation = self._quarantined_observation()
+
+        with self.assertRaisesRegex(ValueError, "quarantine cannot be lifted"):
+            correct_content_intent_boundary_observation(
+                observation,
+                verdict="acceptable",
+                personalization_eligible=True,
+                exclusion_reason=None,
+                reason_code="operator_corrected_review",
+                recorded_at="2026-07-26T21:05:00+00:00",
+            )
+
+    def test_withdrawal_preserves_derivation_quarantine_reason(self) -> None:
+        observation = self._quarantined_observation()
+
+        withdrawn = withdraw_content_intent_boundary_observation(
+            observation,
+            reason_code="operator_withdrew_review",
+            recorded_at="2026-07-26T21:05:00+00:00",
+        )
+
+        self.assertEqual(
+            withdrawn.exclusion_reason,
+            AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON,
+        )
+
+    def test_derivation_provenance_is_excluded_from_every_replay_scope(self) -> None:
+        sample_item, calibration = self._review_payload()
+        observation = self._observation(sample_item, calibration)
+        values = observation.values()
+        provenance = json.loads(str(values["provenance_json"]))
+        provenance["calibration_action"] = "av1_derivation"
+        values["provenance_json"] = json.dumps(provenance)
+        historical = _rehash_observation(values)
+
+        for scope in ("item", "folder", "content_class", "operator"):
+            rows = content_intent_replay_scope_rows(
+                [historical.values()],
+                source_id=historical.source_id,
+                content_id=historical.content_id,
+                prefix=historical.prefix,
+                content_profile_id=historical.content_profile_id,
+                intent_semantic_id=historical.intent_semantic_id,
+                compatibility_key=historical.compatibility_key,
+                scope=scope,
+            )
+            self.assertEqual(rows, ())
+
+    def test_malformed_provenance_fails_closed_as_derivation_evidence(self) -> None:
+        self.assertTrue(
+            _observation_has_derivation_provenance({"provenance_json": "{"})
+        )
 
     def test_withdrawal_removes_current_evidence_without_deleting_history(self) -> None:
         sample_item, calibration = self._review_payload()
@@ -1451,6 +1509,27 @@ class ContentIntentObservationTests(unittest.TestCase):
             evidence_ids=["ev1_cadence", "ev1_fingerprint"],
             moment_indexes=[1],
             recorded_at="2026-07-26T21:00:00+00:00",
+        )
+        self.assertIsNone(result.exclusion_reason)
+        assert result.observation is not None
+        return result.observation
+
+    def _quarantined_observation(self) -> ContentIntentBoundaryObservation:
+        sample_item, calibration = self._review_payload()
+        calibration["action"] = "av1_derivation"
+        result = build_visual_content_intent_observation(
+            prefix="tv/Futurama/Season 8",
+            sample_item=sample_item,
+            calibration=calibration,
+            verdict="approved",
+            concern_tags=["softness_detail_loss"],
+            evidence_ids=["ev1_cadence", "ev1_fingerprint"],
+            moment_indexes=[1],
+            recorded_at="2026-07-26T21:00:00+00:00",
+            personalization_eligible=False,
+            personalization_exclusion_reason=(
+                AV1_VALIDATION_DERIVATION_PERSONALIZATION_EXCLUSION_REASON
+            ),
         )
         self.assertIsNone(result.exclusion_reason)
         assert result.observation is not None

@@ -107,8 +107,4 @@ jobs:
           enable-cache: true
 
       - name: Run macOS file-integrity tests
-        run: >-
-          uv run --with pytest pytest -q
-          tests/test_file_integrity.py
-          tests/test_av1_validation_partition.py
-          tests/test_av1_validation_derivation.py
+        run: uv run --with pytest pytest -q tests/test_file_integrity.py

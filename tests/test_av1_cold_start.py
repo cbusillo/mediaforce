@@ -31,10 +31,6 @@ from mediaforce.tuning.av1_cold_start import (
     _row_at_or_after,
     _row_timestamp_status,
 )
-from mediaforce.tuning.av1_cold_start_evaluation import (
-    AV1ColdStartEvaluationCase,
-    summarize_av1_cold_start_evaluation,
-)
 from mediaforce.tuning.compression_intent import CompressionIntentLevel
 from mediaforce.tuning.content_intent_observations import (
     BoundaryCohortConfidence,
@@ -760,64 +756,6 @@ class AV1ColdStartTests(unittest.TestCase):
             self.request,
         )
         self.assertNotEqual(local.provenance_ids, changed_local.provenance_ids)
-
-    def test_evaluation_summary_is_aggregate_deterministic_and_zero_regression(self) -> None:
-        summary = summarize_av1_cold_start_evaluation(
-            [
-                AV1ColdStartEvaluationCase(
-                    recommended_crf_lower=28.0,
-                    recommended_crf_upper=30.0,
-                    measured_selected_crf=29.0,
-                    baseline_candidate_count=4,
-                    guided_candidate_count=1,
-                    baseline_quality_floor_met=True,
-                    guided_quality_floor_met=True,
-                    baseline_final_size_met=True,
-                    guided_final_size_met=True,
-                    baseline_visual_accepted=True,
-                    guided_visual_accepted=True,
-                    baseline_operator_attention_events=1,
-                    guided_operator_attention_events=1,
-                ),
-                AV1ColdStartEvaluationCase(
-                    recommended_crf_lower=30.0,
-                    recommended_crf_upper=32.0,
-                    measured_selected_crf=33.0,
-                    baseline_candidate_count=5,
-                    guided_candidate_count=3,
-                    baseline_quality_floor_met=True,
-                    guided_quality_floor_met=True,
-                    baseline_final_size_met=True,
-                    guided_final_size_met=True,
-                    baseline_visual_accepted=True,
-                    guided_visual_accepted=True,
-                    baseline_operator_attention_events=1,
-                    guided_operator_attention_events=1,
-                ),
-                AV1ColdStartEvaluationCase(
-                    recommended_crf_lower=27.0,
-                    recommended_crf_upper=29.0,
-                    measured_selected_crf=28.0,
-                    baseline_candidate_count=4,
-                    guided_candidate_count=1,
-                    baseline_quality_floor_met=True,
-                    guided_quality_floor_met=True,
-                    baseline_final_size_met=True,
-                    guided_final_size_met=True,
-                    baseline_visual_accepted=True,
-                    guided_visual_accepted=True,
-                    baseline_operator_attention_events=1,
-                    guided_operator_attention_events=1,
-                ),
-            ]
-        )
-
-        self.assertEqual(summary.held_out_count, 3)
-        self.assertEqual(summary.range_hit_count, 2)
-        self.assertEqual(summary.baseline_candidate_count, 13)
-        self.assertEqual(summary.guided_candidate_count, 5)
-        self.assertEqual(summary.safety_regression_count, 0)
-        self.assertTrue(summary.supports_publication)
 
     def _request(
             self,
