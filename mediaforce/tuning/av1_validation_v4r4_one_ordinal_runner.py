@@ -172,7 +172,6 @@ def run_av1_v4r4_one_ordinal(
         clock=clock,
     ).started
 
-    pending_interrupt: BaseException | None = None
     try:
         operation = run_v4_qualification_search(
             search_quality_for_source,
@@ -206,27 +205,27 @@ def run_av1_v4r4_one_ordinal(
             outcome = build_av1_v4r4_outcome(ordinal=ordinal, disposition="fatal_failure")
         else:
             outcome = classify_av1_v4r4_runtime_exception(ordinal=ordinal, exc=exc)
-    except (KeyboardInterrupt, SystemExit) as exc:
-        outcome = build_av1_v4r4_outcome(ordinal=ordinal, disposition="fatal_failure")
-        pending_interrupt = exc
     except BaseException:
         outcome = build_av1_v4r4_outcome(ordinal=ordinal, disposition="fatal_failure")
 
-    publication = publish_av1_v4r4_ordinal_registry_outcome(
-        binding=binding,
-        plan=plan,
-        started=started,
-        outcome=outcome,
-        clock=clock,
-    )
+    while True:
+        try:
+            publication = publish_av1_v4r4_ordinal_registry_outcome(
+                binding=binding,
+                plan=plan,
+                started=started,
+                outcome=outcome,
+                clock=clock,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            continue
+        break
     result = AV1V4R4OneOrdinalRunResult(
         public_result=_public_result(outcome, publication.outcome_publication, publication.terminal_publication),
         outcome=outcome,
         outcome_publication=publication.outcome_publication,
         terminal_publication=publication.terminal_publication,
     )
-    if pending_interrupt is not None:
-        raise pending_interrupt
     return result
 
 
