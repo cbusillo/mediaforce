@@ -3094,7 +3094,17 @@ identity drift, and positive-control divergence publish a fatal outcome after
 `disposition`, and nullable bounded-conflict diagnostics, and exits `0` for
 `selected_success`, `2` for `bounded_quality_conflict`, and `1` for
 `fatal_failure` or pre-run failure. It is intentionally not a `pyproject.toml`
-entrypoint.
+entrypoint. Both private inputs must be absolute owner-owned regular files with
+mode `0600`, one link, bounded size, and mandatory `O_NOFOLLOW` support. The CLI
+compares the pre-open, opened, and post-read metadata snapshots and consumes
+only a complete descriptor read, so symlink, hard-link, replacement, mutation,
+and oversized-file races fail closed without exposing paths. A live-process
+`KeyboardInterrupt` or `SystemExit` after `started` is converted to a fatal
+outcome and returned normally. Outcome publication retries live-process
+interrupts, including recovery when the outcome became durable before its
+absorbing terminal publication; an interrupt before `started` is converted to
+the same one-line CLI failure. Hard termination can still prevent output or
+outcome publication and remains an incident-review stop.
 
 This runner slice remains synthetic-only in tests. Issue #409 is still
 preparation-only: it must not create real execution authority, claims, media

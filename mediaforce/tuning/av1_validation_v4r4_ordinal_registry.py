@@ -1440,11 +1440,14 @@ def publish_av1_v4r4_ordinal_registry_outcome(
                 raise AV1V4R4OrdinalRegistryError(
                     "AV1 v4 r4 ordinal registry duplicate outcome is invalid"
                 )
-            terminal = (
-                ctx.load_verified_terminal(plan_payload)
-                if ctx.exists(_TERMINAL_NAME)
-                else None
-            )
+            if _outcome_absorbs(outcome_payload) or ordinal == AV1_V4R4_ORDINAL_COUNT:
+                terminal = (
+                    ctx.load_verified_terminal(plan_payload)
+                    if ctx.exists(_TERMINAL_NAME)
+                    else ctx.publish_terminal(plan_payload, now)
+                )
+            else:
+                terminal = None
             return AV1V4R4OrdinalRegistryOutcomePublication(
                 outcome_publication=existing,
                 terminal_publication=terminal,
