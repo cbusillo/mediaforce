@@ -3174,6 +3174,29 @@ next-owner-decision boundary.
 Private registry paths, source paths, key bytes, raw media facts, command lines,
 stderr, and exception text do not appear in public output.
 
+The dormant execution-authority issuer is isolated in
+`mediaforce/tuning/av1_validation_v4r4_execution_issuer.py`; the verify-only
+execution-authority module remains unchanged. Grant and claim issuance are two
+separate owner-confirmed operations. `grant` verifies the clean reviewed
+repository, retained request/preflight/plan/sequencing grant, selected ordinal,
+prepared invocation digest, live half-open windows, and owner identity before
+atomically publishing one canonical `0600` execution grant. It never creates a
+sequencing claim. This is an abortable pre-burn state, not deletion authority:
+the operator preserves an unused grant and lets its bounded window expire.
+`claim` is unavailable until the ordinal registry has
+independently burned and retained the matching sequencing claim, then publishes
+one direct-final execution claim. A torn or conflicting retained execution
+claim is preserved and terminalized rather than replaced or retried.
+
+The checkout-only JSON CLI is
+`scripts/issue_av1_v4r4_execution_authority.py`. It requires repeated owner and
+ordinal confirmation plus an owner-only registry key file, emits one bounded
+path-free JSON line, and reports explicitly that it created no sequencing claim
+and started no media execution. The CLI has no source, temp, runtime-request,
+callback, evidence, activation, or dogfood inputs. Its presence is dormant
+implementation support only and is not authorization to create a fresh cohort
+or issue real authority.
+
 The explicit revision-4 owner sequence is now:
 
 1. `uv run python scripts/prepare_av1_v4r4_preparation_custody_readiness.py < request.json`
