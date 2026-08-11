@@ -241,12 +241,13 @@ def assert_av1_v4r4_execution_chain(
     execution_claim: Mapping[str, Any],
     now: datetime,
 ) -> None:
-    assert_av1_v4r4_execution_preparation_chain(
+    assert_av1_v4r4_execution_preparation_chain_active(
         qualification_request=qualification_request,
         execution_preflight=execution_preflight,
         plan=plan,
         sequencing_grant=sequencing_grant,
         execution_grant=execution_grant,
+        now=now,
     )
     _assert_av1_v4r4_execution_runtime_chain(
         plan=plan,
@@ -402,6 +403,68 @@ def assert_av1_v4r4_execution_preparation_chain(
     ):
         raise AV1V4R4ExecutionAuthorityError(
             "AV1 v4 r4 execution preparation chain binding is invalid"
+        )
+
+
+def assert_av1_v4r4_execution_preparation_chain_active(
+    *,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    sequencing_grant: Mapping[str, Any],
+    execution_grant: Mapping[str, Any],
+    now: datetime,
+) -> None:
+    assert_av1_v4r4_execution_preparation_chain(
+        qualification_request=qualification_request,
+        execution_preflight=execution_preflight,
+        plan=plan,
+        sequencing_grant=sequencing_grant,
+        execution_grant=execution_grant,
+    )
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise AV1V4R4ExecutionAuthorityError(
+            "AV1 v4 r4 execution preparation clock is invalid"
+        )
+    request = dict(qualification_request)
+    preflight = dict(execution_preflight)
+    plan_payload = dict(plan)
+    sequencing_grant_payload = dict(sequencing_grant)
+    execution_grant_payload = dict(execution_grant)
+    current = now.astimezone(UTC).replace(microsecond=0)
+    requested_at = _parse_ts(request["requested_at"])
+    created_at = _parse_ts(preflight["created_at"])
+    request_valid_until = _parse_ts(request["valid_until"])
+    preflight_valid_until = _parse_ts(preflight["valid_until"])
+    plan_opens_at = _parse_ts(plan_payload["plan_opens_at"])
+    plan_closes_at = _parse_ts(plan_payload["plan_closes_at"])
+    sequencing_authorized_at = _parse_ts(
+        sequencing_grant_payload["authorized_at"]
+    )
+    sequencing_valid_until = _parse_ts(sequencing_grant_payload["valid_until"])
+    execution_authorized_at = _parse_ts(execution_grant_payload["authorized_at"])
+    execution_valid_until = _parse_ts(execution_grant_payload["valid_until"])
+    if (
+        preflight["plan_opens_at"] != plan_payload["plan_opens_at"]
+        or preflight["plan_closes_at"] != plan_payload["plan_closes_at"]
+        or request_valid_until != preflight_valid_until
+        or request_valid_until != plan_closes_at
+        or sequencing_authorized_at < created_at
+        or not plan_opens_at
+        <= execution_authorized_at
+        < execution_valid_until
+        <= plan_closes_at
+        or not sequencing_authorized_at
+        <= execution_authorized_at
+        < execution_valid_until
+        <= sequencing_valid_until
+        or not requested_at <= current < request_valid_until
+        or not created_at <= current < preflight_valid_until
+        or not plan_opens_at <= current < plan_closes_at
+        or not execution_authorized_at <= current < execution_valid_until
+    ):
+        raise AV1V4R4ExecutionAuthorityError(
+            "AV1 v4 r4 execution preparation chain is inactive"
         )
 
 

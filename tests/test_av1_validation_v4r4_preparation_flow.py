@@ -167,6 +167,8 @@ class AV1V4R4PreparationFlowTests(unittest.TestCase):
                 {path.name for path in ordinal.iterdir()},
                 {
                     "v4r4-ordinal-registry-plan.json",
+                    "v4r4-qualification-request.json",
+                    "v4r4-execution-preflight.json",
                     "v4r4-ordinal-01-sequencing-grant.json",
                 },
             )

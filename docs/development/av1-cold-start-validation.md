@@ -3013,7 +3013,10 @@ The follow-on registry slice adds
 immutable sequencing registry for the pure r4r4 artifacts. It defines distinct
 r4 plan, sequencing grant, sequencing claim, started, outcome-publication, and
 terminal-publication schemas, filenames, IDs, and identity domains. The registry
-is an owner-only directory and accepts only its revision-4 filenames; revision-3
+also retains path-free qualification-request and execution-preflight singletons
+so every admission, outcome, terminal derivation, and reconciliation can
+revalidate the complete preparation-to-execution chain. It is an owner-only
+directory and accepts only its revision-4 filenames; revision-3
 ordinal-window artifacts are rejected instead of migrated or reused. Registry
 IDs are HMAC-derived from the private path, but the public artifacts and error
 messages remain path-free. The private binding can only be constructed with
@@ -3022,13 +3025,20 @@ owner-only path local while exposing only the keyed registry ID to public
 artifacts.
 
 The r4 registry state machine admits ordinals `1..8` only in strict increasing
-order. Each ordinal gets one sequencing claim burn; repeated owner publication
-of the same plan, grant, or claim is idempotent, while substitution, retry,
+order. Each ordinal gets one sequencing claim burn, and the burn is refused
+unless a canonical execution grant already binds the retained request,
+preflight, plan, sequencing grant, and prepared invocation inside their live
+windows. Repeated owner publication of the same plan, grant, or complete claim
+is idempotent, while substitution, retry,
 backfill, duplicate outcomes, gaps, incomplete publication, and clock regression
-seal the registry. `selected_success` and `bounded_quality_conflict` advance the
+seal the registry. The sequencing claim remains a direct-final, no-rollback
+publication: a torn or mismatched retained claim is preserved and causes a
+deterministic absorbing seal rather than deletion, rename, or retry.
+`selected_success` and `bounded_quality_conflict` advance the
 high-water mark; `fatal_failure` and positive-control divergence are absorbing.
-Terminal derivation validates each contiguous grant, claim, started, and outcome
-publication chain before using it; existing terminal publications are
+Terminal derivation validates each contiguous request, preflight, grant, claim,
+execution-authority, admission, started, and outcome publication chain at the
+recorded start time before using it; existing terminal publications are
 recomputed from that validated prefix and rejected if stale or rebound. The
 terminal publication wraps the pure r4 terminal, so selected/conflict/traversed
 counts, reason and band maps, traversal completeness, termination kind, and
@@ -3134,8 +3144,10 @@ ffprobe:["-version"]}`, builds the path-free bundle, records a terminal
 measurement, freezes the reviewed cohort, materializes a non-authorizing
 qualification request and execution preflight, derives the retained ordinal
 registry binding from the private preparation key, publishes the revision-4
-ordinal plan and preflight before publishing only the ordinal-1 sequencing
-grant. A preflight failure therefore cannot leave sequencing authority behind.
+ordinal plan, then publishes path-free request and preflight singletons into the
+ordinal registry before publishing only the ordinal-1 sequencing grant. A
+preflight or singleton-publication failure therefore cannot leave sequencing
+authority behind.
 
 The stop line is explicit and enforced. The flow stops before any sequencing
 claim, execution grant, execution claim, runtime request/callback, runner

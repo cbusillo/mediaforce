@@ -84,6 +84,45 @@ def test_execution_grant_and_claim_verify_owner_chain_and_round_trip(tmp_path: P
     )
 
 
+def test_execution_chain_rejects_inactive_preparation(tmp_path: Path) -> None:
+    prepared = _prepared_chain(tmp_path)
+    sequencing_claim = _sequencing_claim(
+        prepared.binding,
+        prepared.plan,
+        prepared.sequencing_grant,
+        prepared.clock,
+    )
+    execution_grant = _execution_grant(
+        prepared.plan,
+        prepared.sequencing_grant,
+        qualification_request=prepared.request,
+        execution_preflight=prepared.preflight,
+    )
+    execution_claim = _execution_claim(
+        prepared.plan,
+        sequencing_claim,
+        execution_grant,
+    )
+    expired = datetime.fromisoformat(
+        str(prepared.plan["plan_closes_at"]).replace("Z", "+00:00")
+    )
+
+    with pytest.raises(
+        AV1V4R4ExecutionAuthorityError,
+        match="preparation chain is inactive",
+    ):
+        assert_av1_v4r4_execution_chain(
+            qualification_request=prepared.request,
+            execution_preflight=prepared.preflight,
+            plan=prepared.plan,
+            sequencing_grant=prepared.sequencing_grant,
+            sequencing_claim=sequencing_claim,
+            execution_grant=execution_grant,
+            execution_claim=execution_claim,
+            now=expired,
+        )
+
+
 def test_execution_grant_authorizes_exactly_three_fields(tmp_path: Path) -> None:
     prepared = _prepared_chain(tmp_path)
     plan, sequencing_grant = prepared.plan, prepared.sequencing_grant
@@ -174,7 +213,7 @@ def test_execution_chain_rejects_future_claim_and_window_escape(tmp_path: Path) 
 
     wide_grant = _rebind_execution_grant({**grant, "valid_until": "2026-08-11T00:00:01Z"})
     wide_claim = _rebind_execution_claim({**claim, "execution_grant_id": wide_grant["execution_grant_id"], "execution_grant_payload_sha256": wide_grant["payload_sha256"]})
-    with pytest.raises(AV1V4R4ExecutionAuthorityError, match="interval"):
+    with pytest.raises(AV1V4R4ExecutionAuthorityError, match="inactive"):
         assert_av1_v4r4_execution_chain(
             qualification_request=prepared.request,
             execution_preflight=prepared.preflight,
@@ -319,9 +358,24 @@ def _sequencing_grant(binding: Any, plan: Mapping[str, Any], clock: Any, *, ordi
 
 def _sequencing_claim(binding: Any, plan: Mapping[str, Any], grant: Mapping[str, Any], clock: Any) -> dict[str, Any]:
     from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
+        load_av1_v4r4_ordinal_registry_preparation,
         publish_av1_v4r4_ordinal_registry_claim,
     )
 
+    request, preflight = load_av1_v4r4_ordinal_registry_preparation(
+        binding=binding,
+        plan=plan,
+    )
+    execution_grant = _execution_grant(
+        plan,
+        grant,
+        qualification_request=request,
+        execution_preflight=preflight,
+    )
+    grant_file = binding.registry / f"v4r4-ordinal-{grant['ordinal']:02d}-execution-grant.json"
+    if not grant_file.exists():
+        grant_file.write_bytes(_private_canonical_bytes(execution_grant))
+        grant_file.chmod(0o600)
     return publish_av1_v4r4_ordinal_registry_claim(
         binding=binding,
         plan=plan,

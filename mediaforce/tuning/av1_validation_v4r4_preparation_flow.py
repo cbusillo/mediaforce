@@ -27,6 +27,7 @@ from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
     load_av1_v4r4_ordinal_registry_plan,
     publish_av1_v4r4_ordinal_registry_grant_with_status,
     publish_av1_v4r4_ordinal_registry_plan_with_status,
+    publish_av1_v4r4_ordinal_registry_preparation,
 )
 from mediaforce.tuning.av1_validation_v4r4_preparation import (
     AV1V4R4PreparationError,
@@ -235,6 +236,12 @@ def prepare_av1_v4r4_preparation_custody_readiness(
     )
     created["preflight"] = preflight_created
     try:
+        publish_av1_v4r4_ordinal_registry_preparation(
+            binding=ordinal_binding,
+            plan=plan,
+            qualification_request=request_payload,
+            execution_preflight=preflight,
+        )
         ordinal_publication = publish_av1_v4r4_ordinal_registry_grant_with_status(
             binding=ordinal_binding,
             plan=plan,

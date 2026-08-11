@@ -50,18 +50,34 @@ from mediaforce.tuning.av1_validation_v4r4_outcome import (
 
 def _execution_chain_assertion() -> Any:
     from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
-        _assert_av1_v4r4_execution_runtime_chain,
+        assert_av1_v4r4_execution_chain,
     )
 
-    return _assert_av1_v4r4_execution_runtime_chain
+    return assert_av1_v4r4_execution_chain
 
 
 def _runner_admission_chain_assertion() -> Any:
     from mediaforce.tuning.av1_validation_v4r4_runner_admission import (
-        _assert_av1_v4r4_runner_admission_runtime_chain,
+        assert_av1_v4r4_runner_admission_chain,
     )
 
-    return _assert_av1_v4r4_runner_admission_runtime_chain
+    return assert_av1_v4r4_runner_admission_chain
+
+
+def _assert_execution_preparation_chain(**kwargs: Any) -> None:
+    from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
+        assert_av1_v4r4_execution_preparation_chain,
+    )
+
+    assert_av1_v4r4_execution_preparation_chain(**kwargs)
+
+
+def _assert_execution_preparation_chain_active(**kwargs: Any) -> None:
+    from mediaforce.tuning.av1_validation_v4r4_execution_authority import (
+        assert_av1_v4r4_execution_preparation_chain_active,
+    )
+
+    assert_av1_v4r4_execution_preparation_chain_active(**kwargs)
 
 
 AV1_V4R4_OR_PLAN_SCHEMA = "mediaforce.av1_cold_start_v4r4_ordinal_registry_plan"
@@ -184,6 +200,8 @@ _PROCESS_LOCK = threading.RLock()
 _MAX_FILE_BYTES = 128 * 1024
 _TEMP_SUFFIX = ".tmp"
 _PLAN_NAME = "v4r4-ordinal-registry-plan.json"
+_REQUEST_NAME = "v4r4-qualification-request.json"
+_PREFLIGHT_NAME = "v4r4-execution-preflight.json"
 _TERMINAL_NAME = "v4r4-ordinal-registry-terminal.json"
 _BINDING_TOKEN = object()
 
@@ -217,6 +235,14 @@ class AV1V4R4OrdinalRegistryGrantPublication:
 class AV1V4R4OrdinalRegistryPlanPublication:
     plan: Mapping[str, Any]
     created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AV1V4R4OrdinalRegistryPreparationPublication:
+    qualification_request: Mapping[str, Any]
+    execution_preflight: Mapping[str, Any]
+    qualification_request_created: bool
+    execution_preflight_created: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -944,6 +970,48 @@ def deserialize_av1_v4r4_ordinal_registry_execution_claim(
         ) from exc
 
 
+def _serialize_qualification_request(payload: Mapping[str, Any]) -> bytes:
+    from mediaforce.tuning.av1_validation_v4r4_preparation import (
+        serialize_av1_v4r4_qualification_request,
+    )
+
+    return serialize_av1_v4r4_qualification_request(payload)
+
+
+def _deserialize_qualification_request(data: bytes) -> dict[str, Any]:
+    from mediaforce.tuning.av1_validation_v4r4_preparation import (
+        deserialize_av1_v4r4_qualification_request,
+    )
+
+    try:
+        return deserialize_av1_v4r4_qualification_request(data)
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry qualification request bytes are invalid"
+        ) from exc
+
+
+def _serialize_execution_preflight(payload: Mapping[str, Any]) -> bytes:
+    from mediaforce.tuning.av1_validation_v4r4_preparation import (
+        serialize_av1_v4r4_execution_preflight,
+    )
+
+    return serialize_av1_v4r4_execution_preflight(payload)
+
+
+def _deserialize_execution_preflight(data: bytes) -> dict[str, Any]:
+    from mediaforce.tuning.av1_validation_v4r4_preparation import (
+        deserialize_av1_v4r4_execution_preflight,
+    )
+
+    try:
+        return deserialize_av1_v4r4_execution_preflight(data)
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry execution preflight bytes are invalid"
+        ) from exc
+
+
 def publish_av1_v4r4_ordinal_registry_plan(
     *,
     binding: AV1V4R4OrdinalRegistryBinding,
@@ -989,6 +1057,79 @@ def load_av1_v4r4_ordinal_registry_plan(
         plan = context.load_plan()
         _assert_binding_matches_plan(binding, plan)
         return dict(plan)
+
+
+def publish_av1_v4r4_ordinal_registry_preparation(
+    *,
+    binding: AV1V4R4OrdinalRegistryBinding,
+    plan: Mapping[str, Any],
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
+) -> AV1V4R4OrdinalRegistryPreparationPublication:
+    request_payload = dict(qualification_request)
+    preflight_payload = dict(execution_preflight)
+    with _locked_registry(binding.registry) as ctx:
+        ctx.assert_supported_artifacts()
+        plan_payload = ctx.load_matching_plan(binding, plan)
+        if ctx.exists(_TERMINAL_NAME):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry is sealed"
+            )
+        _assert_preparation_binds_plan(
+            plan=plan_payload,
+            qualification_request=request_payload,
+            execution_preflight=preflight_payload,
+        )
+        if ctx.exists(_PREFLIGHT_NAME) and not ctx.exists(_REQUEST_NAME):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry preparation publication is incomplete"
+            )
+        if (
+            not ctx.exists(_REQUEST_NAME) or not ctx.exists(_PREFLIGHT_NAME)
+        ) and any(
+            ctx.exists(_grant_name(ordinal))
+            for ordinal in range(1, AV1_V4R4_ORDINAL_COUNT + 1)
+        ):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry preparation publication is incomplete"
+            )
+        request_created = not ctx.exists(_REQUEST_NAME)
+        if request_created:
+            ctx.write(_REQUEST_NAME, _serialize_qualification_request(request_payload))
+        else:
+            _assert_same_record(
+                ctx.load_qualification_request(),
+                request_payload,
+                "qualification request",
+            )
+        preflight_created = not ctx.exists(_PREFLIGHT_NAME)
+        if preflight_created:
+            ctx.write(_PREFLIGHT_NAME, _serialize_execution_preflight(preflight_payload))
+        else:
+            _assert_same_record(
+                ctx.load_execution_preflight(),
+                preflight_payload,
+                "execution preflight",
+            )
+        stored_request, stored_preflight = ctx.load_preparation(plan_payload)
+        return AV1V4R4OrdinalRegistryPreparationPublication(
+            qualification_request=stored_request,
+            execution_preflight=stored_preflight,
+            qualification_request_created=request_created,
+            execution_preflight_created=preflight_created,
+        )
+
+
+def load_av1_v4r4_ordinal_registry_preparation(
+    *,
+    binding: AV1V4R4OrdinalRegistryBinding,
+    plan: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    with _locked_registry(binding.registry) as ctx:
+        ctx.assert_supported_artifacts()
+        plan_payload = ctx.load_matching_plan(binding, plan)
+        request, preflight = ctx.load_preparation(plan_payload)
+        return dict(request), dict(preflight)
 
 
 def publish_av1_v4r4_ordinal_registry_grant_with_status(
@@ -1061,16 +1202,63 @@ def publish_av1_v4r4_ordinal_registry_claim(
         now = ctx.read_clock(clock)
         ctx.assert_next_ordinal_admissible(plan_payload, ordinal, now)
         if ctx.exists(_claim_name(ordinal)):
-            claim = ctx.load_claim(ordinal)
-            _assert_record_binds_plan(claim, plan_payload, "claim")
-            _assert_record_binds_grant(claim, grant_payload, "claim")
-            _assert_record_within_grant(
-                _parse_ts(claim["claimed_at"]),
-                grant_payload,
-                "claim",
-            )
+            try:
+                claim = ctx.load_claim(ordinal)
+                execution_grant = ctx.load_execution_grant(ordinal)
+                request, preflight = ctx.load_preparation(plan_payload)
+                _assert_record_binds_plan(claim, plan_payload, "claim")
+                _assert_record_binds_grant(claim, grant_payload, "claim")
+                _assert_record_within_grant(
+                    _parse_ts(claim["claimed_at"]),
+                    grant_payload,
+                    "claim",
+                )
+                _assert_execution_preparation_chain(
+                    qualification_request=request,
+                    execution_preflight=preflight,
+                    plan=plan_payload,
+                    sequencing_grant=grant_payload,
+                    execution_grant=execution_grant,
+                )
+            except Exception as exc:
+                ctx.publish_terminal(plan_payload, now)
+                raise AV1V4R4OrdinalRegistryError(
+                    "AV1 v4 r4 ordinal registry sequencing claim burn is invalid"
+                ) from exc
             return claim
         _assert_grant_open(grant_payload, now)
+        if not ctx.exists(_execution_grant_name(ordinal)):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry execution grant is required before claim"
+            )
+        execution_grant = ctx.load_execution_grant(ordinal)
+        request, preflight = ctx.load_preparation(plan_payload)
+        try:
+            _assert_execution_preparation_chain_active(
+                qualification_request=request,
+                execution_preflight=preflight,
+                plan=plan_payload,
+                sequencing_grant=grant_payload,
+                execution_grant=execution_grant,
+                now=now,
+            )
+        except Exception as exc:
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry execution grant is inactive"
+            ) from exc
+        if any(
+            ctx.exists(name)
+            for name in (
+                _execution_claim_name(ordinal),
+                _admission_name(ordinal),
+                _started_name(ordinal),
+                _outcome_name(ordinal),
+            )
+        ):
+            ctx.publish_terminal(plan_payload, now)
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry has execution artifacts before claim"
+            )
         claim = build_av1_v4r4_ordinal_registry_claim(
             plan=plan_payload,
             grant=grant_payload,
@@ -1138,7 +1326,10 @@ def publish_av1_v4r4_ordinal_registry_runner_admission_started(
                 "AV1 v4 r4 ordinal registry outcome already exists"
             )
 
+        request, preflight = ctx.load_preparation(plan_payload)
         _assert_full_execution_and_admission_chain(
+            qualification_request=request,
+            execution_preflight=preflight,
             plan=plan_payload,
             sequencing_grant=seq_grant,
             sequencing_claim=seq_claim,
@@ -1220,7 +1411,10 @@ def publish_av1_v4r4_ordinal_registry_outcome(
             "start",
         )
         now = ctx.read_clock(clock)
+        request, preflight = ctx.load_preparation(plan_payload)
         _assert_full_execution_and_admission_chain(
+            qualification_request=request,
+            execution_preflight=preflight,
             plan=plan_payload,
             sequencing_grant=grant_payload,
             sequencing_claim=claim_payload,
@@ -1546,6 +1740,29 @@ class _RegistryContext:
     def load_plan(self) -> dict[str, Any]:
         return deserialize_av1_v4r4_ordinal_registry_plan(self.read(_PLAN_NAME))
 
+    def load_qualification_request(self) -> dict[str, Any]:
+        return _deserialize_qualification_request(self.read(_REQUEST_NAME))
+
+    def load_execution_preflight(self) -> dict[str, Any]:
+        return _deserialize_execution_preflight(self.read(_PREFLIGHT_NAME))
+
+    def load_preparation(
+        self,
+        plan: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not self.exists(_REQUEST_NAME) or not self.exists(_PREFLIGHT_NAME):
+            raise AV1V4R4OrdinalRegistryError(
+                "AV1 v4 r4 ordinal registry preparation publication is incomplete"
+            )
+        request = self.load_qualification_request()
+        preflight = self.load_execution_preflight()
+        _assert_preparation_binds_plan(
+            plan=plan,
+            qualification_request=request,
+            execution_preflight=preflight,
+        )
+        return request, preflight
+
     def load_grant(self, ordinal: int) -> dict[str, Any]:
         payload = deserialize_av1_v4r4_ordinal_registry_grant(
             self.read(_grant_name(ordinal))
@@ -1848,7 +2065,10 @@ class _RegistryContext:
         _assert_record_binds_grant(started, grant, "started")
         _assert_record_binds_claim(started, claim, "started")
         _assert_record_binds_started(outcome_publication, started, "outcome")
+        request, preflight = self.load_preparation(plan)
         _assert_full_execution_and_admission_chain(
+            qualification_request=request,
+            execution_preflight=preflight,
             plan=plan,
             sequencing_grant=grant,
             sequencing_claim=claim,
@@ -2135,6 +2355,52 @@ def _assert_no_private_text(value: Any) -> None:
             _assert_no_private_text(child)
 
 
+def _assert_preparation_binds_plan(
+    *,
+    plan: Mapping[str, Any],
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
+) -> None:
+    from mediaforce.tuning.av1_validation_v4r4_preparation import (
+        assert_av1_v4r4_execution_preflight,
+        assert_av1_v4r4_qualification_request,
+    )
+
+    plan_payload = dict(plan)
+    request_payload = dict(qualification_request)
+    preflight_payload = dict(execution_preflight)
+    try:
+        assert_av1_v4r4_ordinal_registry_plan(plan_payload)
+        assert_av1_v4r4_qualification_request(request_payload)
+        assert_av1_v4r4_execution_preflight(preflight_payload)
+    except Exception as exc:
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry preparation binding is invalid"
+        ) from exc
+    if (
+        preflight_payload["qualification_request_id"]
+        != request_payload["request_id"]
+        or preflight_payload["qualification_request_payload_sha256"]
+        != request_payload["payload_sha256"]
+        or preflight_payload["owner_principal"]
+        != request_payload["owner_principal"]
+        or preflight_payload["ordinal_registry_id"]
+        != plan_payload["registry_id"]
+        or preflight_payload["plan_id"] != plan_payload["plan_id"]
+        or preflight_payload["plan_payload_sha256"]
+        != plan_payload["payload_sha256"]
+        or preflight_payload["plan_opens_at"]
+        != plan_payload["plan_opens_at"]
+        or preflight_payload["plan_closes_at"]
+        != plan_payload["plan_closes_at"]
+        or request_payload["valid_until"] != plan_payload["plan_closes_at"]
+        or preflight_payload["valid_until"] != request_payload["valid_until"]
+    ):
+        raise AV1V4R4OrdinalRegistryError(
+            "AV1 v4 r4 ordinal registry preparation binding is invalid"
+        )
+
+
 def _assert_binding_matches_plan(
     binding: AV1V4R4OrdinalRegistryBinding,
     plan: Mapping[str, Any],
@@ -2291,6 +2557,8 @@ def _admitted_slot_complete(present: Mapping[str, bool]) -> bool:
 
 def _assert_full_execution_and_admission_chain(
     *,
+    qualification_request: Mapping[str, Any],
+    execution_preflight: Mapping[str, Any],
     plan: Mapping[str, Any],
     sequencing_grant: Mapping[str, Any],
     sequencing_claim: Mapping[str, Any],
@@ -2301,6 +2569,8 @@ def _assert_full_execution_and_admission_chain(
 ) -> None:
     try:
         _execution_chain_assertion()(
+            qualification_request=qualification_request,
+            execution_preflight=execution_preflight,
             plan=plan,
             sequencing_grant=sequencing_grant,
             sequencing_claim=sequencing_claim,
@@ -2309,6 +2579,8 @@ def _assert_full_execution_and_admission_chain(
             now=now,
         )
         _runner_admission_chain_assertion()(
+            qualification_request=qualification_request,
+            execution_preflight=execution_preflight,
             admission=admission,
             plan=plan,
             sequencing_grant=sequencing_grant,
@@ -2489,7 +2761,7 @@ def _outcome_name(ordinal: int) -> str:
 
 
 def _is_registry_artifact_filename(name: str) -> bool:
-    if name in {_PLAN_NAME, _TERMINAL_NAME}:
+    if name in {_PLAN_NAME, _REQUEST_NAME, _PREFLIGHT_NAME, _TERMINAL_NAME}:
         return True
     return any(
         name == builder(ordinal)

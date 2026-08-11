@@ -36,6 +36,7 @@ from mediaforce.tuning.av1_validation_v4r4_ordinal_registry import (
     build_av1_v4r4_ordinal_registry_terminal_publication,
     deserialize_av1_v4r4_ordinal_registry_terminal_publication,
     initialize_av1_v4r4_ordinal_registry,
+    load_av1_v4r4_ordinal_registry_preparation,
     serialize_av1_v4r4_ordinal_registry_claim,
     serialize_av1_v4r4_ordinal_registry_grant,
     serialize_av1_v4r4_ordinal_registry_outcome_publication,
@@ -60,6 +61,9 @@ class TickClock:
         value = self.current
         self.current += timedelta(seconds=1)
         return value
+
+
+_GRANT_VALID_UNTIL = "2026-08-10T06:00:00Z"
 
 
 def _binding(tmp_path: Path) -> AV1V4R4OrdinalRegistryBinding:
@@ -152,15 +156,41 @@ def _rebind_for_test(
 def _publish_plan(
     tmp_path: Path,
 ) -> tuple[AV1V4R4OrdinalRegistryBinding, dict[str, object], TickClock]:
-    binding = _binding(tmp_path)
-    plan = _plan(binding)
-    clock = TickClock(datetime(2026, 8, 10, 0, 0, 1, tzinfo=UTC))
-    assert publish_av1_v4r4_ordinal_registry_plan(binding=binding, plan=plan) == plan
-    assert publish_av1_v4r4_ordinal_registry_plan(binding=binding, plan=plan) == plan
-    return binding, plan, clock
+    from tests.test_av1_validation_v4r4_execution_authority import _prepared_chain
+
+    prepared = _prepared_chain(tmp_path)
+    return prepared.binding, prepared.plan, prepared.clock
+
+
+def _write_private_execution_grant(
+    binding: AV1V4R4OrdinalRegistryBinding,
+    plan: dict[str, object],
+    grant: dict[str, object],
+) -> dict[str, object]:
+    from tests.test_av1_validation_v4r4_execution_authority import (
+        _execution_grant,
+        _private_canonical_bytes,
+    )
+
+    request, preflight = load_av1_v4r4_ordinal_registry_preparation(
+        binding=binding,
+        plan=plan,
+    )
+    execution_grant = _execution_grant(
+        plan,
+        grant,
+        qualification_request=request,
+        execution_preflight=preflight,
+    )
+    path = binding.registry / f"v4r4-ordinal-{grant['ordinal']:02d}-execution-grant.json"
+    if not path.exists():
+        path.write_bytes(_private_canonical_bytes(execution_grant))
+        path.chmod(0o600)
+    return execution_grant
 
 
 def _execution_and_admission_for_test(
+    binding: AV1V4R4OrdinalRegistryBinding,
     plan: dict[str, object],
     grant: dict[str, object],
     claim: dict[str, object],
@@ -171,7 +201,16 @@ def _execution_and_admission_for_test(
     )
     from tests.test_av1_validation_v4r4_runner_admission import _admission
 
-    exec_grant = _execution_grant(plan, grant)
+    request, preflight = load_av1_v4r4_ordinal_registry_preparation(
+        binding=binding,
+        plan=plan,
+    )
+    exec_grant = _execution_grant(
+        plan,
+        grant,
+        qualification_request=request,
+        execution_preflight=preflight,
+    )
     exec_claim = _execution_claim(plan, claim, exec_grant)
     admission = _admission(plan, grant, claim, exec_grant, exec_claim)
     return exec_grant, exec_claim, admission
@@ -204,6 +243,7 @@ def _publish_admitted_started(
 ) -> dict[str, object]:
     ordinal = int(grant["ordinal"])
     exec_grant, exec_claim, admission = _execution_and_admission_for_test(
+        binding,
         plan,
         grant,
         claim,
@@ -234,8 +274,9 @@ def _run_ordinal(
         plan=plan,
         ordinal=ordinal,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(binding, plan, grant)
     claim = publish_av1_v4r4_ordinal_registry_claim(
         binding=binding,
         plan=plan,
@@ -298,8 +339,9 @@ def test_ordinal_four_eligible_after_ordinal_three_bounded_conflict_requires_fre
         plan=plan,
         ordinal=4,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(binding, plan, grant4)
     claim4 = publish_av1_v4r4_ordinal_registry_claim(
         binding=binding,
         plan=plan,
@@ -411,21 +453,22 @@ def test_fatal_failure_absorbs_and_blocks_later_ordinal(tmp_path: Path) -> None:
             plan=plan,
             ordinal=3,
             clock=clock,
-            valid_until="2026-08-10T01:00:00Z",
+            valid_until=_GRANT_VALID_UNTIL,
         )
 
 
 def test_same_second_started_outcome_is_valid_and_reconciles(tmp_path: Path) -> None:
     binding, plan, clock = _publish_plan(tmp_path)
-    instant = datetime(2026, 8, 10, 0, 0, 5, tzinfo=UTC)
+    instant = datetime(2026, 8, 10, 4, 0, 5, tzinfo=UTC)
     clock.current = instant
     grant = publish_av1_v4r4_ordinal_registry_grant(
         binding=binding,
         plan=plan,
         ordinal=1,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(binding, plan, grant)
     clock.current = instant
     claim = publish_av1_v4r4_ordinal_registry_claim(
         binding=binding,
@@ -525,7 +568,7 @@ def test_reconcile_accepts_absorbing_current_but_later_admission_rejects(
             plan=plan,
             ordinal=2,
             clock=clock,
-            valid_until="2026-08-10T01:00:00Z",
+            valid_until=_GRANT_VALID_UNTIL,
         )
 
 
@@ -538,8 +581,9 @@ def test_incomplete_publication_gap_duplicate_and_clock_regression_seal(
         plan=plan,
         ordinal=1,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(binding, plan, grant1)
     claim1 = publish_av1_v4r4_ordinal_registry_claim(
         binding=binding,
         plan=plan,
@@ -605,15 +649,16 @@ def test_incomplete_publication_gap_duplicate_and_clock_regression_seal(
         plan=clock_plan,
         ordinal=1,
         clock=clock_clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(clock_binding, clock_plan, grant)
     claim = publish_av1_v4r4_ordinal_registry_claim(
         binding=clock_binding,
         plan=clock_plan,
         grant=grant,
         clock=clock_clock,
     )
-    clock_clock.current = datetime(2026, 8, 10, 0, 0, 1, tzinfo=UTC)
+    clock_clock.current = datetime(2026, 8, 10, 4, 0, 1, tzinfo=UTC)
     with pytest.raises(
         AV1V4R4OrdinalRegistryError,
         match="execution/admission chain is invalid",
@@ -662,8 +707,9 @@ def test_loaders_reject_payload_ordinal_mismatched_to_filename(
         plan=plan,
         ordinal=2,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(binding, plan, grant2)
     claim2 = publish_av1_v4r4_ordinal_registry_claim(
         binding=binding,
         plan=plan,
@@ -794,11 +840,11 @@ def test_loaded_grant_claim_and_start_times_must_fit_windows(
         plan=grant_plan,
         ordinal=1,
         clock=grant_clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
     bad_grant = deepcopy(grant)
-    bad_grant["valid_until"] = "2026-08-12T00:00:00Z"
-    bad_grant["admission_closes_at"] = "2026-08-12T00:00:00Z"
+    bad_grant["valid_until"] = "2026-08-13T00:00:00Z"
+    bad_grant["admission_closes_at"] = "2026-08-13T00:00:00Z"
     bad_grant = _rebind_for_test(
         bad_grant,
         id_field="grant_id",
@@ -822,8 +868,9 @@ def test_loaded_grant_claim_and_start_times_must_fit_windows(
         plan=claim_plan,
         ordinal=1,
         clock=claim_clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(claim_binding, claim_plan, claim_grant)
     claim = publish_av1_v4r4_ordinal_registry_claim(
         binding=claim_binding,
         plan=claim_plan,
@@ -859,8 +906,9 @@ def test_loaded_grant_claim_and_start_times_must_fit_windows(
         plan=start_plan,
         ordinal=1,
         clock=start_clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
+    _write_private_execution_grant(start_binding, start_plan, start_grant)
     start_claim = publish_av1_v4r4_ordinal_registry_claim(
         binding=start_binding,
         plan=start_plan,
@@ -1002,7 +1050,7 @@ def test_reconcile_seals_cross_ordinal_clock_regression(tmp_path: Path) -> None:
         outcome=_selected(2),
     )
 
-    regressed_at = "2026-08-10T00:00:01Z"
+    regressed_at = "2026-08-10T04:00:03Z"
     grant["authorized_at"] = regressed_at
     grant["admission_opens_at"] = regressed_at
     grant = _rebind_for_test(
@@ -1021,6 +1069,7 @@ def test_reconcile_seals_cross_ordinal_clock_regression(tmp_path: Path) -> None:
         domain=av1_v4r4_identity_domain("ordinal-registry-claim"),
     )
     exec_grant, exec_claim, admission = _execution_and_admission_for_test(
+        binding,
         plan,
         grant,
         claim,
@@ -1135,26 +1184,158 @@ def test_complete_negative_policy_verdict_round_trips(tmp_path: Path) -> None:
 
 
 def test_grant_publication_reports_idempotent_owner_operation(tmp_path: Path) -> None:
-    binding, plan, clock = _publish_plan(tmp_path)
+    binding = _binding(tmp_path)
+    plan = _plan(binding)
+    clock = TickClock(datetime(2026, 8, 10, 0, 0, 1, tzinfo=UTC))
+    publish_av1_v4r4_ordinal_registry_plan(binding=binding, plan=plan)
 
     first = publish_av1_v4r4_ordinal_registry_grant_with_status(
         binding=binding,
         plan=plan,
         ordinal=1,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
     second = publish_av1_v4r4_ordinal_registry_grant_with_status(
         binding=binding,
         plan=plan,
         ordinal=1,
         clock=clock,
-        valid_until="2026-08-10T01:00:00Z",
+        valid_until=_GRANT_VALID_UNTIL,
     )
 
     assert first.created is True
     assert second.created is False
     assert second.grant == first.grant
+
+
+def test_sequencing_claim_requires_execution_grant(tmp_path: Path) -> None:
+    binding, plan, clock = _publish_plan(tmp_path)
+    grant = publish_av1_v4r4_ordinal_registry_grant(
+        binding=binding,
+        plan=plan,
+        ordinal=1,
+        clock=clock,
+        valid_until=_GRANT_VALID_UNTIL,
+    )
+
+    with pytest.raises(
+        AV1V4R4OrdinalRegistryError,
+        match="execution grant is required before claim",
+    ):
+        publish_av1_v4r4_ordinal_registry_claim(
+            binding=binding,
+            plan=plan,
+            grant=grant,
+            clock=clock,
+        )
+
+    assert not (binding.registry / "v4r4-ordinal-01-sequencing-claim.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("authorized_at", "valid_until"),
+    (
+        ("2026-08-10T04:30:00Z", "2026-08-10T05:00:00Z"),
+        ("2026-08-10T04:00:00Z", "2026-08-10T04:00:02Z"),
+    ),
+)
+def test_sequencing_claim_rejects_inactive_execution_grant(
+    tmp_path: Path,
+    authorized_at: str,
+    valid_until: str,
+) -> None:
+    from tests.test_av1_validation_v4r4_execution_authority import (
+        _execution_grant,
+        _private_canonical_bytes,
+        _rebind_execution_grant,
+    )
+
+    binding, plan, clock = _publish_plan(tmp_path)
+    grant = publish_av1_v4r4_ordinal_registry_grant(
+        binding=binding,
+        plan=plan,
+        ordinal=1,
+        clock=clock,
+        valid_until=_GRANT_VALID_UNTIL,
+    )
+    request, preflight = load_av1_v4r4_ordinal_registry_preparation(
+        binding=binding,
+        plan=plan,
+    )
+    execution_grant = _execution_grant(
+        plan,
+        grant,
+        qualification_request=request,
+        execution_preflight=preflight,
+    )
+    execution_grant = _rebind_execution_grant(
+        {
+            **execution_grant,
+            "authorized_at": authorized_at,
+            "valid_until": valid_until,
+        }
+    )
+    execution_grant_file = (
+        binding.registry / "v4r4-ordinal-01-execution-grant.json"
+    )
+    execution_grant_file.write_bytes(_private_canonical_bytes(execution_grant))
+    execution_grant_file.chmod(0o600)
+
+    with pytest.raises(
+        AV1V4R4OrdinalRegistryError,
+        match="execution grant is inactive",
+    ):
+        publish_av1_v4r4_ordinal_registry_claim(
+            binding=binding,
+            plan=plan,
+            grant=grant,
+            clock=clock,
+        )
+
+    assert not (binding.registry / "v4r4-ordinal-01-sequencing-claim.json").exists()
+
+
+def test_torn_sequencing_claim_burn_seals_without_deleting(tmp_path: Path) -> None:
+    binding, plan, clock = _publish_plan(tmp_path)
+    grant = publish_av1_v4r4_ordinal_registry_grant(
+        binding=binding,
+        plan=plan,
+        ordinal=1,
+        clock=clock,
+        valid_until=_GRANT_VALID_UNTIL,
+    )
+    _write_private_execution_grant(binding, plan, grant)
+    claim_file = binding.registry / "v4r4-ordinal-01-sequencing-claim.json"
+    claim_file.write_bytes(b"")
+    claim_file.chmod(0o600)
+
+    with pytest.raises(
+        AV1V4R4OrdinalRegistryError,
+        match="sequencing claim burn is invalid",
+    ):
+        publish_av1_v4r4_ordinal_registry_claim(
+            binding=binding,
+            plan=plan,
+            grant=grant,
+            clock=clock,
+        )
+
+    assert claim_file.exists()
+    assert claim_file.stat().st_size == 0
+    assert (binding.registry / "v4r4-ordinal-registry-terminal.json").is_file()
+    assert reconcile_av1_v4r4_ordinal_registry(
+        binding=binding,
+        plan=plan,
+        clock=clock,
+    ) == 0
+    with pytest.raises(AV1V4R4OrdinalRegistryError, match="sealed"):
+        publish_av1_v4r4_ordinal_registry_claim(
+            binding=binding,
+            plan=plan,
+            grant=grant,
+            clock=clock,
+        )
 
 
 def test_low_level_publication_errors_are_path_free(tmp_path: Path) -> None:
