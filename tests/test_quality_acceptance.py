@@ -28,6 +28,69 @@ class QualityAcceptanceReportTests(unittest.TestCase):
         self.assertEqual(group.key.policy_hash, self.policy_hash)
         self.assertEqual(group.distinct_items, 2)
 
+    def test_report_counts_passive_units_and_natural_clusters(self) -> None:
+        rows = [self._row(index=index, arm="baseline_holdout") for index in range(4)]
+        for index, row in enumerate(rows):
+            row["source_rel_path"] = (
+                f"tv/Show/Season {1 if index < 3 else 2:02d}/Episode {index:03d}.mkv"
+            )
+            shadow = json.loads(str(row["shadow_json"]))
+            shadow["warm_start"]["scope_prefix"] = "tv/Show"
+            shadow["warm_start"]["scope"] = "series"
+            row["shadow_json"] = json.dumps(shadow)
+
+        group = quality_acceptance_report(rows, library_types={"tv": "tv"}).groups[0]
+
+        self.assertEqual(group.passive_distinct_items, 4)
+        self.assertEqual(group.natural_cluster_count, 2)
+        self.assertEqual(group.largest_cluster_concentration, 0.75)
+
+    def test_cluster_concentration_counts_distinct_items_not_content_versions(self) -> None:
+        first = self._row(index=0, arm="baseline_holdout")
+        second = self._row(index=1, arm="baseline_holdout")
+        second["source_rel_path"] = first["source_rel_path"]
+        second["source_fingerprint"] = "replacement-content-version"
+
+        group = quality_acceptance_report([first, second], library_types={"tv": "tv"}).groups[0]
+
+        self.assertEqual(group.passive_distinct_items, 1)
+        self.assertEqual(group.natural_cluster_count, 1)
+        self.assertEqual(group.largest_cluster_concentration, 1.0)
+
+    def test_report_includes_global_operator_rejection_and_attention_outcomes(self) -> None:
+        rows = [self._row(index=0, arm="baseline_holdout")]
+        boundary_rows = [
+            {
+                "series_id": "boundary-1",
+                "revision": 0,
+                "verdict": "unacceptable",
+                "disposition": "active",
+                "assessment_json": "{}",
+            },
+            {
+                "series_id": "boundary-2",
+                "revision": 1,
+                "verdict": "acceptable",
+                "disposition": "active",
+                "assessment_json": '{"concern_tags":["banding"]}',
+            },
+            {
+                "series_id": "boundary-3",
+                "revision": 1,
+                "verdict": "acceptable",
+                "disposition": "withdrawn",
+                "assessment_json": "{}",
+            },
+        ]
+
+        outcomes = quality_acceptance_report(rows, boundary_rows=boundary_rows).operator_outcomes
+
+        self.assertEqual(outcomes.current_observations, 3)
+        self.assertEqual(outcomes.rejection_count, 1)
+        self.assertEqual(outcomes.rejection_rate, 0.333333)
+        self.assertEqual(outcomes.additional_attention_count, 3)
+        self.assertEqual(outcomes.additional_attention_rate, 1.0)
+
     def test_nested_item_evidence_does_not_enter_season_group(self) -> None:
         rows = [self._row(index=index, arm="baseline_holdout") for index in range(10)]
         rows.append(
@@ -312,6 +375,7 @@ class QualityAcceptanceReportTests(unittest.TestCase):
             "authority": "runtime_native",
             "revision": 0,
             "source_rel_path": f"tv/Show/Season 01/Episode {index:03d}.mkv",
+            "source_fingerprint": f"content-version-{index}",
             "search_signature_id": (
                 final_signature_id
                 or (self.signature_id if signature_match else "qms1_final_mismatch")

@@ -1,22 +1,20 @@
 # AV1 Cold-Start Recommendations
 
-Mediaforce may recommend one better first AV1 calibration probe, then lets the
-existing measured target-size search accept or reject it. A recommendation is
-an optimization hint, not encode authority.
+Mediaforce computes a bounded AV1 calibration recommendation as passive
+telemetry. It does not currently enter the measured target-size search. The
+recommendation remains an optimization hypothesis, never encode authority.
 
 ## Product Flow
 
-The live path is:
+The current live path is:
 
 1. Resolve explicit compression intent and the whole-item size goal.
 2. Measure source and stream facts.
 3. Read compatible accepted local outcomes from the runtime database.
 4. Return one bounded first-probe recommendation or a no-recommendation reason.
-5. Run the normal measured target-size search with unchanged quality and size
-   safeguards.
-6. Fall back to the configured full search when the first probe is missing,
-   incompatible, rejected, or unsuccessful.
-7. Let the operator compare and approve the measured result before it becomes
+5. Record explicit passive execution evidence and run the normal measured
+   target-size search with unchanged quality and size safeguards.
+6. Let the operator compare and approve the measured result before it becomes
    reusable local evidence.
 
 The recommendation never changes target bytes, quality floors, stream budgets,
@@ -31,9 +29,14 @@ restricts rows to the requested item, content profile, or selected local
 cohort. No public prior, checked-in bundle, or package resource participates in
 the recommendation.
 
-Missing, stale, low-confidence, incompatible, conflicting, future-dated, or
-out-of-range evidence returns no recommendation. Full measured search remains
-available in every case.
+The planner evaluates item, folder, content-class, and operator scopes from
+narrow to broad. Each scope independently has to pass freshness and versioned
+timestamps, conflict checks, confidence/actionability, CRF completeness, target
+compatibility, dispersion, and configured candidate bounds. A weak or stale
+narrow cohort therefore cannot suppress an eligible broader cohort. Missing,
+stale, low-confidence, incompatible, conflicting, future-dated, or out-of-range
+evidence returns a readable no-recommendation reason. Full measured search runs
+in every case.
 
 ## Recommendation Inputs
 
@@ -61,7 +64,8 @@ defaults to preservation.
 The LLM-backed advisor may rank and explain one candidate from deterministic
 facts and compatible local memory. It cannot invent numeric authority or bypass
 the search engine. The recommendation payload stays schema-bound and records
-its local source, confidence, compatibility, and fallback reason.
+its local source, confidence, compatibility, fallback reason, bounded
+narrow-to-broad scope-trial diagnostics, and passive execution evidence.
 
 Accepted and rejected outcomes remain explicit records rather than hidden
 mutable model state. This keeps later recommendations explainable and allows

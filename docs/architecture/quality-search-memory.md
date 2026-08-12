@@ -3,10 +3,10 @@
 ## Purpose
 
 Quality-search memory turns accepted encode outcomes into explainable historical
-context. Its first phase is deliberately read-only: it can report a central CRF
-hint, confidence, dispersion, and invalidation reasons, but it cannot change an
-encode policy, search bound, quality floor, transform, stream plan, or runtime
-decision.
+context. Its current phase is deliberately passive: it can report a central CRF
+hint, confidence, dispersion, invalidation reasons, and a stable future-study
+arm, but it cannot change an encode policy, search bound, quality floor,
+transform, stream plan, or runtime decision.
 
 ## Authority Boundary
 
@@ -138,6 +138,20 @@ cohort statistics are computed. Runtime and correction rows require the current
 policy hash; historical staged backfill without one remains eligible through its
 complete search signature.
 
+Every primary passive metric and readiness calculation deduplicates terminal
+observations by normalized source path, source fingerprint/content version,
+exact search signature, and policy hash. The newest current correction or
+runtime result wins; raw evaluated observation count remains diagnostic so retry
+volume cannot inflate readiness.
+
+The shadow payload also exposes `analysis_family_id` for reporting only. It is a
+separate `qaf1_` namespace derived from broad context categories: compression
+intent, encoder family and preset, pixel/bit-depth and resolution/cadence
+buckets, metric/floor policy, and coarse filter/grain categories. It omits exact
+target bytes/bitrate, patch versions, and full stream-plan facts. It never enters
+`QualitySearchWarmStart`, never replaces the exact search signature or group
+key, and cannot authorize execution.
+
 The measured comparison records candidate count, search wall time, eventual CRF,
 quality margin, size error, within-one-CRF accuracy, fallback need, and projected
 candidate/time savings. The projection models the planned warm-start contract:
@@ -159,10 +173,23 @@ metric and objective alone. Active rows do not replace the passive benchmark;
 their safety facts remain visible while passive recommendation projections and
 concurrent holdouts continue to determine whether a cohort is eligible.
 
-## Active Warm Starts
+## Future Warm-Start Study
 
-An active warm start is a single optimization probe in front of the existing
-search. It is available only when all of these conditions hold:
+The generic warm-start engine and exact execution contracts remain available for
+a future isolated study, but ordinary production encoding is passive. The
+quality-memory plan always has `execution_mode=passive`, `experiment_arm` is
+`passive` or `ineligible`, and `search_hint()` returns no hint. Production search
+does not receive either a warm-start hint or expected warm-start signature from
+the plan.
+
+When a plan is otherwise eligible, it records a future assignment instead. The
+assignment uses normalized source path plus source fingerprint/content version,
+not a search-run ID, so retries of the same item/version stay in one future arm.
+The configured holdout percentage remains unchanged. Existing exact execution
+compatibility must still be satisfied before any separately authorized study.
+
+A future active warm start would be a single optimization probe in front of the
+existing search and would require all of these conditions:
 
 - a pre-search context can be built from the same resolved metric, target,
   quality floor, preset, encoder parameters, video filter, container, and
@@ -203,8 +230,8 @@ Warm-selected observations remain append-only audit facts but are marked
 learning-ineligible and are excluded from historical staged backfill. This
 prevents recommendations from training on their own decisions. Outcomes selected
 by the unchanged full fallback remain eligible because the baseline search was
-still authoritative. Once a cohort qualifies, a versioned deterministic hash of
-the search-run identity assigns 20% of runs to an unchanged full-search holdout.
+still authoritative. A future study uses the recorded stable item/version
+assignment for its unchanged full-search holdout.
 Holdouts remain learning-eligible, preserve a current baseline, and prevent the
 post-activation evidence set from containing only warm-start failures.
 
@@ -234,6 +261,15 @@ Each group keeps three sections separate:
 - safety and data quality: passive and active quality-floor violations,
   baseline and active-attributable final-size misses, and report-level
   signatureless failures
+
+The passive section also reports distinct passive units, distinct items, natural
+series/season/film-root clusters, and largest-cluster concentration. These are
+dependence diagnostics only and never gate eligibility. Acceptance reporting
+also carries global operator outcomes from current authoritative content-intent
+boundary observations: rejection means current unacceptable/rejected visual
+evidence; additional attention conservatively includes rejection, correction,
+withdrawal, or approved evidence with concern tags. These outcomes stay global
+when exact quality-group attribution is unsafe.
 
 The issue #256 completion protocol is fixed before active evidence is reviewed:
 

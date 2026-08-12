@@ -28,7 +28,8 @@ QUALITY_WARM_START_SCHEMA_VERSION = 1
 QUALITY_WARM_START_EXPERIMENT_VERSION = "qwa1"
 QUALITY_WARM_START_HOLDOUT_PERCENT = 20
 
-QualityWarmStartExperimentArm = Literal["ineligible", "baseline_holdout", "warm_start"]
+QualityWarmStartExperimentArm = Literal["ineligible", "passive"]
+QualityWarmStartFutureArm = Literal["ineligible", "baseline_holdout", "warm_start"]
 
 QualityWarmStartBlockReason = Literal[
     "recommendation_unavailable",
@@ -47,7 +48,8 @@ class QualityWarmStartPlan:
     block_reason: QualityWarmStartBlockReason | None
     baseline_median_candidate_count: float | None
     baseline_median_search_seconds: float | None
-    experiment_arm: QualityWarmStartExperimentArm = "warm_start"
+    experiment_arm: QualityWarmStartExperimentArm = "passive"
+    future_experiment_arm: QualityWarmStartFutureArm = "ineligible"
     scope_prefix: str | None = None
 
     @property
@@ -56,17 +58,10 @@ class QualityWarmStartPlan:
 
     @property
     def active(self) -> bool:
-        return self.eligible and self.experiment_arm == "warm_start"
+        return False
 
     def search_hint(self) -> QualitySearchWarmStart | None:
-        if not self.active or self.recommendation.first_crf is None or self.recommendation.cohort_id is None:
-            return None
-        return QualitySearchWarmStart(
-            requested_crf=self.recommendation.first_crf,
-            candidate_crf=self.candidate_crf,
-            search_signature_id=self.recommendation.search_signature_id,
-            cohort_id=self.recommendation.cohort_id,
-        )
+        return None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -75,6 +70,8 @@ class QualityWarmStartPlan:
             "block_reason": self.block_reason,
             "experiment_version": QUALITY_WARM_START_EXPERIMENT_VERSION,
             "experiment_arm": self.experiment_arm,
+            "future_experiment_arm": self.future_experiment_arm,
+            "execution_mode": "passive",
             "holdout_percent": QUALITY_WARM_START_HOLDOUT_PERCENT,
             "scope": self.recommendation.scope,
             "scope_prefix": self.scope_prefix,
@@ -151,6 +148,7 @@ def plan_quality_warm_start(
             baseline_median_candidate_count=baseline_candidate_count,
             baseline_median_search_seconds=baseline_search_seconds,
             experiment_arm="ineligible",
+            future_experiment_arm="ineligible",
             scope_prefix=cohort_scope.prefix if recommendation.scope is not None else None,
         )
     assert recommendation.first_crf is not None
@@ -168,8 +166,8 @@ def plan_quality_warm_start(
         block_reason = "baseline_benchmark_unavailable"
     else:
         block_reason = None
-    experiment_arm: QualityWarmStartExperimentArm = (
-        _quality_warm_start_experiment_arm(search_run_id)
+    future_experiment_arm: QualityWarmStartFutureArm = (
+        _quality_warm_start_experiment_arm(source_rel_path, source_fingerprint)
         if block_reason is None
         else "ineligible"
     )
@@ -181,7 +179,8 @@ def plan_quality_warm_start(
         block_reason=block_reason,
         baseline_median_candidate_count=baseline_candidate_count,
         baseline_median_search_seconds=baseline_search_seconds,
-        experiment_arm=experiment_arm,
+        experiment_arm="passive" if block_reason is None else "ineligible",
+        future_experiment_arm=future_experiment_arm,
         scope_prefix=cohort_scope.prefix,
     )
 
@@ -190,9 +189,16 @@ def _row_matches_context(row: Mapping[str, Any], context: QualitySearchContext) 
     return str(row.get("search_signature_id") or "") == context.signature_id
 
 
-def _quality_warm_start_experiment_arm(search_run_id: str) -> QualityWarmStartExperimentArm:
+def _quality_warm_start_experiment_arm(
+        source_rel_path: str,
+        source_fingerprint: str | None,
+) -> QualityWarmStartFutureArm:
+    normalized_source_path = "/".join(part for part in source_rel_path.strip().split("/") if part)
+    content_version = str(source_fingerprint or "").strip()
+    if not normalized_source_path or not content_version:
+        return "ineligible"
     digest = hashlib.sha256(
-        f"{QUALITY_WARM_START_EXPERIMENT_VERSION}:{search_run_id}".encode("utf-8")
+        f"{QUALITY_WARM_START_EXPERIMENT_VERSION}:{normalized_source_path}:{content_version}".encode("utf-8")
     ).digest()
     bucket = int.from_bytes(digest[:8], byteorder="big") % 100
     return "baseline_holdout" if bucket < QUALITY_WARM_START_HOLDOUT_PERCENT else "warm_start"

@@ -102,7 +102,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(trace["candidates"][0]["predicted_encode_size_bytes"], 5 * 1024 ** 2)
             self.assertNotIn("line", trace["candidates"][0])
 
-    def test_warm_selected_observation_is_recorded_but_cannot_train_itself(self) -> None:
+    def test_passive_plan_does_not_execute_a_warm_start(self) -> None:
         source_path = self._source_file("episode-warm-selected.mkv")
         staging_path = self._staging_path("episode-warm-selected.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -115,7 +115,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 target=85.0,
                 score=86.0,
                 stdout="target-size-search",
-                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
+                target_size_trace=self._trace(item, selected_crf=28.0),
             )
             search_calls: list[dict[str, Any]] = []
             policy_before = json.loads(json.dumps(item["resolved_policy"]))
@@ -132,12 +132,12 @@ class TargetSizeProductionTests(unittest.TestCase):
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             shadow = json.loads(cast(str, observation["shadow_json"]))
             outcome = json.loads(cast(str, observation["outcome_json"]))
-            self.assertEqual(observation["learning_eligible"], 0)
-            self.assertEqual(observation["exclusion_reason"], "warm_start_selected")
-            self.assertEqual(outcome["exploration_kind"], "warm_start_accepted")
-            self.assertTrue(shadow["production_search_changed"])
-            self.assertEqual(shadow["warm_start"]["execution"]["status"], "accepted")
-            self.assertIsNotNone(search_calls[0]["warm_start"])
+            self.assertEqual(observation["learning_eligible"], 1)
+            self.assertIsNone(observation["exclusion_reason"])
+            self.assertEqual(outcome["exploration_kind"], "full_search")
+            self.assertFalse(shadow["production_search_changed"])
+            self.assertEqual(shadow["warm_start"]["execution_mode"], "passive")
+            self.assertNotIn("warm_start", search_calls[0])
             self.assertEqual(item["resolved_policy"], policy_before)
 
     def test_blocked_plan_keeps_passive_search_authoritative(self) -> None:
@@ -169,7 +169,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 search_call_kwargs=search_calls,
             )
 
-            self.assertIsNone(search_calls[0]["warm_start"])
+            self.assertNotIn("warm_start", search_calls[0])
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             shadow = json.loads(cast(str, observation["shadow_json"]))
             self.assertFalse(shadow["production_search_changed"])
@@ -177,7 +177,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertFalse(shadow["warm_start"]["eligible"])
             self.assertEqual(shadow["warm_start"]["block_reason"], "shadow_thresholds_not_met")
 
-    def test_holdout_plan_runs_full_search_and_remains_learning_evidence(self) -> None:
+    def test_passive_plan_runs_full_search_and_remains_learning_evidence(self) -> None:
         source_path = self._source_file("episode-warm-holdout.mkv")
         staging_path = self._staging_path("episode-warm-holdout.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -201,39 +201,31 @@ class TargetSizeProductionTests(unittest.TestCase):
                 [5_100_000],
                 warm_start_plan=self._warm_start_plan(
                     first_crf=28.0,
-                    experiment_arm="baseline_holdout",
+                    experiment_arm="passive",
                 ),
                 search_call_kwargs=search_calls,
             )
 
-            self.assertIsNone(search_calls[0]["warm_start"])
+            self.assertNotIn("warm_start", search_calls[0])
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             shadow = json.loads(cast(str, observation["shadow_json"]))
             outcome = json.loads(cast(str, observation["outcome_json"]))
             timing = json.loads(cast(str, observation["timing_json"]))
             self.assertEqual(observation["learning_eligible"], 1)
-            self.assertEqual(outcome["quality_memory_arm"], "baseline_holdout")
+            self.assertEqual(outcome["quality_memory_arm"], "passive")
             self.assertEqual(outcome["quality_memory_experiment_version"], "qwa1")
-            self.assertEqual(outcome["exploration_kind"], "quality_memory_holdout")
+            self.assertEqual(outcome["exploration_kind"], "full_search")
             self.assertTrue(shadow["warm_start"]["eligible"])
-            self.assertEqual(shadow["warm_start"]["experiment_arm"], "baseline_holdout")
+            self.assertEqual(shadow["warm_start"]["experiment_arm"], "passive")
             self.assertGreater(timing["workflow_duration_seconds"], 0)
 
-    def test_warm_selected_final_size_miss_runs_fresh_baseline_before_retry_path(self) -> None:
+    def test_passive_plan_does_not_run_a_second_warm_start_search(self) -> None:
         source_path = self._source_file("episode-warm-final-miss.mkv")
         staging_path = self._staging_path("episode-warm-final-miss.mkv")
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_item(connection, source_path)
             item = self._manifest_item(item_id, source_path, staging_path)
             self._attach_stream_budget(item)
-            warm_quality = QualitySearchResult(
-                crf=28.0,
-                metric="VMAF",
-                target=85.0,
-                score=86.0,
-                stdout="target-size-search",
-                target_size_trace=self._warm_trace(item, selected_crf=28.0, status="accepted"),
-            )
             baseline_quality = QualitySearchResult(
                 crf=30.0,
                 metric="VMAF",
@@ -247,31 +239,28 @@ class TargetSizeProductionTests(unittest.TestCase):
             build_calls, measure_calls = self._encode_with_output_sizes(
                 connection,
                 item,
-                warm_quality,
-                [5_500_000, 5_100_000],
+                baseline_quality,
+                [5_100_000],
                 warm_start_plan=self._warm_start_plan(first_crf=28.0),
-                search_results=[warm_quality, baseline_quality],
+                search_results=[baseline_quality],
                 search_call_kwargs=search_calls,
             )
 
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             shadow = json.loads(cast(str, observation["shadow_json"]))
             outcome = json.loads(cast(str, observation["outcome_json"]))
-            self.assertEqual(len(search_calls), 2)
-            self.assertIsNotNone(search_calls[0]["warm_start"])
-            self.assertIsNone(search_calls[1]["warm_start"])
-            self.assertEqual(len(build_calls), 2)
+            self.assertEqual(len(search_calls), 1)
+            self.assertNotIn("warm_start", search_calls[0])
+            self.assertEqual(len(build_calls), 1)
             self.assertEqual(measure_calls, [])
             self.assertEqual(observation["selected_crf"], 30.0)
             self.assertEqual(observation["learning_eligible"], 1)
-            self.assertEqual(outcome["exploration_kind"], "warm_start_fallback")
-            self.assertEqual(shadow["warm_start"]["execution"]["status"], "fallback")
-            self.assertEqual(shadow["warm_start"]["execution"]["fallback_reason"], "final_size_miss")
-            self.assertTrue(shadow["comparison"]["final_size_miss"])
-            self.assertEqual(shadow["warm_start"]["execution"]["baseline_candidate_count"], 2)
-            self.assertEqual(shadow["comparison"]["candidate_count"], 3)
+            self.assertEqual(outcome["exploration_kind"], "full_search")
+            self.assertFalse(shadow["production_search_changed"])
+            self.assertFalse(shadow["comparison"]["final_size_miss"])
+            self.assertEqual(shadow["comparison"]["candidate_count"], 2)
             event_types = connection.execute(select(item_events.c.event_type)).scalars().all()
-            self.assertIn("encoding_quality_warm_start_fallback", event_types)
+            self.assertNotIn("encoding_quality_warm_start_fallback", event_types)
 
     def test_same_crf_fallback_still_runs_the_unchanged_full_encode(self) -> None:
         source_path = self._source_file("episode-warm-same-crf.mkv")
@@ -853,7 +842,10 @@ class TargetSizeProductionTests(unittest.TestCase):
 
             with patch(
                 "mediaforce.encoding.manifest.plan_quality_warm_start",
-                return_value=self._warm_start_plan(first_crf=28.0),
+                return_value=self._warm_start_plan(
+                    first_crf=28.0,
+                    experiment_arm="warm_start",
+                ),
             ), patch(
                 "mediaforce.execution.resolve_item_source_path",
                 return_value=source_path,
@@ -1274,7 +1266,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 experiment_arm
                 if experiment_arm is not None
                 else "ineligible" if block_reason is not None
-                else "warm_start"
+                else "passive"
             ),
             scope_prefix="tv/Example/Season 01",
         )

@@ -32,7 +32,7 @@ class QualityWarmStartPlanTests(unittest.TestCase):
             output_container="mkv",
         )
 
-    def test_qualified_current_policy_cohort_produces_clamped_search_hint(self) -> None:
+    def test_qualified_current_policy_cohort_remains_passive_with_a_future_arm(self) -> None:
         rows = self._rows(selected_crf=38.6)
 
         with patch(
@@ -41,17 +41,15 @@ class QualityWarmStartPlanTests(unittest.TestCase):
         ) as loader:
             plan = self._plan()
 
-        self.assertTrue(plan.active)
+        self.assertFalse(plan.active)
         self.assertTrue(plan.eligible)
-        self.assertEqual(plan.experiment_arm, "warm_start")
+        self.assertEqual(plan.experiment_arm, "passive")
+        self.assertIn(plan.future_experiment_arm, {"baseline_holdout", "warm_start"})
         self.assertEqual(plan.candidate_crf, 38)
         self.assertTrue(plan.adjusted)
         self.assertEqual(plan.baseline_median_candidate_count, 5.0)
         self.assertEqual(plan.baseline_median_search_seconds, 100.0)
-        hint = plan.search_hint()
-        assert hint is not None
-        self.assertEqual(hint.candidate_crf, 38)
-        self.assertEqual(hint.search_signature_id, self.context.signature_id)
+        self.assertIsNone(plan.search_hint())
         self.assertEqual(loader.call_args.kwargs["recorded_before"], self.as_of.isoformat())
         self.assertEqual(loader.call_args.kwargs["scope"].kind, "tv_series")
 
@@ -64,11 +62,12 @@ class QualityWarmStartPlanTests(unittest.TestCase):
 
         self.assertTrue(plan.eligible)
         self.assertFalse(plan.active)
-        self.assertEqual(plan.experiment_arm, "baseline_holdout")
+        self.assertEqual(plan.experiment_arm, "passive")
         self.assertIsNone(plan.search_hint())
         payload = plan.to_payload()
         self.assertTrue(payload["eligible"])
-        self.assertEqual(payload["experiment_arm"], "baseline_holdout")
+        self.assertEqual(payload["experiment_arm"], "passive")
+        self.assertEqual(payload["execution_mode"], "passive")
         self.assertEqual(payload["holdout_percent"], 20)
 
     def test_large_bound_adjustment_blocks_the_hint(self) -> None:
@@ -78,6 +77,50 @@ class QualityWarmStartPlanTests(unittest.TestCase):
         self.assertIsNone(plan.search_hint())
         self.assertEqual(plan.candidate_crf, 38)
         self.assertEqual(plan.block_reason, "hint_adjustment_exceeds_one_crf")
+
+    def test_future_assignment_is_stable_across_run_ids_and_changes_with_content_version(self) -> None:
+        with patch(
+            "mediaforce.tuning.quality_warm_start.load_current_quality_search_observations",
+            return_value=self._rows(selected_crf=30.0),
+        ):
+            first = self._call_plan(search_run_id="qsr1_first")
+            second = self._call_plan(search_run_id="qsr1_second")
+
+        self.assertEqual(first.future_experiment_arm, second.future_experiment_arm)
+        with patch(
+            "mediaforce.tuning.quality_warm_start.load_current_quality_search_observations",
+            return_value=self._rows(selected_crf=30.0),
+        ):
+            arms = {
+                plan_quality_warm_start(
+                    Mock(),
+                    source_rel_path="tv/Show/Season 01/Episode 99.mkv",
+                    source_fingerprint=f"content-version-{index}",
+                    expected_context=self.context,
+                    policy_hash="policy-1",
+                    configured_min_crf=18,
+                    configured_max_crf=38,
+                    search_run_id=f"qsr1_{index}",
+                    as_of=self.as_of,
+                    library_types={"tv": "tv"},
+                ).future_experiment_arm
+                for index in range(32)
+            }
+
+        self.assertEqual(arms, {"baseline_holdout", "warm_start"})
+
+    def test_analysis_family_cannot_authorize_an_exact_search_hint(self) -> None:
+        rows = self._rows(selected_crf=30.0)
+        for row in rows:
+            row["search_signature_id"] = "qms2_different_exact_signature"
+            shadow = json.loads(str(row["shadow_json"]))
+            shadow["analysis_family_id"] = "qaf1_shared_reporting_family"
+            row["shadow_json"] = json.dumps(shadow)
+
+        plan = self._plan(rows)
+
+        self.assertEqual(plan.block_reason, "recommendation_unavailable")
+        self.assertIsNone(plan.search_hint())
 
     def test_unhashed_backfill_cannot_authorize_active_behavior(self) -> None:
         rows = self._rows(selected_crf=30.0)
@@ -116,7 +159,7 @@ class QualityWarmStartPlanTests(unittest.TestCase):
 
         plan = self._plan(rows)
 
-        self.assertTrue(plan.active)
+        self.assertFalse(plan.active)
         self.assertEqual(plan.readiness.recommendation_runs, 21)
         self.assertEqual(len(plan.recommendation.evidence_observation_ids), 20)
         self.assertEqual(plan.baseline_median_candidate_count, 5.0)

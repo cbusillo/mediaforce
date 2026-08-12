@@ -298,8 +298,8 @@ Guidance:
     local item/folder/content-class/operator replay
 - `av1_cold_start.py`
   - request/runtime compatibility, compatible local content-intent replay,
-    bounded CRF prediction, confidence, provenance, and no-recommendation
-    behavior
+    bounded passive CRF prediction, narrow-to-broad scope eligibility,
+    confidence, provenance, and no-recommendation behavior
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
@@ -308,10 +308,11 @@ Guidance:
     native-versus-backfill authority, corrections, and historical backfill
 - `quality_shadow.py`
   - passive first-CRF recommendations, historical trace rejection, measured
-    shadow comparisons, and aggregate readiness metrics
+    shadow comparisons, derived reporting-only analysis families, and
+    deduplicated aggregate readiness metrics
 - `quality_warm_start.py`
-  - active cohort qualification, exact-policy evidence gating, configured-bound
-    CRF normalization, and passive-baseline benchmarks
+  - passive cohort qualification, exact-policy evidence gating, configured-bound
+    CRF normalization, stable future-arm assignment, and passive benchmarks
 
 Guidance:
 
@@ -332,15 +333,17 @@ Guidance:
 - Keep AV1 first-probe request validation, compatible local content-intent
   replay, prediction, and fallback behavior under
   `mediaforce/tuning/av1_cold_start.py`. The module has no shipped prior bundle
-  or public evidence state machine; local replay remains read-only.
+  or public evidence state machine; local replay remains read-only and ordinary
+  calibration records its recommendation without injecting it into search.
 - Keep install-safe package defaults under `mediaforce/package_defaults/`.
   Operator config, folder overrides, and machine-local paths remain under root
   `config/` and never become package data.
 - Keep quality-memory retrieval read-only and under
   `mediaforce/tuning/quality_memory.py`; keep passive persistence under
   `mediaforce/tuning/quality_observations.py`; keep passive recommendation and
-  evaluation under `mediaforce/tuning/quality_shadow.py`; keep active
-  qualification under `mediaforce/tuning/quality_warm_start.py`; keep read-only
+  evaluation and derived reporting identity under `mediaforce/tuning/quality_shadow.py`;
+  keep passive qualification and future-study assignment under
+  `mediaforce/tuning/quality_warm_start.py`; keep read-only
   acceptance aggregation under `mediaforce/tuning/quality_acceptance.py`.
   Persisted observations, shadow inference, active qualification, acceptance
   reporting, and search execution remain separate explicit phases.

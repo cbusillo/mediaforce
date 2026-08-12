@@ -25,7 +25,6 @@ from mediaforce.tuning.content_intent_observations import (
     ContentIntentPersonalizationState,
     build_content_intent_boundary_compatibility,
 )
-from mediaforce.web.runtime.calibration_runtime import _av1_cold_start_quality_kwargs
 
 
 class AV1ColdStartTests(unittest.TestCase):
@@ -122,9 +121,35 @@ class AV1ColdStartTests(unittest.TestCase):
         self.assertEqual(hint.source, "av1_cold_start_local")
         self.assertEqual(hint.candidate_crf, 29)
 
-        quality_kwargs = _av1_cold_start_quality_kwargs(prediction)
-        self.assertEqual(quality_kwargs["warm_start"], hint)
-        self.assertEqual(quality_kwargs["expected_search_signature_id"], hint.search_signature_id)
+    def test_weak_narrow_scope_falls_back_to_healthy_broader_scope(self) -> None:
+        narrow = self._state(
+            confidence="limited",
+            boundary_status="acceptable_only",
+            crfs=(29.0,),
+            scope="item",
+            maximum_bitrate_bps=1_500_000,
+        )
+        broad = self._state(
+            confidence="moderate",
+            boundary_status="acceptable_only",
+            crfs=(28.0, 29.0, 30.0),
+            scope="folder",
+        )
+        all_state = replace(
+            broad,
+            cohorts=(
+                next(cohort for cohort in narrow.cohorts if cohort.scope == "item"),
+                next(cohort for cohort in broad.cohorts if cohort.scope == "folder"),
+                *broad.cohorts[2:],
+            ),
+        )
+
+        prediction = predict_local_av1_cold_start(all_state, all_state, self.request)
+
+        self.assertTrue(prediction.recommended)
+        self.assertEqual(prediction.local_scope, "folder")
+        self.assertEqual(prediction.scope_trials[0], ("item", "local_evidence_target_incompatible"))
+        self.assertEqual(prediction.scope_trials[1], ("folder", None))
 
     def test_local_prediction_fallbacks_fail_closed(self) -> None:
         cases = (
