@@ -54,6 +54,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    service_parser = subparsers.add_parser("service", help="Manage the local macOS mediaforce-web login item")
+    service_actions = service_parser.add_subparsers(dest="service_action", required=True)
+    for action in ("install", "enable", "disable", "restart", "status", "uninstall"):
+        service_actions.add_parser(action)
+    service_logs_parser = service_actions.add_parser("logs", help="Show the login item's durable logs")
+    service_logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow new log output")
+    service_logs_parser.add_argument("--stderr", action="store_true", help="Show the stderr log")
+    service_logs_parser.add_argument("--lines", type=int, default=80, help="Number of existing lines to show")
+
     scan_parser = subparsers.add_parser("scan", help="Scan source roots into SQLite state")
     scan_parser.add_argument("--prefix", action="append", default=[],
                              help="Restrict scan to rel-path prefixes such as tv/Futurama")
@@ -220,6 +229,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "service":
+        from mediaforce.ops.login_item import run_login_item_command
+
+        return run_login_item_command(
+            str(args.service_action),
+            project_root=Path(__file__).resolve().parents[1],
+            follow=bool(getattr(args, "follow", False)),
+            stderr=bool(getattr(args, "stderr", False)),
+            lines=int(getattr(args, "lines", 80)),
+        )
     return _main(args, load_config(args.config))
 
 

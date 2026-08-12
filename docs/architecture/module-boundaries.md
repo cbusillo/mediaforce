@@ -146,6 +146,13 @@ Guidance:
 - Only trim more from `web/app.py` when a clearly mechanical helper cluster or
   removable compatibility wrapper appears.
 
+### `mediaforce/ops/`
+
+- `login_item.py`
+  - generated macOS `mediaforce-web` LaunchAgent plist
+  - idempotent install, enable, disable, status, log, and uninstall operations
+  - durable local service logs without media-mount ownership
+
 ### `mediaforce/hosts/`
 
 - `transport.py`
