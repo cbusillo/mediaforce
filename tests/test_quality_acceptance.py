@@ -28,6 +28,48 @@ class QualityAcceptanceReportTests(unittest.TestCase):
         self.assertEqual(group.key.policy_hash, self.policy_hash)
         self.assertEqual(group.distinct_items, 2)
 
+    def test_passive_rows_feed_readiness_without_entering_active_metrics(self) -> None:
+        rows = [self._row(index=index, arm="passive") for index in range(10)]
+
+        group = quality_acceptance_report(rows, library_types={"tv": "tv"}).groups[0]
+
+        self.assertEqual(group.passive_readiness.evaluated_runs, 10)
+        self.assertEqual(group.passive_readiness.recommendation_runs, 10)
+        self.assertEqual(group.passive_distinct_items, 10)
+        self.assertEqual(group.active_observed.assigned_warm_runs, 0)
+        self.assertEqual(group.active_observed.holdout_runs, 0)
+        self.assertEqual(group.active_observed.legacy_active_runs, 0)
+        self.assertEqual(group.active_observed.holdout_signature_mismatch_runs, 0)
+        self.assertNotIn("legacy_active_evidence", group.closure_blocking_reasons)
+
+    def test_passive_encode_failure_is_not_a_warm_terminal_failure(self) -> None:
+        rows = [self._row(index=index, arm="passive") for index in range(10)]
+        event = {
+            "event_type": "encoding_failed",
+            "details_json": json.dumps(
+                {
+                    "quality_memory_plan": {
+                        "experiment_version": "qwa1",
+                        "experiment_arm": "passive",
+                        "execution_mode": "passive",
+                        "scope": "season",
+                        "scope_prefix": "tv/Show/Season 01",
+                        "search_signature_id": self.signature_id,
+                    },
+                    "quality_memory_policy_hash": self.policy_hash,
+                }
+            ),
+        }
+
+        group = quality_acceptance_report(
+            rows,
+            terminal_events=[event],
+            library_types={"tv": "tv"},
+        ).groups[0]
+
+        self.assertEqual(group.active_observed.terminal_event_failures, 0)
+        self.assertNotIn("warm_terminal_event_failure", group.closure_blocking_reasons)
+
     def test_report_counts_passive_units_and_natural_clusters(self) -> None:
         rows = [self._row(index=index, arm="baseline_holdout") for index in range(4)]
         for index, row in enumerate(rows):
@@ -357,6 +399,7 @@ class QualityAcceptanceReportTests(unittest.TestCase):
                 "eligible": True,
                 "experiment_version": "qwa1",
                 "experiment_arm": arm,
+                "execution_mode": "passive" if arm == "passive" else None,
                 "holdout_percent": 20,
                 "scope": scope,
                 "scope_prefix": scope_prefix,
