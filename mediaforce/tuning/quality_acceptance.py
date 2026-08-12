@@ -374,7 +374,7 @@ def _row_group(
     recommendation = object_dict(shadow.get("recommendation"))
     warm_start = object_dict(shadow.get("warm_start"))
     outcome = _json_object(row.get("outcome_json"))
-    experiment_arm = _quality_memory_arm(row, shadow)
+    experiment_arm = _assigned_experiment_arm(row, shadow)
     scope_name = str(
         (
             warm_start.get("scope")
@@ -500,7 +500,7 @@ def _acceptance_group(
     distinct_items = len({str(row.get("source_rel_path") or "") for row in group_rows})
     passive_rows = deduplicate_quality_terminal_rows([
         row for row in group_rows
-        if _quality_memory_arm(row, _json_object(row.get("shadow_json"))) != "warm_start"
+        if _assigned_experiment_arm(row, _json_object(row.get("shadow_json"))) != "warm_start"
     ])
     passive_distinct_items = len({str(row.get("source_rel_path") or "") for row in passive_rows})
     cluster_items = {
@@ -559,7 +559,7 @@ def _active_observed(
     fallback_counts: Counter[str] = Counter()
     for row in rows:
         shadow = _json_object(row.get("shadow_json"))
-        arm = _quality_memory_arm(row, shadow)
+        arm = _assigned_experiment_arm(row, shadow)
         if arm is None and shadow.get("production_search_changed") is True:
             legacy_active_runs += 1
             continue
@@ -652,7 +652,7 @@ def _safety(rows: Iterable[Mapping[str, Any]]) -> QualityAcceptanceSafety:
     for row in rows:
         shadow = _json_object(row.get("shadow_json"))
         comparison = object_dict(shadow.get("comparison"))
-        arm = _quality_memory_arm(row, shadow)
+        arm = _assigned_experiment_arm(row, shadow)
         warm_start_attempted = (
             arm == "warm_start" or shadow.get("production_search_changed") is True
         ) and _quality_memory_attempted(row, shadow)
@@ -726,7 +726,7 @@ def _closure_blocking_reasons(
     return reasons
 
 
-def _quality_memory_arm(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> str | None:
+def _assigned_experiment_arm(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> str | None:
     warm_start = object_dict(shadow.get("warm_start"))
     plan_version = str(warm_start.get("experiment_version") or "")
     plan_arm = str(warm_start.get("experiment_arm") or "")
@@ -747,7 +747,7 @@ def _row_matches_group_signature(row: Mapping[str, Any], signature_id: str) -> b
     if str(row.get("search_signature_id") or "") == signature_id:
         return True
     shadow = _json_object(row.get("shadow_json"))
-    if _quality_memory_arm(row, shadow) is None:
+    if _assigned_experiment_arm(row, shadow) is None:
         return False
     warm_start = object_dict(shadow.get("warm_start"))
     outcome = _json_object(row.get("outcome_json"))
