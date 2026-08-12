@@ -81,6 +81,7 @@ from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
@@ -2982,6 +2983,40 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(len(host_statuses), 1)
         self.assertEqual(host_statuses[0].key, "host-status-error")
         self.assertFalse(host_statuses[0].available)
+
+    def test_host_status_cache_key_tracks_controller_mount_mapping(self) -> None:
+        mapping_path = self.config.paths.runtime_settings_path.with_name("controller-smb-mounts.json")
+        before = web_host_status_runtime._host_status_cache_key(self.config)
+
+        mapping_path.write_text('{"schema_version":1,"mounts":[]}\n')
+        after = web_host_status_runtime._host_status_cache_key(self.config)
+
+        self.assertNotEqual(before, after)
+        self.assertEqual(after[-1], mapping_path.stat().st_mtime_ns)
+
+    def test_stale_host_status_refresh_result_is_discarded(self) -> None:
+        stale_key = web_host_status_runtime._host_status_cache_key(self.config)
+        stale_status = HostStatus(
+            key="stale",
+            label="Stale",
+            mode="ssh",
+            priority=0,
+            capabilities=[],
+            available=False,
+            message="stale",
+            missing_paths=[],
+        )
+        future: Future[tuple[tuple[str, int, str, int, int], list[HostStatus]]] = Future()
+        future.set_result((stale_key, [stale_status]))
+        web_host_status_runtime._HOST_STATUS_CACHE_KEY = None
+        web_host_status_runtime._HOST_STATUS_CACHE_VALUE = []
+        web_host_status_runtime._HOST_STATUS_CACHE_REFRESH_FUTURE = future
+        self.config.paths.runtime_settings_path.write_text('{"changed":true}\n')
+
+        web_host_status_runtime._complete_host_status_refresh_if_ready()
+
+        self.assertIsNone(web_host_status_runtime._HOST_STATUS_CACHE_KEY)
+        self.assertEqual(web_host_status_runtime._HOST_STATUS_CACHE_VALUE, [])
 
     def test_settings_rows_map_legacy_default_schedule_to_always(self) -> None:
         self.config.raw["remote_hosts"] = [
@@ -10670,7 +10705,7 @@ raise SystemExit(0)
             result = remote.prepare_remote_host_with_password(self.config, "Sample Host", password=None)
         self.assertTrue(result.ok)
         self.assertEqual(result.performed_steps, ["Connected media using the remote Finder Keychain."])
-        mount_mock.assert_called_once_with(self.config, host, needs_paths)
+        mount_mock.assert_called_once_with(self.config, host, needs_paths, force=True)
         finish_mock.assert_not_called()
 
     def test_prepare_remote_host_with_password_creates_missing_child_paths_on_mounted_volume(self) -> None:

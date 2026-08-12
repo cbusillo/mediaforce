@@ -10,10 +10,12 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote
 
+from mediaforce.core.config import load_runtime_settings, save_runtime_settings
 from mediaforce.hosts.types import HostSetupResult
 
 
 REMOTE_MOUNT_ATTEMPT_SECONDS = 30
+CONTROLLER_SMB_MOUNTS_FILE_NAME = "controller-smb-mounts.json"
 
 _NO_GUI_SESSION_EXIT = 41
 _MOUNT_TIMEOUT_EXIT = 42
@@ -36,6 +38,50 @@ class RemoteSmbMount:
     url: str
 
 
+def controller_smb_mounts_path(runtime_settings_path: Path) -> Path:
+    return runtime_settings_path.with_name(CONTROLLER_SMB_MOUNTS_FILE_NAME)
+
+
+def load_controller_smb_mounts(path: Path) -> list[ControllerSmbMount]:
+    try:
+        payload = load_runtime_settings(path)
+    except (OSError, ValueError):
+        return []
+    return controller_smb_mounts_from_payload(payload.get("mounts"))
+
+
+def save_controller_smb_mounts(path: Path, mounts: list[ControllerSmbMount]) -> None:
+    normalized = _sanitized_controller_smb_mounts(mounts)
+    save_runtime_settings(
+        path,
+        {
+            "schema_version": 1,
+            "mounts": [
+                {
+                    "mount_point": str(mount.mount_point),
+                    "source": mount.source,
+                }
+                for mount in normalized
+            ],
+        },
+    )
+
+
+def controller_smb_mounts_from_payload(payload: object) -> list[ControllerSmbMount]:
+    if not isinstance(payload, list):
+        return []
+    mounts: list[ControllerSmbMount] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        mount_point = Path(os.path.normpath(str(item.get("mount_point") or "")))
+        source = str(item.get("source") or "").strip()
+        normalized = _sanitized_controller_smb_mount(source, mount_point)
+        if normalized is not None:
+            mounts.append(normalized)
+    return _deduplicate_controller_smb_mounts(mounts)
+
+
 def controller_smb_mounts_from_output(raw_output: str) -> list[ControllerSmbMount]:
     mounts: list[ControllerSmbMount] = []
     for raw_line in raw_output.splitlines():
@@ -55,7 +101,7 @@ def controller_smb_mounts_from_output(raw_output: str) -> list[ControllerSmbMoun
         if not path.is_absolute():
             continue
         mounts.append(ControllerSmbMount(source=decoded_source, mount_point=path))
-    return sorted(mounts, key=lambda mount: len(mount.mount_point.parts), reverse=True)
+    return _deduplicate_controller_smb_mounts(mounts)
 
 
 def remote_smb_mounts_for_paths(
@@ -93,40 +139,43 @@ def finder_mount_roots_for_paths(paths: list[str | Path]) -> list[Path]:
     return list(roots)
 
 
-def mount_remote_smb_shares(
+def mount_smb_shares(
         host: dict[str, Any],
         mounts: list[RemoteSmbMount],
         *,
-        run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]],
+        run_mount_script: Callable[[str, int], subprocess.CompletedProcess[str]],
+        transport: str,
         attempt_seconds: int = REMOTE_MOUNT_ATTEMPT_SECONDS,
 ) -> HostSetupResult:
     label = str(host.get("label") or host.get("host") or "Remote host").strip() or "Remote host"
-    remote_account = _remote_login_account(host)
+    login_account = _login_account_for_host(host)
+    is_ssh = transport == "ssh"
+    transport_failure_kind = "ssh_transport" if is_ssh else "host_unavailable"
+    request_name = "remote request" if is_ssh else "local Finder helper"
+    timeout_detail = (
+        "The SSH request timed out. Retry after the remote host connection is stable."
+        if is_ssh
+        else "The local Finder helper timed out. Retry after the desktop session is responsive."
+    )
     mounted_names: list[str] = []
     for mount in mounts:
         token = uuid.uuid4().hex
         script = _remote_mount_script(mount, token=token, attempt_seconds=attempt_seconds)
         try:
-            result = run_remote_ssh(
-                host,
-                "sh",
-                "-s",
-                input_text=script,
-                timeout=attempt_seconds + 15,
-            )
+            result = run_mount_script(script, attempt_seconds + 15)
         except subprocess.TimeoutExpired:
             return HostSetupResult(
                 ok=False,
                 message=f"{label} did not finish the shared-storage connection request.",
-                detail="The SSH request timed out. Retry after the remote host connection is stable.",
-                failure_kind="ssh_transport",
+                detail=timeout_detail,
+                failure_kind=transport_failure_kind,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return HostSetupResult(
                 ok=False,
                 message=f"{label} could not run the shared-storage connection request.",
-                detail=f"The remote request failed with {exc.__class__.__name__}. Retry after SSH is stable.",
-                failure_kind="ssh_transport",
+                detail=f"The {request_name} failed with {exc.__class__.__name__}.",
+                failure_kind=transport_failure_kind,
             )
         if result.returncode == 0:
             mounted_names.append(mount.share_name)
@@ -135,7 +184,7 @@ def mount_remote_smb_shares(
             return HostSetupResult(
                 ok=False,
                 message=f"{label} needs a signed-in macOS desktop session to connect shared storage.",
-                detail=f"Sign in to {label} as {remote_account}, then retry Prepare or the workload.",
+                detail=f"Sign in to {label} as {login_account}, then use Prepare to retry storage recovery.",
                 failure_kind="host_unavailable",
             )
         if result.returncode == _MOUNT_BUSY_EXIT:
@@ -157,10 +206,30 @@ def mount_remote_smb_shares(
             failure_kind="host_configuration",
         )
     names = ", ".join(mounted_names)
+    location = "remote " if is_ssh else ""
     return HostSetupResult(
         ok=True,
         message=f"Connected shared storage on {label}.",
-        performed_steps=[f"Connected {names} using the remote Finder Keychain."],
+        performed_steps=[f"Connected {names} using the {location}Finder Keychain."],
+    )
+
+
+def mount_remote_smb_shares(
+        host: dict[str, Any],
+        mounts: list[RemoteSmbMount],
+        *,
+        run_remote_ssh: Callable[..., subprocess.CompletedProcess[str]],
+        attempt_seconds: int = REMOTE_MOUNT_ATTEMPT_SECONDS,
+) -> HostSetupResult:
+    def _run_script(script: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        return run_remote_ssh(host, "sh", "-s", input_text=script, timeout=timeout)
+
+    return mount_smb_shares(
+        host,
+        mounts,
+        run_mount_script=_run_script,
+        transport="ssh",
+        attempt_seconds=attempt_seconds,
     )
 
 
@@ -363,13 +432,50 @@ def _finder_recovery_result(label: str, mount: RemoteSmbMount) -> HostSetupResul
     )
 
 
-def _remote_login_account(host: dict[str, Any]) -> str:
+def _login_account_for_host(host: dict[str, Any]) -> str:
     target = str(host.get("host") or host.get("key") or "").strip()
     if "@" in target:
         account = target.rsplit("@", 1)[0].strip()
         if account:
             return account
     return "the configured SSH account"
+
+
+def _sanitized_controller_smb_mount(source: str, mount_point: Path) -> ControllerSmbMount | None:
+    if not _finder_mount_point_supported(mount_point) or not source.startswith("//"):
+        return None
+    authority, separator, raw_share_path = source[2:].partition("/")
+    if not separator or not raw_share_path:
+        return None
+    raw_user = authority.rsplit("@", 1)[0] if "@" in authority else ""
+    server = authority.rsplit("@", 1)[-1]
+    if not server or not _SMB_SERVER_RE.fullmatch(server):
+        return None
+    user = unquote(raw_user).split(":", 1)[0]
+    share_path = unquote(raw_share_path)
+    if any(ord(char) < 32 for char in user + share_path):
+        return None
+    user_prefix = f"{quote(user, safe='-._~')}@" if user else ""
+    return ControllerSmbMount(
+        source=f"//{user_prefix}{server}/{share_path}",
+        mount_point=mount_point,
+    )
+
+
+def _deduplicate_controller_smb_mounts(mounts: list[ControllerSmbMount]) -> list[ControllerSmbMount]:
+    resolved: dict[Path, ControllerSmbMount] = {}
+    for mount in mounts:
+        resolved[mount.mount_point] = mount
+    return sorted(resolved.values(), key=lambda mount: len(mount.mount_point.parts), reverse=True)
+
+
+def _sanitized_controller_smb_mounts(mounts: list[ControllerSmbMount]) -> list[ControllerSmbMount]:
+    sanitized = [
+        normalized
+        for mount in mounts
+        if (normalized := _sanitized_controller_smb_mount(mount.source, mount.mount_point)) is not None
+    ]
+    return _deduplicate_controller_smb_mounts(sanitized)
 
 
 def _finder_mount_point_supported(path: Path) -> bool:
@@ -398,12 +504,18 @@ def mount_output_field(value: str) -> str:
 
 
 __all__ = [
+    "CONTROLLER_SMB_MOUNTS_FILE_NAME",
     "ControllerSmbMount",
     "REMOTE_MOUNT_ATTEMPT_SECONDS",
     "RemoteSmbMount",
     "controller_smb_mounts_from_output",
+    "controller_smb_mounts_from_payload",
+    "controller_smb_mounts_path",
     "finder_mount_roots_for_paths",
+    "load_controller_smb_mounts",
     "mount_output_field",
     "mount_remote_smb_shares",
+    "mount_smb_shares",
     "remote_smb_mounts_for_paths",
+    "save_controller_smb_mounts",
 ]

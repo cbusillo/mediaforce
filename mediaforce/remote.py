@@ -1,5 +1,6 @@
 import os
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,8 +12,10 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
     remote_shell_path_export_line, ssh_target_for_host
-from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, controller_smb_mounts_from_output, \
-    mount_remote_smb_shares, remote_smb_mounts_for_paths
+from mediaforce.hosts.mount_runtime import REMOTE_MOUNT_ATTEMPT_SECONDS, ControllerSmbMount, RemoteSmbMount, \
+    controller_smb_mounts_from_output, controller_smb_mounts_from_payload, controller_smb_mounts_path, \
+    finder_mount_roots_for_paths, load_controller_smb_mounts, mount_smb_shares, remote_smb_mounts_for_paths, \
+    save_controller_smb_mounts
 from mediaforce.hosts.status_runtime import _current_machine_host_status as _current_machine_host_status_impl, \
     _remote_host_status as _remote_host_status_impl, _run_remote_status_probe as _run_remote_status_probe_impl
 from mediaforce.hosts.setup_runtime import _finish_remote_host_prepare as _finish_remote_host_prepare_impl, \
@@ -59,6 +62,7 @@ __all__ = [
     "execution_mode_for_host",
     "host_media_access_for_host",
     "host_status_targets_current_machine",
+    "learn_controller_smb_mounts",
     "normalize_host_media_access",
     "prepare_remote_host_with_password",
     "recover_remote_host_mounts",
@@ -69,6 +73,12 @@ __all__ = [
     "run_remote_command",
     "ssh_client_options",
 ]
+
+
+_MOUNT_RECOVERY_COOLDOWN_SECONDS = 120.0
+_MOUNT_RECOVERY_STATE_LOCK = threading.Lock()
+_MOUNT_RECOVERY_COOLDOWNS: dict[tuple[str, str], float] = {}
+_MOUNT_RECOVERY_NO_GUI_SESSIONS: dict[tuple[str, str], str] = {}
 
 
 def run_host_lifecycle_command(host: dict[str, object], command: str, *, timeout: int) -> subprocess.CompletedProcess[
@@ -94,6 +104,8 @@ def recover_remote_host_mounts(
         config: MediaforceConfig,
         host: dict[str, Any],
         status: HostStatus,
+        *,
+        force: bool = False,
 ) -> HostSetupResult:
     mounts = _remote_smb_mounts_for_status(config, host, status)
     label = str(host.get("label") or status.label or host.get("host") or "Remote host").strip() or "Remote host"
@@ -106,7 +118,29 @@ def recover_remote_host_mounts(
             ),
             failure_kind="controller_storage_unavailable",
         )
-    return mount_remote_smb_shares(host, mounts, run_remote_ssh=_run_remote_ssh)
+    current_machine = host_targets_current_machine(host)
+    session = _local_gui_session_token() if current_machine else ""
+    recovery_block = _mount_recovery_block(host, mounts, session=session, force=force)
+    if recovery_block is not None:
+        return recovery_block
+    result = mount_smb_shares(
+        host,
+        mounts,
+        run_mount_script=(
+            _run_local_mount_script
+            if current_machine
+            else lambda script, timeout: _run_remote_ssh(
+                host,
+                "sh",
+                "-s",
+                input_text=script,
+                timeout=timeout,
+            )
+        ),
+        transport="local" if current_machine else "ssh",
+    )
+    _record_mount_recovery_result(host, mounts, result, session=session)
+    return result
 
 
 def _remote_smb_mounts_for_status(
@@ -114,22 +148,57 @@ def _remote_smb_mounts_for_status(
         host: dict[str, Any],
         status: HostStatus,
 ) -> list[RemoteSmbMount] | None:
-    _ = config
     if (
             status.available
             or status.mode != "ssh"
             or status.platform != "macos"
             or not status.missing_mounts
             or host_media_access_for_host(host) != "mounted"
-            or host_targets_current_machine(host)
     ):
         return None
-    controller_mounts: list[ControllerSmbMount] = controller_smb_mounts_from_output(_controller_smb_mount_output())
+    controller_mounts = _controller_smb_mounts_for_config(config)
     return remote_smb_mounts_for_paths(
         status.missing_mounts,
         controller_mounts,
         remote_user=_ssh_user_for_host(host),
     )
+
+
+def learn_controller_smb_mounts(config: MediaforceConfig) -> int:
+    observed = controller_smb_mounts_from_output(_controller_smb_mount_output())
+    required_roots = _controller_required_mount_roots(config)
+    learned = [mount for mount in observed if mount.mount_point in required_roots]
+    if not learned:
+        return 0
+    path = controller_smb_mounts_path(config.paths.runtime_settings_path)
+    merged = {m.mount_point: m for m in [*load_controller_smb_mounts(path), *learned]}
+    save_controller_smb_mounts(path, list(merged.values()))
+    return len(learned)
+
+
+def _controller_smb_mounts_for_config(config: MediaforceConfig) -> list[ControllerSmbMount]:
+    override_mounts = controller_smb_mounts_from_payload(config.raw.get("controller_smb_mounts"))
+    learned_mounts = load_controller_smb_mounts(controller_smb_mounts_path(config.paths.runtime_settings_path))
+    resolved = {m.mount_point: m for m in [*learned_mounts, *override_mounts]}
+    return sorted(resolved.values(), key=lambda mount: len(mount.mount_point.parts), reverse=True)
+
+
+def _controller_required_mount_roots(config: MediaforceConfig) -> set[Path]:
+    roots: set[Path] = set()
+    for host in config.remote_hosts:
+        if host_media_access_for_host(host) != "mounted":
+            continue
+        paths = [
+            *config.source_root_map_for_host(host).values(),
+            config.staging_root_for_host(host),
+            config.archive_root_for_host(host),
+        ]
+        roots.update(_finder_mount_roots(paths))
+    return roots
+
+
+def _finder_mount_roots(paths: list[Path]) -> set[Path]:
+    return set(finder_mount_roots_for_paths(paths))
 
 
 def _controller_smb_mount_output() -> str:
@@ -138,6 +207,82 @@ def _controller_smb_mount_output() -> str:
     except (OSError, subprocess.SubprocessError):
         return ""
     return result.stdout if result.returncode == 0 else ""
+
+
+def _run_local_mount_script(script: str, timeout: int) -> subprocess.CompletedProcess[str]:
+    return _run_subprocess_text(["/bin/sh", "-s"], input_text=script, timeout=timeout)
+
+
+def _mount_recovery_block(
+        host: dict[str, Any],
+        mounts: list[RemoteSmbMount],
+        *,
+        session: str,
+        force: bool,
+) -> HostSetupResult | None:
+    host_key = _mount_recovery_host_key(host)
+    now = time.monotonic()
+    with _MOUNT_RECOVERY_STATE_LOCK:
+        for mount in mounts:
+            key = (host_key, str(mount.mount_point))
+            no_gui_session = _MOUNT_RECOVERY_NO_GUI_SESSIONS.get(key)
+            if no_gui_session is not None and (
+                    (session and no_gui_session == session)
+                    or (not session and not force)
+            ):
+                return HostSetupResult(
+                    ok=False,
+                    message=f"{_mount_recovery_label(host)} needs a signed-in macOS desktop session to connect shared storage.",
+                    detail="Sign in to the desktop, then use Prepare to retry storage recovery.",
+                    failure_kind="host_unavailable",
+                )
+            cooldown_until = _MOUNT_RECOVERY_COOLDOWNS.get(key, 0.0)
+            if not force and cooldown_until > now:
+                return HostSetupResult(
+                    ok=False,
+                    message=f"{_mount_recovery_label(host)} is cooling down after a shared-storage recovery attempt.",
+                    detail="Mediaforce will retry automatically after the bounded cooldown, or use Prepare to retry now.",
+                    failure_kind="host_unavailable",
+                )
+    return None
+
+
+def _record_mount_recovery_result(
+        host: dict[str, Any],
+        mounts: list[RemoteSmbMount],
+        result: HostSetupResult,
+        *,
+        session: str,
+) -> None:
+    host_key = _mount_recovery_host_key(host)
+    no_gui_session = "signed-in macOS desktop session" in result.message
+    cooldown_until = time.monotonic() + max(_MOUNT_RECOVERY_COOLDOWN_SECONDS, REMOTE_MOUNT_ATTEMPT_SECONDS + 90)
+    with _MOUNT_RECOVERY_STATE_LOCK:
+        for mount in mounts:
+            key = (host_key, str(mount.mount_point))
+            if result.ok:
+                _MOUNT_RECOVERY_COOLDOWNS.pop(key, None)
+                _MOUNT_RECOVERY_NO_GUI_SESSIONS.pop(key, None)
+                continue
+            _MOUNT_RECOVERY_COOLDOWNS[key] = cooldown_until
+            if no_gui_session:
+                _MOUNT_RECOVERY_NO_GUI_SESSIONS[key] = session
+
+
+def _local_gui_session_token() -> str:
+    try:
+        result = _run_subprocess_text(["/usr/bin/stat", "-f", "%u:%c", "/dev/console"], timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _mount_recovery_host_key(host: dict[str, Any]) -> str:
+    return str(host.get("host") or host.get("key") or host.get("label") or "controller").strip()
+
+
+def _mount_recovery_label(host: dict[str, Any]) -> str:
+    return str(host.get("label") or host.get("host") or "Controller").strip() or "Controller"
 
 
 def _ssh_user_for_host(host: dict[str, Any]) -> str | None:
@@ -291,6 +436,7 @@ def prepare_remote_host_with_password(
         request_remote_xcode_install=_request_remote_xcode_install,
         bootstrap_remote_macos=lambda host, pwd, issues: _bootstrap_remote_macos(host, pwd, issues=issues),
         recover_remote_host_mounts=recover_remote_host_mounts,
+        learn_controller_smb_mounts=learn_controller_smb_mounts,
         finish_remote_host_prepare=_finish_remote_host_prepare,
     )
 

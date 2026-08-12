@@ -542,15 +542,21 @@ Mediaforce can install this Mac's SSH public key, then let the prep step
 create remote paths and install `ffmpeg-full` plus `ab-av1` for
 `sample_calibration` hosts when possible. Those sample hosts now verify
 `libvmaf`/`xpsnr` metric support and `libsvtav1` before they show as ready.
-For mounted-media macOS hosts, Mediaforce can reconnect an SMB volume over SSH
-when the same `/Volumes/...` root is mounted on the controller. Recovery runs
-before preparation, sampling, or encode dispatch. The configured SSH account
-must be the active signed-in console user, and the remote Finder session uses
-that account's saved login-Keychain credentials; Mediaforce never reads or
-transports the password. If another account is active, the action identifies the
-account that must sign in. If Finder cannot use a saved credential, the action
-identifies the host and share that need one manual Finder connection with the
-password saved to Keychain before retrying.
+For mounted-media macOS hosts, including the controller itself, Mediaforce can
+reconnect an SMB volume through Finder. Recovery runs before preparation,
+sampling, or encode dispatch. The active signed-in console user must already
+have the share password saved in the login Keychain; Mediaforce never reads,
+stores, or transports it. While a required controller share is healthy,
+Mediaforce learns a password-free mount mapping into
+`~/Library/Application Support/mediaforce/controller-smb-mounts.json`. Status
+reads use that machine-local mapping instead of probing or mutating mount state.
+For first bootstrap, a private `controller_smb_mounts` list in runtime settings
+may supply the same `source` and `/Volumes/...` `mount_point` fields until a
+healthy mount can be observed and learned. Repeated automatic failures use a
+bounded cooldown, and a missing GUI session remains suppressed until the console
+login session changes. The operator can use Prepare for an explicit retry. If
+Finder cannot use a saved credential, the action identifies the host and share
+that need one manual Finder connection with the password saved to Keychain.
 
 Sampled calibration and AI note tuning can now run on any configured host with
 the `sample_calibration` capability. The folder page uses one AI-guided sample
