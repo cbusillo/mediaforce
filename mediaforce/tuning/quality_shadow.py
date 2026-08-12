@@ -155,6 +155,7 @@ class QualityShadowMetrics:
     performance_thresholds_met: bool
     active_eligible: bool
     blocking_reasons: tuple[str, ...]
+    raw_evaluated_runs: int = 0
 
     @property
     def production_quality_floor_violations(self) -> int:
@@ -187,6 +188,7 @@ class QualityShadowMetrics:
             "performance_thresholds_met": self.performance_thresholds_met,
             "active_eligible": self.active_eligible,
             "blocking_reasons": list(self.blocking_reasons),
+            "raw_evaluated_runs": self.raw_evaluated_runs,
         }
 
 
@@ -468,6 +470,7 @@ def build_quality_shadow_payload(
         size_target_bytes: int | None,
         warm_start_plan: Mapping[str, Any] | None = None,
         warm_start_trace: Mapping[str, Any] | None = None,
+        context: Mapping[str, Any] | None = None,
         final_size_miss: bool = False,
 ) -> dict[str, Any]:
     normalized_candidate_count = max(int(candidate_count), 0)
@@ -512,6 +515,7 @@ def build_quality_shadow_payload(
     payload = recommendation.to_payload()
     payload.update(
         {
+            "analysis_family_id": analysis_family_id_from_context(context),
             "production_search_changed": production_search_changed,
             "warm_start": warm_payload,
             "comparison": {
@@ -585,6 +589,8 @@ def _quality_warm_start_payload(
         "block_reason": _optional_text(plan_payload.get("block_reason")),
         "experiment_version": _optional_text(plan_payload.get("experiment_version")),
         "experiment_arm": _optional_text(plan_payload.get("experiment_arm")),
+        "future_experiment_arm": _optional_text(plan_payload.get("future_experiment_arm")),
+        "execution_mode": _optional_text(plan_payload.get("execution_mode")),
         "holdout_percent": int_value(plan_payload.get("holdout_percent")),
         "scope": _optional_text(plan_payload.get("scope")),
         "scope_prefix": _optional_text(plan_payload.get("scope_prefix")),
@@ -760,16 +766,28 @@ def load_quality_shadow_metrics(connection: DBClient) -> QualityShadowMetrics:
 
 
 def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMetrics:
-    row_list = list(rows)
+    raw_row_list = _resolve_current_rows(rows)
+    raw_evaluated_runs = sum(
+        payload.get("production_search_changed") is not True
+        for row in raw_row_list
+        if (payload := _json_object(row.get("shadow_json")))
+        and payload.get("algorithm_version") == QUALITY_SHADOW_ALGORITHM_VERSION
+    )
+    row_list = deduplicate_quality_terminal_rows(raw_row_list)
     row_payloads = [
         (row, payload)
         for row in row_list
         if (payload := _json_object(row.get("shadow_json")))
         and payload.get("algorithm_version") == QUALITY_SHADOW_ALGORITHM_VERSION
     ]
+    raw_row_payloads = [
+        (row, payload)
+        for row in raw_row_list
+        if (payload := _json_object(row.get("shadow_json")))
+        and payload.get("algorithm_version") == QUALITY_SHADOW_ALGORITHM_VERSION
+    ]
     payloads = [payload for _, payload in row_payloads]
     passive_payloads = [payload for payload in payloads if payload.get("production_search_changed") is not True]
-    active_payloads = [payload for payload in payloads if payload.get("production_search_changed") is True]
     evaluated_runs = len(passive_payloads)
     recommendation_payloads = [
         payload for payload in passive_payloads if object_dict(payload.get("recommendation"))
@@ -797,11 +815,14 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
     )
     passive_quality_floor_violations = sum(
         comparison.get("production_quality_floor_violation") is True
-        for comparison in (object_dict(payload.get("comparison")) for payload in passive_payloads)
+        for _, payload in raw_row_payloads
+        if payload.get("production_search_changed") is not True
+        for comparison in (object_dict(payload.get("comparison")),)
     )
     active_quality_floor_violations = sum(
         object_dict(payload.get("comparison")).get("production_quality_floor_violation") is True
-        for payload in active_payloads
+        for _, payload in raw_row_payloads
+        if payload.get("production_search_changed") is True
     )
     active_final_size_misses = sum(
         (
@@ -810,13 +831,13 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         )
         and _quality_memory_arm(row, payload) == "warm_start"
         and _quality_memory_attempted(row, payload)
-        for row, payload in row_payloads
+        for row, payload in raw_row_payloads
     ) + sum(
         str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
         and _quality_memory_arm(row, _json_object(row.get("shadow_json"))) == "warm_start"
         and _quality_memory_attempted(row, _json_object(row.get("shadow_json")))
         and not _json_object(row.get("shadow_json"))
-        for row in row_list
+        for row in raw_row_list
     )
     baseline_final_size_misses = sum(
         str(row.get("outcome_kind") or "") == OUTCOME_FINAL_SIZE_FAILURE
@@ -824,7 +845,7 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
             _quality_memory_arm(row, _json_object(row.get("shadow_json"))) == "warm_start"
             and _quality_memory_attempted(row, _json_object(row.get("shadow_json")))
         )
-        for row in row_list
+        for row in raw_row_list
     )
     coverage_rate = _ratio(recommendation_runs, evaluated_runs)
     within_one_rate = _ratio(within_one_count, recommendation_runs)
@@ -848,6 +869,7 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
     performance_thresholds_met = not performance_blocking_reasons
     return QualityShadowMetrics(
         evaluated_runs=evaluated_runs,
+        raw_evaluated_runs=raw_evaluated_runs,
         recommendation_runs=recommendation_runs,
         coverage_rate=coverage_rate,
         within_one_rate=within_one_rate,
@@ -912,6 +934,8 @@ def quality_result_target_changed(quality_result: Any) -> bool:
 
 def _quality_memory_arm(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> str | None:
     warm_start = object_dict(shadow.get("warm_start"))
+    if warm_start.get("execution_mode") == "passive":
+        return "passive"
     experiment_arm = str(warm_start.get("experiment_arm") or "")
     if experiment_arm:
         return experiment_arm
@@ -925,6 +949,8 @@ def _quality_memory_arm(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> st
 
 
 def _quality_memory_attempted(row: Mapping[str, Any], shadow: Mapping[str, Any]) -> bool:
+    if object_dict(shadow.get("warm_start")).get("execution_mode") == "passive":
+        return False
     execution = object_dict(object_dict(shadow.get("warm_start")).get("execution"))
     if execution.get("attempted") is True or shadow.get("production_search_changed") is True:
         return True
@@ -966,6 +992,108 @@ def _resolve_current_rows(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str
         if existing is None or rank > existing[0]:
             current[search_run_id] = (rank, row)
     return [current[search_run_id][1] for search_run_id in sorted(current)]
+
+
+def deduplicate_quality_terminal_rows(
+        rows: Iterable[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    selected: dict[tuple[str, str, str, str], tuple[tuple[int, int, str], Mapping[str, Any]]] = {}
+    for index, row in enumerate(rows):
+        outcome_kind = str(row.get("outcome_kind") or OUTCOME_SELECTED)
+        if outcome_kind not in {OUTCOME_SELECTED, OUTCOME_FINAL_SIZE_FAILURE}:
+            continue
+        key = (
+            "/".join(part for part in str(row.get("source_rel_path") or "").strip().split("/") if part),
+            str(row.get("source_fingerprint") or "").strip(),
+            str(row.get("search_signature_id") or "").strip(),
+            str(row.get("policy_hash") or "").strip(),
+        )
+        if not all(key):
+            continue
+        rank = (
+            _timestamp_rank(row.get("recorded_at")),
+            _AUTHORITY_RANK.get(str(row.get("authority") or ""), 0),
+            str(row.get("observation_id") or f"row-{index}"),
+        )
+        existing = selected.get(key)
+        if existing is None or rank > existing[0]:
+            selected[key] = (rank, row)
+    return [row for _, row in selected.values()]
+
+
+def _timestamp_rank(value: Any) -> int:
+    parsed = _parse_timestamp(value)
+    return int(_as_utc(parsed).timestamp()) if parsed is not None else -1
+
+
+def analysis_family_id_from_context(context: Mapping[str, Any] | None) -> str | None:
+    payload = object_dict(context)
+    if not payload:
+        return None
+    encoder_parameters = str(payload.get("encoder_parameters") or "").casefold()
+    pixel_format = str(payload.get("pixel_format") or "").casefold()
+    width = int_value(payload.get("output_width"))
+    height = int_value(payload.get("output_height"))
+    family = {
+        "intent": _optional_text(payload.get("compression_intent_id")),
+        "encoder_family": _optional_text(payload.get("encoder")),
+        "preset": _optional_text(payload.get("preset")),
+        "pixel_class": _pixel_class(pixel_format),
+        "resolution_bucket": _resolution_bucket(width, height),
+        "cadence_bucket": _cadence_bucket(str(payload.get("video_filter") or "")),
+        "metric": _optional_text(payload.get("metric")),
+        "search_objective": _optional_text(payload.get("search_objective")),
+        "source_codec": _optional_text(payload.get("source_codec")),
+        "floor_policy": _strict_number(payload.get("minimum_quality_score")),
+        "grain_category": _grain_category(encoder_parameters),
+        "filter_category": _filter_category(str(payload.get("video_filter") or "")),
+        "output_container": _optional_text(payload.get("output_container")),
+    }
+    return f"qaf1_{stable_json_hash(family)[:24]}"
+
+
+def _pixel_class(pixel_format: str) -> str:
+    chroma = "444" if "444" in pixel_format else "422" if "422" in pixel_format else "420"
+    bit_depth = "12" if "12" in pixel_format else "10" if "10" in pixel_format else "8"
+    return f"{chroma}p{bit_depth}"
+
+
+def _resolution_bucket(width: int, height: int) -> str:
+    pixels = width * height
+    if pixels <= 0:
+        return "unknown"
+    if pixels <= 1_000_000:
+        return "sd_or_720p"
+    if pixels <= 2_500_000:
+        return "1080p"
+    if pixels <= 5_000_000:
+        return "1440p"
+    return "uhd_or_larger"
+
+
+def _cadence_bucket(video_filter: str) -> str:
+    return "cadence_transform" if any(
+        token in video_filter.casefold() for token in ("yadif", "bwdif", "pullup", "fps=")
+    ) else "native"
+
+
+def _grain_category(encoder_parameters: str) -> str:
+    if "film-grain-denoise=" in encoder_parameters and "film-grain-denoise=0" not in encoder_parameters:
+        return "grain_denoise"
+    if "film-grain=" in encoder_parameters and "film-grain=0" not in encoder_parameters:
+        return "grain_preserved"
+    return "no_grain_transform"
+
+
+def _filter_category(video_filter: str) -> str:
+    normalized = video_filter.casefold()
+    if not normalized:
+        return "none"
+    if "scale=" in normalized:
+        return "scale"
+    if "crop=" in normalized:
+        return "crop"
+    return "other"
 
 
 def _trace_rejection(

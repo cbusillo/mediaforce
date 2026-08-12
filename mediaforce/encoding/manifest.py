@@ -498,7 +498,7 @@ def encode_one_item(
             "provenance": observation_provenance(),
         }
 
-    def run_quality_search(warm_start: Any = None) -> Any:
+    def run_quality_search() -> Any:
         return search_quality(
             quality_source_path,
             policy["video"],
@@ -514,16 +514,13 @@ def encode_one_item(
             quality_temp_dir=_quality_temp_dir_for_encode_host(config, quality_search_host),
             stream_budget_ledger=stream_budget,
             resolved_plan=quality_search_plan,
-            warm_start=warm_start,
             expected_search_signature_id=(
                 planned_quality_context.signature_id if planned_quality_context is not None else None
             ),
         )
 
     try:
-        quality_result = run_quality_search(
-            warm_start_plan.search_hint() if warm_start_plan is not None else None
-        )
+        quality_result = run_quality_search()
         quality_search_completed_at = timestamp()
         quality_search_duration_seconds = round(
             max(time.monotonic() - quality_search_start_monotonic, 0.0),
@@ -1000,6 +997,7 @@ def encode_one_item(
                         size_target_bytes=planned_quality_context.size_target_bytes,
                         warm_start_plan=warm_start_plan.to_payload(),
                         warm_start_trace=failure_warm_trace,
+                        context=planned_quality_context.to_payload(),
                         final_size_miss=True,
                     )
                 except Exception as shadow_error:
@@ -1236,6 +1234,7 @@ def encode_one_item(
                 size_target_bytes=quality_observation_context.size_target_bytes,
                 warm_start_plan=warm_start_plan.to_payload() if warm_start_plan is not None else None,
                 warm_start_trace=warm_start_trace,
+                context=quality_observation_context.to_payload(),
                 final_size_miss=(
                     str(warm_start_trace.get("fallback_reason") or "") == "final_size_miss"
                 ),
@@ -1257,6 +1256,7 @@ def encode_one_item(
                     size_target_bytes=quality_observation_context.size_target_bytes,
                     warm_start_plan=warm_start_plan.to_payload() if warm_start_plan is not None else None,
                     warm_start_trace=warm_start_trace,
+                    context=quality_observation_context.to_payload(),
                 )
             except Exception as fallback_error:
                 LOGGER.warning("Quality-shadow fallback recording failed: %s", fallback_error)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 import json
 import math
@@ -188,6 +188,7 @@ class AV1ColdStartPrediction:
     search_signature_id: str | None
     local_scope: str | None
     local_evidence_present: bool = False
+    scope_trials: tuple[tuple[str, str | None], ...] = ()
 
     @property
     def recommended(self) -> bool:
@@ -233,6 +234,10 @@ class AV1ColdStartPrediction:
             "provenance_ids": list(self.provenance_ids),
             "review_risks": list(self.review_risks),
             "local_scope": self.local_scope,
+            "scope_trials": [
+                {"scope": scope, "fallback_reason": fallback_reason}
+                for scope, fallback_reason in self.scope_trials[:4]
+            ],
             "fallback": {
                 "full_measured_calibration": not self.recommended,
                 "quality_floor_unchanged": True,
@@ -360,12 +365,48 @@ def predict_local_av1_cold_start(
         request: AV1ColdStartRequestV1,
         *,
         freshness_fallback_reason: str | None = None,
+        freshness_fallback_reasons: Mapping[str, str] | None = None,
 ) -> AV1ColdStartPrediction:
     if all_state is None:
         return _no_recommendation(request, "no_local_evidence")
-    all_cohort = _first_evidence_cohort(all_state)
-    if all_cohort is None:
+    if _first_evidence_cohort(all_state) is None:
         return _no_recommendation(request, "no_local_evidence")
+    scope_trials: list[tuple[str, str | None]] = []
+    first_failure: AV1ColdStartPrediction | None = None
+    for scope in ("item", "folder", "content_class", "operator"):
+        all_cohort = _cohort_for_scope(all_state, scope)
+        if all_cohort is None or all_cohort.observation_count == 0:
+            continue
+        fresh_cohort = _cohort_for_scope(fresh_state, scope)
+        fallback_reason = (
+            freshness_fallback_reasons.get(scope)
+            if freshness_fallback_reasons is not None
+            else freshness_fallback_reason
+        )
+        prediction = _predict_local_av1_cold_start_scope(
+            all_cohort,
+            fresh_cohort,
+            request,
+            freshness_fallback_reason=fallback_reason,
+        )
+        scope_trials.append((scope, prediction.fallback_reason))
+        if prediction.recommended:
+            return _with_scope_trials(prediction, scope_trials)
+        if first_failure is None:
+            first_failure = prediction
+    return _with_scope_trials(
+        first_failure or _no_recommendation(request, "no_local_evidence"),
+        scope_trials,
+    )
+
+
+def _predict_local_av1_cold_start_scope(
+        all_cohort: ContentIntentBoundaryCohort,
+        fresh_cohort: ContentIntentBoundaryCohort | None,
+        request: AV1ColdStartRequestV1,
+        *,
+        freshness_fallback_reason: str | None,
+) -> AV1ColdStartPrediction:
     local_provenance = _local_provenance_id(all_cohort)
     if freshness_fallback_reason is not None:
         return _no_recommendation(
@@ -383,7 +424,6 @@ def predict_local_av1_cold_start(
             local_evidence_present=True,
             provenance_ids=(local_provenance,),
         )
-    fresh_cohort = _cohort_for_scope(fresh_state, all_cohort.scope)
     if fresh_cohort is None or fresh_cohort.observation_count == 0:
         return _no_recommendation(
             request,
@@ -465,6 +505,13 @@ def predict_local_av1_cold_start(
     )
 
 
+def _with_scope_trials(
+        prediction: AV1ColdStartPrediction,
+        scope_trials: Sequence[tuple[str, str | None]],
+) -> AV1ColdStartPrediction:
+    return replace(prediction, scope_trials=tuple(scope_trials[:4]))
+
+
 def plan_av1_cold_start(
         connection: DBClient,
         *,
@@ -503,37 +550,9 @@ def plan_av1_cold_start(
         )
     except ValueError:
         return _no_recommendation(request, "cold_start_request_invalid")
-    all_cohort = _first_evidence_cohort(all_state) if all_state is not None else None
     request_time = _parse_timestamp(as_of, "request timestamp")
     cutoff = request_time - timedelta(days=AV1_COLD_START_LOCAL_MAX_AGE_DAYS)
     fresh_rows = [row for row in rows if _row_at_or_after(row, cutoff, request_time)]
-    try:
-        selected_scope_rows = (
-            content_intent_replay_scope_rows(
-                rows,
-                source_id=replay_context.source_id,
-                content_id=replay_context.content_id,
-                prefix=prefix,
-                content_profile_id=replay_context.content_profile_id,
-                intent_semantic_id=request.intent_semantic_id,
-                compatibility_key=local_compatibility.compatibility_key,
-                scope=all_cohort.scope,
-            )
-            if all_cohort is not None
-            else ()
-        )
-    except ValueError:
-        return _no_recommendation(request, "cold_start_request_invalid")
-    selected_timestamp_statuses = {
-        _row_timestamp_status(row, cutoff, request_time)
-        for row in selected_scope_rows
-    }
-    if "unversioned" in selected_timestamp_statuses:
-        freshness_fallback_reason = "local_evidence_unversioned"
-    elif "future" in selected_timestamp_statuses:
-        freshness_fallback_reason = "local_evidence_future_dated"
-    else:
-        freshness_fallback_reason = None
     try:
         fresh_state = _replay_local_state(
             fresh_rows,
@@ -544,11 +563,42 @@ def plan_av1_cold_start(
         )
     except ValueError:
         return _no_recommendation(request, "cold_start_request_invalid")
+    try:
+        populated_scopes = [
+            cohort.scope
+            for cohort in all_state.cohorts
+            if cohort.observation_count > 0
+        ] if all_state is not None else []
+        scope_rows = {
+            scope: content_intent_replay_scope_rows(
+                rows,
+                source_id=replay_context.source_id,
+                content_id=replay_context.content_id,
+                prefix=prefix,
+                content_profile_id=replay_context.content_profile_id,
+                intent_semantic_id=request.intent_semantic_id,
+                compatibility_key=local_compatibility.compatibility_key,
+                scope=scope,
+            )
+            for scope in populated_scopes
+        }
+    except ValueError:
+        return _no_recommendation(request, "cold_start_request_invalid")
+    freshness_fallback_reasons: dict[str, str] = {}
+    for scope, selected_scope_rows in scope_rows.items():
+        selected_timestamp_statuses = {
+            _row_timestamp_status(row, cutoff, request_time)
+            for row in selected_scope_rows
+        }
+        if "unversioned" in selected_timestamp_statuses:
+            freshness_fallback_reasons[scope] = "local_evidence_unversioned"
+        elif "future" in selected_timestamp_statuses:
+            freshness_fallback_reasons[scope] = "local_evidence_future_dated"
     return predict_local_av1_cold_start(
         all_state,
         fresh_state,
         request,
-        freshness_fallback_reason=freshness_fallback_reason,
+        freshness_fallback_reasons=freshness_fallback_reasons,
     )
 
 

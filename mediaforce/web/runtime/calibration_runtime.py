@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import delete
 from sqlalchemy import select
@@ -783,7 +783,6 @@ def run_sampled_calibration(
                 cold_start_prediction = unavailable_av1_cold_start_prediction(
                     "cold_start_planner_error"
                 )
-    quality_kwargs.update(_av1_cold_start_quality_kwargs(cold_start_prediction))
     if progress_callback is not None:
         progress_callback("searching_target")
     quality_result = deps.search_quality_for_source(quality_source_path, video_policy, **quality_kwargs)
@@ -911,7 +910,7 @@ def run_sampled_calibration(
     )
     target_size_trace = object_dict(getattr(quality_result, "target_size_trace", None)) or None
     cold_start_payload = cold_start_prediction.to_payload()
-    cold_start_payload["execution"] = object_dict(object_dict(target_size_trace).get("warm_start")) or None
+    cold_start_payload["execution"] = _av1_cold_start_execution_evidence(target_size_trace)
     compatibility_payload = _content_intent_compatibility_payload(
         sample_item=sample_item,
         video_policy=video_policy,
@@ -1001,14 +1000,12 @@ def run_sampled_calibration(
     return payload, None
 
 
-def _av1_cold_start_quality_kwargs(prediction: Any) -> dict[str, Any]:
-    hint = prediction.search_hint()
-    if hint is None:
-        return {}
-    return {
-        "warm_start": hint,
-        "expected_search_signature_id": hint.search_signature_id,
-    }
+def _av1_cold_start_execution_evidence(target_size_trace: Mapping[str, Any] | None) -> dict[str, Any]:
+    trace = object_dict(target_size_trace)
+    active_execution = object_dict(trace.get("warm_start"))
+    if active_execution:
+        return active_execution
+    return {"mode": "passive", "attempted": False}
 
 
 def _configured_host_record(config: MediaforceConfig, host_data: dict[str, Any]) -> dict[str, Any] | None:

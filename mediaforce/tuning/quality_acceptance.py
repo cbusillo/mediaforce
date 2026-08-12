@@ -12,7 +12,15 @@ from sqlalchemy import select
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.type_defs import object_dict
-from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix
+from mediaforce.library.media_scopes import (
+    MediaScope,
+    media_group_scope_for_rel_path,
+    media_scope_from_prefix,
+    normalize_scope_prefix,
+)
+from mediaforce.tuning.content_intent_observations import (
+    load_current_content_intent_boundary_observations,
+)
 from mediaforce.tuning.quality_observations import (
     OUTCOME_FINAL_SIZE_FAILURE,
     OUTCOME_SELECTED,
@@ -21,6 +29,7 @@ from mediaforce.tuning.quality_observations import (
 from mediaforce.tuning.quality_shadow import (
     MIN_SHADOW_RECOMMENDATIONS,
     QualityShadowMetrics,
+    deduplicate_quality_terminal_rows,
     quality_memory_scope_chain,
     quality_shadow_metrics,
 )
@@ -127,9 +136,30 @@ class QualityAcceptanceSafety:
 
 
 @dataclass(frozen=True, slots=True)
+class QualityAcceptanceOperatorOutcomes:
+    current_observations: int
+    rejection_count: int
+    rejection_rate: float
+    additional_attention_count: int
+    additional_attention_rate: float
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "current_observations": self.current_observations,
+            "rejection_count": self.rejection_count,
+            "rejection_rate": self.rejection_rate,
+            "additional_attention_count": self.additional_attention_count,
+            "additional_attention_rate": self.additional_attention_rate,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class QualityAcceptanceGroup:
     key: QualityAcceptanceGroupKey
     distinct_items: int
+    passive_distinct_items: int
+    natural_cluster_count: int
+    largest_cluster_concentration: float
     passive_benchmark_runs: int
     passive_readiness: QualityShadowMetrics
     active_observed: QualityAcceptanceActiveObserved
@@ -141,6 +171,9 @@ class QualityAcceptanceGroup:
         return {
             "key": self.key.to_payload(),
             "distinct_items": self.distinct_items,
+            "passive_distinct_items": self.passive_distinct_items,
+            "natural_cluster_count": self.natural_cluster_count,
+            "largest_cluster_concentration": self.largest_cluster_concentration,
             "passive_benchmark_runs": self.passive_benchmark_runs,
             "passive_readiness": self.passive_readiness.to_payload(),
             "active_observed": self.active_observed.to_payload(),
@@ -157,6 +190,7 @@ class QualityAcceptanceReport:
     requested_prefix: str | None
     rows_considered: int
     missing_policy_rows: int
+    operator_outcomes: QualityAcceptanceOperatorOutcomes
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -166,6 +200,7 @@ class QualityAcceptanceReport:
             "requested_prefix": self.requested_prefix,
             "rows_considered": self.rows_considered,
             "missing_policy_rows": self.missing_policy_rows,
+            "operator_outcomes": self.operator_outcomes.to_payload(),
         }
 
 
@@ -184,6 +219,10 @@ def load_quality_acceptance_report(
     return quality_acceptance_report(
         load_current_quality_search_observations(connection),
         terminal_events=terminal_events,
+        boundary_rows=load_current_content_intent_boundary_observations(
+            connection,
+            include_withdrawn=True,
+        ),
         library_types=library_types,
         prefix=prefix,
     )
@@ -193,6 +232,7 @@ def quality_acceptance_report(
         rows: Iterable[Mapping[str, Any]],
         *,
         terminal_events: Iterable[Mapping[str, Any]] = (),
+        boundary_rows: Iterable[Mapping[str, Any]] = (),
         library_types: Mapping[str, str] | None = None,
         prefix: str | None = None,
 ) -> QualityAcceptanceReport:
@@ -233,6 +273,7 @@ def quality_acceptance_report(
         requested_prefix=requested_prefix,
         rows_considered=len(relevant_rows),
         missing_policy_rows=sum(not str(row.get("policy_hash") or "") for row in relevant_rows),
+        operator_outcomes=_operator_outcomes(boundary_rows),
     )
 
 
@@ -242,7 +283,9 @@ def format_quality_acceptance_report(report: QualityAcceptanceReport) -> str:
         (
             f"groups={len(report.groups)} rows={report.rows_considered} "
             f"unattributed_final_size_failures={report.unattributed_final_size_failures} "
-            f"missing_policy_rows={report.missing_policy_rows}"
+            f"missing_policy_rows={report.missing_policy_rows} "
+            f"operator_rejections={report.operator_outcomes.rejection_count} "
+            f"operator_attention={report.operator_outcomes.additional_attention_count}"
         ),
     ]
     if report.requested_prefix is not None:
@@ -266,6 +309,9 @@ def format_quality_acceptance_report(report: QualityAcceptanceReport) -> str:
                     "  passive "
                     f"recommendations={passive.recommendation_runs} "
                     f"benchmarks={group.passive_benchmark_runs} "
+                    f"distinct_units={group.passive_distinct_items} "
+                    f"clusters={group.natural_cluster_count} "
+                    f"largest_cluster={_percent(group.largest_cluster_concentration)} "
                     f"within_one={_percent(passive.within_one_rate)} "
                     f"projected_candidates={_percent(passive.median_candidate_savings_rate)} "
                     f"eligible={'yes' if passive.active_eligible else 'no'}"
@@ -452,6 +498,25 @@ def _acceptance_group(
     )
     safety = _safety(safety_scope_rows)
     distinct_items = len({str(row.get("source_rel_path") or "") for row in group_rows})
+    passive_rows = deduplicate_quality_terminal_rows([
+        row for row in group_rows
+        if _quality_memory_arm(row, _json_object(row.get("shadow_json"))) != "warm_start"
+    ])
+    passive_distinct_items = len({str(row.get("source_rel_path") or "") for row in passive_rows})
+    cluster_items = {
+        (
+            _natural_cluster_id(source_rel_path, library_types=library_types),
+            source_rel_path,
+        )
+        for row in passive_rows
+        if (source_rel_path := str(row.get("source_rel_path") or ""))
+    }
+    clusters = Counter(cluster_id for cluster_id, _ in cluster_items)
+    largest_cluster_concentration = (
+        round(max(clusters.values()) / passive_distinct_items, 6)
+        if clusters and passive_distinct_items > 0
+        else 0.0
+    )
     closure_blocking_reasons = _closure_blocking_reasons(
         passive_readiness=passive_readiness,
         passive_benchmark_runs=passive_benchmark_runs,
@@ -461,6 +526,9 @@ def _acceptance_group(
     return QualityAcceptanceGroup(
         key=key,
         distinct_items=distinct_items,
+        passive_distinct_items=passive_distinct_items,
+        natural_cluster_count=len(clusters),
+        largest_cluster_concentration=largest_cluster_concentration,
         passive_benchmark_runs=passive_benchmark_runs,
         passive_readiness=passive_readiness,
         active_observed=active_observed,
@@ -758,6 +826,62 @@ def _savings_rate(observed: float | None, baseline: float | None) -> float | Non
     if observed is None or baseline is None or baseline <= 0:
         return None
     return round((baseline - observed) / baseline, 6)
+
+
+def _ratio(numerator: int, denominator: int) -> float:
+    return round(numerator / denominator, 6) if denominator > 0 else 0.0
+
+
+def _natural_cluster_id(
+        source_rel_path: str,
+        *,
+        library_types: Mapping[str, str] | None,
+) -> str:
+    scope = media_group_scope_for_rel_path(source_rel_path, library_types=library_types)
+    if scope is None:
+        return source_rel_path
+    return f"{scope.kind}:{scope.prefix}"
+
+
+def _operator_outcomes(
+        rows: Iterable[Mapping[str, Any]],
+) -> QualityAcceptanceOperatorOutcomes:
+    current_rows = _current_boundary_rows(rows)
+    rejection_count = sum(
+        str(row.get("verdict") or "").casefold() in {"unacceptable", "rejected"}
+        for row in current_rows
+    )
+    additional_attention_count = sum(_requires_additional_attention(row) for row in current_rows)
+    denominator = len(current_rows)
+    return QualityAcceptanceOperatorOutcomes(
+        current_observations=denominator,
+        rejection_count=rejection_count,
+        rejection_rate=_ratio(rejection_count, denominator),
+        additional_attention_count=additional_attention_count,
+        additional_attention_rate=_ratio(additional_attention_count, denominator),
+    )
+
+
+def _current_boundary_rows(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    current: dict[str, Mapping[str, Any]] = {}
+    for index, row in enumerate(rows):
+        identity = str(row.get("series_id") or row.get("observation_id") or f"row-{index}")
+        previous = current.get(identity)
+        if previous is None or int(row.get("revision") or 0) >= int(previous.get("revision") or 0):
+            current[identity] = row
+    return list(current.values())
+
+
+def _requires_additional_attention(row: Mapping[str, Any]) -> bool:
+    if str(row.get("verdict") or "").casefold() in {"unacceptable", "rejected"}:
+        return True
+    if str(row.get("disposition") or "").casefold() == "withdrawn":
+        return True
+    if int(row.get("revision") or 0) > 0:
+        return True
+    assessment = _json_object(row.get("assessment_json"))
+    concern_tags = assessment.get("concern_tags")
+    return isinstance(concern_tags, list) and bool(concern_tags)
 
 
 def _prefix_includes(prefix: str | None, rel_path: str) -> bool:
