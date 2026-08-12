@@ -33,7 +33,7 @@ from mediaforce.tuning.quality_observations import (
 )
 
 QUALITY_SHADOW_SCHEMA_VERSION = 1
-QUALITY_SHADOW_ALGORITHM_VERSION = "qsh1"
+QUALITY_SHADOW_ALGORITHM_VERSION = "qsh2"
 MAX_EVIDENCE_OBSERVATION_IDS = 20
 QUALITY_SCORE_MONOTONIC_TOLERANCE = 0.5
 QUALITY_SCORE_CONFLICT_MARGIN = 0.25
@@ -52,6 +52,7 @@ QualityShadowFallbackReason = Literal[
     "search_target_changed",
     "non_monotonic_trace",
     "conflicting_quality_evidence",
+    "final_retry_terminal",
     "shadow_evaluation_error",
 ]
 
@@ -69,6 +70,7 @@ _FALLBACK_PRIORITY: tuple[QualityShadowFallbackReason, ...] = (
     "conflicting_quality_evidence",
     "non_monotonic_trace",
     "search_target_changed",
+    "final_retry_terminal",
     "high_dispersion",
     "sparse_cohort",
     "source_fingerprint_changed",
@@ -268,7 +270,13 @@ def recommend_quality_search_from_rows(
             continue
         rows_before_cutoff.append(row)
     evidence: list[_ShadowEvidence] = []
-    for row in _resolve_current_rows(rows_before_cutoff):
+    fallback_reasons: list[QualityShadowFallbackReason] = []
+    terminal_rows = deduplicate_quality_terminal_rows(
+        _resolve_current_rows(rows_before_cutoff),
+        allow_unhashed_backfill=allow_unhashed_backfill,
+        retain_missing_policy=True,
+    )
+    for row in terminal_rows:
         rel_path = str(row.get("source_rel_path") or "").strip().strip("/")
         if str(row.get("outcome_kind") or "") != OUTCOME_SELECTED:
             continue
@@ -305,6 +313,10 @@ def recommend_quality_search_from_rows(
             exclusion_counts["malformed_observation"] += 1
             continue
         candidate_trace = _json_object(row.get("candidate_trace_json"))
+        if _selected_candidate_is_final_retry(candidate_trace):
+            exclusion_counts["final_retry_terminal"] += 1
+            fallback_reasons.append("final_retry_terminal")
+            continue
         trace_rejection = _trace_rejection(
             candidate_trace,
             expected_context.minimum_quality_score,
@@ -322,7 +334,6 @@ def recommend_quality_search_from_rows(
             )
         )
 
-    fallback_reasons: list[QualityShadowFallbackReason] = []
     normalized_fingerprint = _optional_text(source_fingerprint)
     for scope_name, scope in scope_chain:
         scoped = [observation for observation in evidence if scope.includes(observation.rel_path)]
@@ -472,12 +483,22 @@ def build_quality_shadow_payload(
         warm_start_trace: Mapping[str, Any] | None = None,
         context: Mapping[str, Any] | None = None,
         final_size_miss: bool = False,
+        selected_candidate_role: str | None = None,
 ) -> dict[str, Any]:
     normalized_candidate_count = max(int(candidate_count), 0)
     quality_margin = round(selected_score - minimum_quality_score, 3)
     size_error_percent = _size_error_percent(actual_output_bytes, size_target_bytes)
     first_crf = recommendation.first_crf
-    delta = round(selected_crf - first_crf, 3) if first_crf is not None else None
+    evaluation_exclusion_reason = (
+        "final_retry_terminal"
+        if selected_candidate_role == "final_retry_measurement"
+        else None
+    )
+    delta = (
+        round(selected_crf - first_crf, 3)
+        if first_crf is not None and evaluation_exclusion_reason is None
+        else None
+    )
     within_one = abs(delta) <= 1.0 if delta is not None else None
     projected_candidate_count: int | None = None
     candidate_savings_count: int | None = None
@@ -520,6 +541,8 @@ def build_quality_shadow_payload(
             "warm_start": warm_payload,
             "comparison": {
                 "selected_crf": selected_crf,
+                "selected_candidate_role": selected_candidate_role,
+                "evaluation_exclusion_reason": evaluation_exclusion_reason,
                 "crf_delta": delta,
                 "within_one_crf": within_one,
                 "candidate_count": normalized_candidate_count,
@@ -535,13 +558,17 @@ def build_quality_shadow_payload(
                 "size_error_percent": size_error_percent,
                 "final_size_miss": final_size_miss,
                 "fallback_needed": (
-                    warm_trace.get("fallback_used") is True
-                    if production_search_changed
-                    else first_crf is None or not bool(within_one)
+                    None
+                    if evaluation_exclusion_reason is not None
+                    else (
+                        warm_trace.get("fallback_used") is True
+                        if production_search_changed
+                        else first_crf is None or not bool(within_one)
+                    )
                 ),
                 "false_narrow": (
                     False
-                    if production_search_changed
+                    if production_search_changed or evaluation_exclusion_reason is not None
                     else first_crf is not None and not bool(within_one)
                 ),
             },
@@ -790,7 +817,10 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
     passive_payloads = [payload for payload in payloads if payload.get("production_search_changed") is not True]
     evaluated_runs = len(passive_payloads)
     recommendation_payloads = [
-        payload for payload in passive_payloads if object_dict(payload.get("recommendation"))
+        payload
+        for payload in passive_payloads
+        if object_dict(payload.get("recommendation"))
+        and not object_dict(payload.get("comparison")).get("evaluation_exclusion_reason")
     ]
     recommendation_runs = len(recommendation_payloads)
     comparisons = [object_dict(payload.get("comparison")) for payload in passive_payloads]
@@ -808,11 +838,17 @@ def quality_shadow_metrics(rows: Iterable[Mapping[str, Any]]) -> QualityShadowMe
         for comparison in recommendation_comparisons
         if (value := _strict_number(comparison.get("search_time_savings_rate"))) is not None
     ]
-    fallback_counts = Counter(
-        str(payload.get("fallback_reason"))
-        for payload in passive_payloads
-        if payload.get("fallback_reason")
-    )
+    fallback_counts: Counter[str] = Counter()
+    for payload in passive_payloads:
+        reasons = {
+            str(reason)
+            for reason in (
+                payload.get("fallback_reason"),
+                object_dict(payload.get("comparison")).get("evaluation_exclusion_reason"),
+            )
+            if reason
+        }
+        fallback_counts.update(reasons)
     passive_quality_floor_violations = sum(
         comparison.get("production_quality_floor_violation") is True
         for _, payload in raw_row_payloads
@@ -996,17 +1032,28 @@ def _resolve_current_rows(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str
 
 def deduplicate_quality_terminal_rows(
         rows: Iterable[Mapping[str, Any]],
+        *,
+        allow_unhashed_backfill: bool = False,
+        retain_missing_policy: bool = False,
 ) -> list[Mapping[str, Any]]:
     selected: dict[tuple[str, str, str, str], tuple[tuple[int, int, str], Mapping[str, Any]]] = {}
     for index, row in enumerate(rows):
         outcome_kind = str(row.get("outcome_kind") or OUTCOME_SELECTED)
         if outcome_kind not in {OUTCOME_SELECTED, OUTCOME_FINAL_SIZE_FAILURE}:
             continue
+        policy_hash = str(row.get("policy_hash") or "").strip()
+        if not policy_hash:
+            if allow_unhashed_backfill and str(row.get("authority") or "") == AUTHORITY_STAGED_BACKFILL:
+                policy_hash = "staged_backfill:unhashed"
+            elif retain_missing_policy:
+                policy_hash = f"missing:{str(row.get('authority') or 'unknown')}"
+            else:
+                continue
         key = (
             "/".join(part for part in str(row.get("source_rel_path") or "").strip().split("/") if part),
             str(row.get("source_fingerprint") or "").strip(),
             str(row.get("search_signature_id") or "").strip(),
-            str(row.get("policy_hash") or "").strip(),
+            policy_hash,
         )
         if not all(key):
             continue
@@ -1140,6 +1187,11 @@ def _trace_rejection(
     return None
 
 
+def _selected_candidate_is_final_retry(trace: Mapping[str, Any]) -> bool:
+    selected_candidate = object_dict(trace.get("selected_candidate"))
+    return str(selected_candidate.get("role") or "") == "final_retry_measurement"
+
+
 def _fallback_reason(
         fallback_reasons: Iterable[QualityShadowFallbackReason],
         *,
@@ -1167,6 +1219,11 @@ def _fallback_detail(reason: QualityShadowFallbackReason, exclusions: Counter[st
         return f"{count or 'Historical'} observation trace(s) were non-monotonic and were excluded."
     if reason == "conflicting_quality_evidence":
         return f"{count or 'Historical'} observation trace(s) contained conflicting quality-floor evidence."
+    if reason == "final_retry_terminal":
+        return (
+            f"{count or 'Historical'} terminal result(s) came from bounded final-size retries and were "
+            "excluded from first-CRF guidance."
+        )
     if reason == "stale_signature":
         return "Historical observations do not match the current search signature or policy."
     if reason == "stale_evidence":

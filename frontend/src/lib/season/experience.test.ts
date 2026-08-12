@@ -286,7 +286,7 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 function qualityMemoryPayload(): FolderQualityMemoryPayload {
 	return {
 		schema_version: 1,
-		algorithm_version: 'qsh1',
+		algorithm_version: 'qsh2',
 		observation_id: 'qso1_fixture',
 		source_rel_path: 'tv/Big Brother (US)/Season 19/Episode 03.mkv',
 		recorded_at: '2026-07-24T17:00:00+00:00',
@@ -518,6 +518,7 @@ describe('quality memory explanation', () => {
 
 	it.each([
 		['sparse_cohort', 'sparse', 'Sparse memory'],
+		['final_retry_terminal', 'sparse', 'Sparse memory'],
 		['stale_signature', 'stale', 'Memory invalidated'],
 		['shadow_evaluation_error', 'unavailable', 'Memory unavailable'],
 		['conflicting_quality_evidence', 'conflicting', 'Evidence conflict']

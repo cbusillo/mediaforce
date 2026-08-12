@@ -201,6 +201,156 @@ class QualityShadowTests(unittest.TestCase):
         self.assertIn("qso1_correction", recommendation.evidence_observation_ids)
         self.assertNotIn("qso1_1", recommendation.evidence_observation_ids)
 
+    def test_recommendation_deduplicates_retries_by_item_version(self) -> None:
+        rows = [self._row(index=index, crf=50.0) for index in range(1, 4)]
+        rows.extend(
+            [
+                self._row(
+                    index=4,
+                    crf=40.0,
+                    completed_at=self.as_of - timedelta(days=2),
+                    rel_path="tv/Show/Season 01/Episode 04.mkv",
+                    source_fingerprint="shared-version",
+                    observation_id="qso1_retry_old",
+                    search_run_id="qsr1_retry_old",
+                ),
+                self._row(
+                    index=5,
+                    crf=50.0,
+                    completed_at=self.as_of - timedelta(days=1),
+                    rel_path="tv/Show/Season 01/Episode 04.mkv",
+                    source_fingerprint="shared-version",
+                    observation_id="qso1_retry_new",
+                    search_run_id="qsr1_retry_new",
+                ),
+            ]
+        )
+
+        recommendation = self._recommend(rows)
+
+        self.assertEqual(recommendation.sample_count, 4)
+        self.assertEqual(recommendation.first_crf, 50.0)
+        self.assertIn("qso1_retry_new", recommendation.evidence_observation_ids)
+        self.assertNotIn("qso1_retry_old", recommendation.evidence_observation_ids)
+
+    def test_final_retry_terminal_is_excluded_from_first_crf_guidance(self) -> None:
+        rows = [self._row(index=index, crf=50.0) for index in range(1, 4)]
+        rows.append(
+            self._row(
+                index=4,
+                crf=44.0,
+                candidates=[
+                    {"crf": 46.0, "metric_score": 85.0, "role": "expanded_bound"},
+                    {"crf": 44.0, "metric_score": 86.0, "role": "final_retry_measurement"},
+                ],
+                selected_candidate={
+                    "crf": 44.0,
+                    "metric_score": 86.0,
+                    "role": "final_retry_measurement",
+                },
+            )
+        )
+
+        recommendation = self._recommend(rows)
+
+        self.assertFalse(recommendation.available)
+        self.assertEqual(recommendation.fallback_reason, "final_retry_terminal")
+        exclusions = {entry.reason: entry.count for entry in recommendation.exclusions}
+        self.assertEqual(exclusions["final_retry_terminal"], 1)
+
+    def test_final_retry_terminal_is_excluded_from_passive_accuracy_metrics(self) -> None:
+        recommendation = self._available_recommendation(first_crf=44.0)
+        payload = build_quality_shadow_payload(
+            recommendation,
+            selected_crf=42.0,
+            selected_score=85.0,
+            minimum_quality_score=84.0,
+            candidate_count=4,
+            search_duration_seconds=100.0,
+            actual_output_bytes=300_000_000,
+            size_target_bytes=300_000_000,
+            selected_candidate_role="final_retry_measurement",
+        )
+
+        comparison = payload["comparison"]
+        self.assertIsNone(comparison["crf_delta"])
+        self.assertIsNone(comparison["within_one_crf"])
+        self.assertIsNone(comparison["fallback_needed"])
+        self.assertFalse(comparison["false_narrow"])
+        self.assertEqual(comparison["evaluation_exclusion_reason"], "final_retry_terminal")
+
+        metrics = quality_shadow_metrics([self._metric_row(index=1, payload=payload)])
+        self.assertEqual(metrics.evaluated_runs, 1)
+        self.assertEqual(metrics.recommendation_runs, 0)
+        self.assertEqual(metrics.fallback_need_rate, 0.0)
+        self.assertEqual(dict(metrics.fallback_counts), {"final_retry_terminal": 1})
+
+    def test_final_retry_reason_is_counted_once_per_passive_run(self) -> None:
+        recommendation = QualityShadowRecommendation(
+            search_signature_id=self.context.signature_id,
+            evidence_cutoff_at=self.as_of.isoformat(),
+            first_crf=None,
+            scope=None,
+            confidence="none",
+            sample_count=0,
+            cohort_id=None,
+            minimum_crf=None,
+            maximum_crf=None,
+            iqr=None,
+            median_absolute_deviation=None,
+            evidence_observation_ids=(),
+            fallback_reason="final_retry_terminal",
+            reason="test",
+            exclusions=(),
+        )
+        payload = build_quality_shadow_payload(
+            recommendation,
+            selected_crf=42.0,
+            selected_score=85.0,
+            minimum_quality_score=84.0,
+            candidate_count=4,
+            search_duration_seconds=100.0,
+            actual_output_bytes=300_000_000,
+            size_target_bytes=300_000_000,
+            selected_candidate_role="final_retry_measurement",
+        )
+
+        metrics = quality_shadow_metrics([self._metric_row(index=1, payload=payload)])
+
+        self.assertEqual(dict(metrics.fallback_counts), {"final_retry_terminal": 1})
+
+    def test_newer_final_size_failure_suppresses_older_selected_terminal(self) -> None:
+        rows = [self._row(index=index, crf=50.0) for index in range(1, 4)]
+        rows.extend(
+            [
+                self._row(
+                    index=4,
+                    crf=50.0,
+                    completed_at=self.as_of - timedelta(days=2),
+                    rel_path="tv/Show/Season 01/Episode 04.mkv",
+                    source_fingerprint="shared-version",
+                    observation_id="qso1_selected_old",
+                    search_run_id="qsr1_selected_old",
+                ),
+                self._row(
+                    index=5,
+                    crf=50.0,
+                    completed_at=self.as_of - timedelta(days=1),
+                    rel_path="tv/Show/Season 01/Episode 04.mkv",
+                    source_fingerprint="shared-version",
+                    observation_id="qso1_failure_new",
+                    search_run_id="qsr1_failure_new",
+                    outcome_kind="final_size_failure",
+                    learning_eligible=0,
+                ),
+            ]
+        )
+
+        recommendation = self._recommend(rows)
+
+        self.assertFalse(recommendation.available)
+        self.assertEqual(recommendation.fallback_reason, "sparse_cohort")
+
     def test_shadow_comparison_models_hit_and_fallback_cost_without_changing_search(self) -> None:
         recommendation = self._available_recommendation(first_crf=50.0)
 
@@ -842,12 +992,16 @@ class QualityShadowTests(unittest.TestCase):
             signature_id: str | None = None,
             candidates: list[dict[str, object]] | None = None,
             attempts: list[dict[str, object]] | None = None,
+            selected_candidate: dict[str, object] | None = None,
             rel_path: str | None = None,
+            source_fingerprint: str | None = None,
             policy_hash: str | None = "policy-1",
             authority: str = "runtime_native",
             observation_id: str | None = None,
             search_run_id: str | None = None,
             revision: int = 0,
+            outcome_kind: str = "selected",
+            learning_eligible: int = 1,
     ) -> dict[str, object]:
         completion = completed_at or self.as_of - timedelta(days=index)
         recorded = recorded_at or completion
@@ -855,19 +1009,20 @@ class QualityShadowTests(unittest.TestCase):
             "observation_id": observation_id or f"qso1_{index}",
             "search_run_id": search_run_id or f"qsr1_{index}",
             "revision": revision,
-            "outcome_kind": "selected",
-            "learning_eligible": 1,
+            "outcome_kind": outcome_kind,
+            "learning_eligible": learning_eligible,
             "authority": authority,
             "search_signature_id": signature_id or self.context.signature_id,
             "policy_hash": policy_hash,
             "source_rel_path": rel_path or f"tv/Show/Season 01/Episode {index:02d}.mkv",
-            "source_fingerprint": f"source-{index}",
+            "source_fingerprint": source_fingerprint or f"source-{index}",
             "selected_crf": crf,
             "selected_target": 85.0,
             "selected_score": 85.0,
             "candidate_trace_json": json.dumps(
                 {
                     "attempts": attempts or [],
+                    "selected_candidate": selected_candidate,
                     "candidates": candidates or [
                         {"crf": crf - 1, "metric_score": 86.0},
                         {"crf": crf, "metric_score": 85.0},

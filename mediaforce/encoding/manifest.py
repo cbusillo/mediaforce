@@ -999,6 +999,14 @@ def encode_one_item(
                         warm_start_trace=failure_warm_trace,
                         context=planned_quality_context.to_payload(),
                         final_size_miss=True,
+                        selected_candidate_role=str(
+                            object_dict(
+                                object_dict(getattr(quality_result, "target_size_trace", None)).get(
+                                    "selected_candidate"
+                                )
+                            ).get("role")
+                            or ""
+                        ) or None,
                     )
                 except Exception as shadow_error:
                     LOGGER.warning("Quality warm-start failure telemetry failed: %s", shadow_error)
@@ -1238,6 +1246,12 @@ def encode_one_item(
                 final_size_miss=(
                     str(warm_start_trace.get("fallback_reason") or "") == "final_size_miss"
                 ),
+                selected_candidate_role=str(
+                    object_dict(
+                        object_dict(getattr(quality_result, "target_size_trace", None)).get("selected_candidate")
+                    ).get("role")
+                    or ""
+                ) or None,
             )
         except Exception as shadow_error:
             LOGGER.warning("Quality-shadow evaluation failed: %s", shadow_error)
