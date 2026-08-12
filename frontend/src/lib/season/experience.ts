@@ -600,6 +600,8 @@ function qualityMemoryFallbackCopy(reason: string | null, storedReason: string):
 		search_target_changed: 'Prior searches changed their quality target and were excluded.',
 		non_monotonic_trace: 'Prior measurements were non-monotonic and were excluded.',
 		conflicting_quality_evidence: 'Prior runs disagree about the quality floor.',
+		final_retry_terminal:
+			'Prior terminal results came from bounded final-size retries and were excluded from first-probe guidance.',
 		shadow_evaluation_error: 'Memory evaluation failed; production search continued normally.'
 	};
 	return copy[reason ?? ''] ?? (storedReason || 'No shadow recommendation was available.');
@@ -608,7 +610,9 @@ function qualityMemoryFallbackCopy(reason: string | null, storedReason: string):
 function qualityMemoryState(reason: string | null, confidence: string | null): QualityMemoryState {
 	if (confidence === 'high') return 'high-confidence';
 	if (confidence) return 'available';
-	if (reason === 'no_history' || reason === 'sparse_cohort') return 'sparse';
+	if (reason === 'no_history' || reason === 'sparse_cohort' || reason === 'final_retry_terminal') {
+		return 'sparse';
+	}
 	if (reason === 'shadow_evaluation_error') return 'unavailable';
 	if (
 		reason === 'stale_evidence' ||

@@ -28,6 +28,7 @@ from mediaforce.tuning.quality_observations import (
 )
 from mediaforce.tuning.quality_shadow import (
     MIN_SHADOW_RECOMMENDATIONS,
+    QUALITY_SHADOW_ALGORITHM_VERSION,
     QualityShadowMetrics,
     deduplicate_quality_terminal_rows,
     quality_memory_scope_chain,
@@ -501,6 +502,7 @@ def _acceptance_group(
     passive_rows = deduplicate_quality_terminal_rows([
         row for row in group_rows
         if _assigned_experiment_arm(row, _json_object(row.get("shadow_json"))) != "warm_start"
+        and _is_current_shadow_row(row)
     ])
     passive_distinct_items = len({str(row.get("source_rel_path") or "") for row in passive_rows})
     cluster_items = {
@@ -806,16 +808,26 @@ def _complete_metrics(row: Mapping[str, Any]) -> tuple[float, float, float] | No
 
 def _passive_benchmark_runs(rows: Iterable[Mapping[str, Any]]) -> int:
     count = 0
-    for row in rows:
+    for row in deduplicate_quality_terminal_rows(rows):
         shadow = _json_object(row.get("shadow_json"))
-        if shadow.get("production_search_changed") is True or not object_dict(shadow.get("recommendation")):
+        if (
+                shadow.get("algorithm_version") != QUALITY_SHADOW_ALGORITHM_VERSION
+                or shadow.get("production_search_changed") is True
+                or not object_dict(shadow.get("recommendation"))
+        ):
             continue
         comparison = object_dict(shadow.get("comparison"))
+        if comparison.get("evaluation_exclusion_reason"):
+            continue
         candidate_count = _number(comparison.get("candidate_count"))
         search_seconds = _number(comparison.get("search_duration_seconds"))
         if candidate_count is not None and candidate_count > 0 and search_seconds is not None and search_seconds >= 0:
             count += 1
     return count
+
+
+def _is_current_shadow_row(row: Mapping[str, Any]) -> bool:
+    return _json_object(row.get("shadow_json")).get("algorithm_version") == QUALITY_SHADOW_ALGORITHM_VERSION
 
 
 def _median_or_none(values: list[float]) -> float | None:

@@ -318,7 +318,7 @@ class QualityObservationTests(unittest.TestCase):
         shadowed = self._selected_observation(
             shadow_payload={
                 "schema_version": 1,
-                "algorithm_version": "qsh1",
+                "algorithm_version": "qsh2",
                 "production_search_changed": False,
             }
         )
@@ -327,7 +327,7 @@ class QualityObservationTests(unittest.TestCase):
         self.assertNotEqual(plain.payload_sha256, shadowed.payload_sha256)
         self.assertTrue(append_quality_search_observation(self.connection, shadowed))
         row = self.connection.execute(select(quality_search_observations)).mappings().one()
-        self.assertEqual(json.loads(row["shadow_json"])["algorithm_version"], "qsh1")
+        self.assertEqual(json.loads(row["shadow_json"])["algorithm_version"], "qsh2")
 
     def test_promoted_staged_success_backfill_is_lower_authority_and_idempotent(self) -> None:
         self._add_promoted_outcome()
@@ -419,7 +419,7 @@ class QualityObservationTests(unittest.TestCase):
             observation = self._selected_observation(
                 shadow_payload={
                     "schema_version": 1,
-                    "algorithm_version": "qsh1",
+                    "algorithm_version": "qsh2",
                     "production_search_changed": False,
                 }
             )

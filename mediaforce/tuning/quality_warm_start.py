@@ -19,6 +19,7 @@ from mediaforce.tuning.quality_shadow import (
     QUALITY_SHADOW_ALGORITHM_VERSION,
     QualityShadowMetrics,
     QualityShadowRecommendation,
+    deduplicate_quality_terminal_rows,
     quality_memory_scope_chain,
     quality_shadow_metrics,
     recommend_quality_search_from_rows,
@@ -132,10 +133,15 @@ def plan_quality_warm_start(
         for row in context_rows
         if str(row.get("observation_id") or "")
     }
-    cohort_rows = [
+    cohort_rows = deduplicate_quality_terminal_rows([
         row for row in context_rows
         if _shadow_evidence_is_verified(row, verified_observation_ids)
-    ]
+        and _row_matches_recommendation_scope(
+            row,
+            scope_kind=recommendation.scope,
+            scope_prefix=cohort_scope.prefix,
+        )
+    ])
     readiness = quality_shadow_metrics(cohort_rows)
     baseline_candidate_count, baseline_search_seconds = _baseline_benchmarks(cohort_rows)
     if not recommendation.available:
@@ -189,6 +195,28 @@ def _row_matches_context(row: Mapping[str, Any], context: QualitySearchContext) 
     return str(row.get("search_signature_id") or "") == context.signature_id
 
 
+def _row_matches_recommendation_scope(
+        row: Mapping[str, Any],
+        *,
+        scope_kind: str | None,
+        scope_prefix: str,
+) -> bool:
+    if scope_kind is None:
+        return True
+    payload = _json_object(row.get("shadow_json"))
+    recommendation = object_dict(payload.get("recommendation"))
+    if not recommendation:
+        return True
+    if str(recommendation.get("scope") or "") != scope_kind:
+        return False
+    source_rel_path = "/".join(
+        part for part in str(row.get("source_rel_path") or "").strip().split("/") if part
+    )
+    if scope_kind == "item":
+        return source_rel_path == scope_prefix
+    return source_rel_path == scope_prefix or source_rel_path.startswith(f"{scope_prefix}/")
+
+
 def _quality_warm_start_experiment_arm(
         source_rel_path: str,
         source_fingerprint: str | None,
@@ -215,6 +243,8 @@ def _baseline_benchmarks(rows: list[Mapping[str, Any]]) -> tuple[float | None, f
         ):
             continue
         comparison = object_dict(payload.get("comparison"))
+        if comparison.get("evaluation_exclusion_reason"):
+            continue
         candidate_count = int_value(comparison.get("candidate_count"))
         duration = _number(comparison.get("search_duration_seconds"))
         if candidate_count > 0 and duration is not None and duration >= 0:

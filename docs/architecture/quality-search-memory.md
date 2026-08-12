@@ -134,15 +134,32 @@ learning-eligible, within the age limit, and compatible with the current search
 signature. Exact-item evidence also requires the same source fingerprint.
 Historical traces that are non-monotonic, changed their quality target during
 the run, or contain conflicting quality-floor measurements are excluded before
-cohort statistics are computed. Runtime and correction rows require the current
-policy hash; historical staged backfill without one remains eligible through its
-complete search signature.
+cohort statistics are computed. A terminal result selected by the bounded
+final-size retry is also excluded from first-CRF guidance: it remains valid
+final-size and safety evidence, but its retry-calibrated CRF is not treated as
+the CRF that should have started the original measured search. Those rows also
+do not satisfy passive benchmark completeness or influence baseline candidate
+and search-time medians used to estimate first-probe savings. Runtime and
+correction rows require the current policy hash; historical staged backfill
+without one remains eligible through its complete search signature.
 
-Every primary passive metric and readiness calculation deduplicates terminal
-observations by normalized source path, source fingerprint/content version,
-exact search signature, and policy hash. The newest current correction or
-runtime result wins; raw evaluated observation count remains diagnostic so retry
-volume cannot inflate readiness.
+First-CRF inference, primary passive metrics, and readiness calculations
+deduplicate terminal observations by normalized source path, source
+fingerprint/content version, exact search signature, and policy hash. The newest
+current correction or runtime result wins; raw evaluated observation count
+remains diagnostic so retry volume cannot inflate readiness.
+
+Warm-start readiness uses only passive rows whose recommendation scope and
+prefix match the current recommendation. Item-, season-, and series-derived
+recommendations remain separate evidence groups; narrower historical guidance
+cannot silently qualify a broader scope. Scope-less fallback rows remain inside
+the already-selected media scope as fail-closed safety context, but never count
+as recommendation-bearing accuracy or savings evidence.
+
+`qsh2` supersedes `qsh1` evidence for current readiness. Historical `qsh1` rows
+remain available for audit and safety reporting, but they cannot satisfy current
+recommendation, benchmark, distinct-item, or cluster-readiness thresholds. A
+deployment of `qsh2` therefore intentionally restarts passive qualification.
 
 The shadow payload also exposes `analysis_family_id` for reporting only. It is a
 separate `qaf1_` namespace derived from broad context categories: compression

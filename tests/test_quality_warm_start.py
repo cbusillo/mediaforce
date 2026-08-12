@@ -53,6 +53,27 @@ class QualityWarmStartPlanTests(unittest.TestCase):
         self.assertEqual(loader.call_args.kwargs["recorded_before"], self.as_of.isoformat())
         self.assertEqual(loader.call_args.kwargs["scope"].kind, "tv_series")
 
+    def test_baseline_benchmarks_exclude_final_retry_terminals(self) -> None:
+        rows = self._rows(selected_crf=30.0)
+        for index in range(10):
+            final_retry = dict(rows[index])
+            final_retry["observation_id"] = f"qso1_final_retry_{index}"
+            final_retry["search_run_id"] = f"qsr1_final_retry_{index}"
+            final_retry["source_rel_path"] = f"tv/Show/Season 01/Retry {index:02d}.mkv"
+            final_retry["source_fingerprint"] = f"retry-source-{index}"
+            shadow = json.loads(str(final_retry["shadow_json"]))
+            shadow["comparison"]["evaluation_exclusion_reason"] = "final_retry_terminal"
+            shadow["comparison"]["candidate_count"] = 50
+            shadow["comparison"]["search_duration_seconds"] = 1_000.0
+            final_retry["shadow_json"] = json.dumps(shadow)
+            rows.append(final_retry)
+
+        plan = self._plan(rows)
+
+        self.assertEqual(plan.readiness.recommendation_runs, 10)
+        self.assertEqual(plan.baseline_median_candidate_count, 5.0)
+        self.assertEqual(plan.baseline_median_search_seconds, 100.0)
+
     def test_qualified_holdout_keeps_full_search_authoritative(self) -> None:
         with patch(
             "mediaforce.tuning.quality_warm_start.load_current_quality_search_observations",
@@ -175,6 +196,39 @@ class QualityWarmStartPlanTests(unittest.TestCase):
 
         self.assertFalse(plan.active)
         self.assertEqual(plan.block_reason, "baseline_benchmark_unavailable")
+
+    def test_baseline_benchmarks_deduplicate_retries_by_content_version(self) -> None:
+        rows = self._rows(selected_crf=30.0)
+        for index in range(10):
+            retry = dict(rows[0])
+            retry["observation_id"] = f"qso1_retry_{index}"
+            retry["search_run_id"] = f"qsr1_retry_{index}"
+            retry["recorded_at"] = (self.as_of - timedelta(seconds=index + 1)).isoformat()
+            shadow = json.loads(str(retry["shadow_json"]))
+            shadow["comparison"]["candidate_count"] = 50
+            shadow["comparison"]["search_duration_seconds"] = 1_000.0
+            retry["shadow_json"] = json.dumps(shadow)
+            rows.append(retry)
+
+        plan = self._plan(rows)
+
+        self.assertEqual(plan.readiness.recommendation_runs, 10)
+        self.assertIsNone(plan.block_reason)
+        self.assertEqual(plan.baseline_median_candidate_count, 5.0)
+        self.assertEqual(plan.baseline_median_search_seconds, 100.0)
+
+    def test_readiness_uses_only_rows_from_the_selected_recommendation_scope(self) -> None:
+        rows = self._rows(selected_crf=30.0)
+        for row in rows[:5]:
+            shadow = json.loads(str(row["shadow_json"]))
+            shadow["recommendation"]["scope"] = "item"
+            row["shadow_json"] = json.dumps(shadow)
+
+        plan = self._plan(rows)
+
+        self.assertEqual(plan.recommendation.scope, "season")
+        self.assertEqual(plan.readiness.recommendation_runs, 5)
+        self.assertEqual(plan.block_reason, "shadow_thresholds_not_met")
 
     def test_presearch_signature_matches_the_final_command_signature(self) -> None:
         video_policy = {

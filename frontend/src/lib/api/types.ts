@@ -1362,6 +1362,7 @@ export type QualityMemoryFallbackReason =
 	| 'search_target_changed'
 	| 'non_monotonic_trace'
 	| 'conflicting_quality_evidence'
+	| 'final_retry_terminal'
 	| 'shadow_evaluation_error';
 
 export interface FolderQualityMemoryPayload {

@@ -42,6 +42,42 @@ class QualityAcceptanceReportTests(unittest.TestCase):
         self.assertEqual(group.active_observed.holdout_signature_mismatch_runs, 0)
         self.assertNotIn("legacy_active_evidence", group.closure_blocking_reasons)
 
+    def test_legacy_shadow_rows_do_not_feed_current_passive_readiness(self) -> None:
+        row = self._row(index=0, arm="passive")
+        shadow = json.loads(str(row["shadow_json"]))
+        shadow["algorithm_version"] = "qsh1"
+        row["shadow_json"] = json.dumps(shadow)
+
+        group = quality_acceptance_report([row], library_types={"tv": "tv"}).groups[0]
+
+        self.assertEqual(group.passive_readiness.evaluated_runs, 0)
+        self.assertEqual(group.passive_benchmark_runs, 0)
+        self.assertEqual(group.passive_distinct_items, 0)
+
+    def test_passive_benchmarks_deduplicate_retries_by_content_version(self) -> None:
+        rows = [self._row(index=index, arm="passive") for index in range(10)]
+        for index, row in enumerate(rows):
+            row["source_rel_path"] = "tv/Show/Season 01/Episode 000.mkv"
+            row["source_fingerprint"] = "shared-content-version"
+            row["recorded_at"] = f"2026-07-25T11:{index:02d}:00+00:00"
+
+        group = quality_acceptance_report(rows, library_types={"tv": "tv"}).groups[0]
+
+        self.assertEqual(group.passive_readiness.recommendation_runs, 1)
+        self.assertEqual(group.passive_benchmark_runs, 1)
+        self.assertEqual(group.passive_distinct_items, 1)
+
+    def test_passive_benchmarks_exclude_final_retry_terminals(self) -> None:
+        row = self._row(index=0, arm="passive")
+        shadow = json.loads(str(row["shadow_json"]))
+        shadow["comparison"]["evaluation_exclusion_reason"] = "final_retry_terminal"
+        row["shadow_json"] = json.dumps(shadow)
+
+        group = quality_acceptance_report([row], library_types={"tv": "tv"}).groups[0]
+
+        self.assertEqual(group.passive_readiness.recommendation_runs, 0)
+        self.assertEqual(group.passive_benchmark_runs, 0)
+
     def test_passive_encode_failure_is_not_a_warm_terminal_failure(self) -> None:
         rows = [self._row(index=index, arm="passive") for index in range(10)]
         event = {
