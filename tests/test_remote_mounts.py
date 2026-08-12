@@ -1,16 +1,23 @@
 import base64
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mediaforce import remote
 from mediaforce.hosts.mount_runtime import ControllerSmbMount, RemoteSmbMount, _remote_mount_script, \
-    controller_smb_mounts_from_output, mount_remote_smb_shares, remote_smb_mounts_for_paths
+    controller_smb_mounts_from_output, load_controller_smb_mounts, mount_remote_smb_shares, \
+    remote_smb_mounts_for_paths, save_controller_smb_mounts
 from mediaforce.remote import HostStatus
 
 
 class RemoteMountRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        remote._MOUNT_RECOVERY_COOLDOWNS.clear()
+        remote._MOUNT_RECOVERY_NO_GUI_SESSIONS.clear()
+
     def test_controller_smb_mounts_parse_only_smb_volumes(self) -> None:
         mounts = controller_smb_mounts_from_output(
             "\n".join(
@@ -74,6 +81,67 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(mounts, [RemoteSmbMount(Path("/Volumes/media"), "media", "smb://local@NAS.local/media")])
+
+    def test_controller_mount_mapping_round_trips_without_password(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            path = Path(raw_root) / "controller-smb-mounts.json"
+
+            save_controller_smb_mounts(
+                path,
+                [ControllerSmbMount(source="//local:secret@NAS.local/media", mount_point=Path("/Volumes/media"))],
+            )
+
+            self.assertEqual(
+                load_controller_smb_mounts(path),
+                [ControllerSmbMount(source="//local@NAS.local/media", mount_point=Path("/Volumes/media"))],
+            )
+            self.assertNotIn("secret", path.read_text())
+
+    def test_private_override_wins_over_learned_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            runtime_settings_path = Path(raw_root) / "runtime-settings.json"
+            save_controller_smb_mounts(
+                runtime_settings_path.with_name("controller-smb-mounts.json"),
+                [ControllerSmbMount(source="//local@old.local/media", mount_point=Path("/Volumes/media"))],
+            )
+            config = SimpleNamespace(
+                raw={"controller_smb_mounts": [{"source": "//local@new.local/media", "mount_point": "/Volumes/media"}]},
+                paths=SimpleNamespace(runtime_settings_path=runtime_settings_path),
+            )
+
+            mounts = remote._controller_smb_mounts_for_config(config)
+
+        self.assertEqual(mounts[0].source, "//local@new.local/media")
+
+    def test_remote_no_gui_failure_remains_suppressed(self) -> None:
+        host = {"host": "remote@worker", "label": "Worker", "media_access": "mounted"}
+        status = HostStatus(
+            key="remote@worker",
+            label="Worker",
+            mode="ssh",
+            priority=0,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Shared storage disconnected",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        config = SimpleNamespace(
+            raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
+            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+        )
+        run_ssh = Mock(
+            return_value=subprocess.CompletedProcess(args=["ssh"], returncode=41, stdout="", stderr="")
+        )
+
+        with patch("mediaforce.remote._run_remote_ssh", run_ssh):
+            first = remote.recover_remote_host_mounts(config, host, status, force=True)
+            second = remote.recover_remote_host_mounts(config, host, status)
+
+        self.assertFalse(first.ok)
+        self.assertIn("signed-in macOS desktop session", second.message)
+        run_ssh.assert_called_once()
 
     def test_remote_mount_script_hides_url_and_cleans_launchagent(self) -> None:
         script = _remote_mount_script(
@@ -192,15 +260,19 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             missing_mounts=["/Volumes/media"],
             platform="macos",
         )
-        mount_output = "//local@NAS.local/media on /Volumes/media (smbfs, nodev)\n"
+        config = SimpleNamespace(
+            raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
+            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+        )
 
-        with patch("mediaforce.remote._controller_smb_mount_output", return_value=mount_output):
-            self.assertTrue(remote.remote_mount_recovery_supported(Mock(), host, status))
+        with patch("mediaforce.remote._controller_smb_mount_output") as mount_output:
+            self.assertTrue(remote.remote_mount_recovery_supported(config, host, status))
             status.missing_paths.append("/srv/transcode")
-            self.assertFalse(remote.remote_mount_recovery_supported(Mock(), host, status))
+            self.assertFalse(remote.remote_mount_recovery_supported(config, host, status))
             status.missing_paths.pop()
             status.issues.append("ffmpeg is missing")
-            self.assertFalse(remote.remote_mount_recovery_supported(Mock(), host, status))
+            self.assertFalse(remote.remote_mount_recovery_supported(config, host, status))
+            mount_output.assert_not_called()
 
     def test_remote_mount_recovery_reports_controller_storage_when_mapping_disappears(self) -> None:
         host = {"host": "remote@worker", "label": "Worker", "media_access": "mounted"}
@@ -217,11 +289,112 @@ class RemoteMountRuntimeTests(unittest.TestCase):
             platform="macos",
         )
 
-        with patch("mediaforce.remote._controller_smb_mount_output", return_value=""):
-            result = remote.recover_remote_host_mounts(Mock(), host, status)
+        config = SimpleNamespace(
+            raw={},
+            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+        )
+        result = remote.recover_remote_host_mounts(config, host, status)
 
         self.assertFalse(result.ok)
         self.assertEqual(result.failure_kind, "controller_storage_unavailable")
+
+    def test_controller_recovery_uses_local_mount_transport(self) -> None:
+        host = {"host": "local@localhost", "label": "Controller", "media_access": "mounted"}
+        status = HostStatus(
+            key="local@localhost",
+            label="Controller",
+            mode="ssh",
+            priority=0,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Shared storage disconnected",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        config = SimpleNamespace(
+            raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
+            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+        )
+
+        with patch(
+                "mediaforce.remote._run_local_mount_script",
+                return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
+        ) as run_local, patch("mediaforce.remote._run_remote_ssh") as run_ssh:
+            result = remote.recover_remote_host_mounts(config, host, status, force=True)
+
+        self.assertTrue(result.ok)
+        run_local.assert_called_once()
+        run_ssh.assert_not_called()
+
+    def test_controller_recovery_cooldown_suppresses_automatic_retry(self) -> None:
+        host = {"host": "local@localhost", "label": "Controller", "media_access": "mounted"}
+        status = HostStatus(
+            key="local@localhost",
+            label="Controller",
+            mode="ssh",
+            priority=0,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Shared storage disconnected",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        config = SimpleNamespace(
+            raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
+            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+        )
+        run_local = Mock(
+            return_value=subprocess.CompletedProcess(args=["sh"], returncode=42, stdout="", stderr="")
+        )
+
+        with patch("mediaforce.remote._run_local_mount_script", run_local), patch(
+                "mediaforce.remote._local_gui_session_token", return_value="501:123"
+        ):
+            first = remote.recover_remote_host_mounts(config, host, status)
+            second = remote.recover_remote_host_mounts(config, host, status)
+
+        self.assertFalse(first.ok)
+        self.assertIn("cooling down", second.message)
+        run_local.assert_called_once()
+
+    def test_controller_no_gui_failure_is_suppressed_until_session_changes(self) -> None:
+        host = {"host": "local@localhost", "label": "Controller", "media_access": "mounted"}
+        status = HostStatus(
+            key="local@localhost",
+            label="Controller",
+            mode="ssh",
+            priority=0,
+            capabilities=["encode_queue"],
+            available=False,
+            message="Shared storage disconnected",
+            missing_paths=["/Volumes/media/tv"],
+            missing_mounts=["/Volumes/media"],
+            platform="macos",
+        )
+        config = SimpleNamespace(
+            raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
+            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+        )
+        run_local = Mock(
+            side_effect=[
+                subprocess.CompletedProcess(args=["sh"], returncode=41, stdout="", stderr=""),
+                subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="", stderr=""),
+            ]
+        )
+
+        with patch("mediaforce.remote._run_local_mount_script", run_local), patch(
+                "mediaforce.remote._local_gui_session_token", side_effect=["501:123", "501:123", "501:456"]
+        ):
+            first = remote.recover_remote_host_mounts(config, host, status, force=True)
+            same_session = remote.recover_remote_host_mounts(config, host, status, force=True)
+            next_session = remote.recover_remote_host_mounts(config, host, status, force=True)
+
+        self.assertFalse(first.ok)
+        self.assertIn("signed-in macOS desktop session", same_session.message)
+        self.assertTrue(next_session.ok)
+        self.assertEqual(run_local.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -96,6 +96,7 @@ from mediaforce.remote import (
     DEFAULT_HOST_CAPABILITIES,
     HostStatus,
     collect_host_statuses,
+    learn_controller_smb_mounts,
     prepare_remote_host_with_password,
     remote_mount_recovery_supported,
     reset_remote_host_trust,
@@ -520,6 +521,12 @@ def create_app(
             try:
                 shutdown_event.clear()
                 migrate_config_state(config)
+                try:
+                    learned_mount_count = learn_controller_smb_mounts(config)
+                    if learned_mount_count:
+                        LOGGER.info("Learned %s controller SMB mount mappings.", learned_mount_count)
+                except (OSError, ValueError):
+                    LOGGER.exception("Controller SMB mount learning failed; private overrides remain available.")
                 reserve_mediaforce_database_identity(
                     config,
                     create_if_missing=True,

@@ -155,8 +155,10 @@ Guidance:
 - `lifecycle.py`
   - wake/start/stop commands, cooldown behavior
 - `mount_runtime.py`
-  - controller SMB mount discovery and password-free remote Finder mount recovery
-  - bounded transient LaunchAgent execution, cleanup, and Keychain recovery messages
+  - controller SMB mount parsing and password-free learned mapping persistence
+  - one Finder mount script shared by local and SSH transports
+  - bounded transient LaunchAgent execution, cleanup, and locking
+  - Finder Keychain recovery messages without credential access
 - `setup.py`
   - prepare/reset trust/bootstrap flows
 - `models.py`

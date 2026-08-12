@@ -181,7 +181,8 @@ def prepare_remote_host_with_password(
         ssh_access_must_be_fixed_first: Callable[[HostStatus], bool],
         request_remote_xcode_install: Callable[[dict[str, Any]], HostSetupResult],
         bootstrap_remote_macos: Callable[[dict[str, Any], str, list[str]], HostSetupResult],
-        recover_remote_host_mounts: Callable[[MediaforceConfig, dict[str, Any], HostStatus], HostSetupResult],
+        recover_remote_host_mounts: Callable[..., HostSetupResult],
+        learn_controller_smb_mounts: Callable[[MediaforceConfig], int],
         finish_remote_host_prepare: Callable[[MediaforceConfig, dict[str, Any], list[str]], HostSetupResult],
 ) -> HostSetupResult:
     host = _find_remote_host(config, host_key)
@@ -192,6 +193,10 @@ def prepare_remote_host_with_password(
     if not ssh_host:
         return HostSetupResult(ok=False, message="Remote host is missing an SSH target")
 
+    try:
+        learn_controller_smb_mounts(config)
+    except (OSError, ValueError):
+        pass
     prep_steps: list[str] = []
     for _ in range(6):
         status = remote_host_status(config, host)
@@ -223,7 +228,7 @@ def prepare_remote_host_with_password(
                 return key_install
             continue
         if status.missing_mounts and status.platform == "macos":
-            mount_result = recover_remote_host_mounts(config, host, status)
+            mount_result = recover_remote_host_mounts(config, host, status, force=True)
             prep_steps.extend(mount_result.performed_steps)
             mount_result.performed_steps = prep_steps
             if not mount_result.ok:

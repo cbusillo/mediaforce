@@ -4,14 +4,15 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from pathlib import Path
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.hosts.mount_runtime import controller_smb_mounts_path
 from mediaforce.remote import HostStatus, collect_host_statuses
 from mediaforce.web.settings_runtime import normalize_host_capabilities
 
 _HOST_STATUS_CACHE_LOCK = threading.Lock()
-_HOST_STATUS_CACHE_KEY: tuple[str, int, int] | None = None
+_HOST_STATUS_CACHE_KEY: tuple[str, int, str, int, int] | None = None
 _HOST_STATUS_CACHE_FETCHED_AT = 0.0
 _HOST_STATUS_CACHE_VALUE: list[HostStatus] = []
-_HOST_STATUS_CACHE_REFRESH_FUTURE: Future[tuple[tuple[str, int, int], list[HostStatus]]] | None = None
+_HOST_STATUS_CACHE_REFRESH_FUTURE: Future[tuple[tuple[str, int, str, int, int], list[HostStatus]]] | None = None
 _HOST_STATUS_CACHE_TTL_SECONDS = 15.0
 _HOST_STATUS_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="host-status")
 
@@ -30,6 +31,10 @@ def refresh_host_status_cache(config: MediaforceConfig) -> list[HostStatus]:
     global _HOST_STATUS_CACHE_REFRESH_FUTURE
 
     cache_key, statuses = _host_status_refresh_payload(config)
+    if _host_status_cache_key(config) != cache_key:
+        cache_key, statuses = _host_status_refresh_payload(config)
+    if _host_status_cache_key(config) != cache_key:
+        return list(statuses)
     with _HOST_STATUS_CACHE_LOCK:
         _HOST_STATUS_CACHE_KEY = cache_key
         _HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
@@ -70,11 +75,13 @@ def cached_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
     return _fallback_host_statuses(config)
 
 
-def _host_status_cache_key(config: MediaforceConfig) -> tuple[str, int, int]:
+def _host_status_cache_key(config: MediaforceConfig) -> tuple[str, int, str, int, int]:
     return (
         str(config.paths.config_path),
         _path_mtime_ns(config.paths.config_path),
+        str(config.paths.runtime_settings_path),
         _path_mtime_ns(config.paths.runtime_settings_path),
+        _path_mtime_ns(controller_smb_mounts_path(config.paths.runtime_settings_path)),
     )
 
 
@@ -85,7 +92,7 @@ def _path_mtime_ns(path: Path) -> int:
         return -1
 
 
-def _host_status_refresh_payload(config: MediaforceConfig) -> tuple[tuple[str, int, int], list[HostStatus]]:
+def _host_status_refresh_payload(config: MediaforceConfig) -> tuple[tuple[str, int, str, int, int], list[HostStatus]]:
     return _host_status_cache_key(config), collect_host_statuses_with_fallback(config)
 
 
@@ -156,9 +163,11 @@ def _complete_host_status_refresh_if_ready() -> None:
         return
 
     with _HOST_STATUS_CACHE_LOCK:
-        _HOST_STATUS_CACHE_KEY = cache_key
-        _HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
-        _HOST_STATUS_CACHE_VALUE = list(statuses)
+        current_key = _host_status_cache_key_from_path(cache_key)
+        if current_key == cache_key:
+            _HOST_STATUS_CACHE_KEY = cache_key
+            _HOST_STATUS_CACHE_FETCHED_AT = time.monotonic()
+            _HOST_STATUS_CACHE_VALUE = list(statuses)
 
 
 def _schedule_host_status_refresh(config: MediaforceConfig) -> None:
@@ -169,3 +178,16 @@ def _schedule_host_status_refresh(config: MediaforceConfig) -> None:
         if _HOST_STATUS_CACHE_REFRESH_FUTURE is not None:
             return
         _HOST_STATUS_CACHE_REFRESH_FUTURE = _HOST_STATUS_CACHE_EXECUTOR.submit(_host_status_refresh_payload, config)
+
+
+def _host_status_cache_key_from_path(
+        cache_key: tuple[str, int, str, int, int],
+) -> tuple[str, int, str, int, int]:
+    runtime_settings_path = Path(cache_key[2])
+    return (
+        cache_key[0],
+        _path_mtime_ns(Path(cache_key[0])),
+        cache_key[2],
+        _path_mtime_ns(runtime_settings_path),
+        _path_mtime_ns(controller_smb_mounts_path(runtime_settings_path)),
+    )
