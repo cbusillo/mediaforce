@@ -436,6 +436,26 @@ reloader. Give it an explicit `--no-reload` argument even when `.env` enables
 reload for an active development session; otherwise Uvicorn `StatReload`
 continuously walks the checkout and consumes CPU while the app appears idle.
 
+Manage the local macOS login item through the Mediaforce CLI:
+
+```bash
+uv run mediaforce service install
+uv run mediaforce service enable
+uv run mediaforce service status
+uv run mediaforce service logs --stderr
+uv run mediaforce service disable
+```
+
+The generated `~/Library/LaunchAgents/com.mediaforce.web.plist` invokes the
+repo-local `.venv/bin/mediaforce-web` entrypoint directly, not `uv`, and always
+passes `--no-reload`. It has no `/Volumes` dependency and does not mount storage;
+the running app remains the only owner of SMB recovery. Durable stdout and
+stderr logs live under `~/Library/Logs/mediaforce/`. Use `restart` to regenerate
+and reload the item after moving the checkout or recreating `.venv`, and use
+`uninstall` to disable it and remove the plist. See
+`docs/development/macos-login-item.md` for verification and raw launchctl
+fallbacks.
+
 The frontend dev server now reads the same repo-local `.env` file. The clearest
 local setup is:
 
