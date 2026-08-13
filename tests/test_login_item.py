@@ -188,7 +188,8 @@ class LoginItemTests(unittest.TestCase):
             ]
         )
 
-        uninstall_login_item(self.paths, runner=runner)
+        with patch("mediaforce.ops.login_item._require_supported_platform"):
+            uninstall_login_item(self.paths, runner=runner)
 
         self.assertFalse(self.paths.plist.exists())
         self.assertEqual(runner.call_count, 3)
