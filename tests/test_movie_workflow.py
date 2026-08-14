@@ -533,10 +533,28 @@ class MovieWorkflowTests(unittest.TestCase):
     def test_promotion_refresh_prefix_moves_exact_movie_members_to_a_surviving_scope(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._insert_item(connection, "films/Example/Example.mp4")
+            self._insert_item(connection, "films/Example/Example - Director's Cut.mp4")
+            self._insert_item(connection, "films/Example/Extras/Trailer.mp4")
+            self._insert_item(connection, "films/Example/Disc 2/Alternate.mp4")
             self._insert_item(connection, "films/Loose Feature.mp4")
             title_member_scope = resolve_media_scope(
                 connection,
                 "films/Example/Example.mp4",
+                library_types=self.config.library_type_map,
+            )
+            edition_scope = resolve_media_scope(
+                connection,
+                "films/Example/Example - Director's Cut.mp4",
+                library_types=self.config.library_type_map,
+            )
+            extra_scope = resolve_media_scope(
+                connection,
+                "films/Example/Extras/Trailer.mp4",
+                library_types=self.config.library_type_map,
+            )
+            uncertain_scope = resolve_media_scope(
+                connection,
+                "films/Example/Disc 2/Alternate.mp4",
                 library_types=self.config.library_type_map,
             )
             single_file_scope = resolve_media_scope(
@@ -553,6 +571,33 @@ class MovieWorkflowTests(unittest.TestCase):
                 [self.root / "films/Example/Example.mkv"],
             ),
             "films/Example",
+        )
+        self.assertEqual(
+            _promotion_refresh_prefix(
+                "films/Example/Example - Director's Cut.mp4",
+                edition_scope,
+                [{"rel_path": "films/Example/Example - Director's Cut.mp4"}],
+                [self.root / "films/Example/Example - Director's Cut.mkv"],
+            ),
+            "films/Example/Example - Director's Cut.mkv",
+        )
+        self.assertEqual(
+            _promotion_refresh_prefix(
+                "films/Example/Extras/Trailer.mp4",
+                extra_scope,
+                [{"rel_path": "films/Example/Extras/Trailer.mp4"}],
+                [self.root / "films/Example/Extras/Trailer.mkv"],
+            ),
+            "films/Example/Extras/Trailer.mkv",
+        )
+        self.assertEqual(
+            _promotion_refresh_prefix(
+                "films/Example/Disc 2/Alternate.mp4",
+                uncertain_scope,
+                [{"rel_path": "films/Example/Disc 2/Alternate.mp4"}],
+                [self.root / "films/Example/Disc 2/Alternate.mkv"],
+            ),
+            "films/Example/Disc 2/Alternate.mkv",
         )
         self.assertEqual(
             _promotion_refresh_prefix(

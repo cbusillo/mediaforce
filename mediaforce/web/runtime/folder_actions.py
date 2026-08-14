@@ -1232,7 +1232,12 @@ def _promotion_refresh_prefix(
         return normalized_prefix
     if scope.domain == "movie":
         membership = classify_movie_path(normalized_prefix, root=scope.root)
-        if membership is not None and membership.scope_mode == "title_folder":
+        if (
+                membership is not None
+                and membership.scope_mode == "title_folder"
+                and membership.role == "feature"
+                and membership.edition_label is None
+        ):
             return membership.title_prefix
     if len(items) != 1 or len(promoted_paths) != 1:
         return normalized_prefix
