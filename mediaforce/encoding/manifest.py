@@ -23,7 +23,7 @@ from mediaforce.encoding.quality import (
     resolve_local_quality_temp_root,
 )
 from mediaforce.encoding.quality_search import QualitySearchPlan
-from mediaforce.encoding.staging import safe_unlink
+from mediaforce.encoding.staging import partial_output_path, safe_unlink
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import planned_output_dimensions
 from mediaforce.tuning.compression_intent import (
@@ -714,7 +714,7 @@ def encode_one_item(
     )
     connection.commit()
 
-    temp_output = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+    temp_output = partial_output_path(staging_path)
     if temp_output.exists():
         safe_unlink(temp_output)
     if staging_path.exists() and overwrite:

@@ -49,6 +49,10 @@ def safe_unlink(path: Path) -> None:
     _retry_transient_file_busy(_unlink)
 
 
+def partial_output_path(staging_path: Path) -> Path:
+    return staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+
+
 def finalize_output_path(temp_output: Path, staging_path: Path) -> None:
     def _finalize() -> None:
         if temp_output.exists():

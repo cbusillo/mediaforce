@@ -216,7 +216,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             deps=web_app._encode_queue_runtime_deps(),
         )
 
-    def test_restart_recovery_requeues_running_job_and_cleans_transients(self) -> None:
+    def test_restart_recovery_preserves_completed_output_and_cleans_transients(self) -> None:
         source_path = self._create_source_file("episode-a.mkv")
         staging_path = self._staging_path("episode-a.mkv")
         partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
@@ -252,14 +252,14 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["status"], "retry_backoff")
             self.assertEqual(job["last_failure_kind"], "worker_restart")
             self.assertEqual(job["last_host"]["key"], "remote-a")
-            self.assertFalse(staging_path.exists())
+            self.assertTrue(staging_path.exists())
             self.assertFalse(partial_path.exists())
-            stage_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.promoted_at)
-            self.assertIsNone(stage_row)
+            stage_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+            self.assertIsNotNone(stage_row)
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
             item_status = item_status_row["status"]
-            self.assertEqual(item_status, "planned")
+            self.assertEqual(item_status, "encoded")
             queue_state = load_queue_state(connection)
             self.assertIsNone(queue_state["active_job_id"])
             self.assertFalse(queue_state["stop_requested"])
@@ -535,7 +535,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
         self.assertTrue(staging_path.exists())
 
-    def test_reconcile_encode_jobs_ignores_unlink_errors_during_stale_cleanup(self) -> None:
+    def test_reconcile_encode_jobs_preserves_state_when_stale_cleanup_fails(self) -> None:
         first_source = self._create_source_file("episode-stale-first.mkv")
         second_source = self._create_source_file("episode-stale-second.mkv")
         first_staging = self._staging_path("episode-stale-first.mkv")
@@ -558,11 +558,18 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             with patch("mediaforce.web.runtime.encode_runtime.safe_unlink", side_effect=_unlink_with_one_failure):
                 web_app._reconcile_encode_jobs(connection, self.config)
 
-            for item_id in (first_id, second_id):
-                item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
-                assert item_status_row is not None
-                self.assertEqual(item_status_row["status"], "planned")
-                self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+            first_status_row = self._library_item_value(connection, first_id, library_items.c.status)
+            second_status_row = self._library_item_value(connection, second_id, library_items.c.status)
+            assert first_status_row is not None
+            assert second_status_row is not None
+            self.assertEqual(first_status_row["status"], "encoding")
+            self.assertEqual(second_status_row["status"], "planned")
+            self.assertIsNotNone(
+                self._staged_artifact_value(connection, first_id, staged_artifacts.c.staging_path)
+            )
+            self.assertIsNone(
+                self._staged_artifact_value(connection, second_id, staged_artifacts.c.staging_path)
+            )
 
         self.assertTrue(first_staging.exists())
         self.assertFalse(second_staging.exists())
@@ -610,7 +617,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertFalse(temp_dir.exists())
 
-    def test_reconcile_encode_jobs_cleans_host_staging_output_without_staged_artifact_row(self) -> None:
+    def test_reconcile_encode_jobs_preserves_untracked_host_staging_output(self) -> None:
         source_path = self._create_source_file("episode-host-orphan.mkv")
         self.config.raw["remote_hosts"] = [
             {
@@ -630,16 +637,11 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="encoding")
 
-            with patch("mediaforce.web.runtime.encode_runtime.run_remote_command") as run_remote_command_mock:
-                web_app._reconcile_encode_jobs(connection, self.config)
+            web_app._reconcile_encode_jobs(connection, self.config)
 
             item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
             assert item_status_row is not None
             self.assertEqual(item_status_row["status"], "planned")
-            self.assertEqual(run_remote_command_mock.call_count, 2)
-            scripted_paths = "\n".join(str(call.args[1][2]) for call in run_remote_command_mock.call_args_list)
-            self.assertIn(str(host_staging_path), scripted_paths)
-            self.assertIn(str(host_partial_path), scripted_paths)
 
         self.assertTrue(host_staging_path.exists())
         self.assertTrue(host_partial_path.exists())
@@ -17039,6 +17041,68 @@ raise SystemExit(0)
             self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
             self.assertIsNone(queued["schedule_close_deadline_at"])
 
+    def test_run_encode_job_marks_completed_output_complete_after_late_cancellation(self) -> None:
+        source_path = self._create_source_file("episode-late-cancel.mkv")
+        staging_path = self._staging_path("episode-late-cancel.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_job_id="job-late-cancel",
+                    item_index=0,
+                    staging_fingerprint="fingerprint",
+                )
+            )
+            self._write_manifest(
+                "manifest-late-cancel.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-late-cancel",
+                manifest_name="manifest-late-cancel.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+        class CancelAfterEncodeController(ManagedProcessController):
+            def __init__(self) -> None:
+                super().__init__()
+                self.throw_count = 0
+
+            def reset(self) -> None:
+                super().reset()
+                self.throw_count = 0
+
+            def throw_if_cancelled(self) -> None:
+                self.throw_count += 1
+                if self.throw_count >= 3:
+                    raise ProcessCancelledError("late cancellation")
+
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+        deps.encode_manifest_items = Mock(return_value=[])
+
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path,
+            job_id="job-late-cancel",
+            process_controller=CancelAfterEncodeController(),
+            deps=deps,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-late-cancel")
+        assert job is not None
+        self.assertEqual(job["status"], "completed")
+
     def test_restart_recovery_prefers_schedule_requeue_after_deadline(self) -> None:
         source_path = self._create_source_file("episode-restart-deadline.mkv")
         staging_path = self._staging_path("episode-restart-deadline.mkv")
@@ -18991,7 +19055,7 @@ raise SystemExit(0)
             )
 
             self.assertFalse(result["ok"])
-            self.assertIn(f"folder encode is {status.replace('_', ' ')}", result["message"])
+            self.assertIn("season_active_encode_job", {blocker["code"] for blocker in result["blockers"]})
 
     def test_load_folder_staged_items_ignores_promoted_rows_and_filters_statuses(self) -> None:
         encoded_source = self._create_source_file("episode-encoded.mkv")
@@ -21414,22 +21478,24 @@ raise SystemExit(0)
             item_a_row = self._library_item_value(connection, item_a, library_items.c.status)
             item_b_row = self._library_item_value(connection, item_b, library_items.c.status)
 
-        self.assertFalse(staging_a.exists())
+        self.assertTrue(staging_a.exists())
         self.assertFalse(staging_b.exists())
         self.assertFalse(partial_b.exists())
-        self.assertEqual(item_a_row["status"], "planned")
+        self.assertEqual(item_a_row["status"], "encoded")
         self.assertEqual(item_b_row["status"], "planned")
 
-    def test_prepare_terminal_encode_job_for_requeue_handles_no_child_jobs(self) -> None:
+    def test_prepare_terminal_encode_job_for_requeue_preserves_untracked_complete_outputs(self) -> None:
         source_a = self._create_source_file("orphan-a.mkv")
         source_b = self._create_source_file("orphan-b.mkv")
         staging_a = self._staging_path("orphan-a.mkv")
         staging_b = self._staging_path("orphan-b.mkv")
+        manifest_staging_a = self._staging_path("orphan-a-reconstructed.mkv")
         partial_a = staging_a.with_name(f"{staging_a.stem}.partial{staging_a.suffix}")
         partial_b = staging_b.with_name(f"{staging_b.stem}.partial{staging_b.suffix}")
         staging_a.parent.mkdir(parents=True, exist_ok=True)
         staging_a.write_text("encoded")
         staging_b.write_text("encoded")
+        manifest_staging_a.write_text("untracked")
         partial_a.write_text("partial")
         partial_b.write_text("partial")
 
@@ -21440,7 +21506,7 @@ raise SystemExit(0)
             manifest = self._write_manifest(
                 "manifest-orphan-retry.json",
                 [
-                    {"library_item_id": item_a, "staging_path": str(staging_a)},
+                    {"library_item_id": item_a, "staging_path": str(manifest_staging_a)},
                     {"library_item_id": item_b, "staging_path": str(staging_b)},
                 ],
             )
@@ -21492,11 +21558,12 @@ raise SystemExit(0)
             item_a_row = self._library_item_value(connection, item_a, library_items.c.status)
             item_b_row = self._library_item_value(connection, item_b, library_items.c.status)
 
-        self.assertFalse(staging_a.exists())
+        self.assertTrue(staging_a.exists())
         self.assertFalse(staging_b.exists())
+        self.assertTrue(manifest_staging_a.exists())
         self.assertFalse(partial_a.exists())
         self.assertFalse(partial_b.exists())
-        self.assertEqual(item_a_row["status"], "planned")
+        self.assertEqual(item_a_row["status"], "encoded")
         self.assertEqual(item_b_row["status"], "planned")
 
     def test_cleanup_encode_retry_artifacts_only_removes_selected_indexes(self) -> None:
@@ -21508,6 +21575,8 @@ raise SystemExit(0)
         staging_b.parent.mkdir(parents=True, exist_ok=True)
         staging_a.write_text("a")
         staging_b.write_text("b")
+        partial_a = staging_a.with_name(f"{staging_a.stem}.partial{staging_a.suffix}")
+        partial_a.write_text("partial")
         self._write_manifest(
             "manifest-cleanup.json",
             [
@@ -21520,18 +21589,8 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             item_a = self._insert_library_item(connection, source_a, status="encoding")
             item_b = self._insert_library_item(connection, source_b, status="encoding")
-            connection.execute(update(library_items).where(library_items.c.id == item_a).values(status="encoding"))
-            connection.execute(update(library_items).where(library_items.c.id == item_b).values(status="encoding"))
-            connection.execute(
-                update(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == item_a)
-                .values(library_item_id=item_a, staging_path=str(staging_a), updated_at=web_app._now_iso())
-            )
-            connection.execute(
-                update(staged_artifacts)
-                .where(staged_artifacts.c.library_item_id == item_b)
-                .values(library_item_id=item_b, staging_path=str(staging_b), updated_at=web_app._now_iso())
-            )
+            self._insert_staged_artifact(connection, item_a, staging_a)
+            self._insert_staged_artifact(connection, item_b, staging_b)
 
         cleanup_manifest = self._write_manifest(
             "manifest-cleanup-indexed.json",
@@ -21548,9 +21607,50 @@ raise SystemExit(0)
             item_b_row = self._library_item_value(connection, item_b, library_items.c.status)
 
         self.assertFalse(staging_a.exists())
+        self.assertFalse(partial_a.exists())
         self.assertTrue(staging_b.exists())
         self.assertEqual(item_a_row["status"], "planned")
         self.assertEqual(item_b_row["status"], "encoding")
+
+    def test_cleanup_encode_retry_artifacts_preserves_unreachable_remote_artifact(self) -> None:
+        source_path = self._create_source_file("cleanup-remote.mkv")
+        staging_path = self.root / "remote-staging" / "tv" / "show" / "cleanup-remote.mkv"
+        manifest_path = self._write_manifest(
+            "manifest-cleanup-remote.json",
+            [{"library_item_id": 1, "staging_path": str(self.root / "wrong-path.mkv")}],
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_host_key="remote",
+                    encode_host_mode="ssh",
+                    encode_media_access="mounted",
+                )
+            )
+
+        manifest_path.write_text(json.dumps({"items": [{"library_item_id": item_id}]}))
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                side_effect=OSError("remote unavailable"),
+        ):
+            encode_runtime._cleanup_encode_retry_artifacts(
+                connection,
+                manifest_path=manifest_path,
+                host={"key": "remote", "mode": "ssh", "media_access": "mounted"},
+                deps=web_app._encode_queue_runtime_deps(),
+            )
+            item_row = self._library_item_value(connection, item_id, library_items.c.status)
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        assert item_row is not None
+        self.assertEqual(item_row["status"], "encoding")
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
 
     def test_cleanup_encode_retry_artifacts_commits_between_file_removals(self) -> None:
         source_a = self._create_source_file("cleanup-writer-a.mkv")
@@ -21564,6 +21664,8 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             item_a = self._insert_library_item(connection, source_a, status="encoding")
             item_b = self._insert_library_item(connection, source_b, status="encoding")
+            self._insert_staged_artifact(connection, item_a, staging_a)
+            self._insert_staged_artifact(connection, item_b, staging_b)
 
         cleanup_manifest = self._write_manifest(
             "manifest-cleanup-writer.json",

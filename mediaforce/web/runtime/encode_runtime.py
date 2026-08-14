@@ -13,7 +13,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import case
 from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import literal_column
@@ -36,7 +35,7 @@ from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, Encode
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
-from mediaforce.encoding.staging import safe_unlink
+from mediaforce.encoding.staging import partial_output_path, safe_unlink
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
     authorize_compression_change,
@@ -211,8 +210,11 @@ def clear_stale_encoding_items_when_idle(
         select(
             library_items.c.id,
             library_items.c.rel_path,
+            library_items.c.status,
             staged_artifacts.c.staging_path,
             staged_artifacts.c.promoted_at,
+            staged_artifacts.c.encode_completed_at,
+            staged_artifacts.c.staging_fingerprint,
             staged_artifacts.c.encode_host_key,
             staged_artifacts.c.encode_host_label,
         )
@@ -230,17 +232,36 @@ def clear_stale_encoding_items_when_idle(
 
     stale_ids: list[int] = []
     for row in stale_rows:
-        if row["promoted_at"] is not None:
-            continue
         item_id = int(row["id"])
         if _active_standalone_cli_encode(connection, item_id):
             continue
+        if row["promoted_at"] is not None or _staged_output_is_complete(row):
+            if (
+                    str(row["status"] or "") == "encoding"
+                    and row["promoted_at"] is None
+                    and str(row["staging_fingerprint"] or "").strip()
+                    and str(row["encode_completed_at"] or "").strip()
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == row["id"])
+                    .where(library_items.c.status == "encoding")
+                    .values(status="encoded", updated_at=deps.now_iso())
+                )
+            continue
+        cleanup_succeeded = True
         for staging_path, host in _candidate_stale_staging_targets(config, row):
-            _remove_stale_staging_path(staging_path, host=host)
-            _remove_stale_staging_path(
-                staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"),
+            cleanup_succeeded = _remove_stale_staging_path(staging_path, host=host) and cleanup_succeeded
+            cleanup_succeeded = _remove_stale_staging_path(
+                partial_output_path(staging_path),
                 host=host,
+            ) and cleanup_succeeded
+        if not cleanup_succeeded:
+            deps.logger.warning(
+                "Preserving stale staged artifact for item %s because its encoded host is unreachable.",
+                item_id,
             )
+            continue
         stale_ids.append(item_id)
 
     if not stale_ids:
@@ -291,55 +312,27 @@ def _process_is_running(process_id: int) -> bool:
     return True
 
 
+def _staged_output_is_complete(row: Mapping[str, Any]) -> bool:
+    if row.get("promoted_at") is not None:
+        return True
+    if str(row.get("status") or "") in {"encoded", "validated"}:
+        return True
+    return bool(
+        str(row.get("encode_completed_at") or "").strip()
+        and str(row.get("staging_fingerprint") or "").strip()
+    )
+
+
 def _candidate_stale_staging_targets(
         config: MediaforceConfig,
         row: Mapping[str, Any],
 ) -> list[tuple[Path, dict[str, Any] | None]]:
-    targets: list[tuple[Path, dict[str, Any] | None]] = []
-
-    def _add_target(path: Path | None, host: dict[str, Any] | None = None) -> None:
-        if path is None:
-            return
-        normalized_host = object_dict(host)
-        host_key = str(
-            normalized_host.get("host")
-            or normalized_host.get("key")
-            or normalized_host.get("label")
-            or ""
-        ).strip()
-        if any(existing == path and existing_host_key == host_key for existing, existing_host_key in (
-            (candidate_path, str(object_dict(candidate_host).get("host") or object_dict(candidate_host).get("key") or object_dict(candidate_host).get("label") or "").strip())
-            for candidate_path, candidate_host in targets
-        )):
-            return
-        targets.append((path, normalized_host or None))
-
     staging_value = str(row.get("staging_path") or "").strip()
-    if staging_value:
-        host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
-        host_config = host_config_for_key(config, host_key) if host_key else {}
-        _add_target(Path(staging_value), host_config or None)
-
-    rel_path = str(row.get("rel_path") or "").strip()
-    if not rel_path:
-        return targets
-
-    output_suffix = str(object_dict(config.media).get("output_container") or "").strip()
-    if output_suffix:
-        output_suffix = f".{output_suffix.lstrip('.')}"
-    else:
-        output_suffix = Path(rel_path).suffix or ".mkv"
-
-    rel_output_path = Path(rel_path).with_suffix(output_suffix)
+    if not staging_value:
+        return []
     host_key = str(row.get("encode_host_key") or row.get("encode_host_label") or "").strip()
-    if host_key:
-        host_config = host_config_for_key(config, host_key)
-        _add_target(config.staging_root_for_host(host_config) / rel_output_path, host_config)
-
-    _add_target(config.staging_root / rel_output_path)
-    for host in config.remote_hosts:
-        _add_target(config.staging_root_for_host(host) / rel_output_path, host if isinstance(host, dict) else None)
-    return targets
+    host_config = host_config_for_key(config, host_key) if host_key else {}
+    return [(Path(staging_value), host_config or None)]
 
 
 def _remove_stale_staging_path(
@@ -347,7 +340,7 @@ def _remove_stale_staging_path(
         *,
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
-) -> None:
+) -> bool:
     host_payload = object_dict(host)
     remote_mounted_host = (
         bool(host_payload)
@@ -355,17 +348,25 @@ def _remove_stale_staging_path(
         and host_media_access_for_host(host_payload) != "stream"
     )
     if remote_mounted_host and prefer_remote:
-        _remove_remote_stale_staging_path(path, host_payload)
-        return
+        return _remove_remote_stale_staging_path(path, host_payload)
     if path.exists():
         _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
-        return
+        return not path.exists()
     if remote_mounted_host:
-        _remove_remote_stale_staging_path(path, host_payload)
-        return
+        return _remove_remote_stale_staging_path(path, host_payload)
     _remove_path(path)
     _prune_empty_quality_temp_dir(path.parent)
+    return not path.exists()
+
+
+def remove_stale_staging_path(
+        path: Path,
+        *,
+        host: dict[str, Any] | None = None,
+        prefer_remote: bool = True,
+) -> bool:
+    return _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote)
 
 
 def _prune_empty_quality_temp_dir(path: Path) -> None:
@@ -376,19 +377,21 @@ def _prune_empty_quality_temp_dir(path: Path) -> None:
             return
 
 
-def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> None:
+def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> bool:
     quoted_path = shlex.quote(str(path))
     script = f"rm -f {quoted_path}"
     if path.parent.name.startswith(".mediaforce-ab-av1-") or path.parent.name.startswith(".ab-av1-"):
         quoted_parent = shlex.quote(str(path.parent))
         script = (
-            f"{script}; "
-            f"if [ -d {quoted_parent} ]; then rmdir {quoted_parent} >/dev/null 2>&1 || true; fi"
+            f"{script}; status=$?; "
+            f"if [ $status -eq 0 ] && [ -d {quoted_parent} ]; then "
+            f"rmdir {quoted_parent} >/dev/null 2>&1 || true; fi; exit $status"
         )
     try:
-        run_remote_command(host, ["sh", "-lc", script], timeout=10)
+        result = run_remote_command(host, ["sh", "-lc", script], timeout=10)
     except Exception:
-        return
+        return False
+    return result.returncode == 0
 
 
 def running_encode_job_count(connection: DBClient) -> int:
@@ -2296,8 +2299,18 @@ def run_encode_job(
         schedule_interrupted = True
         error = SCHEDULE_CLOSE_ERROR_MESSAGE
     except ProcessCancelledError:
-        final_status = "stopped"
-        error = "Encode queue job was stopped and cleaned up."
+        with open_db(config.paths.db_path) as completion_connection:
+            current_job = load_encode_job(completion_connection, job_id)
+            outputs_completed = (
+                current_job is not None
+                and _encode_job_outputs_completed(completion_connection, current_job)
+            )
+        if outputs_completed:
+            final_status = "completed"
+            error = None
+        else:
+            final_status = "stopped"
+            error = "Encode queue job was stopped and cleaned up."
     except Exception as exc:
         failure_kind = _classify_encode_failure(exc, job)
         error = quality_error_message(exc)
@@ -2647,30 +2660,74 @@ def _cleanup_encode_retry_artifacts(
         stage_row = None
         if library_item_id is not None:
             stage_row = connection.execute(
-                select(staged_artifacts.c.promoted_at).where(staged_artifacts.c.library_item_id == library_item_id)
+                select(
+                    staged_artifacts,
+                    library_items.c.status.label("library_status"),
+                )
+                .select_from(
+                    library_items.outerjoin(
+                        staged_artifacts,
+                        library_items.c.id == staged_artifacts.c.library_item_id,
+                    )
+                )
+                .where(library_items.c.id == library_item_id)
             ).mappings().fetchone()
-        promoted = stage_row is not None and stage_row["promoted_at"] is not None
-        staging_value = item.get("staging_path")
-        if staging_value and not promoted:
-            staging_path = Path(str(staging_value))
-            _remove_stale_staging_path(staging_path, host=host, prefer_remote=False)
-            _remove_stale_staging_path(
-                staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}"),
+        library_status = str(stage_row["library_status"] if stage_row is not None else "").strip()
+        artifact_present = stage_row is not None and stage_row["staging_path"] is not None
+        promoted = artifact_present and stage_row["promoted_at"] is not None
+        manifest_staging_value = item.get("staging_path")
+        staging_value = stage_row["staging_path"] if artifact_present else manifest_staging_value
+        staging_path = Path(str(staging_value)) if str(staging_value or "").strip() else None
+        complete = (
+            promoted
+            or library_status in {"encoded", "validated"}
+            or (
+                artifact_present
+                and _staged_output_is_complete({**dict(stage_row), "status": library_status})
+            )
+        )
+        partial_cleanup_succeeded = True
+        partial_paths = {
+            partial_output_path(Path(str(value)))
+            for value in (staging_value, manifest_staging_value)
+            if str(value or "").strip()
+        }
+        if not promoted:
+            for partial_path in partial_paths:
+                partial_cleanup_succeeded = _remove_stale_staging_path(
+                    partial_path,
+                    host=host,
+                    prefer_remote=False,
+                ) and partial_cleanup_succeeded
+            if not partial_cleanup_succeeded:
+                deps.logger.warning(
+                    "Preserving partial staged artifact for item %s because its encoded host is unreachable.",
+                    library_item_id,
+                )
+        if library_item_id is None or promoted or complete:
+            continue
+        cleanup_succeeded = partial_cleanup_succeeded
+        if staging_path is not None:
+            cleanup_succeeded = _remove_stale_staging_path(
+                staging_path,
                 host=host,
                 prefer_remote=False,
             )
-        if library_item_id is None or promoted:
-            continue
-        if stage_row is not None:
-            connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == library_item_id))
-        connection.execute(
-            update(library_items)
-            .where(library_items.c.id == library_item_id, library_items.c.status != "promoted")
-            .values(
-                status=case((library_items.c.status == "promoted", library_items.c.status), else_="planned"),
-                updated_at=now_iso,
+        if not cleanup_succeeded:
+            deps.logger.warning(
+                "Preserving staged artifact for item %s because its encoded host is unreachable.",
+                library_item_id,
             )
-        )
+            continue
+        if artifact_present:
+            connection.execute(delete(staged_artifacts).where(staged_artifacts.c.library_item_id == library_item_id))
+        if library_status == "encoding":
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == library_item_id)
+                .where(library_items.c.status == "encoding")
+                .values(status="planned", updated_at=now_iso)
+            )
         if commit_between_items:
             connection.commit()
 
