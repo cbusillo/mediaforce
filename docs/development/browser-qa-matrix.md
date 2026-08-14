@@ -85,6 +85,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   lifecycle override dialog before queueing.
 - Active processing state: `/folders/tv/Encoding%20Show/Season%201`, with a
   running folder processing row.
+- Complete and blocked promotion states:
+  `/folders/tv/Promotion%20Ready/Season%201` has a fully validated, coherently
+  approved season, while `/folders/tv/Partial%20Promotion/Season%201` exposes
+  missing, drifted, failed-check, unreachable, not-started, orphaned, and
+  temporary staged-output blockers without adopting or promoting anything.
 - Retryable processing state: `/folders/tv/Failed%20Encode/Season%201`, with a
   needs-attention processing row that exposes recovery copy.
 - Delivery states: `/folders/tv/Validation%20Ready/Season%201`,

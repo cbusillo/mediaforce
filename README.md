@@ -296,6 +296,14 @@ Validate every staged item from the latest manifest:
 uv run mediaforce validate --all
 ```
 
+Inspect staged-output integrity for one explicit scope without changing media,
+runtime state, or database rows. Add `--details` to perform bounded discovery
+of untracked and temporary files under configured staging roots:
+
+```bash
+uv run mediaforce staged-integrity "tv/Show/Season 1" --details
+```
+
 Promote a validated encode into the library:
 
 ```bash
@@ -308,6 +316,13 @@ Promote everything from the latest manifest after approval:
 ```bash
 uv run mediaforce promote --all
 ```
+
+TV promotion is fail-closed at the selected season or show scope: every
+in-scope episode must already be promoted or have a locally available,
+unchanged, validated staged output made with one coherent approved policy.
+Active or attention-needed encode jobs, integrity findings, policy drift, and
+destination conflicts block replacement of the entire selected TV scope.
+Movie and exact-file scopes remain item-granular.
 
 Generate side-by-side approval clips from the source and staged outputs:
 

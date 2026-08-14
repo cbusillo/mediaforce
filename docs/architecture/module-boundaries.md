@@ -258,6 +258,10 @@ Guidance:
   - Other folder/file grouping, Library payloads, exact scope membership, and
     processing confirmation guards; action callers consume membership tokens
     rather than minting replacements
+- `staged_integrity.py`
+  - typed, bounded, read-only staged-output reconciliation for durable artifact
+    rows and configured staging roots; owns integrity dispositions, compact
+    summaries, bounded detail records, and safe next-action contracts
 - `folder_profiles.py`
   - folder inspection and suggested override shaping
 - `run_manifests.py`
