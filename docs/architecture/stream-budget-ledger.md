@@ -104,6 +104,14 @@ source-relative cap, and its calibrated total projection is inside the final
 band. If no bounded measured retry is available, or if the retry budget is
 exhausted, the item enters a needs-review failure state rather than falling back
 to quality-first encoding or silently relaxing the approved constraint.
+When retry planning declines, the target-size trace keeps the item fail-closed
+and records a stable `final_retry_skipped_*` `selection_reason` plus a bounded
+`final_retry_skip` detail block. The reason distinguishes invalid trace inputs,
+unsafe calibration, missing directional candidates, source-cap rejection,
+missing calibrated brackets, unavailable measurement, and interpolation
+failure. This telemetry never authorizes another retry, changes the one-retry
+budget, extrapolates outside measured candidates, or alters targets, CRF bounds,
+sample cadence, source caps, or quality floors.
 
 ## Fallbacks and migration
 

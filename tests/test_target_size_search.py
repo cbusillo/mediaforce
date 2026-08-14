@@ -12,6 +12,7 @@ from mediaforce.tuning.compression_intent import (
 from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
 from mediaforce.tuning.target_size_search import (
+    FINAL_RETRY_SKIP_REASONS,
     TargetSizeSearchError,
     build_target_size_transform_plan,
     retry_quality_result_for_final_miss,
@@ -1285,10 +1286,20 @@ class TargetSizeSearchTests(unittest.TestCase):
             retry_count=0,
         )
         cases = (
-            (31.0, 900_000, "no corrected target bracket"),
-            (35.0, 500_000, "no intermediate integer crf"),
+            (
+                38.0,
+                900_000,
+                "no corrected target bracket",
+                "final_retry_skipped_no_calibrated_bracket",
+            ),
+            (
+                35.0,
+                500_000,
+                "no intermediate integer crf",
+                "final_retry_skipped_interpolation_failure",
+            ),
         )
-        for bracket_crf, bracket_video_bytes, label in cases:
+        for bracket_crf, bracket_video_bytes, label, expected_reason in cases:
             with self.subTest(label=label):
                 bracket = {
                     "crf": bracket_crf,
@@ -1326,6 +1337,122 @@ class TargetSizeSearchTests(unittest.TestCase):
                 )
 
                 self.assertIsNone(retry_quality)
+                retry_trace = quality.target_size_trace or {}
+                self.assertEqual(retry_trace["status"], "needs_review")
+                self.assertEqual(retry_trace["selection_reason"], expected_reason)
+                self.assertEqual(retry_trace["final_retry_skip"]["status"], "skipped")
+                self.assertEqual(retry_trace["final_retry_skip"]["reason"], expected_reason)
+                self.assertIn(expected_reason, FINAL_RETRY_SKIP_REASONS)
+
+    def test_final_output_retry_records_planning_skip_reasons(self) -> None:
+        selected = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_000_000,
+            "predicted_whole_episode_bytes": 5_000_000,
+            "violates_source_cap": False,
+        }
+        bracket = {
+            "crf": 38.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 84.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 500_000,
+            "predicted_whole_episode_bytes": 4_500_000,
+            "violates_source_cap": False,
+        }
+        verification = verify_final_output_size(
+            self._ledger(target_bytes=5_000_000, source_size_bytes=20_000_000),
+            5_400_000,
+            retry_count=0,
+        )
+
+        def trace_for(
+                *,
+                selected_candidate: dict[str, Any] | None = None,
+                candidates: list[dict[str, Any]] | None = None,
+                source_cap_video_bytes: int = 10_000_000,
+        ) -> dict[str, Any]:
+            selected_value = dict(selected_candidate or selected)
+            return {
+                "status": "selected",
+                "selection_reason": "nearest_target_candidate",
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": source_cap_video_bytes},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "candidates": candidates or [selected_value, dict(bracket)],
+                "selected_candidate": selected_value,
+            }
+
+        invalid_selected = dict(selected)
+        invalid_selected.pop("crf")
+        low_prediction_selected = {**selected, "predicted_video_bytes": 500_000}
+        cases = (
+            (
+                trace_for(selected_candidate=invalid_selected, candidates=[invalid_selected, dict(bracket)]),
+                "final_retry_skipped_invalid_trace_inputs",
+                lambda _crf: self.fail("Invalid inputs must not be measured"),
+            ),
+            (
+                trace_for(
+                    selected_candidate=low_prediction_selected,
+                    candidates=[low_prediction_selected, dict(bracket)],
+                ),
+                "final_retry_skipped_calibration_factor_out_of_bounds",
+                lambda _crf: self.fail("Out-of-range calibration must not be measured"),
+            ),
+            (
+                trace_for(candidates=[dict(selected)]),
+                "final_retry_skipped_no_eligible_directional_candidate",
+                lambda _crf: self.fail("Missing directional candidates must not be measured"),
+            ),
+            (
+                trace_for(source_cap_video_bytes=600_000),
+                "final_retry_skipped_all_candidates_over_source_cap",
+                lambda _crf: self.fail("Source-cap violations must not be measured"),
+            ),
+            (
+                trace_for(),
+                "final_retry_skipped_measurement_unavailable",
+                None,
+            ),
+        )
+        for trace, expected_reason, measure_candidate in cases:
+            with self.subTest(reason=expected_reason):
+                quality = QualitySearchResult(
+                    crf=34.0,
+                    metric="VMAF",
+                    target=85.0,
+                    score=86.0,
+                    stdout="target-size-search",
+                    target_size_trace=trace,
+                )
+
+                retry_quality = retry_quality_result_for_final_miss(
+                    quality,
+                    verification,
+                    measure_candidate=measure_candidate,
+                )
+
+                self.assertIsNone(retry_quality)
+                retry_trace = quality.target_size_trace or {}
+                self.assertEqual(retry_trace["status"], "needs_review")
+                self.assertEqual(retry_trace["selection_reason"], expected_reason)
+                self.assertEqual(retry_trace["final_retry_skip"]["reason"], expected_reason)
+                self.assertEqual(retry_trace["final_retry_skip"]["previous_status"], "selected")
+                self.assertEqual(
+                    retry_trace["final_retry_skip"]["previous_selection_reason"],
+                    "nearest_target_candidate",
+                )
+                self.assertIn(expected_reason, FINAL_RETRY_SKIP_REASONS)
 
     def test_final_output_retry_interpolation_respects_calibrated_source_cap(self) -> None:
         selected = {

@@ -696,8 +696,21 @@ class TargetSizeProductionTests(unittest.TestCase):
             failed_details = json.loads(cast(str, events[-1]["details_json"]))
             self.assertEqual(failed_details["failure_kind"], "target_size_needs_review")
             self.assertEqual(failed_details["target_size_verification"]["status"], "over_target")
+            failed_trace = failed_details["target_size_trace"]
+            self.assertEqual(failed_trace["status"], "needs_review")
+            self.assertEqual(
+                failed_trace["selection_reason"],
+                "final_retry_skipped_no_eligible_directional_candidate",
+            )
+            self.assertEqual(failed_trace["final_retry_skip"]["status"], "skipped")
+            self.assertEqual(
+                failed_trace["final_retry_skip"]["reason"],
+                "final_retry_skipped_no_eligible_directional_candidate",
+            )
+            self.assertNotIn("encoding_target_size_retry", event_types)
             observation = connection.execute(select(quality_search_observations)).mappings().one()
             outcome = json.loads(cast(str, observation["outcome_json"]))
+            candidate_trace = json.loads(cast(str, observation["candidate_trace_json"]))
             self.assertEqual(observation["outcome_kind"], "final_size_failure")
             self.assertEqual(observation["learning_eligible"], 0)
             self.assertEqual(observation["exclusion_reason"], "final_size_miss")
@@ -706,6 +719,11 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertTrue(outcome["search_selected"])
             self.assertFalse(outcome["terminal_success"])
             self.assertEqual(outcome["quality_memory_arm"], "ineligible")
+            self.assertEqual(candidate_trace["status"], "needs_review")
+            self.assertEqual(
+                candidate_trace["selection_reason"],
+                "final_retry_skipped_no_eligible_directional_candidate",
+            )
             timing = json.loads(cast(str, observation["timing_json"]))
             self.assertGreater(timing["workflow_duration_seconds"], 0)
             self.assertFalse(staging_path.exists())
