@@ -29,6 +29,8 @@ We do not stop at "it works." We stop when we fully like the result.
 
 - PyCharm is the repository's JetBrains inspection route for Python and general
   IDE findings.
+- Linked-worktree Python IDE state is produced by the configured inspection
+  preparation, stays ignored, and must not be committed.
 - `npm --prefix frontend run check` is the semantic authority for Svelte files,
   with `npm --prefix frontend run lint` covering ESLint and formatting policy.
 - A clean JetBrains inspection does not replace the frontend checks. WebStorm

@@ -49,7 +49,21 @@
     "inspection": {
       "tool": "jetbrains",
       "ide": "PyCharm",
-      "scopePreference": ["changed_files", "directory", "whole_project"]
+      "scopePreference": ["changed_files", "directory", "whole_project"],
+      "prepare": {
+        "python": {
+          "version": "3.13",
+          "moduleName": "mediaforce",
+          "testRoots": ["tests"],
+          "sync": true,
+          "requiredGeneratedState": [
+            ".venv",
+            ".idea/mediaforce.iml",
+            ".idea/modules.xml",
+            ".idea/misc.xml"
+          ]
+        }
+      }
     },
     "docsRequiredWhen": [
       "behavior changes",
