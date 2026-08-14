@@ -393,6 +393,10 @@ def normalize_video_policy_value(key: str, value: JSONValue, base_value: JSONVal
         return clamp_int(value, minimum=0, maximum=63)
     if key == "max_encoded_percent":
         return clamp_int(value, minimum=1, maximum=100)
+    if key == "target_size_bytes":
+        return max(1, int_value(value))
+    if key in {"target_size_mb", "target_runtime_minutes"}:
+        return round(max(float_value(value), 0.001), 3)
     if key == "max_height":
         return clamp_int(value, minimum=0, maximum=4320)
     if key in {"black_bar_detect_samples"}:
