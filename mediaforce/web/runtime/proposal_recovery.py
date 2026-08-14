@@ -1,22 +1,13 @@
 import re
 from typing import Any
 
+from mediaforce.advising.failures import ASSISTANT_FAILURE_CODES
 from mediaforce.core.type_defs import object_dict
 
 
 ASSISTANT_FAILURE_KINDS = frozenset({"assistant_unavailable", "assistant_invalid_response"})
-ASSISTANT_FAILURE_TRACE_CODES = frozenset(
-    {
-        "empty_response",
-        "incomplete_turn",
-        "invalid_structured_output",
-        "provider_error",
-        "timeout",
-        "tool_use_rejected",
-    }
-)
 _ASSISTANT_FAILURE_TRACE_PATTERN = re.compile(
-    rf"(?:^|\n)attempt \d+: ({'|'.join(sorted(ASSISTANT_FAILURE_TRACE_CODES))})(?::|$)",
+    rf"(?:^|\n)attempt \d+: ({'|'.join(sorted(ASSISTANT_FAILURE_CODES))})(?::|$)",
     re.IGNORECASE,
 )
 

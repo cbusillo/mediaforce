@@ -1458,6 +1458,7 @@ def maybe_seed_baseline_policy(
         return {
             "policy": base_policy,
             "job_fields": {
+                "seed_ok": seed_response.ok,
                 "seed_source": "default",
                 "seed_summary": seed_response.summary,
                 "seed_diagnosis": seed_response.diagnosis,
@@ -1482,6 +1483,7 @@ def maybe_seed_baseline_policy(
         return {
             "policy": base_policy,
             "job_fields": {
+                "seed_ok": seed_response.ok,
                 "seed_source": "default",
                 "seed_summary": seed_response.summary,
                 "seed_diagnosis": (
@@ -1510,6 +1512,7 @@ def maybe_seed_baseline_policy(
     return {
         "policy": seeded_policy,
         "job_fields": {
+            "seed_ok": seed_response.ok,
             "seed_source": seed_source,
             "seed_summary": seed_response.summary,
             "seed_diagnosis": seed_response.diagnosis,
@@ -1565,7 +1568,11 @@ def seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dict
         return None
     job_fields = object_dict(seed_metadata.get("job_fields")) if seed_metadata else {}
     return {
-        "ok": bool(job_fields.get("seed_proposed_policy")),
+        "ok": (
+            bool(job_fields.get("seed_ok"))
+            if "seed_ok" in job_fields
+            else bool(job_fields.get("seed_proposed_policy"))
+        ),
         "summary": job_fields.get("seed_summary") or "Queued an AI-guided first sample baseline.",
         "raw": job_fields.get("seed_raw_response") or "",
         "kind": "seed_baseline",

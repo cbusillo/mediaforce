@@ -483,7 +483,6 @@ export type PendingSampleProposal = {
 	action?: string;
 	created_at?: string | null;
 	can_queue?: boolean;
-	queued?: boolean;
 	message?: string;
 	operator_note?: string | null;
 	operator_request?: FolderOperatorRequest | null;
@@ -558,6 +557,16 @@ export function noteAfterPreview(
 	proposal: PendingSampleProposal | Record<string, unknown> | null | undefined
 ): string {
 	return proposal?.can_queue === true ? '' : currentNote;
+}
+
+export function noteAfterPrepareAgain(
+	currentNote: string,
+	storedNote: string,
+	hasNewerText: boolean,
+	proposal: PendingSampleProposal | Record<string, unknown> | null | undefined
+): string {
+	if (proposal?.can_queue !== true) return currentNote;
+	return hasNewerText && currentNote !== storedNote ? currentNote : '';
 }
 
 export function noteAfterProposalHydration(

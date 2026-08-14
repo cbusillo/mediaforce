@@ -1113,7 +1113,7 @@ def _seed_preview_action(
     if advice_payload is not None and combined_fragment:
         advice_payload["applied_policy"] = combined_fragment
     advice_details = object_dict(advice_payload)
-    if not combined_fragment and _can_keep_first_size_budget_sample(
+    if not combined_fragment and not advice_details.get("failure_kind") and _can_keep_first_size_budget_sample(
             operator_request,
             latest_failed_sample_job=blocking_failed_sample_job,
     ):

@@ -11,21 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from mediaforce.advising.failures import ASSISTANT_RETRYABLE_FAILURE_CODES
 from mediaforce.advising.privacy import redact_sensitive_text
 from mediaforce.advising.routing import AdvisorRouting, AdvisorTask, default_advisor_routing
 from mediaforce.advising.telemetry import append_advisor_telemetry, estimated_cost_usd
 
 
-_FALLBACK_STATUSES = frozenset(
-    {
-        "empty_response",
-        "incomplete_turn",
-        "invalid_structured_output",
-        "provider_error",
-        "timeout",
-        "tool_use_rejected",
-    }
-)
+_FALLBACK_STATUSES = ASSISTANT_RETRYABLE_FAILURE_CODES
 
 
 @dataclass(slots=True)

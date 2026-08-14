@@ -36,7 +36,7 @@ def recent_tuning_sessions(
         load_json_object_fn: Any,
         limit: int = 8,
 ) -> list[dict[str, Any]]:
-    rows = connection.execute(
+    query = (
         select(
             tuning_sessions.c.session_id,
             tuning_sessions.c.note,
@@ -50,39 +50,49 @@ def recent_tuning_sessions(
         )
         .where(tuning_sessions.c.prefix == prefix)
         .order_by(tuning_sessions.c.created_at.desc())
-        .limit(limit)
-    ).mappings().fetchall()
+    )
     sessions: list[dict[str, Any]] = []
-    for row in rows:
-        raw_response = str(row["raw_response"] or "")
-        if has_assistant_failure({"trace": {"raw_response": raw_response}}):
-            continue
-        note = str(row["note"] or "").strip()
-        summary = str(row["summary"] or "").strip()
-        diagnosis = str(row["diagnosis"] or "").strip()
-        suggested_follow_up = str(row["suggested_follow_up"] or "").strip()
-        parsed_raw = load_json_object_fn(raw_response)
-        toolbelt = load_json_object_fn(str(row["toolbelt_json"] or ""))
-        sessions.append(
-            {
-                "session_id": row["session_id"],
-                "note": note,
-                "summary": summary,
-                "diagnosis": diagnosis or None,
-                "confidence": str(row["confidence"] or "").strip() or None,
-                "suggested_follow_up": suggested_follow_up or None,
-                "request_disposition": str(parsed_raw.get("request_disposition") or "").strip() or None,
-                "request_response": str(parsed_raw.get("request_response") or "").strip() or None,
-                "feasibility_note": str(parsed_raw.get("feasibility_note") or "").strip() or None,
-                "requested_experiment": object_dict(toolbelt.get("requested_experiment")) or None,
-                "operator_note_parse": (
-                    object_dict(toolbelt.get("operator_note_parse"))
-                    or object_dict(object_dict(toolbelt.get("requested_experiment")).get("operator_note_parse"))
-                    or None
-                ),
-                "created_at": row["created_at"],
-            }
-        )
+    batch_size = max(limit * 2, 16)
+    offset = 0
+    while len(sessions) < limit:
+        rows = connection.execute(query.limit(batch_size).offset(offset)).mappings().fetchall()
+        if not rows:
+            break
+        offset += len(rows)
+        for row in rows:
+            raw_response = str(row["raw_response"] or "")
+            if has_assistant_failure({"trace": {"raw_response": raw_response}}):
+                continue
+            note = str(row["note"] or "").strip()
+            summary = str(row["summary"] or "").strip()
+            diagnosis = str(row["diagnosis"] or "").strip()
+            suggested_follow_up = str(row["suggested_follow_up"] or "").strip()
+            parsed_raw = load_json_object_fn(raw_response)
+            toolbelt = load_json_object_fn(str(row["toolbelt_json"] or ""))
+            sessions.append(
+                {
+                    "session_id": row["session_id"],
+                    "note": note,
+                    "summary": summary,
+                    "diagnosis": diagnosis or None,
+                    "confidence": str(row["confidence"] or "").strip() or None,
+                    "suggested_follow_up": suggested_follow_up or None,
+                    "request_disposition": str(parsed_raw.get("request_disposition") or "").strip() or None,
+                    "request_response": str(parsed_raw.get("request_response") or "").strip() or None,
+                    "feasibility_note": str(parsed_raw.get("feasibility_note") or "").strip() or None,
+                    "requested_experiment": object_dict(toolbelt.get("requested_experiment")) or None,
+                    "operator_note_parse": (
+                        object_dict(toolbelt.get("operator_note_parse"))
+                        or object_dict(object_dict(toolbelt.get("requested_experiment")).get("operator_note_parse"))
+                        or None
+                    ),
+                    "created_at": row["created_at"],
+                }
+            )
+            if len(sessions) == limit:
+                break
+        if len(rows) < batch_size:
+            break
     return sessions
 
 

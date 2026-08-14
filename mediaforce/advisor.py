@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from mediaforce.core.type_defs import JSONObject, JSONValue, int_value, object_dict, object_list
+from mediaforce.advising.failures import ASSISTANT_FAILURE_CODES, ASSISTANT_INVALID_RESPONSE_CODES
 from mediaforce.advising.policy import compact_policy_payload as _compact_policy_payload_impl, \
     extract_seed_payload as _extract_seed_payload_impl, normalize_policy_section as _normalize_policy_section_impl, \
     policy_key_paths as _policy_key_paths_impl, policy_response_schema as _policy_response_schema_impl, \
@@ -41,23 +42,6 @@ RUN_VERDICT_PROMPT_VERSION = "run-verdict-v3-deterministic"
 REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION = "review-artifact-critique-v1"
 OPERATOR_NOTE_PARSE_PROMPT_VERSION = "operator-note-parse-v2"
 REQUEST_DISPOSITIONS = ("honored", "honored_with_risk", "softened", "rejected", "unclear")
-_ASSISTANT_INVALID_RESPONSE_STATUSES = frozenset(
-    {"empty_response", "incomplete_turn", "invalid_structured_output"}
-)
-_ASSISTANT_FAILURE_CODES = frozenset(
-    {
-        "empty_response",
-        "incomplete_turn",
-        "invalid_response",
-        "invalid_structured_output",
-        "missing_image",
-        "no_response",
-        "provider_error",
-        "timeout",
-        "tool_use_rejected",
-        "unsupported_image",
-    }
-)
 _GUARDED_AUDIO_POLICY_KEYS = ("surround_7_1_opus_bitrate", "surround_5_1_opus_bitrate", "stereo_opus_bitrate")
 _AUDIO_SPECIFIC_TOKENS = (
     " audio ",
@@ -169,11 +153,11 @@ def _assistant_failure_details(parsed: Any) -> tuple[str, str, int]:
     if isinstance(parsed, StructuredLLMFailure):
         statuses = [str(status).strip() for status in parsed.statuses if str(status).strip()]
         failure_code = statuses[-1] if statuses else "no_response"
-        if failure_code not in _ASSISTANT_FAILURE_CODES:
+        if failure_code not in ASSISTANT_FAILURE_CODES:
             failure_code = "invalid_response"
         failure_kind = (
             "assistant_invalid_response"
-            if failure_code in _ASSISTANT_INVALID_RESPONSE_STATUSES or failure_code == "invalid_response"
+            if failure_code in ASSISTANT_INVALID_RESPONSE_CODES
             else "assistant_unavailable"
         )
         return failure_kind, failure_code, len(parsed.attempts)
@@ -202,7 +186,7 @@ def _force_operator_confirmed_experiment(
     parsed["diagnosis"] = (
         "The operator gave a direct request, so this draft preserves it for measurement instead of replacing it "
         "with generic bitrate assumptions."
-    )
+        )
     parsed["request_response"] = (
         f"You asked for this directly, so I kept it as the {draft_label}. The real sample and your review will decide."
     )
@@ -471,7 +455,7 @@ def request_note_tuning(
             prompt_version=TUNE_PROMPT_VERSION,
             routing=routing,
             evidence_references=advisor_evidence_references(payload),
-    )
+        )
     if not isinstance(parsed, dict):
         failure_kind, failure_code, failure_attempt_count = _assistant_failure_details(parsed)
         return TuningPolicyResponse(

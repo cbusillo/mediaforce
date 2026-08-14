@@ -12,6 +12,7 @@
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import {
+		noteAfterPrepareAgain,
 		noteAfterPreview,
 		noteAfterProposalHydration,
 		prepareAgainRequest,
@@ -138,7 +139,7 @@
 			if (response.proposal?.can_queue === true) noteHasNewerText = false;
 			return {
 				message: response.message || 'Sample plan ready. Review it before starting work.',
-				attention: response.proposal?.can_queue !== true
+				attention: response.proposal != null && response.proposal.can_queue !== true
 			};
 		});
 	}
@@ -156,11 +157,18 @@
 			);
 			if (!response.ok)
 				throw new Error(response.message || 'Mediaforce could not prepare the sample.');
-			note = noteAfterPreview(note, response.proposal);
-			if (response.proposal?.can_queue === true) noteHasNewerText = false;
+			const nextNote = noteAfterPrepareAgain(
+				note,
+				request.note,
+				noteHasNewerText,
+				response.proposal
+			);
+			const keptNewerText = response.proposal?.can_queue === true && nextNote !== '';
+			note = nextNote;
+			if (response.proposal?.can_queue === true) noteHasNewerText = keptNewerText;
 			return {
 				message: response.message || 'Mediaforce prepared the request again.',
-				attention: response.proposal?.can_queue !== true
+				attention: response.proposal != null && response.proposal.can_queue !== true
 			};
 		});
 	}

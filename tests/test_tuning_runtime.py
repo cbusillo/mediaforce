@@ -4026,6 +4026,32 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.failure_code, "invalid_structured_output")
         self.assertEqual(response.failure_attempt_count, 1)
 
+    def test_request_note_tuning_classifies_all_runtime_availability_failures(self) -> None:
+        for failure_code in (
+            "command_unavailable",
+            "missing_image",
+            "provider_error",
+            "timeout",
+            "tool_use_rejected",
+            "transport_error",
+            "unsupported_image",
+        ):
+            with self.subTest(failure_code=failure_code), patch(
+                "mediaforce.advisor._run_structured_llm_request",
+                return_value=StructuredLLMFailure(
+                    [f"attempt 1: {failure_code}: bounded diagnostic"],
+                    statuses=[failure_code],
+                ),
+            ):
+                response = request_note_tuning(
+                    project_root=self.root,
+                    payload={"policy": {"video": {"target_vmaf": 90.0}}},
+                )
+
+            self.assertEqual(response.request_disposition, "unavailable")
+            self.assertEqual(response.failure_kind, "assistant_unavailable")
+            self.assertEqual(response.failure_code, failure_code)
+
     def test_request_note_tuning_classifies_missing_response_as_unavailable(self) -> None:
         with patch("mediaforce.advisor._run_structured_llm_request", return_value=None):
             response = request_note_tuning(
@@ -4077,11 +4103,32 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         assert public is not None
-        self.assertFalse(public["queued"])
         self.assertEqual(public["operator_note"], "Keep grain but reduce size.")
         self.assertEqual(public["host"], {"key": "worker-1"})
         self.assertEqual(public["recovery"]["cause"], "assistant_failure")
         self.assertIsNone(public["trace"])
+
+    def test_pending_proposal_public_view_covers_nonretryable_legacy_transport_failures(self) -> None:
+        for failure_code in ("command_unavailable", "missing_image", "transport_error", "unsupported_image"):
+            with self.subTest(failure_code=failure_code):
+                public = pending_proposal_public_view(
+                    FolderStateDeps(
+                        review_file_from_url=lambda *_args: None,
+                        load_advice_state=lambda *_args: None,
+                        calibration_draft_hash=lambda *_args: "",
+                        tuning_policy_focus=lambda policy: policy,
+                        pending_proposal_trace_public_view=lambda trace: trace or None,
+                    ),
+                    {
+                        "can_queue": False,
+                        "request_disposition": "unclear",
+                        "trace": {"raw_response": f"attempt 1: {failure_code}: private detail"},
+                    },
+                )
+
+                assert public is not None
+                self.assertEqual(public["recovery"]["cause"], "assistant_failure")
+                self.assertIsNone(public["trace"])
 
     def test_pending_proposal_public_view_does_not_infer_assistant_failure_from_free_text(self) -> None:
         public = pending_proposal_public_view(
@@ -4131,6 +4178,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 connection,
                 "movies/Example",
                 load_json_object_fn=lambda value: object_dict(json.loads(value)),
+                limit=1,
             )
 
         self.assertEqual([session["note"] for session in sessions], ["Valid request"])
@@ -5172,7 +5220,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "source_path": str(self.root / "source" / "tv" / "Lucifer" / "Season 2" / "Lucifer.S02E10.mkv"),
                 "source_size_bytes": 3_913_541_003,
                 "video_codec": "hevc",
-                "duration_seconds": 2686.464,
+                "duration_seconds": None,
                 "audio_summary": [{"channels": 6, "codec_name": "aac"}],
                 "subtitle_summary": [],
                 "resolved_policy": dict(base_policy),
@@ -5240,12 +5288,8 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
         self.assertFalse(proposal["can_queue"])
-        expected_fragment = _absolute_size_fragment(300.0, 44.774)
-        self.assertEqual(
-            proposal["preview_policy"],
-            {"video": {**base_policy["video"], **expected_fragment["video"]}},
-        )
-        self.assertEqual(proposal["applied_policy"], expected_fragment)
+        self.assertEqual(proposal["preview_policy"], base_policy)
+        self.assertEqual(proposal["applied_policy"], {})
         self.assertEqual(proposal["request_disposition"], "unavailable")
         self.assertEqual(proposal["recovery"]["cause"], "assistant_failure")
         self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")

@@ -9,6 +9,7 @@ import {
 	encodeStatusTone,
 	normalizeReviewArtifacts,
 	noteAfterPreview,
+	noteAfterPrepareAgain,
 	noteAfterProposalHydration,
 	prepareAgainRequest,
 	proposalRecoveryView,
@@ -63,6 +64,18 @@ describe('proposalRecoveryView', () => {
 		expect(noteAfterProposalHydration('', false, proposal)).toBe('Saved request');
 		expect(noteAfterProposalHydration('Newer request', true, proposal)).toBe('Newer request');
 		expect(noteAfterProposalHydration('', false, { ...proposal, can_queue: true })).toBe('');
+	});
+
+	it('keeps newer composer text when an exact stored retry becomes queueable', () => {
+		expect(noteAfterPrepareAgain('New request', 'Saved request', true, { can_queue: true })).toBe(
+			'New request'
+		);
+		expect(noteAfterPrepareAgain('Saved request', 'Saved request', true, { can_queue: true })).toBe(
+			''
+		);
+		expect(
+			noteAfterPrepareAgain('Saved request', 'Saved request', false, { can_queue: false })
+		).toBe('Saved request');
 	});
 
 	it('keeps unclear and deterministic recoveries on an edit path', () => {

@@ -354,7 +354,6 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "action": payload.get("action"),
         "created_at": payload.get("created_at"),
         "can_queue": bool(payload.get("can_queue")),
-        "queued": False,
         "message": payload.get("message"),
         "operator_note": payload.get("operator_note"),
         "operator_request": payload.get("operator_request"),
