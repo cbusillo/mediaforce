@@ -12,7 +12,9 @@ import type {
 	OperatorIntentRequestPayload,
 	QualityRiskPayload,
 	QualityRiskTag,
-	SizeGoalMode
+	SizeGoalMode,
+	StagedIntegrityDisposition,
+	StagedIntegrityRecord
 } from '$lib/api/types';
 
 export type HumanSeasonStateKey =
@@ -22,6 +24,7 @@ export type HumanSeasonStateKey =
 	| 'ready_to_make'
 	| 'making_season'
 	| 'ready_to_check'
+	| 'finish_blocked'
 	| 'ready_to_finish'
 	| 'finished'
 	| 'needs_help';
@@ -34,6 +37,193 @@ export interface HumanSeasonState {
 	detail: string;
 	tone: HumanSeasonTone;
 	recoveryKind?: 'test' | 'season';
+}
+
+export interface SeasonPromotionIntegrityBlocker {
+	code: string;
+	count: number;
+	label: string;
+	nextAction: string;
+}
+
+export interface SeasonPromotionIntegrity {
+	available: boolean;
+	canFinish: boolean;
+	error: string;
+	reportComplete: boolean;
+	readyCount: number;
+	alreadyPlacedCount: number;
+	unresolvedCount: number;
+	totalCount: number;
+	blockers: SeasonPromotionIntegrityBlocker[];
+	records: StagedIntegrityRecord[];
+}
+
+const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAction: string }> = {
+	promotable: {
+		label: 'Ready to replace',
+		nextAction: 'Finish the season when every other file is also ready.'
+	},
+	tracked: {
+		label: 'Already in the library',
+		nextAction: 'No action is needed for this file.'
+	},
+	unvalidated: {
+		label: 'Needs a safety check',
+		nextAction: 'Run the file checks before finishing the season.'
+	},
+	validation_failed: {
+		label: 'Safety check failed',
+		nextAction: 'Inspect the failed file and make a clean replacement.'
+	},
+	missing: {
+		label: 'Working file missing',
+		nextAction: 'Make this episode again before finishing the season.'
+	},
+	drifted: {
+		label: 'Changed after checking',
+		nextAction: 'Check the file again or make a fresh replacement.'
+	},
+	orphaned: {
+		label: 'Untracked working file',
+		nextAction: 'Inspect the untracked file; Mediaforce will not adopt it automatically.'
+	},
+	partial_or_temporary: {
+		label: 'Incomplete working file',
+		nextAction: 'Wait for active work to finish or remove the abandoned temporary file.'
+	},
+	remote_only_or_unreachable: {
+		label: 'Worker file unavailable',
+		nextAction: 'Restore access to the worker staging folder before finishing.'
+	},
+	not_started: {
+		label: 'Not made yet',
+		nextAction: 'Process the remaining episode before finishing the season.'
+	}
+};
+
+const PROMOTION_BLOCKER_COPY: Record<string, { label: string; nextAction: string }> = {
+	season_active_encode_job: {
+		label: 'Processing still active',
+		nextAction: 'Wait for the current season processing job to finish.'
+	},
+	season_encode_job_attention: {
+		label: 'Processing needs attention',
+		nextAction: 'Resolve or retry the interrupted season work.'
+	},
+	season_destination_conflict: {
+		label: 'Library file conflict',
+		nextAction: 'Resolve the existing destination file before replacing the season.'
+	},
+	season_policy_approval_missing: {
+		label: 'Approved settings missing',
+		nextAction: 'Review and approve one set of settings for this season.'
+	},
+	season_policy_provenance_missing: {
+		label: 'Settings history missing',
+		nextAction: 'Make the affected episodes again so their exact settings are recorded.'
+	},
+	season_policy_mixed: {
+		label: 'Mixed season settings',
+		nextAction: 'Make the affected episodes with one coherent approved setup.'
+	},
+	season_policy_not_approved: {
+		label: 'Output does not match approval',
+		nextAction: 'Approve matching settings or make the affected episodes again.'
+	},
+	season_policy_gate_unavailable: {
+		label: 'Approval check unavailable',
+		nextAction: 'Restore the approved-settings check before finishing this season.'
+	}
+};
+
+export function stagedIntegrityDispositionCopy(disposition: StagedIntegrityDisposition): {
+	label: string;
+	nextAction: string;
+} {
+	return (
+		INTEGRITY_COPY[disposition] ?? {
+			label: 'Needs attention',
+			nextAction: 'Inspect this staged file before finishing the season.'
+		}
+	);
+}
+
+export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPromotionIntegrity {
+	const integrity = status.staged_integrity;
+	if (!integrity) {
+		return {
+			available: false,
+			canFinish: false,
+			error: '',
+			reportComplete: false,
+			readyCount: 0,
+			alreadyPlacedCount: 0,
+			unresolvedCount: 0,
+			totalCount: 0,
+			blockers: [],
+			records: []
+		};
+	}
+	const records = integrity.records ?? [];
+	const reportComplete = Boolean(
+		integrity.discovery.requested &&
+		!integrity.database_truncated &&
+		!integrity.discovery.truncated &&
+		integrity.records !== undefined &&
+		integrity.next_offset == null
+	);
+	const readyCount = integrity.counts.promotable ?? 0;
+	const alreadyPlacedCount = integrity.counts.tracked ?? 0;
+	const totalCount = Object.values(integrity.counts).reduce(
+		(total, count) => total + (count ?? 0),
+		0
+	);
+	const blockers = integrity.blockers.map((blocker) => {
+		const disposition = blocker.code.replace('staged_integrity_', '') as StagedIntegrityDisposition;
+		const copy = INTEGRITY_COPY[disposition];
+		return {
+			code: blocker.code,
+			count: blocker.count,
+			label: copy?.label ?? 'Needs attention',
+			nextAction: copy?.nextAction ?? 'Inspect the season inventory before finishing.'
+		};
+	});
+	for (const blocker of integrity.promotion_readiness?.blockers ?? []) {
+		if (blocker.code.startsWith('season_staged_integrity_')) continue;
+		const copy = PROMOTION_BLOCKER_COPY[blocker.code];
+		blockers.push({
+			code: blocker.code,
+			count: blocker.count,
+			label: copy?.label ?? 'Finish needs attention',
+			nextAction: copy?.nextAction ?? 'Inspect the season before finishing.'
+		});
+	}
+	if (integrity.database_truncated || integrity.discovery.truncated) {
+		blockers.push({
+			code: 'staged_integrity_incomplete_report',
+			count: 1,
+			label: 'Inventory incomplete',
+			nextAction: 'Inspect the full staged-output report before finishing this season.'
+		});
+	}
+
+	return {
+		available: integrity.discovery.requested,
+		canFinish:
+			reportComplete &&
+			integrity.blocker_count === 0 &&
+			Boolean(integrity.promotion_readiness?.applicable) &&
+			Boolean(integrity.promotion_readiness?.can_promote),
+		error: integrity.load_error ?? '',
+		reportComplete,
+		readyCount,
+		alreadyPlacedCount,
+		unresolvedCount: integrity.blocker_count,
+		totalCount,
+		blockers,
+		records
+	};
 }
 
 export interface ApprovalGuard {
@@ -1481,6 +1671,17 @@ export function detailSeasonState(
 		};
 	}
 	if (workflow?.primary_lane === 'promote') {
+		const integrity = seasonPromotionIntegrity(status);
+		if (!integrity.canFinish) {
+			return {
+				key: 'finish_blocked',
+				label: integrity.available ? 'Season not ready' : 'Checking the season',
+				detail: integrity.available
+					? 'Every episode must be accounted for before any file is replaced.'
+					: 'Mediaforce is confirming every episode before enabling finish.',
+				tone: 'attention'
+			};
+		}
 		return {
 			key: 'ready_to_finish',
 			label: 'Ready to finish',
@@ -1729,6 +1930,7 @@ export function activeSeasonCards(
 				'ready_to_make',
 				'making_season',
 				'ready_to_check',
+				'finish_blocked',
 				'ready_to_finish',
 				'needs_help'
 			].includes(state.key)
@@ -1739,11 +1941,12 @@ export function activeSeasonCards(
 				making_season: 1,
 				ready_to_compare: 2,
 				needs_help: 3,
-				ready_to_make: 4,
-				ready_to_check: 5,
-				ready_to_finish: 6,
-				finished: 7,
-				needs_test: 8
+				finish_blocked: 4,
+				ready_to_make: 5,
+				ready_to_check: 6,
+				ready_to_finish: 7,
+				finished: 8,
+				needs_test: 9
 			};
 			return order[left.state.key] - order[right.state.key];
 		});

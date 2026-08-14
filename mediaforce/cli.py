@@ -33,6 +33,7 @@ from mediaforce.library.run_manifests import build_run_manifest as build_db_run_
     select_encode_candidates as select_run_manifest_encode_candidates, \
     write_manifest as write_run_manifest
 from mediaforce.library.scanner import scan_library
+from mediaforce.library.staged_integrity import staged_integrity_report
 from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
@@ -123,6 +124,16 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--limit", type=int, default=20, help="Number of rows to show")
     report_parser.add_argument("--status", action="append", default=None, help="Statuses to include")
     report_parser.add_argument("--prefix", action="append", default=[], help="Restrict report to rel-path prefixes")
+
+    staged_integrity_parser = subparsers.add_parser(
+        "staged-integrity",
+        help="Read-only bounded staged-output integrity report for one explicit scope",
+    )
+    staged_integrity_parser.add_argument("prefix", help="Explicit scope such as tv/Show/Season 1")
+    staged_integrity_parser.add_argument("--details", action="store_true", help="Discover bounded untracked and temporary outputs")
+    staged_integrity_parser.add_argument("--offset", type=int, default=0, help="Detail record offset")
+    staged_integrity_parser.add_argument("--limit", type=int, default=50, help="Detail record page size")
+    staged_integrity_parser.add_argument("--json", action="store_true", dest="json_output", help="Print JSON")
 
     quality_memory_parser = subparsers.add_parser(
         "quality-memory",
@@ -257,6 +268,20 @@ def _main(
             print(json.dumps(report.to_payload(), indent=2, sort_keys=True))
         else:
             print(format_quality_acceptance_report(report))
+        return 0
+    if args.command == "staged-integrity":
+        with open_readonly_db(config.paths.db_path) as connection:
+            report = staged_integrity_report(
+                connection,
+                config,
+                args.prefix,
+                discover=bool(args.details),
+            )
+        payload = report.detail_payload(offset=args.offset, limit=args.limit)
+        if args.json_output:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            _print_staged_integrity_report(payload)
         return 0
 
     try:
@@ -627,6 +652,30 @@ def _select_encode_candidates(
         limit=limit,
         buckets=buckets,
     )
+
+
+def _print_staged_integrity_report(payload: dict[str, Any]) -> None:
+    counts = dict(payload.get("counts") or {})
+    count_text = ", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "no records"
+    print(f"Staged integrity: {count_text}")
+    discovery = dict(payload.get("discovery") or {})
+    if not discovery.get("requested"):
+        print("Filesystem discovery was not performed; pass --details to inspect untracked and temporary files.")
+    if payload.get("database_truncated") or discovery.get("truncated"):
+        print("Report is bounded; inspect a narrower scope before acting on incomplete results.")
+    records = list(payload.get("records") or [])
+    total_records = sum(int(value or 0) for value in counts.values())
+    offset = max(0, int(payload.get("offset") or 0))
+    if records:
+        print(
+            f"Showing records {offset + 1}-{offset + len(records)} of {total_records}."
+            + (f" Next offset: {payload['next_offset']}." if payload.get("next_offset") is not None else "")
+        )
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        target = str(record.get("rel_path") or record.get("staging_path") or "unknown")
+        print(f"  {record.get('disposition')}: {target} -> {record.get('next_action')}")
 
 
 def _print_report(rows: list[dict[str, Any]], config: MediaforceConfig) -> None:

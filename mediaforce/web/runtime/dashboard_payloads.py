@@ -10,6 +10,7 @@ from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_movie_scope_payload
+from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.candidate_selection import encode_candidate_decisions, project_candidates, workflow_eligibility
 from mediaforce.web.runtime.job_runtime import calibration_job_public_payload, calibration_scope_relation
@@ -143,6 +144,12 @@ def folder_status_payload(
             candidate_eligibility=workflow_eligibility(lifecycle_decisions),
             library_types=config.library_type_map,
         ).to_payload()
+        staged_integrity = staged_integrity_report_for_scope(
+            connection,
+            config,
+            media_scope,
+            discover=False,
+        ).summary_payload()
         if media_scope.domain == "movie":
             movie_context = load_movie_scope_payload(connection, config, normalized_prefix)
             if movie_context is not None:
@@ -177,6 +184,7 @@ def folder_status_payload(
         "retryable_sample_job": retryable_sample_job,
         "folder_scan_job": folder_scan_job,
         "workflow_state": workflow_state,
+        "staged_integrity": staged_integrity,
     }
 
 

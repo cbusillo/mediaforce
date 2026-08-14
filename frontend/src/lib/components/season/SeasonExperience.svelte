@@ -4,6 +4,7 @@
 
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import ComparisonWorkspace from '$lib/components/season/ComparisonWorkspace.svelte';
+	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import type {
 		CompressionIntentLevel,
 		FolderPayload,
@@ -45,6 +46,7 @@
 		reviewSampleSizes,
 		scopedEncodeProgress,
 		seasonIdentity,
+		seasonPromotionIntegrity,
 		shouldPrioritizeScopeActivity,
 		sizeGoals,
 		targetConstraintSummary,
@@ -173,6 +175,7 @@
 				: 'Make the season'
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
+	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
 	const goals = $derived(sizeGoals(folder));
 	const selectedGoal = $derived(goals.find((goal) => goal.key === selectedGoalKey) ?? goals[0]);
 	const compressionIntentOptions = $derived(folder.compression_intent_options ?? []);
@@ -1986,13 +1989,47 @@
 				<p class="eyebrow">Every check passed</p>
 				<h1>Ready to finish.</h1>
 				<p class="lede">
-					The checked smaller episodes will take their place in your library. The current originals
-					move to the backup area so they can be recovered later.
+					Every episode is accounted for. {promotionIntegrity.readyCount === 0
+						? 'No checked episodes still need replacement.'
+						: promotionIntegrity.readyCount === 1
+							? 'Finishing replaces the checked episode.'
+							: `Finishing replaces all ${promotionIntegrity.readyCount} checked episodes together.`}
+					The current originals move to the backup area so they can be recovered later.
 				</p>
+				<SeasonIntegrityPanel integrity={promotionIntegrity} tone="ready" />
 				<button class="primary-button" type="button" onclick={finishSeason}>
 					{isSeriesScope ? 'Finish the show' : 'Finish the season'}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 				</button>
+				<p class="action-note">Nothing changes until you choose this action.</p>
+			</section>
+		{:else if humanState.key === 'finish_blocked'}
+			<section class="ready-room ready-room--blocked">
+				<div class="ready-symbol" aria-hidden="true"><span>!</span></div>
+				<p class="eyebrow">Whole season required</p>
+				<h1>{humanState.label}.</h1>
+				<p class="lede">
+					{humanState.detail} Mediaforce will not replace a partial season or adopt an untracked file.
+					No originals move to backup while this check is blocked.
+				</p>
+				{#if promotionIntegrity.available}
+					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
+				{:else if promotionIntegrity.error}
+					<div class="integrity-loading integrity-loading--error" role="alert">
+						<strong>Season check unavailable</strong>
+						<span
+							>{promotionIntegrity.error} No files can be replaced while this check is unavailable.</span
+						>
+						<button class="secondary-button" type="button" onclick={onMutate}
+							>Try the check again</button
+						>
+					</div>
+				{:else}
+					<div class="integrity-loading" role="status">
+						<strong>Checking every staged file</strong>
+						<span>The finish action stays unavailable until the complete inventory is loaded.</span>
+					</div>
+				{/if}
 			</section>
 		{:else if humanState.key === 'finished'}
 			<section class="finished-room">
@@ -4705,6 +4742,37 @@
 	.ready-room--check .ready-symbol {
 		background: #e7edfb;
 		color: #2456c9;
+	}
+
+	.ready-room--blocked .ready-symbol {
+		background: var(--mf-fail-bg);
+		color: var(--mf-fail-fg);
+	}
+
+	.action-note {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+		margin: -2px 0 0;
+	}
+
+	.integrity-loading {
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		display: grid;
+		gap: 3px;
+		max-width: 680px;
+		padding: 12px 14px;
+		width: 100%;
+	}
+
+	.integrity-loading strong {
+		color: var(--mf-wait-fg);
+		font-size: 12px;
+	}
+
+	.integrity-loading span {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
 	}
 
 	.ready-summary {

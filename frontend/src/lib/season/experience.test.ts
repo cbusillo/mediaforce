@@ -45,6 +45,7 @@ import {
 	reviewSampleSizes,
 	scopedEncodeProgress,
 	seasonIdentity,
+	seasonPromotionIntegrity,
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
 	targetConstraintSummary,
@@ -127,6 +128,53 @@ const status = {
 	calibration_job: null,
 	folder_scan_job: null
 } satisfies FolderStatusPayload;
+
+function promotionStatus({
+	blockerCount = 0,
+	databaseTruncated = false,
+	discoveryTruncated = false
+}: {
+	blockerCount?: number;
+	databaseTruncated?: boolean;
+	discoveryTruncated?: boolean;
+} = {}): FolderStatusPayload {
+	return {
+		...status,
+		staged_integrity: {
+			scope: status.media_scope,
+			counts:
+				blockerCount > 0
+					? { promotable: 6, tracked: 1, not_started: blockerCount }
+					: { promotable: 7, tracked: 1 },
+			blocker_count: blockerCount,
+			blockers:
+				blockerCount > 0
+					? [
+							{
+								code: 'staged_integrity_not_started',
+								count: blockerCount,
+								next_action: 'queue_encode'
+							}
+						]
+					: [],
+			database_truncated: databaseTruncated,
+			discovery: {
+				requested: true,
+				truncated: discoveryTruncated,
+				entries_scanned: 8
+			},
+			offset: 0,
+			limit: 8,
+			records: [],
+			next_offset: null,
+			promotion_readiness: {
+				applicable: true,
+				can_promote: blockerCount === 0 && !databaseTruncated && !discoveryTruncated,
+				blockers: []
+			}
+		}
+	};
+}
 
 function scanJobWithWarnings(...warnings: DashboardScanWarning[]): DashboardScanJob {
 	return {
@@ -1148,12 +1196,113 @@ describe('season experience translation', () => {
 
 	it.each([
 		['validate', 'ready_to_check'],
-		['promote', 'ready_to_finish'],
+		['promote', 'finish_blocked'],
 		['complete', 'finished']
 	] as const)('translates the %s delivery step', (lane, expectedKey) => {
 		expect(
 			detailSeasonState(folder({ workflow_state: workflowState(lane) }), status)
 		).toMatchObject({ key: expectedKey });
+	});
+
+	it('keeps season finishing blocked until the complete integrity inventory is loaded', () => {
+		expect(
+			detailSeasonState(folder({ workflow_state: workflowState('promote') }), status)
+		).toMatchObject({ key: 'finish_blocked', label: 'Checking the season' });
+	});
+
+	it('explains exact season blockers and keeps finish unavailable', () => {
+		const integrity = seasonPromotionIntegrity(promotionStatus({ blockerCount: 2 }));
+
+		expect(integrity).toMatchObject({
+			available: true,
+			canFinish: false,
+			readyCount: 6,
+			alreadyPlacedCount: 1,
+			unresolvedCount: 2,
+			totalCount: 9
+		});
+		expect(integrity.blockers).toEqual([
+			{
+				code: 'staged_integrity_not_started',
+				count: 2,
+				label: 'Not made yet',
+				nextAction: 'Process the remaining episode before finishing the season.'
+			}
+		]);
+		expect(
+			detailSeasonState(
+				folder({ workflow_state: workflowState('promote') }),
+				promotionStatus({ blockerCount: 2 })
+			)
+		).toMatchObject({ key: 'finish_blocked', label: 'Season not ready' });
+	});
+
+	it('enables whole-season finishing only for a complete unblocked inventory', () => {
+		const integrity = seasonPromotionIntegrity(promotionStatus());
+
+		expect(integrity).toMatchObject({
+			available: true,
+			canFinish: true,
+			reportComplete: true,
+			readyCount: 7,
+			alreadyPlacedCount: 1,
+			unresolvedCount: 0,
+			totalCount: 8
+		});
+		expect(
+			detailSeasonState(folder({ workflow_state: workflowState('promote') }), promotionStatus())
+		).toMatchObject({ key: 'ready_to_finish', label: 'Ready to finish' });
+	});
+
+	it('blocks finishing when the integrity report is truncated', () => {
+		const integrity = seasonPromotionIntegrity(promotionStatus({ databaseTruncated: true }));
+
+		expect(integrity.canFinish).toBe(false);
+		expect(integrity.blockers.at(-1)).toMatchObject({
+			code: 'staged_integrity_incomplete_report',
+			label: 'Inventory incomplete'
+		});
+	});
+
+	it('blocks finishing when staged episodes do not share the approved settings', () => {
+		const mixedPolicyStatus = promotionStatus();
+		mixedPolicyStatus.staged_integrity!.promotion_readiness = {
+			applicable: true,
+			can_promote: false,
+			blockers: [
+				{
+					code: 'season_policy_mixed',
+					count: 8,
+					next_action: 'recreate_outputs_with_one_policy'
+				}
+			]
+		};
+
+		const integrity = seasonPromotionIntegrity(mixedPolicyStatus);
+
+		expect(integrity).toMatchObject({ canFinish: false, unresolvedCount: 0 });
+		expect(integrity.blockers).toContainEqual({
+			code: 'season_policy_mixed',
+			count: 8,
+			label: 'Mixed season settings',
+			nextAction: 'Make the affected episodes with one coherent approved setup.'
+		});
+	});
+
+	it('keeps finish blocked and exposes an integrity load failure', () => {
+		const failedStatus = promotionStatus();
+		failedStatus.staged_integrity = {
+			...failedStatus.staged_integrity!,
+			discovery: { requested: false, truncated: false, entries_scanned: 0 },
+			load_error: 'Mediaforce could not load the staged-file inventory.',
+			promotion_readiness: undefined
+		};
+
+		expect(seasonPromotionIntegrity(failedStatus)).toMatchObject({
+			available: false,
+			canFinish: false,
+			error: 'Mediaforce could not load the staged-file inventory.'
+		});
 	});
 
 	it('shows real active work before the generic folder state', () => {

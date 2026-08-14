@@ -8,7 +8,8 @@ import type {
 	MediaScopePayload,
 	MovieLibraryPayload,
 	OtherLibraryPayload,
-	QueueLane
+	QueueLane,
+	StagedIntegrityPayload
 } from './types';
 
 const emptyQueueLane: QueueLane = {
@@ -122,6 +123,7 @@ export function initialFolderStatusPayload(prefix: string): FolderStatusPayload 
 		folder_scan_status: 'loading',
 		calibration_job: null,
 		folder_scan_job: null,
+		staged_integrity: initialStagedIntegrityPayload(prefix),
 		workflow_state: {
 			prefix,
 			state: 'loading',
@@ -140,6 +142,29 @@ export function initialFolderStatusPayload(prefix: string): FolderStatusPayload 
 			},
 			blockers: []
 		}
+	};
+}
+
+export function initialStagedIntegrityPayload(
+	prefix: string,
+	loadError?: string
+): StagedIntegrityPayload {
+	return {
+		scope: loadingMediaScope(prefix),
+		counts: {},
+		blocker_count: 0,
+		blockers: [],
+		database_truncated: false,
+		discovery: {
+			requested: false,
+			truncated: false,
+			entries_scanned: 0
+		},
+		offset: 0,
+		limit: 100,
+		records: [],
+		next_offset: null,
+		load_error: loadError
 	};
 }
 

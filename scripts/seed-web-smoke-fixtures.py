@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 
 from mediaforce.core.config import load_config, update_runtime_settings
@@ -55,6 +56,7 @@ ENCODE_RUNNING_PREFIX = "tv/Encoding Show/Season 1"
 ENCODE_RETRY_PREFIX = "tv/Failed Encode/Season 1"
 VALIDATION_PREFIX = "tv/Validation Ready/Season 1"
 PROMOTION_PREFIX = "tv/Promotion Ready/Season 1"
+PARTIAL_PROMOTION_PREFIX = "tv/Partial Promotion/Season 1"
 FINISHED_PREFIX = "tv/Finished Show/Season 1"
 ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
 MOVIE_LOOSE_PREFIX = "movies/Loose Feature.mkv"
@@ -93,6 +95,7 @@ FIXTURE_PREFIXES = (
     ENCODE_RETRY_PREFIX,
     VALIDATION_PREFIX,
     PROMOTION_PREFIX,
+    PARTIAL_PROMOTION_PREFIX,
     FINISHED_PREFIX,
     ENCODE_WAITING_PREFIX,
     MOVIE_LOOSE_PREFIX,
@@ -757,6 +760,26 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
     _write_review_sample_state(
         config,
         rows_by_prefix,
+        prefix=PROMOTION_PREFIX,
+        job_id="web-smoke-promotion-ready",
+        review_slug="web-smoke-promotion-ready",
+        predicted_total_size_bytes=396_000_000,
+        quality_score=94.8,
+        accepted=True,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
+        prefix=PARTIAL_PROMOTION_PREFIX,
+        job_id="web-smoke-partial-promotion",
+        review_slug="web-smoke-partial-promotion",
+        predicted_total_size_bytes=396_000_000,
+        quality_score=94.8,
+        accepted=True,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
         prefix=PROTECTED_READY_PREFIX,
         job_id="web-smoke-protected-ready",
         review_slug="web-smoke-protected-ready",
@@ -817,6 +840,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
     staging_root = _resolve_under_project(project_root, config.staging_root)
     archive_root.mkdir(parents=True, exist_ok=True)
     staging_root.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(staging_root / PARTIAL_PROMOTION_PREFIX, ignore_errors=True)
     config.paths.web_state_dir.mkdir(parents=True, exist_ok=True)
     _clear_fixture_files(config)
     archived_source = archive_root / "movies" / "Archive Ready" / "Feature.mkv"
@@ -1350,6 +1374,72 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation="priority_encode",
                 recommendation_reason="Fixture show-level sample shown from a season route.",
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 01 Ready.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture validated episode in an incomplete promotion scope.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 02 Not Started.mkv",
+                size_bytes=5 * 1024**3,
+                status="planned",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture unprocessed episode blocks whole-season promotion.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 03 Missing.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture missing staged output blocks whole-season promotion.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 04 Drifted.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture changed staged output blocks whole-season promotion.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 05 Failed Check.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture failed validation blocks whole-season promotion.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 06 Remote.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture unreachable worker output blocks whole-season promotion.",
+            ),
         ]
         rows.extend(
             _library_item(
@@ -1532,20 +1622,96 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             )
             staging_path.parent.mkdir(parents=True, exist_ok=True)
             staging_path.write_bytes(b"mediaforce smoke staged output\n")
+            manifest_path = None
+            item_index = None
+            validation_json = None
+            staging_mtime_ns = None
+            staging_size_bytes = max(1, int(row["size_bytes"]) // 2)
+            if prefix == PROMOTION_PREFIX:
+                policy = config.resolve_policy(str(row["rel_path"]))
+                manifest_path = config.paths.run_manifest_dir / "web-smoke-promotion-ready.json"
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text(json.dumps({
+                    "items": [{"resolved_policy": policy}],
+                }))
+                item_index = 0
+                validation_json = json.dumps({"passed": True, "source": "web-smoke"})
+                staging_size_bytes = staging_path.stat().st_size
+                staging_mtime_ns = staging_path.stat().st_mtime_ns
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
+                    manifest_run_id="web-smoke-promotion-ready" if manifest_path else None,
+                    manifest_path=str(manifest_path) if manifest_path else None,
+                    item_index=item_index,
                     source_rel_path=row["rel_path"],
                     source_size_bytes=row["size_bytes"],
                     staging_path=str(staging_path),
-                    staging_size_bytes=max(1, int(row["size_bytes"]) // 2),
+                    staging_size_bytes=staging_size_bytes,
+                    staging_mtime_ns=staging_mtime_ns,
                     bytes_saved=max(1, int(row["size_bytes"]) // 2),
                     size_ratio=0.5,
+                    validation_json=validation_json,
                     staged_at=timestamp,
                     validated_at=validated_at,
                     updated_at=timestamp,
                 )
             )
+
+        partial_rows = [
+            row for row in rows if str(row["parent_dir"]) == PARTIAL_PROMOTION_PREFIX
+        ]
+        partial_policy = config.resolve_policy(str(partial_rows[0]["rel_path"]))
+        partial_manifest_path = config.paths.run_manifest_dir / "web-smoke-partial-promotion.json"
+        partial_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        partial_manifest_path.write_text(json.dumps({
+            "items": [{"resolved_policy": partial_policy} for _row in partial_rows],
+        }))
+        for item_index, row in enumerate(partial_rows):
+            rel_path = str(row["rel_path"])
+            item_id = ids_by_rel_path[rel_path]
+            if "Not Started" in rel_path:
+                continue
+            if "Remote" in rel_path:
+                staging_path = project_root / "scratch/web-smoke-remote" / Path(rel_path)
+                encode_host_key = "web-smoke-remote"
+            else:
+                staging_path = staging_root / Path(rel_path)
+                encode_host_key = None
+            if "Missing" not in rel_path and "Remote" not in rel_path:
+                staging_path.parent.mkdir(parents=True, exist_ok=True)
+                staging_path.write_bytes(f"mediaforce smoke {rel_path}\n".encode())
+            validation_passed = "Failed Check" not in rel_path
+            expected_size = staging_path.stat().st_size if staging_path.exists() else 1
+            expected_mtime = staging_path.stat().st_mtime_ns if staging_path.exists() else 1
+            if "Drifted" in rel_path:
+                expected_size = 1
+                expected_mtime = 1
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    manifest_run_id="web-smoke-partial-promotion",
+                    manifest_path=str(partial_manifest_path),
+                    item_index=item_index,
+                    encode_host_key=encode_host_key,
+                    source_rel_path=rel_path,
+                    source_size_bytes=row["size_bytes"],
+                    staging_path=str(staging_path),
+                    staging_size_bytes=expected_size,
+                    staging_mtime_ns=expected_mtime,
+                    bytes_saved=max(1, int(row["size_bytes"]) // 2),
+                    size_ratio=0.5,
+                    validation_json=json.dumps({"passed": validation_passed, "source": "web-smoke"}),
+                    staged_at=timestamp,
+                    validated_at=timestamp,
+                    updated_at=timestamp,
+                )
+            )
+        orphan_path = staging_root / PARTIAL_PROMOTION_PREFIX / "Episode 07 Orphan.mkv"
+        orphan_path.parent.mkdir(parents=True, exist_ok=True)
+        orphan_path.write_bytes(b"mediaforce smoke orphaned staged output\n")
+        partial_path = staging_root / PARTIAL_PROMOTION_PREFIX / "Episode 08.partial.mkv"
+        partial_path.write_bytes(b"mediaforce smoke partial staged output\n")
 
         movie_conflict_row = rows_by_prefix[MOVIE_CONFLICT_PREFIX]
         movie_conflict_id = ids_by_rel_path[str(movie_conflict_row["rel_path"])]
@@ -2068,6 +2234,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Promotion%20Ready/Season%201",
                 "marker": "Promotion Ready",
                 "stageMarker": "Ready to finish",
+            },
+            {
+                "label": "Folder Studio partial-promotion fixture",
+                "route": "/folders/tv/Partial%20Promotion/Season%201",
+                "marker": "Partial Promotion",
+                "stageMarker": "Whole season required",
             },
             {
                 "label": "Folder Studio finished fixture",

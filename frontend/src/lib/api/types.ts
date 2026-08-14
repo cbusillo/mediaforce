@@ -1471,6 +1471,57 @@ export interface FolderPayload {
 	other_context?: OtherScopeContext | null;
 }
 
+export type StagedIntegrityDisposition =
+	| 'promotable'
+	| 'tracked'
+	| 'unvalidated'
+	| 'validation_failed'
+	| 'missing'
+	| 'drifted'
+	| 'orphaned'
+	| 'partial_or_temporary'
+	| 'remote_only_or_unreachable'
+	| 'not_started';
+
+export interface StagedIntegrityBlocker {
+	code: string;
+	count: number;
+	next_action: string;
+}
+
+export interface StagedIntegrityRecord {
+	disposition: StagedIntegrityDisposition;
+	item_id: number | null;
+	rel_path: string | null;
+	staging_path: string | null;
+	code: string;
+	next_action: string;
+	detail: string;
+}
+
+export interface StagedIntegrityPayload {
+	scope: MediaScopePayload;
+	counts: Partial<Record<StagedIntegrityDisposition, number>>;
+	blocker_count: number;
+	blockers: StagedIntegrityBlocker[];
+	database_truncated: boolean;
+	discovery: {
+		requested: boolean;
+		truncated: boolean;
+		entries_scanned: number;
+	};
+	offset?: number;
+	limit?: number;
+	records?: StagedIntegrityRecord[];
+	next_offset?: number | null;
+	load_error?: string;
+	promotion_readiness?: {
+		applicable: boolean;
+		can_promote: boolean;
+		blockers: StagedIntegrityBlocker[];
+	};
+}
+
 export interface FolderBenchPreviewResponse {
 	ok: boolean;
 	message?: string;
@@ -1498,4 +1549,5 @@ export interface FolderStatusPayload {
 	retryable_sample_job?: CalibrationJobPayload | null;
 	folder_scan_job: Record<string, unknown> | null;
 	workflow_state?: FolderWorkflowState | null;
+	staged_integrity?: StagedIntegrityPayload;
 }

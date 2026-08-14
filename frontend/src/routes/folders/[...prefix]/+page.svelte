@@ -5,6 +5,7 @@
 		initialFolderPayload,
 		initialFoldersPayload,
 		initialFolderStatusPayload,
+		initialStagedIntegrityPayload,
 		initialHosts
 	} from '$lib/api/placeholders';
 	import type {
@@ -12,7 +13,8 @@
 		DashboardSummaryPayload,
 		FolderPayload,
 		FolderStatusPayload,
-		HostsPayload
+		HostsPayload,
+		StagedIntegrityPayload
 	} from '$lib/api/types';
 	import SeasonExperience from '$lib/components/season/SeasonExperience.svelte';
 	import SeasonLibrary from '$lib/components/season/SeasonLibrary.svelte';
@@ -40,6 +42,44 @@
 			.split('/')
 			.map((segment) => encodeURIComponent(segment))
 			.join('/');
+	}
+
+	async function fetchStagedIntegrity(currentPrefix: string): Promise<StagedIntegrityPayload> {
+		const encodedPrefix = encodePrefix(currentPrefix);
+		let offset = 0;
+		let combined: StagedIntegrityPayload | null = null;
+		const records: NonNullable<StagedIntegrityPayload['records']> = [];
+
+		while (true) {
+			const page = await fetchJson<StagedIntegrityPayload>(
+				`/api/folders/${encodedPrefix}/staged-integrity?offset=${offset}&limit=100`
+			);
+			combined ??= page;
+			records.push(...(page.records ?? []));
+			if (page.next_offset == null) break;
+			if (page.next_offset <= offset) throw new Error('Staged-output inventory did not advance.');
+			offset = page.next_offset;
+		}
+
+		return {
+			...combined,
+			offset: 0,
+			limit: records.length,
+			records,
+			next_offset: null
+		};
+	}
+
+	function integritySummaryKey(integrity: StagedIntegrityPayload | undefined): string {
+		if (!integrity) return '';
+		return JSON.stringify({
+			counts: integrity.counts,
+			blockerCount: integrity.blocker_count,
+			blockers: integrity.blockers,
+			databaseTruncated: integrity.database_truncated,
+			discovery: integrity.discovery,
+			promotionReadiness: integrity.promotion_readiness
+		});
 	}
 
 	async function hydrateDirectory() {
@@ -70,14 +110,20 @@
 		loadError = null;
 		const encodedPrefix = encodePrefix(currentPrefix);
 		try {
-			const [folderPayload, statusPayload, hostsPayload] = await Promise.all([
+			const [folderPayload, statusPayload, integrityPayload, hostsPayload] = await Promise.all([
 				fetchJson<FolderPayload>(`/api/folders/${encodedPrefix}`),
 				fetchJson<FolderStatusPayload>(`/api/folders/${encodedPrefix}/status`),
+				fetchStagedIntegrity(currentPrefix).catch(() =>
+					initialStagedIntegrityPayload(
+						currentPrefix,
+						'Mediaforce could not load the staged-file inventory.'
+					)
+				),
 				fetchJson<HostsPayload>('/api/hosts?compact=1').catch(() => initialHosts)
 			]);
 			if (generation !== hydrationGeneration || currentPrefix !== prefix) return;
 			folder = folderPayload;
-			status = statusPayload;
+			status = { ...statusPayload, staged_integrity: integrityPayload };
 			hosts = hostsPayload;
 		} catch (error) {
 			if (generation === hydrationGeneration) {
@@ -107,8 +153,26 @@
 			);
 			if (generation !== hydrationGeneration || currentPrefix !== prefix) return;
 			const finishedWork = status.polling_active && !nextStatus.polling_active;
-			status = nextStatus;
-			if (finishedWork) await hydrateStudio(currentPrefix);
+			const integrityChanged =
+				integritySummaryKey(status.staged_integrity) !==
+				integritySummaryKey(nextStatus.staged_integrity);
+			const previousIntegrity = status.staged_integrity;
+			const nextIntegrity = nextStatus.staged_integrity;
+			status = {
+				...nextStatus,
+				staged_integrity:
+					previousIntegrity?.records !== undefined
+						? {
+								...(nextIntegrity ?? previousIntegrity),
+								offset: previousIntegrity.offset,
+								limit: previousIntegrity.limit,
+								records: previousIntegrity.records,
+								next_offset: previousIntegrity.next_offset,
+								promotion_readiness: nextIntegrity?.promotion_readiness
+							}
+						: nextIntegrity
+			};
+			if (finishedWork || integrityChanged) await hydrateStudio(currentPrefix);
 		} catch {
 			// Keep the last useful progress state when a background poll briefly fails.
 		} finally {
