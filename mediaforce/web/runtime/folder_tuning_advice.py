@@ -1469,6 +1469,9 @@ def maybe_seed_baseline_policy(
                 "seed_feasibility_note": seed_response.feasibility_note,
                 "seed_prompt_version": seed_response.prompt_version,
                 "seed_raw_response": seed_response.raw,
+                "seed_failure_kind": seed_response.failure_kind,
+                "seed_failure_code": seed_response.failure_code,
+                "seed_failure_attempt_count": seed_response.failure_attempt_count,
                 "seed_proposed_policy": None,
                 "seed_applied_policy": None,
                 "seed_context_payload": payload,
@@ -1493,6 +1496,9 @@ def maybe_seed_baseline_policy(
                 "seed_feasibility_note": seed_response.feasibility_note,
                 "seed_prompt_version": seed_response.prompt_version,
                 "seed_raw_response": seed_response.raw,
+                "seed_failure_kind": seed_response.failure_kind,
+                "seed_failure_code": seed_response.failure_code,
+                "seed_failure_attempt_count": seed_response.failure_attempt_count,
                 "seed_proposed_policy": seed_response.proposed_policy,
                 "seed_applied_policy": None,
                 "seed_protected_policy_paths": protected_paths,
@@ -1515,6 +1521,9 @@ def maybe_seed_baseline_policy(
             "seed_feasibility_note": seed_response.feasibility_note,
             "seed_prompt_version": seed_response.prompt_version,
             "seed_raw_response": seed_response.raw,
+            "seed_failure_kind": seed_response.failure_kind,
+            "seed_failure_code": seed_response.failure_code,
+            "seed_failure_attempt_count": seed_response.failure_attempt_count,
             "seed_proposed_policy": seed_response.proposed_policy,
             "seed_applied_policy": applied_fragment or None,
             "seed_context_payload": payload,
@@ -1545,6 +1554,9 @@ def tuning_advice_payload(
         "applied_policy": applied_fragment,
         "toolbelt_used": tuning.toolbelt_used,
         "self_check": tuning.self_check,
+        "failure_kind": tuning.failure_kind,
+        "failure_code": tuning.failure_code,
+        "failure_attempt_count": tuning.failure_attempt_count,
     }
 
 
@@ -1553,7 +1565,7 @@ def seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dict
         return None
     job_fields = object_dict(seed_metadata.get("job_fields")) if seed_metadata else {}
     return {
-        "ok": True,
+        "ok": bool(job_fields.get("seed_proposed_policy")),
         "summary": job_fields.get("seed_summary") or "Queued an AI-guided first sample baseline.",
         "raw": job_fields.get("seed_raw_response") or "",
         "kind": "seed_baseline",
@@ -1567,6 +1579,9 @@ def seed_advice_payload(note: str, seed_metadata: dict[str, Any] | None) -> dict
         "evidence_checked": object_list(job_fields.get("seed_evidence_checked")),
         "suggested_follow_up": job_fields.get("seed_suggested_follow_up"),
         "applied_policy": job_fields.get("seed_applied_policy"),
+        "failure_kind": job_fields.get("seed_failure_kind"),
+        "failure_code": job_fields.get("seed_failure_code"),
+        "failure_attempt_count": job_fields.get("seed_failure_attempt_count"),
     }
 
 
@@ -1586,6 +1601,9 @@ def job_seed_metadata(job_payload: dict[str, Any]) -> dict[str, Any] | None:
         "feasibility_note": job_payload.get("seed_feasibility_note"),
         "prompt_version": job_payload.get("seed_prompt_version"),
         "raw_response": job_payload.get("seed_raw_response"),
+        "failure_kind": job_payload.get("seed_failure_kind"),
+        "failure_code": job_payload.get("seed_failure_code"),
+        "failure_attempt_count": job_payload.get("seed_failure_attempt_count"),
         "proposed_policy": job_payload.get("seed_proposed_policy"),
         "applied_policy": job_payload.get("seed_applied_policy"),
     }

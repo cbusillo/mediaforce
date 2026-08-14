@@ -11,6 +11,12 @@
 		MovieMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
+	import {
+		noteAfterPreview,
+		noteAfterProposalHydration,
+		prepareAgainRequest,
+		proposalRecoveryView
+	} from '$lib/folders/studio';
 	import { movieWorkflowLabel } from '$lib/movies/library';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
@@ -36,6 +42,11 @@
 	let pendingAction = $state('');
 	let actionMessage = $state('');
 	let actionError = $state('');
+	let actionNeedsAttention = $state(false);
+	let noteInput = $state<HTMLTextAreaElement>();
+	let noteHasNewerText = $state(false);
+	let hydratedFolderPrefix = $state('');
+	let hydratedProposalId = $state('');
 
 	const context = $derived(folder.movie_context ?? null);
 	const title = $derived(
@@ -52,6 +63,7 @@
 	const calibration = $derived(asRecord(folder.calibration));
 	const pendingProposal = $derived(asRecord(folder.pending_proposal));
 	const pendingProposalCanQueue = $derived(pendingProposal.can_queue === true);
+	const pendingProposalRecovery = $derived(proposalRecoveryView(pendingProposal));
 	const reviewGate = $derived(asRecord(folder.review_gate));
 	const calibrationJob = $derived(asRecord(folder.calibration_job));
 	const encodeJob = $derived(folder.encode_job ?? null);
@@ -95,6 +107,19 @@
 		}
 	});
 
+	$effect(() => {
+		if (folder.prefix !== hydratedFolderPrefix) {
+			hydratedFolderPrefix = folder.prefix;
+			hydratedProposalId = '';
+			note = '';
+			noteHasNewerText = false;
+		}
+		const proposalId = asText(pendingProposal.proposal_id);
+		if (!proposalId || proposalId === hydratedProposalId) return;
+		hydratedProposalId = proposalId;
+		note = noteAfterProposalHydration(note, noteHasNewerText, pendingProposal);
+	});
+
 	async function prepareSample() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('prepare-sample', async () => {
@@ -109,9 +134,40 @@
 			);
 			if (!response.ok)
 				throw new Error(response.message || 'The movie target is not ready for sampling.');
-			note = '';
-			return response.message || 'Sample plan ready. Review it before starting work.';
+			note = noteAfterPreview(note, response.proposal);
+			if (response.proposal?.can_queue === true) noteHasNewerText = false;
+			return {
+				message: response.message || 'Sample plan ready. Review it before starting work.',
+				attention: response.proposal?.can_queue !== true
+			};
 		});
+	}
+
+	async function prepareAgain() {
+		if (isBrowseOnly || isBusy) return;
+		await runAction('prepare-again', async () => {
+			const request = prepareAgainRequest(pendingProposal);
+			if (!request.note || !request.hostKey) {
+				throw new Error('The saved request is unavailable. Edit the request and prepare it again.');
+			}
+			const response = await postJson<FolderBenchPreviewResponse>(
+				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/preview`,
+				{ note: request.note, host_key: request.hostKey }
+			);
+			if (!response.ok)
+				throw new Error(response.message || 'Mediaforce could not prepare the sample.');
+			note = noteAfterPreview(note, response.proposal);
+			if (response.proposal?.can_queue === true) noteHasNewerText = false;
+			return {
+				message: response.message || 'Mediaforce prepared the request again.',
+				attention: response.proposal?.can_queue !== true
+			};
+		});
+	}
+
+	function editRequest() {
+		if (isBrowseOnly) return;
+		requestAnimationFrame(() => noteInput?.focus());
 	}
 
 	async function startSample() {
@@ -217,16 +273,18 @@
 		});
 	}
 
-	type ActionResult = string | { message: string; targetPrefix?: string };
+	type ActionResult = string | { message: string; targetPrefix?: string; attention?: boolean };
 
 	async function runAction(action: string, operation: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
+		actionNeedsAttention = false;
 		let actionCompleted = false;
 		try {
 			const result = await operation();
 			actionMessage = typeof result === 'string' ? result : result.message;
+			actionNeedsAttention = typeof result === 'string' ? false : result.attention === true;
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
@@ -446,8 +504,13 @@
 		</div>
 	{/if}
 	{#if actionMessage}
-		<div class="notice" role="status">
-			<strong>Movie state updated.</strong><span>{actionMessage}</span>
+		<div
+			class:notice--danger={actionNeedsAttention}
+			class="notice"
+			role={actionNeedsAttention ? 'alert' : 'status'}
+		>
+			<strong>{actionNeedsAttention ? 'Sample needs attention.' : 'Movie state updated.'}</strong
+			><span>{actionMessage}</span>
 		</div>
 	{/if}
 	{#if isBrowseOnly}
@@ -555,27 +618,6 @@
 				meta={reviewReady ? 'Ready to review' : 'No sample yet'}
 			>
 				<div class="sample-bench">
-					{#if Object.keys(pendingProposal).length}
-						<div class:sample-plan--blocked={!pendingProposalCanQueue} class="sample-plan">
-							<strong
-								>{pendingProposalCanQueue
-									? 'Sample plan is ready'
-									: 'Sample plan needs another request'}</strong
-							>
-							<p>
-								{pendingProposalCanQueue
-									? 'Nothing starts until you confirm this plan.'
-									: asText(pendingProposal.message) ||
-										asText(pendingProposal.suggested_follow_up) ||
-										'The review assistant could not prepare a sample plan yet.'}
-							</p>
-							{#if pendingProposalCanQueue}
-								<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={startSample}
-									>Start sample</button
-								>
-							{/if}
-						</div>
-					{/if}
 					<div class="sample-facts">
 						<div>
 							<span>Representative file</span><strong
@@ -598,11 +640,49 @@
 							<span>Review status</span><strong>{reviewStatusLabel()}</strong>
 						</div>
 					</div>
+					{#if Object.keys(pendingProposal).length}
+						<div class:sample-plan--blocked={!pendingProposalCanQueue} class="sample-plan">
+							<strong
+								>{pendingProposalCanQueue
+									? 'Sample plan is ready'
+									: pendingProposalRecovery?.headline || 'Sample plan needs attention'}</strong
+							>
+							<p>
+								{pendingProposalCanQueue
+									? 'Nothing starts until you confirm this plan.'
+									: pendingProposalRecovery?.detail ||
+										asText(pendingProposal.message) ||
+										'The sample plan needs another request.'}
+							</p>
+							{#if !pendingProposalCanQueue}
+								<p class="sample-plan__queue-state"><strong>Nothing was queued.</strong></p>
+							{/if}
+							<div class="sample-plan__actions">
+								{#if pendingProposalCanQueue}
+									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={startSample}
+										>Start sample</button
+									>
+								{:else if pendingProposalRecovery?.action === 'prepare_again'}
+									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={prepareAgain}
+										>Prepare again</button
+									>
+								{:else if pendingProposalRecovery}
+									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={editRequest}
+										>{pendingProposalRecovery.action === 'change_request'
+											? 'Change request'
+											: 'Edit request'}</button
+									>
+								{/if}
+							</div>
+						</div>
+					{/if}
 
 					<label class="request-field">
 						<span>What should Mediaforce preserve?</span>
 						<textarea
+							bind:this={noteInput}
 							bind:value={note}
+							oninput={() => (noteHasNewerText = true)}
 							rows="4"
 							placeholder="Example: preserve grain and make the feature about 35% smaller."
 						></textarea>
@@ -932,6 +1012,17 @@
 
 	.sample-plan .secondary {
 		justify-self: start;
+	}
+
+	.sample-plan__queue-state {
+		color: var(--mf-attention-fg);
+		margin-top: 0;
+	}
+
+	.sample-plan__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--mf-space-4);
 	}
 
 	.sample-facts {

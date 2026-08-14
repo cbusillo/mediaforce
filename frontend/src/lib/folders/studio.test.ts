@@ -8,11 +8,86 @@ import {
 	describeHighImpactApprovalGate,
 	encodeStatusTone,
 	normalizeReviewArtifacts,
+	noteAfterPreview,
+	noteAfterProposalHydration,
+	prepareAgainRequest,
+	proposalRecoveryView,
 	resolveBenchDraftNote,
 	summarizeCalibrationFailureDetail,
 	summarizeVideoTransformPolicy,
 	type ComparisonRow
 } from './studio';
+
+describe('proposalRecoveryView', () => {
+	it('keeps assistant retry bounded to the stored request and worker', () => {
+		const proposal = {
+			can_queue: false,
+			operator_note: 'Keep grain, but reduce size.',
+			host: { key: 'worker-stored' },
+			recovery: {
+				cause: 'assistant_failure' as const,
+				headline: 'Mediaforce could not prepare this sample',
+				detail: 'The assistant did not answer. Nothing was queued.',
+				nothing_queued: true,
+				action: 'prepare_again' as const,
+				same_request_retryable: true
+			}
+		};
+
+		expect(proposalRecoveryView(proposal)).toMatchObject({
+			cause: 'assistant_failure',
+			action: 'prepare_again',
+			nothingQueued: true,
+			sameRequestRetryable: true
+		});
+		expect(prepareAgainRequest(proposal)).toEqual({
+			note: 'Keep grain, but reduce size.',
+			hostKey: 'worker-stored'
+		});
+	});
+
+	it('requires the stored worker for an exact retry', () => {
+		expect(prepareAgainRequest({ operator_note: 'Keep grain.' })).toEqual({
+			note: 'Keep grain.',
+			hostKey: ''
+		});
+	});
+
+	it('preserves the composer note for a nonqueueable preview and clears only queueable plans', () => {
+		expect(noteAfterPreview('Keep my newer note', { can_queue: false })).toBe('Keep my newer note');
+		expect(noteAfterPreview('Finished note', { can_queue: true })).toBe('');
+	});
+
+	it('restores a saved nonqueueable note only before the operator types newer text', () => {
+		const proposal = { can_queue: false, operator_note: 'Saved request' };
+		expect(noteAfterProposalHydration('', false, proposal)).toBe('Saved request');
+		expect(noteAfterProposalHydration('Newer request', true, proposal)).toBe('Newer request');
+		expect(noteAfterProposalHydration('', false, { ...proposal, can_queue: true })).toBe('');
+	});
+
+	it('keeps unclear and deterministic recoveries on an edit path', () => {
+		expect(
+			proposalRecoveryView({
+				can_queue: false,
+				recovery: {
+					cause: 'unclear_request',
+					action: 'edit_request',
+					nothing_queued: true
+				}
+			})
+		).toMatchObject({ action: 'edit_request', nothingQueued: true });
+		expect(
+			proposalRecoveryView({
+				can_queue: false,
+				recovery: {
+					cause: 'deterministic_blocker',
+					action: 'change_request',
+					nothing_queued: true
+				}
+			})
+		).toMatchObject({ action: 'change_request', nothingQueued: true });
+	});
+});
 
 describe('describeHighImpactApprovalGate', () => {
 	it('keeps the standard approval button for normal drafts', () => {

@@ -41,6 +41,23 @@ RUN_VERDICT_PROMPT_VERSION = "run-verdict-v3-deterministic"
 REVIEW_ARTIFACT_CRITIQUE_PROMPT_VERSION = "review-artifact-critique-v1"
 OPERATOR_NOTE_PARSE_PROMPT_VERSION = "operator-note-parse-v2"
 REQUEST_DISPOSITIONS = ("honored", "honored_with_risk", "softened", "rejected", "unclear")
+_ASSISTANT_INVALID_RESPONSE_STATUSES = frozenset(
+    {"empty_response", "incomplete_turn", "invalid_structured_output"}
+)
+_ASSISTANT_FAILURE_CODES = frozenset(
+    {
+        "empty_response",
+        "incomplete_turn",
+        "invalid_response",
+        "invalid_structured_output",
+        "missing_image",
+        "no_response",
+        "provider_error",
+        "timeout",
+        "tool_use_rejected",
+        "unsupported_image",
+    }
+)
 _GUARDED_AUDIO_POLICY_KEYS = ("surround_7_1_opus_bitrate", "surround_5_1_opus_bitrate", "stereo_opus_bitrate")
 _AUDIO_SPECIFIC_TOKENS = (
     " audio ",
@@ -148,6 +165,23 @@ def _raw_failure_payload(parsed: Any) -> str:
     return json.dumps(parsed) if parsed is not None else ""
 
 
+def _assistant_failure_details(parsed: Any) -> tuple[str, str, int]:
+    if isinstance(parsed, StructuredLLMFailure):
+        statuses = [str(status).strip() for status in parsed.statuses if str(status).strip()]
+        failure_code = statuses[-1] if statuses else "no_response"
+        if failure_code not in _ASSISTANT_FAILURE_CODES:
+            failure_code = "invalid_response"
+        failure_kind = (
+            "assistant_invalid_response"
+            if failure_code in _ASSISTANT_INVALID_RESPONSE_STATUSES or failure_code == "invalid_response"
+            else "assistant_unavailable"
+        )
+        return failure_kind, failure_code, len(parsed.attempts)
+    if parsed is None:
+        return "assistant_unavailable", "no_response", 0
+    return "assistant_invalid_response", "invalid_response", 0
+
+
 def _force_operator_confirmed_experiment(
         *,
         current_policy: dict[str, Any],
@@ -232,6 +266,9 @@ class SeedPolicyResponse:
     feasibility_note: str | None
     proposed_policy: dict[str, Any] | None
     model_proposed_policy: dict[str, Any] | None = None
+    failure_kind: str | None = None
+    failure_code: str | None = None
+    failure_attempt_count: int | None = None
 
 
 @dataclass(slots=True)
@@ -251,6 +288,9 @@ class TuningPolicyResponse:
     toolbelt_used: list[str]
     self_check: dict[str, Any] | None
     model_proposed_policy: dict[str, Any] | None = None
+    failure_kind: str | None = None
+    failure_code: str | None = None
+    failure_attempt_count: int | None = None
 
 
 @dataclass(slots=True)
@@ -302,19 +342,23 @@ def request_seed_policy(
         evidence_references=advisor_evidence_references(payload),
     )
     if not isinstance(parsed, dict):
+        failure_kind, failure_code, failure_attempt_count = _assistant_failure_details(parsed)
         return SeedPolicyResponse(
             ok=False,
-            summary="The seed worker did not return valid structured JSON.",
+            summary="The assistant could not prepare the first draft.",
             raw=_raw_failure_payload(parsed),
             prompt_version=SEED_PROMPT_VERSION,
-            diagnosis="The seed worker did not complete cleanly.",
+            diagnosis="The assistant request did not complete.",
             confidence="low",
             evidence_checked=[],
-            suggested_follow_up="Ask again with a concrete experiment or artifact concern.",
-            request_disposition="unclear",
-            request_response="I could not turn that note into a trustworthy first draft.",
+            suggested_follow_up="Prepare again with the same request and worker.",
+            request_disposition="unavailable",
+            request_response="The assistant could not prepare this request.",
             feasibility_note=None,
             proposed_policy=None,
+            failure_kind=failure_kind,
+            failure_code=failure_code,
+            failure_attempt_count=failure_attempt_count,
         )
     proposed_policy = object_dict(parsed.get("policy")) or None
     proposed_policy = _compact_policy_payload(proposed_policy)
@@ -427,23 +471,27 @@ def request_note_tuning(
             prompt_version=TUNE_PROMPT_VERSION,
             routing=routing,
             evidence_references=advisor_evidence_references(payload),
-        )
+    )
     if not isinstance(parsed, dict):
+        failure_kind, failure_code, failure_attempt_count = _assistant_failure_details(parsed)
         return TuningPolicyResponse(
             ok=False,
-            summary="The tuning worker did not return valid structured JSON.",
+            summary="The assistant could not prepare the next draft.",
             raw=_raw_failure_payload(parsed),
             prompt_version=TUNE_PROMPT_VERSION,
-            diagnosis="The tuning worker did not complete cleanly.",
+            diagnosis="The assistant request did not complete.",
             confidence="low",
             evidence_checked=[],
-            suggested_follow_up="Try again with a more specific note about the artifact you see.",
-            request_disposition="unclear",
-            request_response="I could not turn that note into a trustworthy next draft.",
+            suggested_follow_up="Prepare again with the same request and worker.",
+            request_disposition="unavailable",
+            request_response="The assistant could not prepare this request.",
             feasibility_note=None,
             proposed_policy=None,
             toolbelt_used=sorted(object_dict(payload.get("runtime_toolbelt")).keys()),
             self_check=None,
+            failure_kind=failure_kind,
+            failure_code=failure_code,
+            failure_attempt_count=failure_attempt_count,
         )
     proposed_policy = object_dict(parsed.get("policy")) or None
     proposed_policy = _compact_policy_payload(proposed_policy)

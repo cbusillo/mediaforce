@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -31,6 +31,7 @@ _FALLBACK_STATUSES = frozenset(
 @dataclass(slots=True)
 class StructuredLLMFailure:
     attempts: list[str]
+    statuses: list[str] = field(default_factory=list)
 
     @property
     def raw(self) -> str:
@@ -128,6 +129,7 @@ def run_structured_llm_request(
     resolved_routing = routing or default_advisor_routing()
     request_id = uuid.uuid4().hex
     failures: list[str] = []
+    statuses: list[str] = []
     fallback_reason: str | None = None
     resolved_images = [str(Path(path).expanduser().resolve()) for path in images or []]
     route = resolved_routing.route_for(task)
@@ -161,10 +163,11 @@ def run_structured_llm_request(
         if attempt.status == "success" and attempt.payload is not None:
             return attempt.payload
         failures.append(_attempt_diagnostic(route_index + 1, attempt.status, attempt.diagnostic))
+        statuses.append(attempt.status)
         fallback_reason = attempt.status
         if attempt.status not in _FALLBACK_STATUSES:
             break
-    return StructuredLLMFailure(failures) if failures else None
+    return StructuredLLMFailure(failures, statuses=statuses) if failures else None
 
 
 def run_multimodal_tune_request(

@@ -5,10 +5,10 @@ from sqlalchemy import select
 
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import tuning_sessions
-from mediaforce.core.type_defs import object_dict
-from mediaforce.core.type_defs import JSONValue
+from mediaforce.core.type_defs import JSONValue, object_dict
 from mediaforce.tuning.compression_intent import compression_intent_from_policy
 from mediaforce.tuning.size_goals import DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT
+from mediaforce.web.runtime.proposal_recovery import has_assistant_failure
 
 
 def video_quality_improvement_change(current_video: dict[str, Any], preview_video: dict[str, Any]) -> bool:
@@ -54,11 +54,14 @@ def recent_tuning_sessions(
     ).mappings().fetchall()
     sessions: list[dict[str, Any]] = []
     for row in rows:
+        raw_response = str(row["raw_response"] or "")
+        if has_assistant_failure({"trace": {"raw_response": raw_response}}):
+            continue
         note = str(row["note"] or "").strip()
         summary = str(row["summary"] or "").strip()
         diagnosis = str(row["diagnosis"] or "").strip()
         suggested_follow_up = str(row["suggested_follow_up"] or "").strip()
-        parsed_raw = load_json_object_fn(str(row["raw_response"] or ""))
+        parsed_raw = load_json_object_fn(raw_response)
         toolbelt = load_json_object_fn(str(row["toolbelt_json"] or ""))
         sessions.append(
             {
@@ -209,7 +212,7 @@ def proposal_alignment_issue(
     if not operator_request:
         return None
     disposition = str(request_disposition or "").strip().lower()
-    if disposition in {"softened", "rejected", "unclear"}:
+    if disposition in {"softened", "rejected", "unclear", "unavailable"}:
         return None
     request_type = str(operator_request.get("request_type") or "").strip().lower()
     current_video = object_dict(current_policy.get("video"))

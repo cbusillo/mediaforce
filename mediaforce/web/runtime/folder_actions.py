@@ -1996,7 +1996,12 @@ def save_profile_action(
     advice_state = object_dict(load_advice_state(config, normalized_prefix))
     operator_request = object_dict(advice_state.get("operator_request"))
     request_disposition = str(advice_state.get("request_disposition") or "").strip().lower()
-    if bool(operator_request.get("operator_confirmed")) and request_disposition in {"softened", "rejected", "unclear"}:
+    if bool(operator_request.get("operator_confirmed")) and request_disposition in {
+        "softened",
+        "rejected",
+        "unclear",
+        "unavailable",
+    }:
         raise HTTPException(
             status_code=409,
             detail=(

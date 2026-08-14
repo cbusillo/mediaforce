@@ -35,12 +35,14 @@ from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
     measured_size_budget_policy_fragment,
 )
+from mediaforce.web.runtime.proposal_recovery import proposal_recovery
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.tuning.tuning_memory import promote_learning_artifact, retrieve_learning_context
 
 
 QUEUEABLE_NO_CHANGE_DISPOSITIONS = {"honored", "honored_with_risk"}
-NONQUEUEABLE_DISPOSITIONS = {"softened", "rejected", "unclear"}
+NONQUEUEABLE_DISPOSITIONS = {"softened", "rejected", "unclear", "unavailable"}
+MEASUREMENT_OVERRIDE_DISPOSITIONS = NONQUEUEABLE_DISPOSITIONS - {"unavailable"}
 
 
 @dataclass(slots=True)
@@ -334,14 +336,29 @@ def _proposal_ready_message(
         alignment_issue: str | None,
         has_policy_change: bool,
         run_label: str,
+        request_disposition: str | None = None,
+        failure_kind: str | None = None,
+        failure_code: str | None = None,
+        failure_attempt_count: int | None = None,
 ) -> str:
-    if alignment_issue:
-        return alignment_issue
+    if not can_queue:
+        recovery = proposal_recovery(
+            {
+                "can_queue": False,
+                "request_disposition": request_disposition,
+                "failure_kind": failure_kind,
+                "failure_code": failure_code,
+                "failure_attempt_count": failure_attempt_count,
+            },
+            deterministic_detail=alignment_issue,
+        )
+        if recovery is not None:
+            return str(recovery["detail"])
     if can_queue and has_policy_change:
         return f"Review the bench draft, then confirm when you are ready to run the {run_label}."
     if can_queue:
         return f"The bench kept the current policy. Confirm when you are ready to rerun the {run_label} unchanged."
-    return "The bench did not produce a queueable draft yet. Adjust the note and ask again."
+    return "Nothing was queued. Update the request and prepare another sample."
 
 
 def _proposal_quality_risk_contract(
@@ -1127,11 +1144,10 @@ def _seed_preview_action(
         alignment_issue = blocking_evidence_issue
     request_disposition = str(advice_details.get("request_disposition") or "").strip().lower()
     measurement_override_needed = (
-        alignment_issue is not None or request_disposition in NONQUEUEABLE_DISPOSITIONS
+        alignment_issue is not None or request_disposition in MEASUREMENT_OVERRIDE_DISPOSITIONS
     )
     if blocking_evidence_issue is None and measurement_override_needed and measurement_fragment is not None:
         seeded_policy = deps.apply_policy_fragment(base_policy, measurement_fragment) if measurement_fragment else base_policy
-        seed_fragment = measurement_fragment
         combined_fragment = measurement_fragment
         alignment_issue = None
         seed_job_fields["seed_source"] = "operator_request" if measurement_fragment else "default"
@@ -1182,11 +1198,28 @@ def _seed_preview_action(
         alignment_issue=alignment_issue,
         quality_risk_contract=quality_risk_contract,
     )
+    failure_kind = str(advice_details.get("failure_kind") or "").strip() or None
+    failure_code = str(advice_details.get("failure_code") or "").strip() or None
+    failure_attempt_count = advice_details.get("failure_attempt_count")
     proposal_message = _proposal_ready_message(
         can_queue=can_queue,
         alignment_issue=alignment_issue,
         has_policy_change=bool(combined_fragment),
         run_label="first sample",
+        request_disposition=advice_details.get("request_disposition"),
+        failure_kind=failure_kind,
+        failure_code=failure_code,
+        failure_attempt_count=failure_attempt_count if isinstance(failure_attempt_count, int) else None,
+    )
+    recovery = proposal_recovery(
+        {
+            "can_queue": can_queue,
+            "request_disposition": advice_details.get("request_disposition"),
+            "failure_kind": failure_kind,
+            "failure_code": failure_code,
+            "failure_attempt_count": failure_attempt_count,
+        },
+        deterministic_detail=alignment_issue,
     )
     proposal_created_at = deps.now_iso()
     session_toolbelt: dict[str, Any] = {}
@@ -1195,19 +1228,21 @@ def _seed_preview_action(
     operator_note_parse = object_dict(object_dict(operator_request).get("operator_note_parse"))
     if operator_note_parse:
         session_toolbelt["operator_note_parse"] = operator_note_parse
-    session_id = deps.record_tuning_session(
-        connection,
-        prefix=normalized_prefix,
-        note=trimmed_note,
-        response={
-            **object_dict(advice_payload),
-            "proposed_policy": object_dict(seed_job_fields.get("seed_proposed_policy")),
-        },
-        applied_policy=combined_fragment,
-        toolbelt=session_toolbelt,
-        created_at=proposal_created_at,
-        requested_experiment=operator_request,
-    )
+    session_id = None
+    if failure_kind is None:
+        session_id = deps.record_tuning_session(
+            connection,
+            prefix=normalized_prefix,
+            note=trimmed_note,
+            response={
+                **object_dict(advice_payload),
+                "proposed_policy": object_dict(seed_job_fields.get("seed_proposed_policy")),
+            },
+            applied_policy=combined_fragment,
+            toolbelt=session_toolbelt,
+            created_at=proposal_created_at,
+            requested_experiment=operator_request,
+        )
     proposal_payload: dict[str, Any] = {
         "proposal_id": uuid.uuid4().hex[:12],
         "session_id": session_id,
@@ -1226,6 +1261,9 @@ def _seed_preview_action(
             advice_details.get("request_disposition"),
         ),
         "request_disposition": advice_details.get("request_disposition"),
+        "failure_kind": failure_kind,
+        "failure_code": failure_code,
+        "failure_attempt_count": failure_attempt_count,
         "request_response": advice_details.get("request_response"),
         "feasibility_note": advice_details.get("feasibility_note"),
         "summary": advice_details.get("summary") or "Drafted the initial sample.",
@@ -1244,6 +1282,8 @@ def _seed_preview_action(
         "job_fields": seed_job_fields,
         "metric_support": metric_support,
         "latest_failed_sample_job": latest_failed_sample_job,
+        "recovery": recovery,
+        "quality_risk_contract": quality_risk_contract,
         "trace": {
             "prompt_version": advice_details.get("prompt_version"),
             "raw_response": advice_details.get("raw"),
@@ -1259,7 +1299,6 @@ def _seed_preview_action(
             ),
         },
     }
-    proposal_payload["quality_risk_contract"] = quality_risk_contract
     deps.save_pending_proposal(config, normalized_prefix, proposal_payload)
     return {
         "ok": True,
@@ -1542,7 +1581,7 @@ def _tuned_preview_action(
         alignment_issue = blocking_evidence_issue
     measurement_override_needed = (
         alignment_issue is not None
-        or str(request_disposition or "").strip().lower() in NONQUEUEABLE_DISPOSITIONS
+        or str(request_disposition or "").strip().lower() in MEASUREMENT_OVERRIDE_DISPOSITIONS
     )
     if (
             not protected_policy_paths
@@ -1600,28 +1639,47 @@ def _tuned_preview_action(
         alignment_issue=alignment_issue,
         quality_risk_contract=quality_risk_contract,
     )
+    failure_kind = str(advice_payload.get("failure_kind") or "").strip() or None
+    failure_code = str(advice_payload.get("failure_code") or "").strip() or None
+    failure_attempt_count = advice_payload.get("failure_attempt_count")
     proposal_message = _proposal_ready_message(
         can_queue=can_queue,
         alignment_issue=alignment_issue,
         has_policy_change=bool(combined_fragment),
         run_label="next sample",
+        request_disposition=request_disposition,
+        failure_kind=failure_kind,
+        failure_code=failure_code,
+        failure_attempt_count=failure_attempt_count if isinstance(failure_attempt_count, int) else None,
+    )
+    recovery = proposal_recovery(
+        {
+            "can_queue": can_queue,
+            "request_disposition": request_disposition,
+            "failure_kind": failure_kind,
+            "failure_code": failure_code,
+            "failure_attempt_count": failure_attempt_count,
+        },
+        deterministic_detail=alignment_issue,
     )
     proposal_created_at = deps.now_iso()
-    with open_db(config.paths.db_path) as post_connection:
-        session_id = deps.record_tuning_session(
-            post_connection,
-            prefix=normalized_prefix,
-            note=trimmed_note,
-            response={
-                **advice_payload,
-                "prompt_version": tuning.prompt_version,
-                "proposed_policy": tuning.proposed_policy,
-            },
-            applied_policy=combined_fragment,
-            toolbelt=runtime_toolbelt,
-            created_at=proposal_created_at,
-            requested_experiment=operator_request,
-        )
+    session_id = None
+    if failure_kind is None:
+        with open_db(config.paths.db_path) as post_connection:
+            session_id = deps.record_tuning_session(
+                post_connection,
+                prefix=normalized_prefix,
+                note=trimmed_note,
+                response={
+                    **advice_payload,
+                    "prompt_version": tuning.prompt_version,
+                    "proposed_policy": tuning.proposed_policy,
+                },
+                applied_policy=combined_fragment,
+                toolbelt=runtime_toolbelt,
+                created_at=proposal_created_at,
+                requested_experiment=operator_request,
+            )
     tune_proposal_payload: dict[str, Any] = {
         "proposal_id": uuid.uuid4().hex[:12],
         "session_id": session_id,
@@ -1635,6 +1693,9 @@ def _tuned_preview_action(
         "operator_request": operator_request,
         "operator_signal": deps.proposal_signal_copy(trimmed_note, operator_request, True, request_disposition),
         "request_disposition": request_disposition,
+        "failure_kind": failure_kind,
+        "failure_code": failure_code,
+        "failure_attempt_count": failure_attempt_count,
         "request_response": request_response,
         "feasibility_note": tuning.feasibility_note,
         "summary": proposal_summary,
@@ -1652,6 +1713,9 @@ def _tuned_preview_action(
         "advice_payload": advice_payload,
         "budget_enforcement": object_dict(advice_payload.get("budget_enforcement")) or None,
         "latest_failed_sample_job": latest_failed_sample_job,
+        "recovery": recovery,
+        "quality_risk_contract": quality_risk_contract,
+        **({"multimodal_review_pack": public_review_pack} if public_review_pack is not None else {}),
         "trace": {
             "prompt_version": tuning.prompt_version,
             "raw_response": tuning.raw,
@@ -1687,9 +1751,6 @@ def _tuned_preview_action(
             },
         },
     }
-    tune_proposal_payload["quality_risk_contract"] = quality_risk_contract
-    if public_review_pack is not None:
-        tune_proposal_payload["multimodal_review_pack"] = public_review_pack
     deps.save_pending_proposal(config, normalized_prefix, tune_proposal_payload)
     return {
         "ok": True,

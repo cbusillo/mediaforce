@@ -35,6 +35,16 @@ the proposal trace path only.
 Current and preview policy hashes remain distinct. A review of the current
 sample cannot authorize a pending preview whose policy hash differs.
 
+## Non-queueable recovery
+
+Every non-queueable pending proposal publishes a bounded recovery object with a
+safe headline, detail, `nothing_queued: true`, one operator action, and whether
+the exact request can be retried. Assistant/provider and structured-output
+failures are separate from an unclear request and deterministic blockers; they
+never label the operator note unclear, expose raw diagnostics, or count as
+tuning-history evidence. Legacy saved proposals derive the same assistant
+recovery from recognized internal trace failure codes after restart.
+
 ## Deterministic rules
 
 - Only existing allow-listed video transform and encode keys may be compiled.
