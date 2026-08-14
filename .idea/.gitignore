@@ -2,6 +2,7 @@
 /shelf/
 /workspace.xml
 /modules.xml
+/misc.xml
 /*.iml
 # Ignored default folder with query files
 /queries/
