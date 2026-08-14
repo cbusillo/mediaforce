@@ -65,6 +65,31 @@ class QualityRiskContractTests(unittest.TestCase):
             ],
         )
 
+    def test_policy_compiler_preserves_larger_absolute_size_goal(self) -> None:
+        base_policy = {
+            "video": {
+                "target_size_mb": 300.0,
+                "target_size_bytes": 300_000_000,
+                "target_runtime_minutes": 45.0,
+            }
+        }
+        preview_policy = {
+            "video": {
+                "target_size_mb": 717.0,
+                "target_size_bytes": 717_000_000,
+                "target_runtime_minutes": 107.581,
+            }
+        }
+
+        compiled, applied, rejected = compile_allow_listed_transform_fragment(
+            base_policy,
+            preview_policy,
+        )
+
+        self.assertEqual(compiled, preview_policy)
+        self.assertEqual(applied, preview_policy)
+        self.assertEqual(rejected, [])
+
     def test_current_rejection_requires_exact_evidence_policy_source_and_job_binding(self) -> None:
         policy = {"video": {"target_vmaf": 90.0}}
         contract = self._contract(

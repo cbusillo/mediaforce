@@ -41,6 +41,9 @@ sample cannot authorize a pending preview whose policy hash differs.
   Unknown keys are rejected before sampling.
 - Allowed values are range- and type-checked before normalization; invalid
   values are rejected instead of being silently clamped into executable policy.
+- Deterministically resolved size and runtime values survive allow-list
+  compilation unchanged; prior defaults are not upper bounds for an explicit
+  absolute size goal.
 - Cadence `mixed`, `unknown`, or transform-less interlaced/telecine outcomes
   block automatic reuse and remain explicit operator-visible gates.
 - Arithmetic infeasibility remains deterministic and is never delegated to a
