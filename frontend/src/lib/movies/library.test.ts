@@ -4,7 +4,10 @@ import type { MovieLibraryPayload, MovieTitle } from '$lib/api/types';
 import {
 	mergeMovieLibraryPayloads,
 	movieReclaimLowerBound,
-	movieReclaimTotalIsLowerBound
+	movieReclaimTotalIsLowerBound,
+	movieTitleNeedsAction,
+	movieWorkflowLabel,
+	selectMovieLeadTitle
 } from './library';
 
 const title: MovieTitle = {
@@ -152,5 +155,94 @@ describe('movieReclaimTotalIsLowerBound', () => {
 				}
 			])
 		).toBe(false);
+	});
+});
+
+describe('movie action discoverability', () => {
+	const readyTitle: MovieTitle = {
+		...title,
+		prefix: 'films/Ready',
+		title: 'Ready',
+		details_loading: false,
+		workflow_state: {
+			prefix: 'films/Ready',
+			state: 'ready_to_promote',
+			primary_lane: 'promote',
+			label: 'Ready to promote',
+			tone: 'ready',
+			detail: 'One validated output is ready.',
+			counts: {},
+			lane_counts: {},
+			state_counts: {},
+			next_action: {
+				kind: 'promote_outputs',
+				label: 'Promote',
+				enabled: true,
+				target_prefix: 'films/Ready'
+			},
+			blockers: []
+		}
+	};
+
+	it('selects the first actionable title for the default priority view', () => {
+		expect(movieTitleNeedsAction(readyTitle)).toBe(true);
+		expect(movieWorkflowLabel(readyTitle)).toBe('Ready to replace');
+		expect(selectMovieLeadTitle([title, readyTitle], 'priority', '')?.prefix).toBe('films/Ready');
+	});
+
+	it('treats a required file choice as actionable without exposing the backend label', () => {
+		const explicitTitle: MovieTitle = {
+			...readyTitle,
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'explicit_selection_required',
+				primary_lane: 'none',
+				label: 'Explicit selection required',
+				next_action: {
+					kind: 'review_scope',
+					label: 'Review title files',
+					enabled: true,
+					target_prefix: readyTitle.prefix
+				}
+			}
+		};
+
+		expect(movieTitleNeedsAction(explicitTitle)).toBe(true);
+		expect(movieWorkflowLabel(explicitTitle)).toBe('Choose a file');
+		expect(selectMovieLeadTitle([title, explicitTitle], 'priority', '')).toBe(explicitTitle);
+	});
+
+	it('labels view-only and conflict states truthfully', () => {
+		const browseOnlyTitle: MovieTitle = {
+			...readyTitle,
+			availability: 'browse_only',
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'browse_only',
+				primary_lane: 'none',
+				label: 'Browse only'
+			}
+		};
+		const conflictTitle: MovieTitle = {
+			...readyTitle,
+			promotion_conflicts: [
+				{
+					kind: 'destination_exists',
+					destination_path: '/movies/Ready.mkv',
+					member_prefixes: [readyTitle.prefix],
+					detail: 'A destination file exists.'
+				}
+			]
+		};
+
+		expect(movieTitleNeedsAction(browseOnlyTitle)).toBe(false);
+		expect(movieWorkflowLabel(browseOnlyTitle)).toBe('View only');
+		expect(movieTitleNeedsAction(conflictTitle)).toBe(true);
+		expect(movieWorkflowLabel(conflictTitle)).toBe('Replacement blocked');
+	});
+
+	it('does not show a next-up shortcut while the operator is searching or using another sort', () => {
+		expect(selectMovieLeadTitle([readyTitle], 'priority', 'ready')).toBeNull();
+		expect(selectMovieLeadTitle([readyTitle], 'name', '')).toBeNull();
 	});
 });

@@ -2103,13 +2103,13 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio exact-file fixture",
                 "route": "/folders/movies/Loose%20Feature.mkv",
                 "marker": "Loose Feature",
-                "stageMarker": "Exact Movie File",
+                "stageMarker": "Only this file",
             },
             {
                 "label": "Movie Studio promotion-conflict fixture",
                 "route": "/folders/movies/Promotion%20Conflict",
                 "marker": "Promotion Conflict",
-                "stageMarker": "Promotion is blocked",
+                "stageMarker": "Mediaforce cannot replace this movie yet.",
             },
             {
                 "label": "Movie Studio active-processing fixture",
@@ -2121,7 +2121,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio infeasible-target fixture",
                 "route": "/folders/movies/Target%20Too%20Large",
                 "marker": "Target Too Large",
-                "stageMarker": "Target size exceeds the 80% source cap.",
+                "stageMarker": "The requested size is larger than the allowed 80% of the original file.",
             },
             {
                 "label": "Folder Studio sampling fixture",

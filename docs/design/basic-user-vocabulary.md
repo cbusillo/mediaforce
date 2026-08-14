@@ -36,6 +36,13 @@ worker`, `Needs sample`, `Safe to delete`.
   state.
 - Encode: use `Process` for basic route summaries; keep `encode` in technical
   job tables.
+- Movie scope: use `Action covers` with `Only this file` or `The whole title`.
+  Keep `scope`, `exact selection`, and `title-wide` in technical details only.
+- Movie validation: use `Check compressed file` and `checked file` instead of
+  `validate outputs` and `validated output` on the primary operator path.
+- Movie promotion: use `Replace original now` when the checked replacement is
+  ready. State beside the action that it runs immediately and that Mediaforce
+  keeps a backup of the original first.
 - Transcode root: use `Working folder` in the Settings storage section.
 - Archive cleanup: use `Delete archived originals` for Completed and Settings
   destructive actions.
@@ -74,11 +81,11 @@ debugging a worker, or comparing logs against backend output.
 - Quality memory lacks enough compatible runs: `Sparse memory`.
 - Quality memory no longer matches source or settings: `Memory invalidated`.
 - Quality-memory evaluation failed without affecting production search: `Memory
-  unavailable`.
+unavailable`.
 - Quality-memory evidence disagrees or is unstable: `Evidence conflict`.
 - A stable recommendation has ten or more item/season observations: `High
-  confidence`. Always pair these states with `quality floors and saved policy
-  remain unchanged` while memory is observation-only.
+confidence`. Always pair these states with `quality floors and saved policy
+remain unchanged` while memory is observation-only.
 
 ### Ops
 
@@ -157,6 +164,9 @@ debugging a worker, or comparing logs against backend output.
   actually encoded and `shadow recommendation` for the observation-only first
   CRF suggestion. Keep `Bench` out of visible labels unless a product naming
   decision intentionally keeps it.
+- Movie Library should lead with `Recommended next`, `Next step`, and plain
+  descriptions of the work. Movie Studio should use `Action covers`, `checked
+file`, and `Replace original now` rather than backend workflow nouns.
 - Ops may expose more technical detail, but first-level headings should still
   use `workers`, `sample queue`, `processing queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete archived
