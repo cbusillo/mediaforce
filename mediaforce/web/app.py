@@ -45,7 +45,7 @@ from mediaforce.tuning.quality_shadow import (
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
     update_runtime_settings, update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import calibration_jobs as calibration_jobs_table
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import learning_artifacts
@@ -78,6 +78,7 @@ from mediaforce.library.media_scopes import media_group_scope_for_rel_path, reso
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
+from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
 from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
@@ -155,7 +156,8 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_
     validate_folder_outputs_action, \
     build_multimodal_review_pack, build_tuning_runtime_toolbelt, load_latest_failed_sample_job_state, \
     load_latest_failed_target_size_job_state, load_retryable_sample_job_state
-from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker
+from mediaforce.web.runtime.folder_actions import ActionPayload, FolderItem, production_action_blocker, \
+    tv_promotion_readiness_payload
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, \
@@ -846,6 +848,42 @@ def create_app(
             load_scan_status=_load_scan_status,
             load_active_encode_job_for_prefix=load_active_encode_job_for_prefix,
         )
+
+    def _folder_staged_integrity_payload(
+            normalized_prefix: str,
+            offset: int,
+            limit: int,
+    ) -> dict[str, Any]:
+        with open_readonly_db(config.paths.db_path) as connection:
+            scope = resolve_media_scope(
+                connection,
+                normalized_prefix,
+                library_types=config.library_type_map,
+            )
+            report = staged_integrity_report_for_scope(
+                connection,
+                config,
+                scope,
+                discover=True,
+            )
+            items = _load_folder_staged_items(
+                connection,
+                config,
+                normalized_prefix,
+                statuses={"validated"},
+            )
+            promotion_readiness = tv_promotion_readiness_payload(
+                connection,
+                config,
+                scope,
+                report,
+                items,
+                load_calibration_state_fn=_load_calibration_state,
+            )
+        return {
+            **report.detail_payload(offset=offset, limit=limit),
+            "promotion_readiness": promotion_readiness,
+        }
 
     def _save_settings_action(
             *,
@@ -1791,6 +1829,7 @@ def create_app(
             config,
             normalized_prefix,
             load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            load_calibration_state_fn=_load_calibration_state,
             load_folder_staged_items_fn=_load_folder_staged_items,
             promote_manifest_items_fn=promote_manifest_items,
             validate_scope_action=lambda connection, prefix: other_scope_action_blocker(
@@ -1950,6 +1989,7 @@ def create_app(
     register_folder_routes(
         app,
         folder_status_payload=_folder_status_payload,
+        folder_staged_integrity_payload=_folder_staged_integrity_payload,
         folder_content_payload=_folder_content_payload,
         download_review_compare_action=lambda prefix: _download_review_compare_action(
             config,
