@@ -1010,12 +1010,12 @@
 	}
 
 	.sample-plan--blocked {
-		background: var(--mf-attention-bg);
-		border-color: var(--mf-attention-line);
+		background: var(--mf-wait-bg);
+		border-color: var(--mf-wait-line);
 	}
 
 	.sample-plan--blocked strong {
-		color: var(--mf-attention-fg);
+		color: var(--mf-wait-fg);
 	}
 
 	.sample-plan .secondary {
@@ -1023,7 +1023,7 @@
 	}
 
 	.sample-plan__queue-state {
-		color: var(--mf-attention-fg);
+		color: var(--mf-wait-fg);
 		margin-top: 0;
 	}
 

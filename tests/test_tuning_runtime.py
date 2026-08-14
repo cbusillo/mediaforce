@@ -4074,6 +4074,10 @@ class TuningRuntimeTests(unittest.TestCase):
             {"can_queue": False, "request_disposition": "rejected"},
             deterministic_detail="The size target leaves no video budget.",
         )
+        unclear_with_blocker = proposal_recovery(
+            {"can_queue": False, "request_disposition": "unclear"},
+            deterministic_detail="The previous sample failed at the configured search limit.",
+        )
 
         assert assistant is not None
         assert unclear is not None
@@ -4083,6 +4087,13 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(unclear["action"], "edit_request")
         self.assertEqual(deterministic["action"], "change_request")
         self.assertEqual(deterministic["detail"], "The size target leaves no video budget.")
+        assert unclear_with_blocker is not None
+        self.assertEqual(unclear_with_blocker["cause"], "deterministic_blocker")
+        self.assertEqual(unclear_with_blocker["action"], "change_request")
+        self.assertEqual(
+            unclear_with_blocker["detail"],
+            "The previous sample failed at the configured search limit.",
+        )
 
     def test_pending_proposal_public_view_derives_legacy_assistant_recovery_and_suppresses_raw_trace(self) -> None:
         public = pending_proposal_public_view(
@@ -5293,6 +5304,35 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(proposal["request_disposition"], "unavailable")
         self.assertEqual(proposal["recovery"]["cause"], "assistant_failure")
         self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")
+        record_session.assert_not_called()
+
+        missing_duration_item = deps.sample_item()
+        deps.sample_item = lambda *_args, **_kwargs: {
+            **missing_duration_item,
+            "duration_seconds": 2686.464,
+        }
+        saved_proposals.clear()
+        record_session.reset_mock()
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 18}):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/Lucifer/Season 2",
+                "Target 300MB per episode",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        proposal = saved_proposals[0]
+        expected_fragment = _absolute_size_fragment(300.0, 44.774)
+        self.assertFalse(proposal["can_queue"])
+        self.assertEqual(
+            proposal["preview_policy"],
+            {"video": {**base_policy["video"], **expected_fragment["video"]}},
+        )
+        self.assertEqual(proposal["applied_policy"], expected_fragment)
+        self.assertEqual(proposal["recovery"]["cause"], "assistant_failure")
         record_session.assert_not_called()
 
     def test_folder_ai_tune_preview_overrides_seed_refusal_for_first_av1_size_budget(self) -> None:

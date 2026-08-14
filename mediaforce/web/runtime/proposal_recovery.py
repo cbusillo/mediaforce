@@ -28,6 +28,9 @@ def proposal_recovery(
             "action": "prepare_again",
             "same_request_retryable": True,
         }
+    resolved_deterministic_detail = str(deterministic_detail or "").strip()
+    if resolved_deterministic_detail:
+        return _deterministic_recovery(resolved_deterministic_detail)
     disposition = str(payload.get("request_disposition") or "").strip().lower()
     if disposition == "unclear":
         return {
@@ -38,7 +41,11 @@ def proposal_recovery(
             "action": "edit_request",
             "same_request_retryable": False,
         }
-    detail = str(deterministic_detail or payload.get("message") or "").strip()
+    detail = str(payload.get("message") or "").strip()
+    return _deterministic_recovery(detail)
+
+
+def _deterministic_recovery(detail: str) -> dict[str, Any]:
     return {
         "cause": "deterministic_blocker",
         "headline": "Sample plan is blocked",

@@ -186,7 +186,7 @@ def _force_operator_confirmed_experiment(
     parsed["diagnosis"] = (
         "The operator gave a direct request, so this draft preserves it for measurement instead of replacing it "
         "with generic bitrate assumptions."
-        )
+    )
     parsed["request_response"] = (
         f"You asked for this directly, so I kept it as the {draft_label}. The real sample and your review will decide."
     )
