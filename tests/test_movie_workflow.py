@@ -19,7 +19,7 @@ from mediaforce.library.movie_library import load_movie_library_payload, load_mo
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.representatives import load_representative_selection
 from mediaforce.library.workflow_state import build_folder_workflow_state
-from mediaforce.web.runtime.folder_actions import _promotion_conflict_response
+from mediaforce.web.runtime.folder_actions import _promotion_conflict_response, _promotion_refresh_prefix
 from mediaforce.web.runtime.folder_actions import _reset_stale_prefix_encoding_items_for_requeue
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action, queue_folder_encode_action, \
     validate_folder_outputs_action
@@ -529,6 +529,40 @@ class MovieWorkflowTests(unittest.TestCase):
 
         self.assertIsNotNone(conflict)
         self.assertEqual(conflict["conflicts"][0]["kind"], "duplicate_destination")
+
+    def test_promotion_refresh_prefix_moves_exact_movie_members_to_a_surviving_scope(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Example/Example.mp4")
+            self._insert_item(connection, "films/Loose Feature.mp4")
+            title_member_scope = resolve_media_scope(
+                connection,
+                "films/Example/Example.mp4",
+                library_types=self.config.library_type_map,
+            )
+            single_file_scope = resolve_media_scope(
+                connection,
+                "films/Loose Feature.mp4",
+                library_types=self.config.library_type_map,
+            )
+
+        self.assertEqual(
+            _promotion_refresh_prefix(
+                "films/Example/Example.mp4",
+                title_member_scope,
+                [{"rel_path": "films/Example/Example.mp4"}],
+                [self.root / "films/Example/Example.mkv"],
+            ),
+            "films/Example",
+        )
+        self.assertEqual(
+            _promotion_refresh_prefix(
+                "films/Loose Feature.mp4",
+                single_file_scope,
+                [{"rel_path": "films/Loose Feature.mp4"}],
+                [self.root / "films/Loose Feature.mkv"],
+            ),
+            "films/Loose Feature.mkv",
+        )
 
     def test_browse_only_movie_library_blocks_validation_and_promotion_actions(self) -> None:
         browse_config = self._config(extras="exclude", availability="browse_only")

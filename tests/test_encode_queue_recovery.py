@@ -19185,6 +19185,7 @@ raise SystemExit(0)
             )
 
         self.assertTrue(result["ok"])
+        self.assertEqual(result["target_prefix"], "other/Foo.mkv")
         self.assertEqual(promoted_item_ids, [exact_id])
         self.assertNotIn(sibling_id, promoted_item_ids)
 

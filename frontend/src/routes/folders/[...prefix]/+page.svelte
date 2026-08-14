@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { fetchJson } from '$lib/api/client';
 	import {
 		initialDashboard,
@@ -16,6 +18,8 @@
 		HostsPayload,
 		StagedIntegrityPayload
 	} from '$lib/api/types';
+	import { folderRoutePath } from '$lib/folder-display';
+	import { studioRefreshPlan } from '$lib/folders/studio-refresh';
 	import SeasonExperience from '$lib/components/season/SeasonExperience.svelte';
 	import SeasonLibrary from '$lib/components/season/SeasonLibrary.svelte';
 	import MovieStudioView from '$lib/components/workstation/MovieStudioView.svelte';
@@ -137,8 +141,17 @@
 		}
 	}
 
-	async function refreshStudio() {
-		await hydrateStudio(prefix);
+	async function refreshStudio(targetPrefix?: string) {
+		const refreshPlan = studioRefreshPlan(prefix, targetPrefix);
+		if (refreshPlan.navigate) {
+			await goto(resolve(folderRoutePath(refreshPlan.prefix)), {
+				keepFocus: true,
+				noScroll: true,
+				replaceState: true
+			});
+			return;
+		}
+		await hydrateStudio(refreshPlan.prefix);
 	}
 
 	async function refreshStudioStatus(currentPrefix: string) {

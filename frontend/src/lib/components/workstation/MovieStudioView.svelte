@@ -27,7 +27,7 @@
 		status: FolderStatusPayload;
 		hosts: HostsPayload;
 		folderPending?: boolean;
-		onMutate?: () => Promise<void>;
+		onMutate?: (targetPrefix?: string) => Promise<void>;
 		loadError?: string | null;
 	} = $props();
 
@@ -207,21 +207,33 @@
 				ok: boolean;
 				message?: string;
 				conflicts?: Array<Record<string, unknown>>;
+				target_prefix?: string;
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/${endpoint}`, {});
 			if (!response.ok) throw new Error(response.message || 'The movie action could not run.');
-			return response.message || fallback;
+			return {
+				message: response.message || fallback,
+				targetPrefix: endpoint === 'promote-outputs' ? response.target_prefix : undefined
+			};
 		});
 	}
 
-	async function runAction(action: string, operation: () => Promise<string>) {
+	type ActionResult = string | { message: string; targetPrefix?: string };
+
+	async function runAction(action: string, operation: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
+		let actionCompleted = false;
 		try {
-			actionMessage = await operation();
-			await onMutate();
+			const result = await operation();
+			actionMessage = typeof result === 'string' ? result : result.message;
+			actionCompleted = true;
+			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
-			actionError = error instanceof Error ? error.message : 'The movie action could not run.';
+			const message = error instanceof Error ? error.message : 'Studio could not refresh.';
+			actionError = actionCompleted
+				? `The movie action completed, but Studio could not refresh. ${message}`
+				: message;
 		} finally {
 			pendingAction = '';
 		}
