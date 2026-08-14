@@ -55,7 +55,7 @@ const endpointChecks = [
 
 const routeChecks = [
   ["Library", "/", "Your library"],
-  ["Movies Library", "/movies", "MOVIE WORKSTATION"],
+  ["Movies Library", "/movies", "MOVIE LIBRARY"],
   ["Other Library", "/other", "Other Library"],
   ["Folders compatibility", "/folders", "Your library"],
   ["Activity", "/ops", "Remembered media state"],
@@ -505,6 +505,12 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
     });
     const showButtons = page.locator(".show-list button");
     await showButtons.nth(1).waitFor({ state: "visible", timeout: timeoutMs });
+    const originalShowName = (
+      await showButtons.nth(0).locator(".show-copy strong").innerText()
+    ).trim();
+    const alternateShowName = "Example Show";
+    const showButton = (name) =>
+      page.locator(".show-list button").filter({ hasText: name }).first();
     const policySelect = page.locator(
       'select[aria-describedby="current-season-policy-help"]',
     );
@@ -518,23 +524,37 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       undefined,
       { timeout: timeoutMs },
     );
-    const saveCompleted = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().includes("/series-lifecycle") &&
-        response.ok(),
+    await showButton(alternateShowName).click();
+    const alternatePolicy = await policySelect.inputValue();
+    if (alternatePolicy !== "auto") {
+      throw new Error(
+        `Lifecycle isolation fixture expected ${alternateShowName} to use auto, received ${alternatePolicy}`,
+      );
+    }
+    await showButton(originalShowName).click();
+    const saveCompleted = page
+      .waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().includes("/series-lifecycle") &&
+          response.ok(),
+      )
+      .then(
+        () => null,
+        (error) => error,
     );
     await policySelect.selectOption("on");
     await saveRequested;
-    await showButtons.nth(1).click();
+    await showButton(alternateShowName).click();
     const selectedValue = await policySelect.inputValue();
     if (selectedValue !== "auto") {
       throw new Error(
         `Current-season policy leaked across shows while saving: ${selectedValue}`,
       );
     }
-    await saveCompleted;
-    await showButtons.nth(0).click();
+    const saveError = await saveCompleted;
+    if (saveError instanceof Error) throw saveError;
+    await showButton(originalShowName).click();
     await page.waitForFunction(
       () => {
         const select = document.querySelector(

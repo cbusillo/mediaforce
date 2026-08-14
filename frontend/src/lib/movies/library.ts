@@ -1,4 +1,18 @@
-import type { MovieLibraryPayload, MovieMember, MovieTitle } from '$lib/api/types';
+import type {
+	FolderWorkflowState,
+	MovieLibraryPayload,
+	MovieMember,
+	MovieTitle
+} from '$lib/api/types';
+
+export type MovieLibrarySortMode = 'priority' | 'name' | 'size' | 'savings' | 'oldest';
+
+export interface MovieWorkflowDisplayState {
+	workflow_state?: FolderWorkflowState | null;
+	promotion_conflicts: unknown[];
+	details_loading: boolean;
+	availability: 'production' | 'browse_only';
+}
 
 export function mergeMovieLibraryPayloads(
 	structure: MovieLibraryPayload,
@@ -28,6 +42,42 @@ export function movieReclaimLowerBound(title: MovieTitle): number | null {
 
 export function movieReclaimTotalIsLowerBound(titles: MovieTitle[]): boolean {
 	return titles.some((title) => title.projected_reclaim_bytes == null);
+}
+
+export function movieTitleNeedsAction(title: MovieTitle): boolean {
+	if (title.promotion_conflicts.length) return true;
+	if (title.workflow_state?.state === 'explicit_selection_required') return true;
+	return ['encode', 'validate', 'promote', 'processing', 'attention', 'mixed'].includes(
+		title.workflow_state?.primary_lane ?? ''
+	);
+}
+
+export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
+	if (title.promotion_conflicts.length) return 'Replacement blocked';
+	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
+		return 'View only';
+	}
+	if (title.workflow_state?.state === 'explicit_selection_required') return 'Choose a file';
+	return {
+		encode: 'Ready to compress',
+		validate: 'Ready to check',
+		promote: 'Ready to replace',
+		processing: 'In progress',
+		attention: 'Needs review',
+		mixed: 'Several steps',
+		complete: 'Finished',
+		blocked: 'Cannot start',
+		none: title.details_loading ? 'Loading' : 'No work needed'
+	}[title.workflow_state?.primary_lane ?? 'none'];
+}
+
+export function selectMovieLeadTitle(
+	titles: MovieTitle[],
+	sortMode: MovieLibrarySortMode,
+	query: string
+): MovieTitle | null {
+	if (sortMode !== 'priority' || query.trim()) return null;
+	return titles.find(movieTitleNeedsAction) ?? null;
 }
 
 function mergeMovieTitle(structure: MovieTitle, details?: MovieTitle): MovieTitle {

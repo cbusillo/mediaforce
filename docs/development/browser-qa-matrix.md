@@ -261,6 +261,17 @@ selected show, scroll position, and size-sorted row order must stay stable while
 the pending metrics fill in. A detail-request failure must leave the structural
 library usable and explain that only savings and status details are unavailable.
 
+On Movies, the default `What to work on next` view must show a visible
+`Recommended next` route to the highest-priority actionable title without
+requiring search. The full title list must remain reachable in a bounded,
+independently scrolling region with a sticky header, and the selected movie
+details must stay adjacent rather than appearing after the complete library.
+Verify this path at 1024px and 390px: Library → Movies → recommended title →
+Studio. Movie Studio must describe the action with plain-language labels such
+as `Action covers`, `Next step`, and `checked file`; a ready replacement must
+state that it runs immediately, preserves a backup of the original, and must
+not be triggered during browser QA.
+
 On Finished, the finished-season list must fit without horizontal scrolling at
 1024px and must become readable stacked rows at 390px. The light/dark control
 must persist across route changes and reloads, and both themes must preserve

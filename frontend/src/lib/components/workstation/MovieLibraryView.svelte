@@ -3,7 +3,14 @@
 
 	import type { MovieLibraryPayload, MovieMember, MovieTitle } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { movieReclaimLowerBound, movieReclaimTotalIsLowerBound } from '$lib/movies/library';
+	import {
+		movieReclaimLowerBound,
+		movieReclaimTotalIsLowerBound,
+		movieTitleNeedsAction,
+		movieWorkflowLabel,
+		selectMovieLeadTitle,
+		type MovieLibrarySortMode
+	} from '$lib/movies/library';
 	import LibraryModeNav from './LibraryModeNav.svelte';
 
 	let {
@@ -23,7 +30,7 @@
 	let query = $state('');
 	let rootFilter = $state('all');
 	let stateFilter = $state<'all' | 'attention' | 'ready' | 'processing' | 'explicit'>('all');
-	let sortMode = $state<'priority' | 'name' | 'size' | 'savings' | 'oldest'>('priority');
+	let sortMode = $state<MovieLibrarySortMode>('priority');
 	let selectedPrefix = $state('');
 
 	const titles = $derived.by(() => {
@@ -48,6 +55,7 @@
 	const selectedTitle = $derived(
 		titles.find((title) => title.prefix === selectedPrefix) ?? titles[0] ?? null
 	);
+	const leadTitle = $derived(selectMovieLeadTitle(titles, sortMode, query));
 	const totalSize = $derived(
 		payload.titles.reduce((total, title) => total + title.total_size_bytes, 0)
 	);
@@ -58,15 +66,14 @@
 		payload.titles.filter((title) => movieReclaimLowerBound(title) != null).length
 	);
 	const reclaimHasUnknowns = $derived(movieReclaimTotalIsLowerBound(payload.titles));
-	const actionableCount = $derived(
-		payload.titles.filter((title) =>
-			['encode', 'validate', 'promote', 'processing', 'attention'].includes(
-				title.workflow_state?.primary_lane ?? ''
-			)
-		).length
-	);
+	const actionableCount = $derived(payload.titles.filter(movieTitleNeedsAction).length);
 	const conflictCount = $derived(
 		payload.titles.reduce((total, title) => total + title.promotion_conflicts.length, 0)
+	);
+	const titleCountSummary = $derived(
+		titles.length === payload.titles.length
+			? `All ${payload.titles.length} titles`
+			: `Showing ${titles.length} of ${payload.titles.length} titles`
 	);
 
 	$effect(() => {
@@ -86,16 +93,17 @@
 
 	function titlePriority(title: MovieTitle): number {
 		if (title.promotion_conflicts.length) return 0;
+		if (title.workflow_state?.state === 'explicit_selection_required') return 6;
 		return {
 			attention: 1,
 			processing: 2,
 			validate: 3,
 			promote: 4,
 			encode: 5,
-			mixed: 6,
-			none: 7,
-			complete: 8,
-			blocked: 9
+			mixed: 7,
+			none: 8,
+			complete: 9,
+			blocked: 10
 		}[title.workflow_state?.primary_lane ?? 'none'];
 	}
 
@@ -133,15 +141,24 @@
 
 	function formatReclaim(title: MovieTitle): string {
 		const lowerBound = movieReclaimLowerBound(title);
-		if (lowerBound == null) return 'No estimate';
-		return title.projected_reclaim_bytes == null
-			? `At least ${formatBytes(lowerBound)}`
-			: formatBytes(lowerBound);
+		if (lowerBound == null) return 'Savings not measured';
+		if (title.projected_reclaim_bytes == null) return `At least ${formatBytes(lowerBound)}`;
+		if (title.savings_confidence === 'estimated') return `About ${formatBytes(lowerBound)}`;
+		return formatBytes(lowerBound);
+	}
+
+	function reclaimSummary(title: MovieTitle): string {
+		if (title.details_loading) return 'Measuring savings…';
+		const lowerBound = movieReclaimLowerBound(title);
+		if (lowerBound == null) return 'Savings not measured';
+		if (title.projected_reclaim_bytes == null) return `Save at least ${formatBytes(lowerBound)}`;
+		if (title.savings_confidence === 'estimated') return `Save about ${formatBytes(lowerBound)}`;
+		return `Save ${formatBytes(lowerBound)}`;
 	}
 
 	function formatAge(title: MovieTitle): string {
-		if (title.details_loading) return 'Age pending';
-		if (!title.age?.timestamp) return 'Age unavailable';
+		if (title.details_loading) return 'Loading date…';
+		if (!title.age?.timestamp) return 'Date unavailable';
 		const date = new Intl.DateTimeFormat(undefined, {
 			year: 'numeric',
 			month: 'short',
@@ -169,9 +186,100 @@
 		return title.workflow_state?.tone ?? 'idle';
 	}
 
+	function workflowExplanation(title: MovieTitle): string {
+		if (title.promotion_conflicts.length) {
+			return 'A file already exists where this movie would be published. Open Studio to review it.';
+		}
+		if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
+			return 'You can review these files, but Mediaforce cannot change this library.';
+		}
+		if (title.workflow_state?.state === 'explicit_selection_required') {
+			const explicitCount = title.members.filter((member) => !member.included_by_default).length;
+			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
+		}
+		const count = title.included_item_count || title.item_count;
+		const fileWord = count === 1 ? 'file' : 'files';
+		switch (title.workflow_state?.primary_lane) {
+			case 'promote':
+				return `${count} checked ${fileWord} can replace the current library copy.`;
+			case 'validate':
+				return `${count} compressed ${fileWord} ${count === 1 ? 'needs' : 'need'} a final safety check.`;
+			case 'encode':
+				return `${count} ${fileWord} ${count === 1 ? 'is' : 'are'} ready to compress.`;
+			case 'processing':
+				return 'Mediaforce is working on this title now.';
+			case 'attention':
+				return 'This title needs review before work can continue.';
+			case 'mixed': {
+				const lanes: Array<[number, string]> = [
+					[title.workflow_state?.lane_counts.encode ?? 0, 'ready to compress'],
+					[title.workflow_state?.lane_counts.validate ?? 0, 'ready to check'],
+					[title.workflow_state?.lane_counts.promote ?? 0, 'ready to replace']
+				];
+				const parts = lanes
+					.filter(([laneCount]) => laneCount > 0)
+					.map(([laneCount, label]) => `${laneCount} ${label}`);
+				return parts.length
+					? `${parts.join(', ')} across this title.`
+					: 'This title has several steps ready for review.';
+			}
+			case 'complete':
+				return 'This title is finished.';
+			case 'blocked':
+				return 'Open Studio to see what must be fixed before work can start.';
+			default:
+				return title.details_loading
+					? 'Mediaforce is checking what this title needs next.'
+					: 'No work is waiting for this title.';
+		}
+	}
+
 	function policyValue(title: MovieTitle, key: string, fallback: string): string {
 		const value = title.policy[key];
 		return typeof value === 'string' && value ? value : fallback;
+	}
+
+	function editionsPolicyLabel(title: MovieTitle): string {
+		return policyValue(title, 'editions', 'separate') === 'separate'
+			? 'Editions stay separate'
+			: 'Editions follow the title';
+	}
+
+	function extrasPolicyLabel(title: MovieTitle): string {
+		return policyValue(title, 'extras', 'exclude') === 'include'
+			? 'Extras run with the title'
+			: 'Extras stay separate';
+	}
+
+	function memberStatusLabel(member: MovieMember): string {
+		return (
+			{
+				discovered: 'Not started',
+				planned: 'Ready to compress',
+				encoding: 'Compressing',
+				encoded: 'Ready to check',
+				validated: 'Ready to replace',
+				promoted: 'Finished',
+				missing: 'File missing'
+			}[member.status] ?? 'Needs review'
+		);
+	}
+
+	function memberSelectionReason(member: MovieMember): string {
+		if (member.role === 'extra') {
+			return 'This extra stays separate unless you open it directly.';
+		}
+		return 'Mediaforce is not sure this is the main movie, so it only runs when you open it directly.';
+	}
+
+	function selectTitle(prefix: string, revealInspector = false) {
+		selectedPrefix = prefix;
+		if (!revealInspector) return;
+		requestAnimationFrame(() => {
+			const workbench = document.querySelector<HTMLElement>('.workbench');
+			if ((workbench?.clientWidth ?? Number.MAX_SAFE_INTEGER) > 900) return;
+			document.querySelector<HTMLElement>('.title-inspector')?.scrollIntoView({ block: 'nearest' });
+		});
 	}
 
 	function moveTitleSelection(event: KeyboardEvent, currentIndex: number) {
@@ -197,7 +305,7 @@
 	<title>Your movie library · Mediaforce</title>
 	<meta
 		name="description"
-		content="Inspect movie titles, editions, extras, workflow state, and safe promotion readiness."
+		content="Browse movie titles, see what needs attention, and open the next safe action."
 	/>
 </svelte:head>
 
@@ -206,11 +314,11 @@
 
 	<header class="page-heading">
 		<div class="page-heading__copy">
-			<span class="eyebrow">Movie workstation</span>
+			<span class="eyebrow">Movie library</span>
 			<h1>Movies</h1>
 			<p>
-				Process one title, edition, or deliberate extra without pulling unrelated files into the
-				run.
+				See what needs attention, choose a movie, and open its Studio. Whole-title work only
+				includes the main movie unless you choose a specific file.
 			</p>
 		</div>
 		<div class="library-totals" aria-label="Movie library totals">
@@ -225,9 +333,9 @@
 							: reclaimHasUnknowns
 								? `At least ${formatBytes(totalReclaim)}`
 								: formatBytes(totalReclaim)}</strong
-				><span>projected reclaim</span>
+				><span>space you could save</span>
 			</div>
-			<div><strong>{actionableCount}</strong><span>active or ready</span></div>
+			<div><strong>{actionableCount}</strong><span>need work</span></div>
 		</div>
 	</header>
 
@@ -246,21 +354,21 @@
 	{#if conflictCount}
 		<div class="notice notice--danger" role="alert">
 			<strong
-				>{conflictCount} promotion {conflictCount === 1 ? 'conflict' : 'conflicts'} need review.</strong
+				>{conflictCount} replacement {conflictCount === 1 ? 'conflict' : 'conflicts'} need review.</strong
 			>
-			<span>No conflicting destination is replaced automatically.</span>
+			<span>Mediaforce will not replace a file that is already in the destination.</span>
 		</div>
 	{/if}
 
 	<section class="workbench" aria-busy={structurePending}>
 		<header class="workbench__toolbar">
 			<div class="search-field">
-				<label for="movie-search">Find title or edition</label>
+				<label for="movie-search">Filter this list</label>
 				<input
 					id="movie-search"
 					bind:value={query}
 					type="search"
-					placeholder="Search movie files"
+					placeholder="Type part of a title"
 				/>
 			</div>
 			{#if payload.libraries.length > 1}
@@ -275,26 +383,44 @@
 				</label>
 			{/if}
 			<label>
-				<span>State</span>
+				<span>Status</span>
 				<select bind:value={stateFilter}>
 					<option value="all">All states</option>
 					<option value="attention">Needs attention</option>
 					<option value="processing">Processing</option>
-					<option value="ready">Ready work</option>
-					<option value="explicit">Explicit selection</option>
+					<option value="ready">Ready to act on</option>
+					<option value="explicit">Needs a file choice</option>
 				</select>
 			</label>
 			<label>
 				<span>Sort</span>
 				<select bind:value={sortMode}>
-					<option value="priority">Operational priority</option>
+					<option value="priority">What to work on next</option>
 					<option value="name">Title A–Z</option>
 					<option value="size">Largest stored</option>
-					<option value="savings">Most reclaim</option>
+					<option value="savings">Biggest space savings</option>
 					<option value="oldest">Oldest added</option>
 				</select>
 			</label>
 		</header>
+
+		{#if leadTitle}
+			<section class="next-up" aria-labelledby="movie-next-up-title">
+				<div class="next-up__copy">
+					<span class="eyebrow">Recommended next</span>
+					<div class="next-up__heading">
+						<h2 id="movie-next-up-title">{leadTitle.title}</h2>
+						<span class="state-badge" data-tone={workflowTone(leadTitle)}>
+							{movieWorkflowLabel(leadTitle)}
+						</span>
+					</div>
+					<p>{workflowExplanation(leadTitle)}</p>
+				</div>
+				<a class="primary-link next-up__action" href={resolve(folderRoutePath(leadTitle.prefix))}>
+					Open in Studio
+				</a>
+			</section>
+		{/if}
 
 		{#if structurePending && !payload.titles.length}
 			<div class="empty-state" role="status">
@@ -319,8 +445,14 @@
 		{:else}
 			<div class="workbench__body">
 				<div class="title-index" aria-label="Movie titles">
-					<div class="title-index__header" aria-hidden="true">
-						<span>Title</span><span>Files</span><span>Stored</span><span>Workflow</span>
+					<div class="title-index__chrome">
+						<div class="title-index__summary">
+							<strong>{titleCountSummary}</strong>
+							<span>Use arrow keys to move through the list</span>
+						</div>
+						<div class="title-index__header" aria-hidden="true">
+							<span>Title</span><span>Files</span><span>Stored</span><span>Next step</span>
+						</div>
 					</div>
 					{#each titles as title, index (title.prefix)}
 						<button
@@ -329,7 +461,7 @@
 							class:selected={selectedTitle?.prefix === title.prefix}
 							data-movie-title-row={title.prefix}
 							tabindex={selectedTitle?.prefix === title.prefix ? 0 : -1}
-							onclick={() => (selectedPrefix = title.prefix)}
+							onclick={() => selectTitle(title.prefix, true)}
 							onkeydown={(event) => moveTitleSelection(event, index)}
 							aria-pressed={selectedTitle?.prefix === title.prefix}
 						>
@@ -337,7 +469,7 @@
 								<strong>{title.title}</strong>
 								<small
 									>{title.scope_mode === 'single_file'
-										? 'Exact movie file'
+										? 'One movie file'
 										: title.library_label}</small
 								>
 							</span>
@@ -345,25 +477,17 @@
 								<strong>{title.item_count}</strong>
 								<small>
 									{title.feature_count}
-									{title.feature_count === 1 ? 'feature' : 'features'}
+									{title.feature_count === 1 ? 'main movie' : 'main movies'}
 									{#if title.extra_count}
 										· {title.extra_count} extras{/if}
 								</small>
 							</span>
 							<span class="title-row__size">
 								<strong>{formatBytes(title.total_size_bytes)}</strong>
-								<small>
-									{title.details_loading
-										? 'Reclaim pending'
-										: title.savings_confidence === 'unavailable'
-											? 'No estimate yet'
-											: `${formatReclaim(title)} reclaim · ${title.savings_confidence}`}
-								</small>
+								<small>{reclaimSummary(title)}</small>
 							</span>
 							<span class="state-badge" data-tone={workflowTone(title)}>
-								{title.promotion_conflicts.length
-									? 'Promotion conflict'
-									: (title.workflow_state?.label ?? (title.details_loading ? 'Loading' : 'Ready'))}
+								{movieWorkflowLabel(title)}
 							</span>
 						</button>
 					{/each}
@@ -378,42 +502,41 @@
 								<p>{selectedTitle.prefix}</p>
 							</div>
 							<span class="state-badge" data-tone={workflowTone(selectedTitle)}>
-								{selectedTitle.workflow_state?.label ?? 'Loading'}
+								{movieWorkflowLabel(selectedTitle)}
 							</span>
 						</header>
 
 						<div class="inspector-facts">
 							<div>
-								<span>Scope</span><strong
+								<span>Action covers</span><strong
 									>{selectedTitle.scope_mode === 'single_file'
-										? 'Exact file'
-										: 'Movie title'}</strong
+										? 'Only this file'
+										: 'The whole title'}</strong
 								>
 							</div>
 							<div>
-								<span>Stored</span><strong>{formatBytes(selectedTitle.total_size_bytes)}</strong>
+								<span>Stored now</span><strong>{formatBytes(selectedTitle.total_size_bytes)}</strong
+								>
 							</div>
 							<div>
-								<span>Projected reclaim</span><strong
+								<span>Space you could save</span><strong
 									>{selectedTitle.details_loading
-										? 'Pending'
+										? 'Measuring…'
 										: formatReclaim(selectedTitle)}</strong
 								>
 							</div>
-							<div><span>Ranking age</span><strong>{formatAge(selectedTitle)}</strong></div>
+							<div><span>Added to library</span><strong>{formatAge(selectedTitle)}</strong></div>
 						</div>
 
 						{#if selectedTitle.availability === 'browse_only'}
 							<div class="inline-alert">
-								<strong>Browse only</strong>
-								<span
-									>Files remain visible, but processing actions are disabled for this library.</span
-								>
+								<strong>View only</strong>
+								<span>You can browse these files, but Mediaforce cannot change this library.</span>
 							</div>
 						{/if}
 						{#if selectedTitle.promotion_conflicts.length}
 							<div class="inline-alert inline-alert--danger">
-								<strong>Promotion blocked</strong>
+								<strong>Cannot publish yet</strong>
 								{#each selectedTitle.promotion_conflicts as conflict (`${conflict.kind}:${conflict.destination_path}`)}
 									<span>{conflict.detail} <code>{conflict.destination_path}</code></span>
 								{/each}
@@ -421,9 +544,9 @@
 						{/if}
 
 						<div class="policy-strip" aria-label="Movie library policy">
-							<span>Titles grouped</span>
-							<span>Editions {policyValue(selectedTitle, 'editions', 'separate')}</span>
-							<span>Extras {policyValue(selectedTitle, 'extras', 'exclude')}</span>
+							<span>Movie folders stay together</span>
+							<span>{editionsPolicyLabel(selectedTitle)}</span>
+							<span>{extrasPolicyLabel(selectedTitle)}</span>
 						</div>
 
 						<section class="member-list" aria-labelledby="movie-files-heading">
@@ -431,8 +554,8 @@
 								<div>
 									<h3 id="movie-files-heading">Files and editions</h3>
 									<p>
-										Every indexed file stays reachable. Only identified features join title-wide
-										work by default.
+										Every file stays available here. Whole-title work includes only the main movie
+										unless you choose another file yourself.
 									</p>
 								</div>
 								<span>{selectedTitle.members.length}</span>
@@ -442,7 +565,7 @@
 									<div class="member-row__copy">
 										<div class="member-row__heading">
 											<strong>{memberLabel(member)}</strong>
-											<span>{member.status.replaceAll('_', ' ')}</span>
+											<span>{memberStatusLabel(member)}</span>
 										</div>
 										<p>{member.label}</p>
 										<small>
@@ -450,15 +573,15 @@
 											{#if member.video_codec}
 												· {member.video_codec.toUpperCase()}{/if}
 											{#if member.included_by_default}
-												· Included in title work{:else}
-												· Exact selection only{/if}
+												· Runs with the whole title{:else}
+												· Only runs if you pick it{/if}
 										</small>
 										{#if member.selection_blocker && !member.included_by_default}
-											<span class="member-row__reason">{member.selection_blocker}</span>
+											<span class="member-row__reason">{memberSelectionReason(member)}</span>
 										{/if}
 									</div>
 									<a class="member-link" href={resolve(folderRoutePath(member.prefix))}
-										>Open exact file</a
+										>Open this file</a
 									>
 								</div>
 							{/each}
@@ -466,9 +589,9 @@
 
 						<footer class="inspector-actions">
 							<a class="primary-link" href={resolve(folderRoutePath(selectedTitle.prefix))}>
-								Open {selectedTitle.scope_mode === 'single_file' ? 'file' : 'title'} Studio
+								Open in Studio
 							</a>
-							<span>{selectedTitle.workflow_state?.detail ?? 'Workflow details are loading.'}</span>
+							<span>{workflowExplanation(selectedTitle)}</span>
 						</footer>
 					</aside>
 				{/if}
@@ -595,6 +718,7 @@
 		background: var(--mf-bg-panel);
 		border: 1px solid var(--mf-line);
 		box-shadow: var(--mf-shadow-popover);
+		container-type: inline-size;
 	}
 
 	.workbench__toolbar {
@@ -633,15 +757,60 @@
 		padding: 0 10px;
 	}
 
+	.next-up {
+		align-items: center;
+		background: var(--mf-bg-strip);
+		border-bottom: 1px solid var(--mf-line);
+		border-left: 4px solid var(--mf-wait-fg);
+		display: grid;
+		gap: 20px;
+		grid-template-columns: minmax(0, 1fr) auto;
+		padding: 16px 18px 17px;
+	}
+
+	.next-up__copy {
+		display: grid;
+		gap: 6px;
+		min-width: 0;
+	}
+
+	.next-up__heading {
+		align-items: center;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+	}
+
+	.next-up h2 {
+		font-size: clamp(20px, 3vw, 27px);
+		letter-spacing: -0.025em;
+	}
+
+	.next-up p {
+		color: var(--mf-fg-secondary);
+		font-size: 13px;
+		line-height: 1.5;
+	}
+
+	.next-up__action {
+		font-size: 12px;
+		padding: 10px 14px;
+	}
+
 	.workbench__body {
+		align-items: stretch;
 		display: grid;
 		grid-template-columns: minmax(520px, 1.12fr) minmax(390px, 0.88fr);
-		min-height: 570px;
+		min-height: 520px;
 	}
 
 	.title-index {
 		border-right: 1px solid var(--mf-line);
+		height: clamp(520px, 66vh, 720px);
 		min-width: 0;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-gutter: stable;
 	}
 
 	.title-index__header,
@@ -651,6 +820,31 @@
 				130px,
 				0.8fr
 			);
+	}
+
+	.title-index__chrome {
+		background: var(--mf-bg-strip);
+		position: sticky;
+		top: 0;
+		z-index: 2;
+	}
+
+	.title-index__summary {
+		align-items: center;
+		border-bottom: 1px solid var(--mf-line);
+		display: flex;
+		gap: 12px;
+		justify-content: space-between;
+		padding: 8px 14px;
+	}
+
+	.title-index__summary strong {
+		font-size: 11px;
+	}
+
+	.title-index__summary span {
+		color: var(--mf-fg-muted);
+		font-size: 10px;
 	}
 
 	.title-index__header {
@@ -747,8 +941,11 @@
 	.title-inspector {
 		display: grid;
 		gap: 16px;
+		height: clamp(520px, 66vh, 720px);
 		min-width: 0;
+		overflow-y: auto;
 		padding: 20px;
+		scrollbar-gutter: stable;
 	}
 
 	.inspector-heading,
@@ -823,7 +1020,6 @@
 		font-size: 10px;
 		font-weight: 700;
 		padding: 5px 7px;
-		text-transform: capitalize;
 	}
 
 	.member-list {
@@ -875,10 +1071,6 @@
 	.member-row__reason {
 		color: var(--mf-fg-muted);
 		font-size: 10px;
-	}
-
-	.member-row__heading span {
-		text-transform: capitalize;
 	}
 
 	.member-row p {
@@ -963,14 +1155,24 @@
 		.library-totals {
 			min-width: 0;
 		}
+	}
 
+	@container (max-width: 900px) {
 		.workbench__body {
 			grid-template-columns: minmax(0, 1fr);
+			min-height: 0;
+		}
+
+		.title-inspector {
+			height: auto;
+			overflow: visible;
 		}
 
 		.title-index {
 			border-bottom: 1px solid var(--mf-line);
 			border-right: 0;
+			height: min(58vh, 620px);
+			min-height: 360px;
 		}
 	}
 
@@ -998,6 +1200,16 @@
 
 		.search-field {
 			grid-column: 1 / -1;
+		}
+
+		.next-up {
+			align-items: stretch;
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.next-up__action {
+			justify-self: stretch;
+			text-align: center;
 		}
 
 		.title-index__header {

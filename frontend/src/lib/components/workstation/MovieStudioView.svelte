@@ -11,6 +11,7 @@
 		MovieMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
+	import { movieWorkflowLabel } from '$lib/movies/library';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 
@@ -77,6 +78,15 @@
 	);
 	const exactScope = $derived(folder.media_scope.match === 'exact_item');
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
+	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
+	const workflowDisplayLabel = $derived(
+		movieWorkflowLabel({
+			workflow_state: workflow,
+			promotion_conflicts: conflicts,
+			details_loading: folderPending,
+			availability: context?.availability ?? 'production'
+		})
+	);
 
 	$effect(() => {
 		const folderHostKey = String(folder.sample_host_key ?? '').trim();
@@ -157,12 +167,15 @@
 	}
 
 	async function validateOutputs() {
-		await folderAction('validate-outputs', 'Validated the ready movie output.');
+		await folderAction('validate-outputs', 'Checked the compressed movie file.');
 	}
 
 	async function promoteOutputs() {
 		if (conflicts.length) return;
-		await folderAction('promote-outputs', 'Promoted the validated movie output.');
+		await folderAction(
+			'promote-outputs',
+			'Installed the checked replacement and kept a backup of the original.'
+		);
 	}
 
 	async function retryEncode() {
@@ -247,6 +260,117 @@
 		return 'idle';
 	}
 
+	function workflowSummary(): string {
+		const fileCount = exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 1);
+		const fileWord = fileCount === 1 ? 'file' : 'files';
+		if (conflicts.length) {
+			return 'A file already exists where this movie would be placed. Review the conflict before replacing anything.';
+		}
+		if (isBrowseOnly || workflow?.state === 'browse_only') {
+			return 'You can review these files, but Mediaforce cannot change this library.';
+		}
+		if (workflow?.state === 'explicit_selection_required') {
+			const explicitCount =
+				context?.members.filter((member) => !member.included_by_default).length ?? 0;
+			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
+		}
+		switch (workflow?.primary_lane) {
+			case 'promote':
+				return `${fileCount} checked ${fileWord} can now replace the current library copy.`;
+			case 'validate':
+				return `${fileCount} compressed ${fileWord} ${fileCount === 1 ? 'needs' : 'need'} a final safety check.`;
+			case 'encode':
+				return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready to compress.`;
+			case 'processing':
+				return 'Mediaforce is working on this movie now.';
+			case 'attention':
+				return 'This movie needs review before work can continue.';
+			case 'mixed': {
+				const lanes: Array<[number, string]> = [
+					[workflow.lane_counts.encode ?? 0, 'ready to compress'],
+					[workflow.lane_counts.validate ?? 0, 'ready to check'],
+					[workflow.lane_counts.promote ?? 0, 'ready to replace']
+				];
+				const parts = lanes
+					.filter(([laneCount]) => laneCount > 0)
+					.map(([laneCount, label]) => `${laneCount} ${label}`);
+				return parts.length
+					? `${parts.join(', ')} across this title.`
+					: 'This title has several steps ready for review.';
+			}
+			case 'complete':
+				return 'This movie is finished.';
+			case 'blocked':
+				if (workflow.detail.includes('80% source cap')) {
+					return 'The requested size is larger than the allowed 80% of the original file.';
+				}
+				return 'Mediaforce cannot start this movie until the issue below is resolved.';
+			default:
+				return folderPending
+					? 'Mediaforce is checking what this movie needs next.'
+					: 'No work is waiting for this movie.';
+		}
+	}
+
+	function sampleStatusLabel(): string {
+		const status = asText(calibrationJob.status);
+		if (!status && ['validate', 'promote', 'complete'].includes(workflow?.primary_lane ?? '')) {
+			return 'Not needed now';
+		}
+		return (
+			{
+				queued: 'Sample waiting',
+				running: 'Sampling',
+				pending_review: 'Ready to review',
+				completed: 'Finished',
+				failed: 'Sample needs retry',
+				stopped: 'Stopped'
+			}[status] ??
+			(status ? 'Status unavailable' : reviewReady ? 'Ready to review' : 'Not prepared')
+		);
+	}
+
+	function processingStatusLabel(): string {
+		const status = String(encodeJob?.status ?? '');
+		return (
+			{
+				queued: 'Waiting to process',
+				running: 'Processing',
+				retry_backoff: 'Waiting to retry',
+				failed: 'Processing needs attention',
+				stopped: 'Stopped',
+				needs_attention: 'Processing needs attention',
+				completed: 'Finished'
+			}[status] ?? (status ? 'Status unavailable' : 'No work running')
+		);
+	}
+
+	function memberStatusLabel(member: MovieMember): string {
+		return (
+			{
+				discovered: 'Not started',
+				planned: 'Ready to compress',
+				encoding: 'Compressing',
+				encoded: 'Ready to check',
+				validated: 'Ready to replace',
+				promoted: 'Finished',
+				missing: 'File missing'
+			}[member.status] ?? 'Needs review'
+		);
+	}
+
+	function reviewStatusLabel(): string {
+		const reviewStatus = asText(reviewGate.status);
+		return (
+			{
+				accepted: 'Approved',
+				pending_review: 'Ready to review',
+				rejected: 'Needs another sample',
+				blocked: 'Needs review'
+			}[reviewStatus] ?? (reviewStatus ? 'Status unavailable' : 'Not reviewed')
+		);
+	}
+
 	function formatBytes(value: unknown): string {
 		let size = Number(value ?? 0);
 		if (!Number.isFinite(size) || size <= 0) return 'Unknown';
@@ -261,7 +385,7 @@
 
 	function memberRole(member: MovieMember): string {
 		if (member.edition_label) return member.edition_label;
-		if (member.role === 'feature') return 'Main feature';
+		if (member.role === 'feature') return 'Main movie';
 		if (member.role === 'extra') return member.extra_category ?? 'Extra';
 		return 'Uncertain file';
 	}
@@ -292,14 +416,11 @@
 
 	<header class="studio-heading">
 		<div>
-			<span class="eyebrow">Movie Studio · {exactScope ? 'Exact file' : 'Title scope'}</span>
+			<span class="eyebrow">Movie Studio · {exactScope ? 'One file' : 'Whole title'}</span>
 			<h1>{title}</h1>
 			<p>{folder.prefix}</p>
 		</div>
-		<StateBadge
-			tone={badgeTone()}
-			label={conflicts.length ? 'Promotion conflict' : (workflow?.label ?? 'Loading')}
-		/>
+		<StateBadge tone={badgeTone()} label={workflowDisplayLabel} />
 	</header>
 
 	{#if loadError}
@@ -319,49 +440,51 @@
 	{/if}
 	{#if isBrowseOnly}
 		<div class="notice" role="status">
-			<strong>Browse-only movie library</strong>
+			<strong>View-only movie library</strong>
 			<span
-				>Files and evidence remain visible. Production actions stay disabled until this root is set
-				to Production in Settings.</span
+				>You can review these files, but Mediaforce cannot change this library. Enable changes in
+				Settings when you are ready.</span
 			>
 		</div>
 	{/if}
 	{#if conflicts.length}
 		<div class="notice notice--danger" role="alert">
-			<strong>Promotion is blocked before any file is replaced.</strong>
+			<strong>Mediaforce cannot replace this movie yet.</strong>
 			{#each conflicts as conflict (`${conflict.kind}:${conflict.destination_path}`)}
 				<span>{conflict.detail} <code>{conflict.destination_path}</code></span>
 			{/each}
 		</div>
 	{/if}
 
-	<section class="status-strip" aria-label="Movie workflow status">
-		<div><span>Scope</span><strong>{exactScope ? 'Exact movie file' : 'Movie title'}</strong></div>
-		<div><span>Workflow</span><strong>{workflow?.label ?? 'Loading'}</strong></div>
+	<section class="status-strip" aria-label="Movie status">
+		<div><span>Action covers</span><strong>{scopeDisplay}</strong></div>
+		<div><span>Next step</span><strong>{workflowDisplayLabel}</strong></div>
 		<div>
-			<span>Sample</span><strong
-				>{asText(calibrationJob.status) || (reviewReady ? 'Review ready' : 'Not prepared')}</strong
-			>
+			<span>Review sample</span><strong>{sampleStatusLabel()}</strong>
 		</div>
 		<div>
-			<span>Processing</span><strong
-				>{String(encodeJob?.status ?? 'Idle').replaceAll('_', ' ')}</strong
-			>
+			<span>Current work</span><strong>{processingStatusLabel()}</strong>
 		</div>
-		<div><span>Hosts online</span><strong>{activeHostCount}</strong></div>
+		<div><span>Workers ready</span><strong>{activeHostCount}</strong></div>
 	</section>
 
 	<div class="studio-grid">
 		<div class="studio-grid__main">
-			<WorkstationPanel eyebrow="Decision" title="Next movie action" meta={scopeNoun}>
+			<WorkstationPanel eyebrow="Next step" title="What to do next" meta={scopeDisplay}>
 				<div class="decision-panel">
 					<div class="decision-copy">
-						<strong>{workflow?.detail ?? 'Reading workflow state and sample evidence.'}</strong>
+						<strong>{workflowSummary()}</strong>
 						<p>
 							{exactScope
-								? 'This action applies only to the selected file.'
-								: 'Title-wide work includes identified feature files. Extras and uncertain files remain exact-selection only.'}
+								? 'Only the file you opened will change.'
+								: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
 						</p>
+						{#if primaryAction() === 'promote'}
+							<small class="decision-note">
+								Runs immediately. Mediaforce keeps a backup of the original before installing the
+								checked replacement.
+							</small>
+						{/if}
 					</div>
 					<div class="decision-actions">
 						{#if primaryAction() === 'prepare'}
@@ -393,13 +516,13 @@
 							{/if}
 						{:else if primaryAction() === 'validate'}
 							<button class="primary" disabled={isBusy} onclick={validateOutputs}
-								>Validate outputs</button
+								>Check compressed file</button
 							>
 						{:else if primaryAction() === 'promote'}
 							<button
 								class="primary"
 								disabled={isBusy || conflicts.length > 0}
-								onclick={promoteOutputs}>Promote safely</button
+								onclick={promoteOutputs}>Replace original now</button
 							>
 						{:else if primaryAction() === 'retry'}
 							<button class="primary" disabled={isBusy} onclick={retryEncode}
@@ -415,9 +538,9 @@
 			</WorkstationPanel>
 
 			<WorkstationPanel
-				eyebrow="Sample bench"
+				eyebrow="Review sample"
 				title="Prepare and review"
-				meta={reviewReady ? 'Evidence ready' : 'No approved sample'}
+				meta={reviewReady ? 'Ready to review' : 'No sample yet'}
 			>
 				<div class="sample-bench">
 					{#if Object.keys(pendingProposal).length}
@@ -432,7 +555,7 @@
 									? 'Nothing starts until you confirm this plan.'
 									: asText(pendingProposal.message) ||
 										asText(pendingProposal.suggested_follow_up) ||
-										'The bench did not produce a queueable sample plan.'}
+										'The review assistant could not prepare a sample plan yet.'}
 							</p>
 							{#if pendingProposalCanQueue}
 								<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={startSample}
@@ -460,14 +583,12 @@
 							>
 						</div>
 						<div>
-							<span>Review gate</span><strong
-								>{asText(reviewGate.status).replaceAll('_', ' ') || 'Not reviewed'}</strong
-							>
+							<span>Review status</span><strong>{reviewStatusLabel()}</strong>
 						</div>
 					</div>
 
 					<label class="request-field">
-						<span>Operator request</span>
+						<span>What should Mediaforce preserve?</span>
 						<textarea
 							bind:value={note}
 							rows="4"
@@ -476,9 +597,9 @@
 					</label>
 					<div class="bench-controls">
 						<label>
-							<span>Sample host</span>
+							<span>Worker</span>
 							<select bind:value={selectedHostKey} disabled={!hostOptions.length}>
-								{#if !hostOptions.length}<option value="">No sample host available</option>{/if}
+								{#if !hostOptions.length}<option value="">No worker available</option>{/if}
 								{#each hostOptions as host (asText(host.key))}
 									<option value={asText(host.key)}>{asText(host.label) || asText(host.key)}</option>
 								{/each}
@@ -488,7 +609,7 @@
 							class="secondary"
 							disabled={isBusy || isBrowseOnly || !selectedHostKey}
 							onclick={prepareSample}
-							>{isWorkflowBlocked ? 'Draft revised sample' : 'Prepare new sample'}</button
+							>{isWorkflowBlocked ? 'Prepare revised sample' : 'Prepare new sample'}</button
 						>
 						{#if status.retryable_sample_job}
 							<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={retrySample}
@@ -497,7 +618,7 @@
 						{/if}
 						{#if reviewReady}
 							<button class="secondary" type="button" onclick={downloadReviewPack}
-								>Download review pack</button
+								>Download review files</button
 							>
 						{/if}
 					</div>
@@ -507,9 +628,9 @@
 
 		<aside class="studio-grid__rail">
 			<WorkstationPanel
-				eyebrow="Title scope"
+				eyebrow="Files in this title"
 				title="Files and editions"
-				meta={`${context?.members.length ?? 0} indexed`}
+				meta={`${context?.members.length ?? 0} files`}
 			>
 				<div class="member-list">
 					{#each context?.members ?? [] as member (member.item_id)}
@@ -522,41 +643,35 @@
 								<strong>{memberRole(member)}</strong>
 								<span>{member.label}</span>
 								<small>
-									{formatBytes(member.size_bytes)} · {member.status.replaceAll('_', ' ')}
-									{member.included_by_default ? ' · title work' : ' · exact only'}
+									{formatBytes(member.size_bytes)} · {memberStatusLabel(member)}
+									{member.included_by_default
+										? ' · Runs with the whole title'
+										: ' · Only runs when opened directly'}
 								</small>
 							</div>
 							<a href={resolve(folderRoutePath(member.prefix))}>Open</a>
 						</div>
 					{/each}
 					{#if !context?.members.length}
-						<div class="panel-empty">Movie membership is still loading.</div>
+						<div class="panel-empty">Movie files are still loading.</div>
 					{/if}
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel
-				eyebrow="Safety"
-				title="Selection contract"
-				meta={exactScope ? 'Exact match' : 'Feature default'}
-			>
+			<WorkstationPanel eyebrow="What will change" title="File rules" meta={scopeDisplay}>
 				<div class="safety-list">
 					<div>
-						<strong>Features</strong><span>Included in title-wide sample and encode work.</span>
+						<strong>Main movie</strong><span>Runs when you work on the whole title.</span>
 					</div>
 					<div>
-						<strong>Editions</strong><span
-							>Remain separate files with independent destinations.</span
-						>
+						<strong>Editions</strong><span>Stay separate from one another.</span>
 					</div>
 					<div>
-						<strong>Extras</strong><span
-							>Visible here; open an exact file to process one deliberately.</span
-						>
+						<strong>Extras</strong><span>Open one directly when you want to change it.</span>
 					</div>
 					<div>
-						<strong>Promotion</strong><span
-							>Destination collisions block the entire action before replacement.</span
+						<strong>Replacement</strong><span
+							>An existing destination file stops the action before anything changes.</span
 						>
 					</div>
 				</div>
@@ -678,7 +793,6 @@
 	.status-strip strong {
 		font-size: var(--mf-text-sm);
 		margin-top: 3px;
-		text-transform: capitalize;
 	}
 
 	.studio-grid {
@@ -723,12 +837,31 @@
 		margin-top: var(--mf-space-4);
 	}
 
+	.decision-note {
+		border-left: 2px solid var(--mf-wait-fg);
+		color: var(--mf-fg-secondary);
+		display: block;
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		margin-top: var(--mf-space-4);
+		max-width: 620px;
+		padding-left: var(--mf-space-4);
+	}
+
 	.decision-actions,
 	.bench-controls {
 		align-items: center;
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--mf-space-4);
+	}
+
+	.decision-actions {
+		flex: 0 0 auto;
+	}
+
+	.decision-actions .primary {
+		min-width: 150px;
 	}
 
 	.primary,
@@ -926,7 +1059,7 @@
 		padding: var(--mf-space-6);
 	}
 
-	@media (max-width: 980px) {
+	@media (max-width: 1100px) {
 		.status-strip {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
@@ -959,13 +1092,10 @@
 			flex-direction: column;
 		}
 
-		.status-strip,
 		.sample-facts {
 			grid-template-columns: minmax(0, 1fr);
 		}
 
-		.status-strip div,
-		.status-strip div:nth-child(odd),
 		.sample-facts div,
 		.sample-facts div:nth-child(2n),
 		.sample-facts div:nth-last-child(-n + 2) {
@@ -974,7 +1104,6 @@
 			border-right: 0;
 		}
 
-		.status-strip div:last-child,
 		.sample-facts div:last-child {
 			border-bottom: 0;
 			grid-column: auto;
