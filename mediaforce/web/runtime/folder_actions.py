@@ -1212,12 +1212,32 @@ def promote_folder_outputs_action(
         manifest: ManifestPayload = {"items": items}
         promoted_paths = promote_manifest_items_fn(connection, config, manifest, list(range(len(items))), force=False)
     promoted_count = len(promoted_paths)
+    target_prefix = _promotion_refresh_prefix(normalized_prefix, scope, items, promoted_paths)
     file_label = "file" if promoted_count == 1 else "files"
     return {
         "ok": True,
         "message": f"Promoted {promoted_count} validated {file_label} into the library.",
         "promoted_count": promoted_count,
+        "target_prefix": target_prefix,
     }
+
+
+def _promotion_refresh_prefix(
+        normalized_prefix: str,
+        scope: MediaScope,
+        items: list[FolderItem],
+        promoted_paths: list[Path],
+) -> str:
+    if scope.match != "exact_item":
+        return normalized_prefix
+    if scope.domain == "movie":
+        membership = classify_movie_path(normalized_prefix, root=scope.root)
+        if membership is not None and membership.scope_mode == "title_folder":
+            return membership.title_prefix
+    if len(items) != 1 or len(promoted_paths) != 1:
+        return normalized_prefix
+    rel_path = str(items[0].get("rel_path") or normalized_prefix)
+    return Path(rel_path).with_suffix(promoted_paths[0].suffix).as_posix()
 
 
 def _tv_season_promotion_gate_blocker(

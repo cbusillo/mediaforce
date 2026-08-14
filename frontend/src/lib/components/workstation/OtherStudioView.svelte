@@ -24,7 +24,7 @@
 		status: FolderStatusPayload;
 		hosts: HostsPayload;
 		folderPending?: boolean;
-		onMutate?: () => Promise<void>;
+		onMutate?: (targetPrefix?: string) => Promise<void>;
 		loadError?: string | null;
 	} = $props();
 
@@ -227,24 +227,35 @@
 	async function folderAction(action: string, successMessage: string) {
 		if (isBusy) return;
 		await runAction(action, async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
+			const response = await postJson<{ ok: boolean; message?: string; target_prefix?: string }>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/${action}`,
 				{ scope_membership_token: scopeMembershipToken() }
 			);
 			if (!response.ok) throw new Error(response.message || `${action} failed.`);
-			return response.message || successMessage;
+			return {
+				message: response.message || successMessage,
+				targetPrefix: action === 'promote-outputs' ? response.target_prefix : undefined
+			};
 		});
 	}
 
-	async function runAction(action: string, execute: () => Promise<string>) {
+	type ActionResult = string | { message: string; targetPrefix?: string };
+
+	async function runAction(action: string, execute: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
+		let actionCompleted = false;
 		try {
-			actionMessage = await execute();
-			await onMutate();
+			const result = await execute();
+			actionMessage = typeof result === 'string' ? result : result.message;
+			actionCompleted = true;
+			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
-			actionError = error instanceof Error ? error.message : 'The action could not complete.';
+			const message = error instanceof Error ? error.message : 'Studio could not refresh.';
+			actionError = actionCompleted
+				? `The action completed, but Studio could not refresh. ${message}`
+				: message;
 		} finally {
 			pendingAction = '';
 		}

@@ -12,6 +12,9 @@ Frontend changes should feel intentional and production-ready.
 - Prefer clear state flow and readable components over clever indirection
 - Keep UI copy consistent with the product name `Mediaforce`
 - Avoid placeholder-looking UX, stale labels, and migration leftovers
+- After a successful action removes or renames the exact file in the current
+  route, continue at the action response's surviving `target_prefix` instead of
+  rehydrating the stale file URL.
 - For workbench, review, worker, completed, and settings redesigns, follow
   `docs/style/workstation-ui.md`, `handoff.md`, and
   `docs/design/workstation-reset-plan.md`
