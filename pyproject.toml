@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.31.0"]
+requires = ["hatchling>=1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -11,8 +11,8 @@ requires-python = ">=3.13"
 dependencies = [
     "alembic",
     "fastapi",
-    "sqlalchemy>=2.0.51,<3",
-    "starlette>=1.4.1",
+    "sqlalchemy>=2.0.52,<3",
+    "starlette>=1.6.0",
     "uvicorn",
     "hatchling"
 ]
