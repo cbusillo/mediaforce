@@ -487,6 +487,7 @@ export type PendingSampleProposal = {
 	operator_note?: string | null;
 	operator_request?: FolderOperatorRequest | null;
 	request_disposition?: string | null;
+	recovery?: PendingProposalRecovery | null;
 	request_response?: string | null;
 	feasibility_note?: string | null;
 	summary?: string;
@@ -506,6 +507,88 @@ export type PendingSampleProposal = {
 	quality_risk?: FolderQualityRisk | null;
 	trace?: ProposalTrace | null;
 };
+export type PendingProposalRecovery = {
+	cause?: 'assistant_failure' | 'unclear_request' | 'deterministic_blocker';
+	headline?: string;
+	detail?: string;
+	nothing_queued?: boolean;
+	action?: 'prepare_again' | 'edit_request' | 'change_request';
+	same_request_retryable?: boolean;
+};
+export type ProposalRecoveryView = {
+	cause: NonNullable<PendingProposalRecovery['cause']>;
+	headline: string;
+	detail: string;
+	action: NonNullable<PendingProposalRecovery['action']>;
+	nothingQueued: boolean;
+	sameRequestRetryable: boolean;
+};
+
+export function proposalRecoveryView(
+	proposal: PendingSampleProposal | Record<string, unknown> | null | undefined
+): ProposalRecoveryView | null {
+	if (!proposal || proposal.can_queue === true) return null;
+	const recovery = proposal.recovery as PendingProposalRecovery | null | undefined;
+	if (!recovery) return null;
+	if (
+		recovery.cause !== 'assistant_failure' &&
+		recovery.cause !== 'unclear_request' &&
+		recovery.cause !== 'deterministic_blocker'
+	)
+		return null;
+	if (
+		recovery.action !== 'prepare_again' &&
+		recovery.action !== 'edit_request' &&
+		recovery.action !== 'change_request'
+	)
+		return null;
+	return {
+		cause: recovery.cause,
+		headline: String(recovery.headline ?? '').trim(),
+		detail: String(recovery.detail ?? '').trim(),
+		action: recovery.action,
+		nothingQueued: recovery.nothing_queued === true,
+		sameRequestRetryable: recovery.same_request_retryable === true
+	};
+}
+
+export function noteAfterPreview(
+	currentNote: string,
+	proposal: PendingSampleProposal | Record<string, unknown> | null | undefined
+): string {
+	return proposal?.can_queue === true ? '' : currentNote;
+}
+
+export function noteAfterPrepareAgain(
+	currentNote: string,
+	storedNote: string,
+	hasNewerText: boolean,
+	proposal: PendingSampleProposal | Record<string, unknown> | null | undefined
+): string {
+	if (proposal?.can_queue !== true) return currentNote;
+	return hasNewerText && currentNote !== storedNote ? currentNote : '';
+}
+
+export function noteAfterProposalHydration(
+	currentNote: string,
+	hasNewerText: boolean,
+	proposal: PendingSampleProposal | Record<string, unknown> | null | undefined
+): string {
+	if (hasNewerText || !proposal || proposal.can_queue === true) return currentNote;
+	const storedNote = typeof proposal.operator_note === 'string' ? proposal.operator_note : '';
+	return storedNote || currentNote;
+}
+
+export function prepareAgainRequest(proposal: PendingSampleProposal | Record<string, unknown>): {
+	note: string;
+	hostKey: string;
+} {
+	const storedHost = String((proposal.host as { key?: string } | undefined)?.key ?? '').trim();
+	return {
+		note: typeof proposal.operator_note === 'string' ? proposal.operator_note : '',
+		hostKey: storedHost
+	};
+}
 export type ProposalTrace = {
 	prompt_version?: string | null;
 	raw_response?: string | null;

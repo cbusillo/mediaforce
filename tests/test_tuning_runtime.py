@@ -38,6 +38,7 @@ from mediaforce.advisor import (
     request_note_tuning,
     request_run_verdict,
 )
+from mediaforce.advising.runtime import StructuredLLMFailure
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, load_config, save_runtime_settings
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import calibration_jobs
@@ -119,9 +120,11 @@ from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
     measured_size_budget_policy_fragment,
     proposal_alignment_issue,
+    recent_tuning_sessions,
     size_budget_sample_issue,
 )
-from mediaforce.web.runtime.folder_state import _merge_review_pairs
+from mediaforce.web.runtime.folder_state import FolderStateDeps, _merge_review_pairs, pending_proposal_public_view
+from mediaforce.web.runtime.proposal_recovery import proposal_recovery
 
 
 def _runtime_settings_writer(path_text: str, ready_path_text: str, mode: str) -> None:
@@ -3999,6 +4002,197 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertFalse(response.ok)
         self.assertIn("attempt 1: timeout: Codex Lab timed out", response.raw)
         self.assertNotIn("model timed out", response.raw)
+        self.assertEqual(response.request_disposition, "unavailable")
+        self.assertEqual(response.failure_kind, "assistant_unavailable")
+        self.assertEqual(response.failure_code, "timeout")
+        self.assertEqual(response.failure_attempt_count, 2)
+
+    def test_request_note_tuning_classifies_invalid_structured_output_without_blame(self) -> None:
+        with patch(
+            "mediaforce.advisor._run_structured_llm_request",
+            return_value=StructuredLLMFailure(
+                ["attempt 1: invalid_structured_output: missing policy"],
+                statuses=["invalid_structured_output"],
+            ),
+        ):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={"policy": {"video": {"target_vmaf": 90.0}}},
+            )
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.request_disposition, "unavailable")
+        self.assertEqual(response.failure_kind, "assistant_invalid_response")
+        self.assertEqual(response.failure_code, "invalid_structured_output")
+        self.assertEqual(response.failure_attempt_count, 1)
+
+    def test_request_note_tuning_classifies_all_runtime_availability_failures(self) -> None:
+        for failure_code in (
+            "command_unavailable",
+            "missing_image",
+            "provider_error",
+            "timeout",
+            "tool_use_rejected",
+            "transport_error",
+            "unsupported_image",
+        ):
+            with self.subTest(failure_code=failure_code), patch(
+                "mediaforce.advisor._run_structured_llm_request",
+                return_value=StructuredLLMFailure(
+                    [f"attempt 1: {failure_code}: bounded diagnostic"],
+                    statuses=[failure_code],
+                ),
+            ):
+                response = request_note_tuning(
+                    project_root=self.root,
+                    payload={"policy": {"video": {"target_vmaf": 90.0}}},
+                )
+
+            self.assertEqual(response.request_disposition, "unavailable")
+            self.assertEqual(response.failure_kind, "assistant_unavailable")
+            self.assertEqual(response.failure_code, failure_code)
+
+    def test_request_note_tuning_classifies_missing_response_as_unavailable(self) -> None:
+        with patch("mediaforce.advisor._run_structured_llm_request", return_value=None):
+            response = request_note_tuning(
+                project_root=self.root,
+                payload={"policy": {"video": {"target_vmaf": 90.0}}},
+            )
+
+        self.assertFalse(response.ok)
+        self.assertEqual(response.request_disposition, "unavailable")
+        self.assertEqual(response.failure_kind, "assistant_unavailable")
+        self.assertEqual(response.failure_code, "no_response")
+        self.assertEqual(response.failure_attempt_count, 0)
+
+    def test_nonqueueable_recovery_distinguishes_assistant_unclear_and_deterministic_states(self) -> None:
+        assistant = proposal_recovery(
+            {"can_queue": False, "request_disposition": "unavailable", "failure_kind": "assistant_unavailable"}
+        )
+        unclear = proposal_recovery({"can_queue": False, "request_disposition": "unclear"})
+        deterministic = proposal_recovery(
+            {"can_queue": False, "request_disposition": "rejected"},
+            deterministic_detail="The size target leaves no video budget.",
+        )
+        unclear_with_blocker = proposal_recovery(
+            {"can_queue": False, "request_disposition": "unclear"},
+            deterministic_detail="The previous sample failed at the configured search limit.",
+        )
+
+        assert assistant is not None
+        assert unclear is not None
+        assert deterministic is not None
+        self.assertEqual(assistant["action"], "prepare_again")
+        self.assertTrue(assistant["same_request_retryable"])
+        self.assertEqual(unclear["action"], "edit_request")
+        self.assertEqual(deterministic["action"], "change_request")
+        self.assertEqual(deterministic["detail"], "The size target leaves no video budget.")
+        assert unclear_with_blocker is not None
+        self.assertEqual(unclear_with_blocker["cause"], "deterministic_blocker")
+        self.assertEqual(unclear_with_blocker["action"], "change_request")
+        self.assertEqual(
+            unclear_with_blocker["detail"],
+            "The previous sample failed at the configured search limit.",
+        )
+
+    def test_pending_proposal_public_view_derives_legacy_assistant_recovery_and_suppresses_raw_trace(self) -> None:
+        public = pending_proposal_public_view(
+            FolderStateDeps(
+                review_file_from_url=lambda *_args: None,
+                load_advice_state=lambda *_args: None,
+                calibration_draft_hash=lambda *_args: "",
+                tuning_policy_focus=lambda policy: policy,
+                pending_proposal_trace_public_view=lambda trace: trace or None,
+            ),
+            {
+                "can_queue": False,
+                "operator_note": "Keep grain but reduce size.",
+                "host": {"key": "worker-1"},
+                "request_disposition": "unclear",
+                "trace": {"raw_response": "attempt 1: provider_error: private command failed"},
+            },
+        )
+
+        assert public is not None
+        self.assertEqual(public["operator_note"], "Keep grain but reduce size.")
+        self.assertEqual(public["host"], {"key": "worker-1"})
+        self.assertEqual(public["recovery"]["cause"], "assistant_failure")
+        self.assertIsNone(public["trace"])
+
+    def test_pending_proposal_public_view_covers_nonretryable_legacy_transport_failures(self) -> None:
+        for failure_code in ("command_unavailable", "missing_image", "transport_error", "unsupported_image"):
+            with self.subTest(failure_code=failure_code):
+                public = pending_proposal_public_view(
+                    FolderStateDeps(
+                        review_file_from_url=lambda *_args: None,
+                        load_advice_state=lambda *_args: None,
+                        calibration_draft_hash=lambda *_args: "",
+                        tuning_policy_focus=lambda policy: policy,
+                        pending_proposal_trace_public_view=lambda trace: trace or None,
+                    ),
+                    {
+                        "can_queue": False,
+                        "request_disposition": "unclear",
+                        "trace": {"raw_response": f"attempt 1: {failure_code}: private detail"},
+                    },
+                )
+
+                assert public is not None
+                self.assertEqual(public["recovery"]["cause"], "assistant_failure")
+                self.assertIsNone(public["trace"])
+
+    def test_pending_proposal_public_view_does_not_infer_assistant_failure_from_free_text(self) -> None:
+        public = pending_proposal_public_view(
+            FolderStateDeps(
+                review_file_from_url=lambda *_args: None,
+                load_advice_state=lambda *_args: None,
+                calibration_draft_hash=lambda *_args: "",
+                tuning_policy_focus=lambda policy: policy,
+                pending_proposal_trace_public_view=lambda trace: trace or None,
+            ),
+            {
+                "can_queue": False,
+                "request_disposition": "unclear",
+                "trace": {"raw_response": "The operator asked what happens after a timeout."},
+            },
+        )
+
+        assert public is not None
+        self.assertEqual(public["recovery"]["cause"], "unclear_request")
+        self.assertEqual(public["trace"]["raw_response"], "The operator asked what happens after a timeout.")
+
+    def test_recent_tuning_sessions_excludes_legacy_assistant_failures(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            record_tuning_session(
+                connection,
+                prefix="movies/Example",
+                note="Retry this request",
+                response={
+                    "summary": "Assistant failure",
+                    "raw": "attempt 1: provider_error: private command failed",
+                },
+                applied_policy={},
+                toolbelt={},
+                created_at="2026-08-14T10:00:00+00:00",
+            )
+            record_tuning_session(
+                connection,
+                prefix="movies/Example",
+                note="Valid request",
+                response={"summary": "Prepared", "raw": "{}"},
+                applied_policy={"video": {"target_vmaf": 90.0}},
+                toolbelt={},
+                created_at="2026-08-14T10:01:00+00:00",
+            )
+
+            sessions = recent_tuning_sessions(
+                connection,
+                "movies/Example",
+                load_json_object_fn=lambda value: object_dict(json.loads(value)),
+                limit=1,
+            )
+
+        self.assertEqual([session["note"] for session in sessions], ["Valid request"])
 
     def test_operator_requested_experiment_detects_literal_vmaf_target(self) -> None:
         request = _operator_requested_experiment("I want to try 85 VMAF on this show.")
@@ -4984,8 +5178,9 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(saved_jobs[0]["policy"], proposal["preview_policy"])
         self.assertEqual(saved_jobs[0]["policy"]["video"]["target_search_max_crf"], 63)
 
-    def test_folder_ai_tune_preview_applies_size_target_when_seed_worker_fails(self) -> None:
+    def test_folder_ai_tune_preview_keeps_seed_assistant_failure_nonqueueable_and_out_of_history(self) -> None:
         saved_proposals: list[dict[str, Any]] = []
+        record_session = Mock(return_value="session-1")
         base_policy = {"video": {"target_size_mb": 300.0, "target_vmaf": 85.0, "max_encoded_percent": 80}}
         host = HostStatus(
             key="host-1",
@@ -5014,11 +5209,14 @@ class TuningRuntimeTests(unittest.TestCase):
                 "seed_confidence": "low",
                 "seed_evidence_checked": [],
                 "seed_suggested_follow_up": "Ask again with a concrete experiment or artifact concern.",
-                "seed_request_disposition": "unclear",
-                "seed_request_response": "I could not turn that note into a trustworthy first draft.",
+                "seed_request_disposition": "unavailable",
+                "seed_request_response": "The assistant did not return a trustworthy first draft.",
                 "seed_feasibility_note": None,
                 "seed_prompt_version": "seed-v9",
                 "seed_raw_response": "attempt 1: timed out after 90s",
+                "seed_failure_kind": "assistant_unavailable",
+                "seed_failure_code": "timeout",
+                "seed_failure_attempt_count": 1,
                 "seed_proposed_policy": None,
                 "seed_applied_policy": None,
             },
@@ -5033,7 +5231,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 "source_path": str(self.root / "source" / "tv" / "Lucifer" / "Season 2" / "Lucifer.S02E10.mkv"),
                 "source_size_bytes": 3_913_541_003,
                 "video_codec": "hevc",
-                "duration_seconds": 2686.464,
+                "duration_seconds": None,
                 "audio_summary": [{"channels": 6, "codec_name": "aac"}],
                 "subtitle_summary": [],
                 "resolved_policy": dict(base_policy),
@@ -5059,6 +5257,9 @@ class TuningRuntimeTests(unittest.TestCase):
                 "evidence_checked": [],
                 "suggested_follow_up": seed_metadata["job_fields"]["seed_suggested_follow_up"],
                 "applied_policy": seed_metadata["job_fields"]["seed_applied_policy"],
+                "failure_kind": seed_metadata["job_fields"]["seed_failure_kind"],
+                "failure_code": seed_metadata["job_fields"]["seed_failure_code"],
+                "failure_attempt_count": seed_metadata["job_fields"]["seed_failure_attempt_count"],
             },
             proposal_alignment_issue=proposal_alignment_issue,
             now_iso=lambda: "2026-06-04T23:54:18+00:00",
@@ -5083,7 +5284,7 @@ class TuningRuntimeTests(unittest.TestCase):
             save_advice_state=lambda *_args, **_kwargs: None,
             save_job_state=lambda *_args, **_kwargs: None,
             clear_pending_proposal=lambda *_args, **_kwargs: None,
-            record_tuning_session=lambda *_args, **_kwargs: "session-1",
+            record_tuning_session=record_session,
         )
 
         with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 18}):
@@ -5097,16 +5298,42 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         proposal = saved_proposals[0]
-        self.assertTrue(proposal["can_queue"])
+        self.assertFalse(proposal["can_queue"])
+        self.assertEqual(proposal["preview_policy"], base_policy)
+        self.assertEqual(proposal["applied_policy"], {})
+        self.assertEqual(proposal["request_disposition"], "unavailable")
+        self.assertEqual(proposal["recovery"]["cause"], "assistant_failure")
+        self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")
+        record_session.assert_not_called()
+
+        missing_duration_item = deps.sample_item()
+        deps.sample_item = lambda *_args, **_kwargs: {
+            **missing_duration_item,
+            "duration_seconds": 2686.464,
+        }
+        saved_proposals.clear()
+        record_session.reset_mock()
+
+        with patch("mediaforce.web.runtime.folder_ai_tuning.inspect_prefix", return_value={"item_count": 18}):
+            result = folder_ai_tune_preview_action(
+                self.config,
+                deps,
+                "tv/Lucifer/Season 2",
+                "Target 300MB per episode",
+                "host-1",
+            )
+
+        self.assertTrue(result["ok"])
+        proposal = saved_proposals[0]
         expected_fragment = _absolute_size_fragment(300.0, 44.774)
+        self.assertFalse(proposal["can_queue"])
         self.assertEqual(
             proposal["preview_policy"],
             {"video": {**base_policy["video"], **expected_fragment["video"]}},
         )
         self.assertEqual(proposal["applied_policy"], expected_fragment)
-        self.assertEqual(proposal["request_disposition"], "honored")
-        self.assertIn("explicit request", proposal["request_response"])
-        self.assertEqual(proposal["trace"]["raw_response"], "attempt 1: timed out after 90s")
+        self.assertEqual(proposal["recovery"]["cause"], "assistant_failure")
+        record_session.assert_not_called()
 
     def test_folder_ai_tune_preview_overrides_seed_refusal_for_first_av1_size_budget(self) -> None:
         saved_proposals: list[dict[str, Any]] = []

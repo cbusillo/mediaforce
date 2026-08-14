@@ -81,6 +81,10 @@ contract.
 - Keep actions close to the data they affect.
 - Preserve user intent during hydration and migration work; the first explicit
   operator action must win over delayed storage or background state replay.
+- Keep every non-queueable plan directly above its request composer. It states
+  `Nothing was queued.` and offers one recovery action: retry the exact saved
+  request for assistant failure, edit an unclear request, or change a blocked
+  request. Never show a start action for these states.
 
 ## Anti-slop rules
 

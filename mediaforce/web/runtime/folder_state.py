@@ -9,6 +9,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.type_defs import float_value, object_dict, object_list
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.tuning.quality_risk import quality_risk_public_view
+from mediaforce.web.runtime.proposal_recovery import proposal_recovery
 
 
 @dataclass(slots=True)
@@ -342,6 +343,10 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
     if not isinstance(payload, dict):
         return None
     self_check = object_dict(payload.get("self_check"))
+    recovery = proposal_recovery(payload)
+    trace = object_dict(payload.get("trace"))
+    if recovery is not None and recovery.get("cause") == "assistant_failure":
+        trace = {key: value for key, value in trace.items() if key != "raw_response"}
     return {
         "proposal_id": payload.get("proposal_id"),
         "status": payload.get("status"),
@@ -353,6 +358,7 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "operator_note": payload.get("operator_note"),
         "operator_request": payload.get("operator_request"),
         "request_disposition": payload.get("request_disposition"),
+        "recovery": recovery,
         "request_response": payload.get("request_response"),
         "feasibility_note": payload.get("feasibility_note"),
         "summary": payload.get("summary"),
@@ -375,7 +381,7 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "evidence_checked": object_list(payload.get("evidence_checked")),
         "multimodal_review_pack": object_dict(payload.get("multimodal_review_pack")) or None,
         "quality_risk": quality_risk_public_view(object_dict(payload.get("quality_risk_contract"))),
-        "trace": deps.pending_proposal_trace_public_view(object_dict(payload.get("trace"))),
+        "trace": deps.pending_proposal_trace_public_view(trace),
     }
 
 
