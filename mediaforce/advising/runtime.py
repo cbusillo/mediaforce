@@ -18,6 +18,7 @@ from mediaforce.advising.telemetry import append_advisor_telemetry, estimated_co
 
 
 _FALLBACK_STATUSES = ASSISTANT_RETRYABLE_FAILURE_CODES
+_CODEX_LAB_SKILL_TRUNCATION_NOTICE_PREFIX = "Skill descriptions were shortened to fit the skills context budget."
 
 
 @dataclass(slots=True)
@@ -374,7 +375,11 @@ def _codex_lab_output(raw: str) -> tuple[str, dict[str, int], bool, bool]:
             item_type = str(item.get("type") or "")
             if item_type == "agent_message":
                 final_text = str(item.get("text") or "").strip()
-            elif item_type not in {"reasoning"}:
+            elif item_type == "error":
+                message = str(item.get("message") or "")
+                if not message.startswith(_CODEX_LAB_SKILL_TRUNCATION_NOTICE_PREFIX):
+                    tool_used = True
+            elif item_type != "reasoning":
                 tool_used = True
         elif event["type"] == "turn.completed" and isinstance(event.get("usage"), dict):
             completed = True

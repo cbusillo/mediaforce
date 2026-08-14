@@ -316,6 +316,57 @@ class AdvisorRoutingTests(unittest.TestCase):
         self.assertTrue(tool_used)
         self.assertTrue(completed)
 
+    def test_jsonl_parser_ignores_nonfatal_error_notice_before_final_message(self) -> None:
+        events = [
+            {"type": "thread.started", "thread_id": "test-thread"},
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "notice-item",
+                    "type": "error",
+                    "message": (
+                        "Skill descriptions were shortened to fit the skills context budget. "
+                        "Codex can still see every skill, but some descriptions are shorter."
+                    ),
+                },
+            },
+            {
+                "type": "item.completed",
+                "item": {"id": "message-item", "type": "agent_message", "text": '{"ok":true}'},
+            },
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 120, "cached_input_tokens": 20, "output_tokens": 30},
+            },
+        ]
+
+        text, usage, tool_used, completed = _codex_lab_output(
+            "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
+        )
+
+        self.assertEqual(text, '{"ok":true}')
+        self.assertEqual(usage, {"input_tokens": 120, "cached_input_tokens": 20, "output_tokens": 30})
+        self.assertFalse(tool_used)
+        self.assertTrue(completed)
+
+    def test_jsonl_parser_rejects_unrecognized_error_item(self) -> None:
+        events = [
+            {
+                "type": "item.completed",
+                "item": {"id": "error-item", "type": "error", "message": "Provider failed."},
+            },
+            {"type": "turn.completed", "usage": {}},
+        ]
+
+        text, usage, tool_used, completed = _codex_lab_output(
+            "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
+        )
+
+        self.assertEqual(text, "")
+        self.assertEqual(usage, {})
+        self.assertTrue(tool_used)
+        self.assertTrue(completed)
+
     def test_process_timeout_terminates_spawned_process_group(self) -> None:
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired) as raised:
