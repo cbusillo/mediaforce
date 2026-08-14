@@ -38,6 +38,15 @@ TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
 MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
 MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
+FINAL_RETRY_SKIP_REASONS = frozenset({
+    "final_retry_skipped_all_candidates_over_source_cap",
+    "final_retry_skipped_calibration_factor_out_of_bounds",
+    "final_retry_skipped_interpolation_failure",
+    "final_retry_skipped_invalid_trace_inputs",
+    "final_retry_skipped_measurement_unavailable",
+    "final_retry_skipped_no_calibrated_bracket",
+    "final_retry_skipped_no_eligible_directional_candidate",
+})
 
 SearchStatus = Literal["selected", "infeasible", "bound_exhausted", "quality_conflict", "needs_review"]
 CurveShape = Literal["single_point", "monotonic", "non_monotonic"]
@@ -625,6 +634,17 @@ def retry_quality_result_for_final_miss(
     if not trace or not verification.retry_allowed:
         return None
     selected = object_dict(trace.get("selected_candidate"))
+
+    def skip_retry(reason: str, **details: Any) -> None:
+        quality.target_size_trace = _final_retry_skip_trace(
+            trace,
+            selected,
+            verification,
+            reason=reason,
+            details=details,
+        )
+        return None
+
     selected_crf = float_value(selected.get("crf"))
     selected_metric = str(selected.get("metric") or quality.metric).strip()
     selected_metric_score = float_value(selected.get("metric_score"))
@@ -633,28 +653,47 @@ def retry_quality_result_for_final_miss(
     selected_predicted_video_bytes = int_value(selected.get("predicted_video_bytes"))
     actual_output_bytes = int_value(verification.actual_output_bytes)
     actual_video_bytes = actual_output_bytes - non_video_bytes
-    if (
-            "crf" not in selected
-            or not math.isfinite(selected_crf)
-            or selected_crf < 0
-            or non_video_bytes < 0
-            or selected_predicted_video_bytes <= 0
-            or actual_video_bytes <= 0
-    ):
-        return None
+    invalid_inputs = []
+    if "crf" not in selected or not math.isfinite(selected_crf) or selected_crf < 0:
+        invalid_inputs.append("selected_candidate.crf")
+    if non_video_bytes < 0:
+        invalid_inputs.append("target.non_video_bytes")
+    if selected_predicted_video_bytes <= 0:
+        invalid_inputs.append("selected_candidate.predicted_video_bytes")
+    if actual_video_bytes <= 0:
+        invalid_inputs.append("final_output.actual_video_bytes")
+    if invalid_inputs:
+        return skip_retry(
+            "final_retry_skipped_invalid_trace_inputs",
+            invalid_inputs=invalid_inputs,
+        )
     calibration_factor = actual_video_bytes / selected_predicted_video_bytes
     if not MIN_FINAL_RETRY_CALIBRATION_FACTOR <= calibration_factor <= MAX_FINAL_RETRY_CALIBRATION_FACTOR:
-        return None
+        return skip_retry(
+            "final_retry_skipped_calibration_factor_out_of_bounds",
+            video_projection_factor=round(calibration_factor, 9),
+        )
     target_size_bytes = int_value(verification.target_size_bytes)
     lower_bound_bytes = int_value(verification.lower_bound_bytes)
     upper_bound_bytes = int_value(verification.upper_bound_bytes)
-    if target_size_bytes <= 0 or lower_bound_bytes <= 0 or upper_bound_bytes <= 0:
-        return None
+    invalid_inputs = []
+    if target_size_bytes <= 0:
+        invalid_inputs.append("final_output.target_size_bytes")
+    if lower_bound_bytes <= 0:
+        invalid_inputs.append("final_output.lower_bound_bytes")
+    if upper_bound_bytes <= 0:
+        invalid_inputs.append("final_output.upper_bound_bytes")
     source_cap = object_dict(trace.get("source_cap"))
     source_cap_video_bytes = int_value(source_cap.get("video_cap_bytes")) or None
     minimum_quality_score = float_value(object_dict(trace.get("quality_floor")).get("minimum"))
     if minimum_quality_score <= 0:
-        return None
+        invalid_inputs.append("quality_floor.minimum")
+    if invalid_inputs:
+        return skip_retry(
+            "final_retry_skipped_invalid_trace_inputs",
+            invalid_inputs=invalid_inputs,
+            video_projection_factor=round(calibration_factor, 9),
+        )
     candidates = [object_dict(candidate) for candidate in trace.get("candidates", []) if isinstance(candidate, dict)]
     if verification.status == "over_target":
         eligible = [
@@ -681,7 +720,11 @@ def retry_quality_result_for_final_miss(
     else:
         return None
     if not eligible:
-        return None
+        return skip_retry(
+            "final_retry_skipped_no_eligible_directional_candidate",
+            eligible_candidate_count=0,
+            video_projection_factor=round(calibration_factor, 9),
+        )
 
     calibrated = [
         (
@@ -695,6 +738,15 @@ def retry_quality_result_for_final_miss(
         entry for entry in calibrated
         if source_cap_video_bytes is None or entry[1] <= source_cap_video_bytes
     ]
+    if not calibrated_safe:
+        return skip_retry(
+            "final_retry_skipped_all_candidates_over_source_cap",
+            calibrated_candidate_count=len(calibrated),
+            calibrated_safe_candidate_count=0,
+            eligible_candidate_count=len(eligible),
+            source_cap_video_bytes=source_cap_video_bytes,
+            video_projection_factor=round(calibration_factor, 9),
+        )
     in_band = [
         entry for entry in calibrated_safe
         if lower_bound_bytes <= entry[2] <= upper_bound_bytes
@@ -731,8 +783,22 @@ def retry_quality_result_for_final_miss(
         bracket = next((entry for entry in calibrated_safe if entry[2] < target_size_bytes), None)
     else:
         bracket = next((entry for entry in calibrated_safe if entry[2] > target_size_bytes), None)
-    if bracket is None or measure_candidate is None:
-        return None
+    if bracket is None:
+        return skip_retry(
+            "final_retry_skipped_no_calibrated_bracket",
+            calibrated_candidate_count=len(calibrated),
+            calibrated_safe_candidate_count=len(calibrated_safe),
+            eligible_candidate_count=len(eligible),
+            video_projection_factor=round(calibration_factor, 9),
+        )
+    if measure_candidate is None:
+        return skip_retry(
+            "final_retry_skipped_measurement_unavailable",
+            calibrated_candidate_count=len(calibrated),
+            calibrated_safe_candidate_count=len(calibrated_safe),
+            eligible_candidate_count=len(eligible),
+            video_projection_factor=round(calibration_factor, 9),
+        )
     bracket_candidate, bracket_video_bytes, _bracket_total_bytes = bracket
     retry_crf = _interpolated_retry_crf(
         selected_crf=selected_crf,
@@ -747,7 +813,14 @@ def retry_quality_result_for_final_miss(
         measured_crfs=_measured_integer_crfs(candidates),
     )
     if retry_crf is None:
-        return None
+        return skip_retry(
+            "final_retry_skipped_interpolation_failure",
+            bracket_crf=float_value(bracket_candidate.get("crf")),
+            calibrated_candidate_count=len(calibrated),
+            calibrated_safe_candidate_count=len(calibrated_safe),
+            eligible_candidate_count=len(eligible),
+            video_projection_factor=round(calibration_factor, 9),
+        )
     sample = measure_candidate(retry_crf)
     measured_candidate = _measured_retry_candidate(
         sample,
@@ -815,6 +888,36 @@ def retry_quality_result_for_final_miss(
         bracket_candidate=bracket_candidate,
         stdout=sample.stdout,
     )
+
+
+def _final_retry_skip_trace(
+        trace: dict[str, Any],
+        selected: dict[str, Any],
+        verification: FinalSizeVerification,
+        *,
+        reason: str,
+        details: dict[str, Any],
+) -> dict[str, Any]:
+    if reason not in FINAL_RETRY_SKIP_REASONS:
+        raise ValueError(f"Unsupported final retry skip reason: {reason}")
+    retry_trace = dict(trace)
+    previous_status = str(trace.get("status") or "") or None
+    previous_selection_reason = str(trace.get("selection_reason") or "") or None
+    retry_trace["status"] = "needs_review"
+    retry_trace["selection_reason"] = reason
+    if selected:
+        retry_trace["final_retry_from_candidate"] = selected
+    retry_trace["final_retry_skip"] = {
+        "schema_version": TARGET_SIZE_SEARCH_SCHEMA_VERSION,
+        "status": "skipped",
+        "reason": reason,
+        "verification_status": verification.status,
+        "retry_allowed": verification.retry_allowed,
+        "previous_status": previous_status,
+        "previous_selection_reason": previous_selection_reason,
+        **details,
+    }
+    return retry_trace
 
 
 def _final_retry_quality_result(

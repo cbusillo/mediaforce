@@ -88,6 +88,12 @@ failure can be reconstructed. Target relaxation, CRF-bound expansion,
 target-size candidates, and the bounded final-size retry remain part of that
 single run rather than becoming separate observations.
 
+When bounded final-size retry planning declines, the full target-size trace in
+the needs-review event retains the structured `final_retry_skip` details. The
+terminal observation projects the stable `needs_review` status and
+`final_retry_skipped_*` selection reason, so analysis can classify the decline
+without replaying the planner while keeping the observation payload bounded.
+
 The log stores typed identity, signature, selected-result, timing, and output
 fields alongside bounded JSON for context, bounds, candidates, outcome, and
 provenance. Candidate JSON contains parsed measurements only; raw tool stdout is
