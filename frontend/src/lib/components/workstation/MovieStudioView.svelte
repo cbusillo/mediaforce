@@ -93,12 +93,14 @@
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
 	const workflowDisplayLabel = $derived(
-		movieWorkflowLabel({
-			workflow_state: workflow,
-			promotion_conflicts: conflicts,
-			details_loading: folderPending,
-			availability: context?.availability ?? 'production'
-		})
+		pendingProposalCanQueue
+			? 'Sample plan ready'
+			: movieWorkflowLabel({
+					workflow_state: workflow,
+					promotion_conflicts: conflicts,
+					details_loading: folderPending,
+					availability: context?.availability ?? 'production'
+				})
 	);
 
 	$effect(() => {
@@ -358,6 +360,9 @@
 			case 'validate':
 				return `${fileCount} compressed ${fileWord} ${fileCount === 1 ? 'needs' : 'need'} a final safety check.`;
 			case 'encode':
+				if (pendingProposalCanQueue) {
+					return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready for a review sample.`;
+				}
 				return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready to compress.`;
 			case 'processing':
 				return 'Mediaforce is working on this movie now.';
@@ -580,7 +585,7 @@
 							</button>
 						{:else if primaryAction() === 'start'}
 							<button class="primary" disabled={isBusy} onclick={startSample}>
-								{pendingAction === 'start-sample' ? 'Starting…' : 'Start planned sample'}
+								{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
 							</button>
 						{:else if primaryAction() === 'monitor-sample'}
 							<a class="primary" href={resolve('/ops')}>Monitor sample</a>
@@ -657,7 +662,7 @@
 							>
 							<p>
 								{pendingProposalCanQueue
-									? 'Nothing starts until you confirm this plan.'
+									? 'This is the current plan. Use Start sample above when you are ready.'
 									: pendingProposalRecovery?.detail ||
 										asText(pendingProposal.message) ||
 										'The sample plan needs another request.'}
@@ -665,63 +670,88 @@
 							{#if !pendingProposalCanQueue}
 								<p class="sample-plan__queue-state"><strong>Nothing was queued.</strong></p>
 							{/if}
-							<div class="sample-plan__actions">
-								{#if pendingProposalCanQueue}
-									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={startSample}
-										>Start sample</button
+							{#if !pendingProposalCanQueue && pendingProposalRecovery}
+								<div class="sample-plan__actions">
+									{#if pendingProposalRecovery.action === 'prepare_again'}
+										<button
+											class="secondary"
+											disabled={isBusy || isBrowseOnly}
+											onclick={prepareAgain}>Prepare again</button
+										>
+									{:else}
+										<button
+											class="secondary"
+											disabled={isBusy || isBrowseOnly}
+											onclick={editRequest}
+											>{pendingProposalRecovery.action === 'change_request'
+												? 'Change request'
+												: 'Edit request'}</button
+										>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					<details class="sample-plan-editor" open={!pendingProposalCanQueue}>
+						<summary
+							>{pendingProposalCanQueue
+								? 'Change sample plan'
+								: isWorkflowBlocked
+									? 'Revise sample plan'
+									: 'Prepare sample plan'}</summary
+						>
+						<div class="sample-plan-editor__body">
+							{#if pendingProposalCanQueue}
+								<p class="sample-plan-editor__note">
+									This replaces the current plan. It does not start sample work.
+								</p>
+							{/if}
+							<label class="request-field">
+								<span>What should Mediaforce preserve?</span>
+								<textarea
+									bind:this={noteInput}
+									bind:value={note}
+									oninput={() => (noteHasNewerText = true)}
+									rows="4"
+									placeholder="Example: preserve grain and make the feature about 35% smaller."
+								></textarea>
+							</label>
+							<div class="bench-controls">
+								<label>
+									<span>Worker</span>
+									<select bind:value={selectedHostKey} disabled={!hostOptions.length}>
+										{#if !hostOptions.length}<option value="">No worker available</option>{/if}
+										{#each hostOptions as host (asText(host.key))}
+											<option value={asText(host.key)}
+												>{asText(host.label) || asText(host.key)}</option
+											>
+										{/each}
+									</select>
+								</label>
+								<button
+									class="secondary"
+									disabled={isBusy || isBrowseOnly || !selectedHostKey}
+									onclick={prepareSample}
+									>{pendingProposalCanQueue
+										? 'Prepare replacement plan'
+										: isWorkflowBlocked
+											? 'Prepare revised sample'
+											: 'Prepare sample plan'}</button
+								>
+								{#if status.retryable_sample_job}
+									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={retrySample}
+										>Retry failed sample</button
 									>
-								{:else if pendingProposalRecovery?.action === 'prepare_again'}
-									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={prepareAgain}
-										>Prepare again</button
-									>
-								{:else if pendingProposalRecovery}
-									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={editRequest}
-										>{pendingProposalRecovery.action === 'change_request'
-											? 'Change request'
-											: 'Edit request'}</button
+								{/if}
+								{#if reviewReady}
+									<button class="secondary" type="button" onclick={downloadReviewPack}
+										>Download review files</button
 									>
 								{/if}
 							</div>
 						</div>
-					{/if}
-
-					<label class="request-field">
-						<span>What should Mediaforce preserve?</span>
-						<textarea
-							bind:this={noteInput}
-							bind:value={note}
-							oninput={() => (noteHasNewerText = true)}
-							rows="4"
-							placeholder="Example: preserve grain and make the feature about 35% smaller."
-						></textarea>
-					</label>
-					<div class="bench-controls">
-						<label>
-							<span>Worker</span>
-							<select bind:value={selectedHostKey} disabled={!hostOptions.length}>
-								{#if !hostOptions.length}<option value="">No worker available</option>{/if}
-								{#each hostOptions as host (asText(host.key))}
-									<option value={asText(host.key)}>{asText(host.label) || asText(host.key)}</option>
-								{/each}
-							</select>
-						</label>
-						<button
-							class="secondary"
-							disabled={isBusy || isBrowseOnly || !selectedHostKey}
-							onclick={prepareSample}
-							>{isWorkflowBlocked ? 'Prepare revised sample' : 'Prepare new sample'}</button
-						>
-						{#if status.retryable_sample_job}
-							<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={retrySample}
-								>Retry failed sample</button
-							>
-						{/if}
-						{#if reviewReady}
-							<button class="secondary" type="button" onclick={downloadReviewPack}
-								>Download review files</button
-							>
-						{/if}
-					</div>
+					</details>
 				</div>
 			</WorkstationPanel>
 		</div>
@@ -1031,6 +1061,41 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--mf-space-4);
+	}
+
+	.sample-plan-editor {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+	}
+
+	.sample-plan-editor summary {
+		color: var(--mf-active-fg);
+		cursor: pointer;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-bold);
+		padding: 11px 13px;
+	}
+
+	.sample-plan-editor summary:focus-visible {
+		outline: 2px solid var(--mf-active-fg);
+		outline-offset: -2px;
+	}
+
+	.sample-plan-editor[open] summary {
+		border-bottom: var(--mf-border-muted);
+	}
+
+	.sample-plan-editor__body {
+		display: grid;
+		gap: var(--mf-space-6);
+		padding: var(--mf-space-6);
+	}
+
+	.sample-plan-editor__note {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		margin: 0;
 	}
 
 	.sample-facts {
