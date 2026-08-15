@@ -19,6 +19,8 @@ _TREE_POLL_SECONDS = 0.02
 _TREE_SETTLE_SECONDS = 0.08
 _TERM_GRACE_SECONDS = 0.45
 _KILL_GRACE_SECONDS = 0.75
+_DARWIN_IDENTITY_PIN_RETRY_SECONDS = 0.05
+_DARWIN_IDENTITY_PIN_RETRY_INTERVAL_SECONDS = 0.001
 _PR_SET_CHILD_SUBREAPER = 36
 _TASK_AUDIT_TOKEN = 15
 _PROC_PID_UNIQUE_IDENTIFIER_INFO = 17
@@ -514,9 +516,7 @@ class _DarwinProcessTree:
         token = self._token_for_task_port(task_port.value)
         if token is None or int(token.values[5]) != pid:
             self._libc.mach_port_deallocate(self_task, task_port)
-            raise _ContainmentUnavailableError(
-                f"cannot pin process identity for {pid}"
-            )
+            return None
         return task_port.value, token
 
     def _token_for_task_port(self, task_port: int) -> _AuditToken | None:
@@ -657,7 +657,7 @@ class _DarwinProcessTree:
             parent = self._processes[parent_serial]
             if int(unique_info.parent_unique_id) != parent.unique_id:
                 return None
-        task_identity = self._task_identity(pid)
+        task_identity = self._pin_task_identity(pid, int(unique_info.unique_id))
         if task_identity is None:
             if required:
                 raise _ContainmentUnavailableError(
@@ -709,6 +709,25 @@ class _DarwinProcessTree:
         self._current_by_pid[pid] = serial
         self._serial_by_unique_id[identity.unique_id] = serial
         return serial
+
+    def _pin_task_identity(
+            self,
+            pid: int,
+            expected_unique_id: int,
+    ) -> tuple[int, _AuditToken] | None:
+        retry_deadline = time.monotonic() + _DARWIN_IDENTITY_PIN_RETRY_SECONDS
+        while True:
+            task_identity = self._task_identity(pid)
+            if task_identity is not None:
+                return task_identity
+            current_info = self._unique_process_info(pid)
+            if current_info is None or int(current_info.unique_id) != expected_unique_id:
+                return None
+            if time.monotonic() >= retry_deadline:
+                raise _ContainmentUnavailableError(
+                    f"cannot pin live process identity for {pid}"
+                )
+            time.sleep(_DARWIN_IDENTITY_PIN_RETRY_INTERVAL_SECONDS)
 
     def _discover_until_stable(self) -> None:
         changed = True
@@ -819,9 +838,15 @@ class _DarwinProcessTree:
         info = self._unique_process_info(identity.pid)
         if info is None or int(info.unique_id) != identity.unique_id:
             return _DarwinSignalState.EXITED
-        task_identity = self._task_identity(identity.pid)
-        if task_identity is None:
+        try:
+            task_identity = self._pin_task_identity(
+                identity.pid,
+                identity.unique_id,
+            )
+        except _ContainmentUnavailableError:
             return _DarwinSignalState.UNSIGNALABLE
+        if task_identity is None:
+            return _DarwinSignalState.EXITED
         task_port, token = task_identity
         try:
             confirmed_info = self._unique_process_info(identity.pid)
