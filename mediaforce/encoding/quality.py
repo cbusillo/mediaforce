@@ -699,7 +699,7 @@ def _run_quality_command(
         process_controller: ManagedProcessController | None,
         host: dict[str, object] | None,
 ) -> subprocess.CompletedProcess[str]:
-    host_mode = execution_mode_for_host(host)
+    host_mode = _quality_execution_mode(host)
     if host_mode != "ssh":
         result = run_command(
             guard_command_for_schedule_deadline(cmd, host, process_controller=process_controller),
@@ -733,7 +733,7 @@ def _run_quality_command(
 def _scoped_quality_temp_dir(quality_temp_dir: Path | None, *, host: dict[str, object] | None) -> Path | None:
     if quality_temp_dir is None:
         return None
-    host_mode = execution_mode_for_host(host)
+    host_mode = _quality_execution_mode(host)
     if host_mode != "ssh":
         quality_temp_dir.mkdir(parents=True, exist_ok=True)
         return Path(tempfile.mkdtemp(prefix=".mediaforce-ab-av1-", dir=quality_temp_dir))
@@ -743,7 +743,7 @@ def _scoped_quality_temp_dir(quality_temp_dir: Path | None, *, host: dict[str, o
 def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict[str, object] | None) -> str | None:
     if scoped_temp_dir is None:
         return None
-    host_mode = execution_mode_for_host(host)
+    host_mode = _quality_execution_mode(host)
     if host_mode != "ssh":
         try:
             shutil.rmtree(scoped_temp_dir)
@@ -859,9 +859,17 @@ def _quality_temp_setup_error(
         host: dict[str, object] | None,
 ) -> str:
     base_dir = str(quality_temp_dir) if quality_temp_dir is not None else "default temp dir"
-    host_mode = execution_mode_for_host(host)
+    host_mode = _quality_execution_mode(host)
     location = "remote" if host_mode == "ssh" else "local"
     return f"Failed to prepare {location} quality temp dir under {base_dir}: {exc}"
+
+
+def _quality_execution_mode(host: dict[str, object] | None) -> str:
+    host_payload = object_dict(host)
+    explicit_mode = str(host_payload.get("mode") or "").strip().lower()
+    if explicit_mode:
+        return explicit_mode
+    return execution_mode_for_host(host_payload)
 
 
 def _quality_temp_dir_arg(cmd: list[str]) -> str | None:
@@ -921,7 +929,7 @@ def _probe_libvmaf(
         process_controller: ManagedProcessController | None = None,
 ) -> bool:
     result = run_command(
-        ["sh", "-lc", "ffmpeg -hide_banner -filters"],
+        ["ffmpeg", "-hide_banner", "-filters"],
         check=True,
         capture_output=True,
         text=True,

@@ -13237,43 +13237,55 @@ raise SystemExit(0)
         )
         self.assertEqual(resolved, Path("/Volumes/media/tv/show/episode.mkv"))
 
-    def test_run_quality_command_localhost_ssh_executes_locally(self) -> None:
-        with patch(
-                "mediaforce.quality.run_command",
-                return_value=subprocess.CompletedProcess(args=["ab-av1"], returncode=0, stdout="{}", stderr=""),
-        ) as run_command_mock, patch("mediaforce.quality.run_remote_command") as run_remote_command_mock:
-            quality._run_quality_command(
-                ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"],
+    def test_run_quality_command_localhost_ssh_preserves_remote_execution(self) -> None:
+        command = ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"]
+        host = {"key": "cbusillo@localhost", "mode": "ssh"}
+        completed = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="{}", stderr="")
+        with patch("mediaforce.quality.run_command") as run_command_mock, patch(
+                "mediaforce.quality.run_remote_command",
+                return_value=completed,
+        ) as run_remote_command_mock:
+            result = quality._run_quality_command(
+                command,
                 process_controller=None,
-                host={"key": "cbusillo@localhost", "mode": "ssh"},
+                host=host,
             )
-        self.assertEqual(run_command_mock.call_args.args[0][0], "ab-av1")
-        self.assertTrue(
-            run_command_mock.call_args.kwargs["env"]["PATH"].startswith(
-                "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin:"
-            )
+        self.assertIs(result, completed)
+        run_command_mock.assert_not_called()
+        run_remote_command_mock.assert_called_once_with(
+            host,
+            command,
+            quality.REMOTE_QUALITY_TIMEOUT_SECONDS,
+            process_controller=None,
         )
-        run_remote_command_mock.assert_not_called()
 
-    def test_run_quality_command_wraps_local_search_with_host_deadline(self) -> None:
+    def test_run_quality_command_routes_host_deadline_through_remote_execution(self) -> None:
         deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
-        with patch(
-                "mediaforce.quality.run_command",
-                return_value=subprocess.CompletedProcess(args=["sh"], returncode=0, stdout="{}", stderr=""),
-        ) as run_command_mock:
+        command = ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"]
+        host = {
+            "key": "cbusillo@localhost",
+            "mode": "ssh",
+            SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
+        }
+        process_controller = ManagedProcessController()
+        completed = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="{}", stderr="")
+        with patch("mediaforce.quality.run_command") as run_command_mock, patch(
+                "mediaforce.quality.run_remote_command",
+                return_value=completed,
+        ) as run_remote_command_mock:
             quality._run_quality_command(
-                ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"],
-                process_controller=ManagedProcessController(),
-                host={
-                    "key": "cbusillo@localhost",
-                    "mode": "ssh",
-                    SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
-                },
+                command,
+                process_controller=process_controller,
+                host=host,
             )
 
-        guarded_command = run_command_mock.call_args.args[0]
-        self.assertEqual(guarded_command[:2], ["sh", "-c"])
-        self.assertIn(SCHEDULE_DEADLINE_MARKER, guarded_command[2])
+        run_command_mock.assert_not_called()
+        run_remote_command_mock.assert_called_once_with(
+            host,
+            command,
+            quality.REMOTE_QUALITY_TIMEOUT_SECONDS,
+            process_controller=process_controller,
+        )
 
     def test_local_quality_environment_prefers_mediaforce_binary_overrides(self) -> None:
         with patch.dict(

@@ -79,6 +79,11 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     managed command that forks cannot report successful completion on macOS;
     unproven cleanup remains the primary enforcement failure even when a
     deadline or cancellation also occurred
+  - quality commands preserve an explicit SSH execution mode even when the SSH
+    target resolves to the controller Mac. This keeps `ab-av1` and its FFmpeg
+    descendants on the supported remote-command path instead of routing their
+    normal forks through strict local Darwin containment. Local capability
+    probes invoke FFmpeg directly rather than adding an avoidable shell fork
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
     back to same-user process scans or signals

@@ -1,21 +1,78 @@
 import subprocess
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
-from mediaforce.core.process_control import ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
 from mediaforce.encoding.quality import (
     QualitySearchResult,
     QualitySearchWarmStart,
     QualityTempSetupError,
+    REMOTE_QUALITY_TIMEOUT_SECONDS,
     SampleEncodeError,
     SampleEncodeResult,
+    _probe_libvmaf,
+    _quality_execution_mode,
+    _run_quality_command,
     quality_toolchain_identity,
 )
 from mediaforce.encoding.quality_search import search_quality
 
 
 class QualityToolchainIdentityTests(unittest.TestCase):
+    def test_quality_execution_preserves_explicit_ssh_mode_for_localhost(self) -> None:
+        self.assertEqual(
+            _quality_execution_mode({"mode": "ssh", "host": "cbusillo@localhost"}),
+            "ssh",
+        )
+
+    def test_localhost_ssh_quality_command_uses_remote_transport(self) -> None:
+        process_controller = ManagedProcessController()
+        host = {"mode": "ssh", "host": "cbusillo@localhost"}
+        command = ["ab-av1", "--version"]
+        completed = subprocess.CompletedProcess(command, 0, "ab-av1 0.11.3\n", "")
+
+        with (
+            patch("mediaforce.encoding.quality.run_command") as local_command,
+            patch("mediaforce.encoding.quality.run_remote_command", return_value=completed) as remote_command,
+        ):
+            result = _run_quality_command(
+                command,
+                process_controller=process_controller,
+                host=host,
+            )
+
+        self.assertIs(result, completed)
+        local_command.assert_not_called()
+        remote_command.assert_called_once_with(
+            host,
+            command,
+            REMOTE_QUALITY_TIMEOUT_SECONDS,
+            process_controller=process_controller,
+        )
+
+    def test_libvmaf_probe_avoids_a_shell_fork_under_managed_containment(self) -> None:
+        process_controller = ManagedProcessController()
+        completed = subprocess.CompletedProcess(
+            args=["ffmpeg", "-hide_banner", "-filters"],
+            returncode=0,
+            stdout=" T.. libvmaf\n",
+            stderr="",
+        )
+
+        with patch("mediaforce.encoding.quality.run_command", return_value=completed) as run_command:
+            available = _probe_libvmaf(process_controller=process_controller)
+
+        self.assertTrue(available)
+        run_command.assert_called_once_with(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=ANY,
+            process_controller=process_controller,
+        )
+
     def test_identity_is_stable_and_uses_version_output(self) -> None:
         results = [
             subprocess.CompletedProcess(
