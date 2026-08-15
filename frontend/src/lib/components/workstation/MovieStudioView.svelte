@@ -340,8 +340,10 @@
 		| 'promote'
 		| 'retry'
 		| 'monitor'
+		| 'complete'
 		| 'none' {
 		if (isBrowseOnly) return 'none';
+		if (workflow?.primary_lane === 'complete') return 'complete';
 		const calibrationStatus = asText(calibrationJob.status);
 		if (['queued', 'running'].includes(calibrationStatus)) return 'monitor-sample';
 		if (canRetrySample) return 'retry-sample';
@@ -606,6 +608,11 @@
 								The completed title sample was prepared from this file. Review or approve it in the
 								title workspace; this page stays scoped to only this file.
 							</p>
+						{:else if primaryAction() === 'complete'}
+							<p>
+								The checked replacement is installed. The original remains in Completed until you
+								decide to delete backups.
+							</p>
 						{:else}
 							<p>
 								{exactScope
@@ -670,6 +677,8 @@
 							>
 						{:else if primaryAction() === 'monitor'}
 							<a class="primary" href={resolve('/ops')}>Monitor processing</a>
+						{:else if primaryAction() === 'complete'}
+							<a class="secondary" href={resolve('/movies')}>Back to Movies</a>
 						{:else}
 							<a class="primary" href={resolve('/settings')}>Open library settings</a>
 						{/if}
@@ -680,6 +689,7 @@
 			<WorkstationPanel
 				eyebrow="Review sample"
 				title="Prepare and review"
+				hidden={primaryAction() === 'complete'}
 				meta={reviewReady
 					? 'Ready to review'
 					: inheritedParentSample
