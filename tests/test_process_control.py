@@ -134,6 +134,41 @@ class ProcessControlTests(TestCase):
             self.assertFalse(_pid_is_alive(child_pid))
 
     @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
+    def test_trusted_local_orchestrator_fails_closed_for_process_group_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            child_pid_path = root / "regrouped-child.pid"
+            script_path = _write_ab_av1_script(
+                root,
+                "\n".join((
+                    "from pathlib import Path",
+                    "import os",
+                    "import sys",
+                    "import time",
+                    "child_pid = os.fork()",
+                    "if child_pid == 0:",
+                    "    Path(sys.argv[1]).write_text(str(os.getpid()))",
+                    "    os.setpgid(0, 0)",
+                    "    time.sleep(10)",
+                    "    os._exit(0)",
+                    "os.waitpid(child_pid, 0)",
+                )),
+            )
+
+            with self.assertRaises(ProcessDeadlineEnforcementError):
+                run_trusted_local_orchestrator_command(
+                    [str(script_path), str(child_pid_path)],
+                    process_controller=ManagedProcessController(),
+                )
+
+            self.assertTrue(child_pid_path.exists())
+            child_pid = int(child_pid_path.read_text())
+            exit_deadline = time.monotonic() + 2
+            while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
+                time.sleep(0.02)
+            self.assertFalse(_pid_is_alive(child_pid))
+
+    @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
     def test_trusted_local_orchestrator_deadline_kills_same_group_children(self) -> None:
         controller = ManagedProcessController()
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1273,6 +1308,121 @@ class ProcessControlTests(TestCase):
             reconcile.assert_called_once_with()
             self.assertFalse(tree.compromised)
             self.assertFalse(tree.requires_immediate_shutdown)
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_identity_pin_treats_vanished_process_as_exited(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        try:
+            with (
+                patch.object(tree, "_task_identity", return_value=None),
+                patch.object(tree, "_unique_process_info", return_value=None),
+            ):
+                identity = tree._pin_task_identity(12345, 67890)
+            self.assertIsNone(identity)
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_identity_pin_retries_live_process_transition(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        unique_info = process_deadline_module._UniqueProcessInfo()
+        unique_info.unique_id = 67890
+        token = process_deadline_module._AuditToken()
+        try:
+            with (
+                patch.object(
+                    tree,
+                    "_task_identity",
+                    side_effect=[None, (123, token)],
+                ),
+                patch.object(
+                    tree,
+                    "_unique_process_info",
+                    return_value=unique_info,
+                ),
+                patch.object(process_deadline_module.time, "sleep") as sleep_mock,
+            ):
+                identity = tree._pin_task_identity(12345, 67890)
+            self.assertEqual(identity, (123, token))
+            sleep_mock.assert_called_once_with(
+                process_deadline_module._DARWIN_IDENTITY_PIN_RETRY_INTERVAL_SECONDS
+            )
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_identity_pin_fails_closed_for_live_unsignalable_process(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        unique_info = process_deadline_module._UniqueProcessInfo()
+        unique_info.unique_id = 67890
+        try:
+            with (
+                patch.object(tree, "_task_identity", return_value=None),
+                patch.object(
+                    tree,
+                    "_unique_process_info",
+                    return_value=unique_info,
+                ),
+                patch.object(
+                    process_deadline_module.time,
+                    "monotonic",
+                    side_effect=[0.0, 1.0],
+                ),
+                self.assertRaisesRegex(
+                    process_deadline_module._ContainmentUnavailableError,
+                    "cannot pin live process identity",
+                ),
+            ):
+                tree._pin_task_identity(12345, 67890)
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_signal_refresh_treats_vanished_identity_as_exited(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        identity = Mock(pid=12345, unique_id=67890)
+        unique_info = process_deadline_module._UniqueProcessInfo()
+        unique_info.unique_id = 67890
+        try:
+            with (
+                patch.object(
+                    tree,
+                    "_unique_process_info",
+                    return_value=unique_info,
+                ),
+                patch.object(tree, "_pin_task_identity", return_value=None),
+            ):
+                state = tree._refresh_signal_token(identity)
+            self.assertIs(state, process_deadline_module._DarwinSignalState.EXITED)
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_signal_refresh_keeps_live_unpinnable_identity(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        identity = Mock(pid=12345, unique_id=67890)
+        unique_info = process_deadline_module._UniqueProcessInfo()
+        unique_info.unique_id = 67890
+        try:
+            with (
+                patch.object(
+                    tree,
+                    "_unique_process_info",
+                    return_value=unique_info,
+                ),
+                patch.object(
+                    tree,
+                    "_pin_task_identity",
+                    side_effect=process_deadline_module._ContainmentUnavailableError,
+                ),
+            ):
+                state = tree._refresh_signal_token(identity)
+            self.assertIs(
+                state,
+                process_deadline_module._DarwinSignalState.UNSIGNALABLE,
+            )
         finally:
             tree.close()
 
