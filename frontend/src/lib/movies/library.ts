@@ -14,6 +14,10 @@ export interface MovieWorkflowDisplayState {
 	availability: 'production' | 'browse_only';
 }
 
+export function movieWorkflowIsComplete(workflow: FolderWorkflowState | null | undefined): boolean {
+	return workflow?.state === 'complete' || workflow?.primary_lane === 'complete';
+}
+
 export function mergeMovieLibraryPayloads(
 	structure: MovieLibraryPayload,
 	details: MovieLibraryPayload
@@ -47,6 +51,7 @@ export function movieReclaimTotalIsLowerBound(titles: MovieTitle[]): boolean {
 export function movieTitleNeedsAction(title: MovieTitle): boolean {
 	if (title.promotion_conflicts.length) return true;
 	if (title.workflow_state?.state === 'explicit_selection_required') return true;
+	if (movieWorkflowIsComplete(title.workflow_state)) return false;
 	return ['encode', 'validate', 'promote', 'processing', 'attention', 'mixed'].includes(
 		title.workflow_state?.primary_lane ?? ''
 	);
@@ -58,17 +63,27 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 		return 'View only';
 	}
 	if (title.workflow_state?.state === 'explicit_selection_required') return 'Choose a file';
-	return {
-		encode: 'Ready to compress',
-		validate: 'Ready to check',
-		promote: 'Ready to replace',
-		processing: 'In progress',
-		attention: 'Needs review',
-		mixed: 'Several steps',
-		complete: 'Finished',
-		blocked: 'Cannot start',
-		none: title.details_loading ? 'Loading' : 'No work needed'
-	}[title.workflow_state?.primary_lane ?? 'none'];
+	if (movieWorkflowIsComplete(title.workflow_state)) return 'Finished';
+	switch (title.workflow_state?.primary_lane ?? 'none') {
+		case 'encode':
+			return 'Ready to compress';
+		case 'validate':
+			return 'Ready to check';
+		case 'promote':
+			return 'Ready to replace';
+		case 'processing':
+			return 'In progress';
+		case 'attention':
+			return 'Needs review';
+		case 'mixed':
+			return 'Several steps';
+		case 'blocked':
+			return 'Cannot start';
+		case 'complete':
+			return 'Finished';
+		case 'none':
+			return title.details_loading ? 'Loading' : 'No work needed';
+	}
 }
 
 export function selectMovieLeadTitle(

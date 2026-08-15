@@ -18,7 +18,7 @@
 		prepareAgainRequest,
 		proposalRecoveryView
 	} from '$lib/folders/studio';
-	import { movieWorkflowLabel } from '$lib/movies/library';
+	import { movieWorkflowIsComplete, movieWorkflowLabel } from '$lib/movies/library';
 	import {
 		canRetrySampleJob,
 		formatMovieBytes,
@@ -69,6 +69,7 @@
 	const workflow = $derived(
 		status.workflow_state ?? folder.workflow_state ?? context?.workflow_state ?? null
 	);
+	const isComplete = $derived(movieWorkflowIsComplete(workflow));
 	const calibration = $derived(asRecord(folder.calibration));
 	const pendingProposal = $derived(asRecord(folder.pending_proposal));
 	const hasPendingProposal = $derived(Object.keys(pendingProposal).length > 0);
@@ -94,11 +95,13 @@
 			.length
 	);
 	const currentWork = $derived(
-		movieCurrentWorkView(
-			encodeJob,
-			folder.encode_queue_state ?? folder.encode_queue?.state,
-			availableEncodeWorkerCount
-		)
+		isComplete
+			? null
+			: movieCurrentWorkView(
+					encodeJob,
+					folder.encode_queue_state ?? folder.encode_queue?.state,
+					availableEncodeWorkerCount
+				)
 	);
 	const sampleItem = $derived(asRecord(folder.sample_item));
 	const hostOptions = $derived(
@@ -115,11 +118,10 @@
 		)
 	);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');
-	const isWorkflowBlocked = $derived(workflow?.primary_lane === 'blocked');
+	const isWorkflowBlocked = $derived(!isComplete && workflow?.primary_lane === 'blocked');
 	const isSizeCapBlock = $derived(
 		isWorkflowBlocked && workflow?.detail.includes('80% source cap') === true
 	);
-	const isComplete = $derived(workflow?.primary_lane === 'complete');
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
 	const reviewReady = $derived(
@@ -142,31 +144,34 @@
 	const memberCount = $derived(context?.members.length ?? 0);
 	const memberCountLabel = $derived(`${memberCount} ${memberCount === 1 ? 'file' : 'files'}`);
 	const needsReviewSample = $derived(
-		workflow?.primary_lane === 'encode' &&
+		!isComplete &&
+			workflow?.primary_lane === 'encode' &&
 			reviewGate.status !== 'accepted' &&
 			!reviewReady &&
 			!pendingProposalCanQueue &&
 			!sampleWorkActive
 	);
 	const workflowDisplayLabel = $derived(
-		currentWork
-			? currentWork.label
-			: sampleWorkActive
-				? sampleWorkStatus === 'queued'
-					? 'Sample queued'
-					: 'Sampling now'
-				: canRetrySample
-					? 'Sample needs retry'
-					: pendingProposalCanQueue
-						? 'Sample plan ready'
-						: needsReviewSample
-							? 'Needs a review sample'
-							: movieWorkflowLabel({
-									workflow_state: workflow,
-									promotion_conflicts: conflicts,
-									details_loading: folderPending,
-									availability: context?.availability ?? 'production'
-								})
+		isComplete
+			? 'Finished'
+			: currentWork
+				? currentWork.label
+				: sampleWorkActive
+					? sampleWorkStatus === 'queued'
+						? 'Sample queued'
+						: 'Sampling now'
+					: canRetrySample
+						? 'Sample needs retry'
+						: pendingProposalCanQueue
+							? 'Sample plan ready'
+							: needsReviewSample
+								? 'Needs a review sample'
+								: movieWorkflowLabel({
+										workflow_state: workflow,
+										promotion_conflicts: conflicts,
+										details_loading: folderPending,
+										availability: context?.availability ?? 'production'
+									})
 	);
 
 	$effect(() => {
@@ -388,9 +393,9 @@
 		| 'current-work'
 		| 'complete'
 		| 'none' {
+		if (isComplete) return 'complete';
 		if (isBrowseOnly) return 'none';
 		if (currentWork) return 'current-work';
-		if (workflow?.primary_lane === 'complete') return 'complete';
 		if (sampleWorkActive) return 'monitor-sample';
 		if (canRetrySample) return 'retry-sample';
 		const encodeStatus = String(encodeJob?.status ?? '');
@@ -408,6 +413,7 @@
 	}
 
 	function badgeTone(): 'active' | 'ready' | 'wait' | 'fail' | 'idle' {
+		if (isComplete) return 'ready';
 		if (currentWork) return currentWork.tone;
 		if (canRetrySample || conflicts.length || workflow?.tone === 'attention') return 'fail';
 		if (workflow?.tone === 'active') return 'active';
@@ -419,6 +425,7 @@
 	function workflowSummary(): string {
 		const fileCount = exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 1);
 		const fileWord = fileCount === 1 ? 'file' : 'files';
+		if (isComplete) return 'This movie is finished.';
 		if (conflicts.length) {
 			return 'A file already exists where this movie would be placed. Review the conflict before replacing anything.';
 		}
