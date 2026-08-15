@@ -19,7 +19,11 @@
 		proposalRecoveryView
 	} from '$lib/folders/studio';
 	import { movieWorkflowLabel } from '$lib/movies/library';
-	import { canRetrySampleJob } from './movie-studio-view';
+	import {
+		canRetrySampleJob,
+		movieReviewStatusLabel,
+		parentSampleAppliesToExactItem
+	} from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 
@@ -68,7 +72,15 @@
 	const pendingProposalCanQueue = $derived(pendingProposal.can_queue === true);
 	const pendingProposalRecovery = $derived(proposalRecoveryView(pendingProposal));
 	const reviewGate = $derived(asRecord(folder.review_gate));
-	const calibrationJob = $derived(asRecord(folder.calibration_job));
+	const exactCalibrationJob = $derived(status.exact_calibration_job ?? folder.calibration_job);
+	const overlappingCalibrationJob = $derived(status.calibration_job);
+	const inheritedParentSample = $derived(
+		folder.media_scope.match === 'exact_item' &&
+			parentSampleAppliesToExactItem(folder.prefix, exactCalibrationJob, overlappingCalibrationJob)
+	);
+	const calibrationJob = $derived(
+		asRecord(exactCalibrationJob ?? (inheritedParentSample ? overlappingCalibrationJob : null))
+	);
 	const retryableSampleJob = $derived(asRecord(status.retryable_sample_job));
 	const canRetrySample = $derived(canRetrySampleJob(retryableSampleJob.job_id, hasPendingProposal));
 	const encodeJob = $derived(folder.encode_job ?? null);
@@ -94,6 +106,10 @@
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
 	const exactScope = $derived(folder.media_scope.match === 'exact_item');
+	const parentTitlePrefix = $derived(asText(folder.media_scope.parent?.prefix));
+	const parentTitleHref = $derived(
+		parentTitlePrefix ? resolve(folderRoutePath(parentTitlePrefix)) : resolve('/movies')
+	);
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
 	const workflowDisplayLabel = $derived(
@@ -318,6 +334,7 @@
 		| 'start'
 		| 'monitor-sample'
 		| 'retry-sample'
+		| 'review-title-sample'
 		| 'queue'
 		| 'validate'
 		| 'promote'
@@ -334,6 +351,9 @@
 		if (workflow?.next_action.kind === 'validate_outputs') return 'validate';
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
 		if (hasPendingProposal && pendingProposalCanQueue) return 'start';
+		if (inheritedParentSample && asText(calibrationJob.status) === 'completed') {
+			return 'review-title-sample';
+		}
 		if (reviewGate.status === 'accepted') return 'queue';
 		if (reviewReady) return 'queue';
 		if (isWorkflowBlocked) return 'none';
@@ -465,15 +485,7 @@
 	}
 
 	function reviewStatusLabel(): string {
-		const reviewStatus = asText(reviewGate.status);
-		return (
-			{
-				accepted: 'Approved',
-				pending_review: 'Ready to review',
-				rejected: 'Needs another sample',
-				blocked: 'Needs review'
-			}[reviewStatus] ?? (reviewStatus ? 'Status unavailable' : 'Not reviewed')
-		);
+		return movieReviewStatusLabel(reviewGate.status, inheritedParentSample);
 	}
 
 	function formatBytes(value: unknown): string {
@@ -589,6 +601,11 @@
 							<small class="decision-note">
 								Retry uses the same file, request, and worker. No full movie work was queued.
 							</small>
+						{:else if primaryAction() === 'review-title-sample'}
+							<p>
+								The completed title sample was prepared from this file. Review or approve it in the
+								title workspace; this page stays scoped to only this file.
+							</p>
 						{:else}
 							<p>
 								{exactScope
@@ -625,6 +642,8 @@
 							<button class="primary" disabled={isBusy} onclick={retrySample}>
 								{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
 							</button>
+						{:else if primaryAction() === 'review-title-sample'}
+							<a class="primary" href={parentTitleHref}>Review title sample</a>
 						{:else if primaryAction() === 'queue'}
 							{#if reviewGate.status === 'accepted'}
 								<button class="primary" disabled={isBusy} onclick={queueApproved}
@@ -661,7 +680,11 @@
 			<WorkstationPanel
 				eyebrow="Review sample"
 				title="Prepare and review"
-				meta={reviewReady ? 'Ready to review' : 'No sample yet'}
+				meta={reviewReady
+					? 'Ready to review'
+					: inheritedParentSample
+						? 'Completed at title level'
+						: 'No sample yet'}
 			>
 				<div class="sample-bench">
 					<div class="sample-facts">
