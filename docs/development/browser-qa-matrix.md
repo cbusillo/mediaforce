@@ -51,7 +51,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/movies/Promotion%20Conflict` cover exact-file, editions/extras,
   active-job, and collision-blocked states on desktop and narrow viewports.
   `/folders/movies/Target%20Too%20Large` proves a source-cap-infeasible target
-  shows `Needs attention`, explains the 80% cap, and disables sample/queue work.
+  shows `Cannot start`, explains the 80% cap, and disables sample/queue work.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
@@ -276,8 +276,9 @@ diagnostics route and must not be required to understand this movie. A ready
 replacement must state that it runs immediately, preserves a backup of the
 original, and must not be triggered during browser QA. After replacement
 completes, Movie Studio must show `Finished`, explain that the original remains
-in Completed, hide all sample and processing actions, and offer only a safe
-route back to Movies.
+in Completed, replace planning projections with only known completed facts,
+hide all sample and processing actions, and offer only a safe route back to
+Movies.
 
 On Finished, the finished-season list must fit without horizontal scrolling at
 1024px and must become readable stacked rows at 390px. The light/dark control

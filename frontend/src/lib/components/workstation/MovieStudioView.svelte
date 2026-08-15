@@ -21,6 +21,7 @@
 	import { movieWorkflowLabel } from '$lib/movies/library';
 	import {
 		canRetrySampleJob,
+		formatMovieBytes,
 		movieCurrentWorkView,
 		movieGoalFactsView,
 		movieReviewStatusLabel,
@@ -83,6 +84,8 @@
 	const calibrationJob = $derived(
 		asRecord(exactCalibrationJob ?? (inheritedParentSample ? overlappingCalibrationJob : null))
 	);
+	const sampleWorkStatus = $derived(asText(calibrationJob.status));
+	const sampleWorkActive = $derived(['queued', 'starting', 'running'].includes(sampleWorkStatus));
 	const retryableSampleJob = $derived(asRecord(status.retryable_sample_job));
 	const canRetrySample = $derived(canRetrySampleJob(retryableSampleJob.job_id, hasPendingProposal));
 	const encodeJob = $derived(folder.encode_job ?? null);
@@ -113,6 +116,10 @@
 	);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');
 	const isWorkflowBlocked = $derived(workflow?.primary_lane === 'blocked');
+	const isSizeCapBlock = $derived(
+		isWorkflowBlocked && workflow?.detail.includes('80% source cap') === true
+	);
+	const isComplete = $derived(workflow?.primary_lane === 'complete');
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
 	const reviewReady = $derived(
@@ -132,25 +139,42 @@
 	);
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
+	const memberCount = $derived(context?.members.length ?? 0);
+	const memberCountLabel = $derived(`${memberCount} ${memberCount === 1 ? 'file' : 'files'}`);
+	const needsReviewSample = $derived(
+		workflow?.primary_lane === 'encode' &&
+			reviewGate.status !== 'accepted' &&
+			!reviewReady &&
+			!pendingProposalCanQueue &&
+			!sampleWorkActive
+	);
 	const workflowDisplayLabel = $derived(
 		currentWork
 			? currentWork.label
-			: canRetrySample
-				? 'Sample needs retry'
-				: pendingProposalCanQueue
-					? 'Sample plan ready'
-					: movieWorkflowLabel({
-							workflow_state: workflow,
-							promotion_conflicts: conflicts,
-							details_loading: folderPending,
-							availability: context?.availability ?? 'production'
-						})
+			: sampleWorkActive
+				? sampleWorkStatus === 'queued'
+					? 'Sample queued'
+					: 'Sampling now'
+				: canRetrySample
+					? 'Sample needs retry'
+					: pendingProposalCanQueue
+						? 'Sample plan ready'
+						: needsReviewSample
+							? 'Needs a review sample'
+							: movieWorkflowLabel({
+									workflow_state: workflow,
+									promotion_conflicts: conflicts,
+									details_loading: folderPending,
+									availability: context?.availability ?? 'production'
+								})
 	);
 
 	$effect(() => {
 		const folderHostKey = String(folder.sample_host_key ?? '').trim();
 		if (!selectedHostKey || !hostOptions.some((host) => asText(host.key) === selectedHostKey)) {
-			selectedHostKey = folderHostKey || asText(hostOptions[0]?.key);
+			selectedHostKey = hostOptions.some((host) => asText(host.key) === folderHostKey)
+				? folderHostKey
+				: asText(hostOptions[0]?.key);
 		}
 	});
 
@@ -367,8 +391,7 @@
 		if (isBrowseOnly) return 'none';
 		if (currentWork) return 'current-work';
 		if (workflow?.primary_lane === 'complete') return 'complete';
-		const calibrationStatus = asText(calibrationJob.status);
-		if (['queued', 'running'].includes(calibrationStatus)) return 'monitor-sample';
+		if (sampleWorkActive) return 'monitor-sample';
 		if (canRetrySample) return 'retry-sample';
 		const encodeStatus = String(encodeJob?.status ?? '');
 		if (['failed', 'stopped', 'needs_attention'].includes(encodeStatus)) return 'retry';
@@ -416,8 +439,16 @@
 			case 'validate':
 				return `${fileCount} compressed ${fileWord} ${fileCount === 1 ? 'needs' : 'need'} a final safety check.`;
 			case 'encode':
+				if (sampleWorkActive) {
+					return sampleWorkStatus === 'queued'
+						? 'The review sample is queued.'
+						: 'Mediaforce is preparing the review sample now.';
+				}
 				if (pendingProposalCanQueue) {
 					return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready for a review sample.`;
+				}
+				if (needsReviewSample) {
+					return `${fileCount} ${fileWord} ${fileCount === 1 ? 'needs' : 'need'} a review sample before compressing.`;
 				}
 				return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready to compress.`;
 			case 'processing':
@@ -440,7 +471,7 @@
 			case 'complete':
 				return 'This movie is finished.';
 			case 'blocked':
-				if (workflow.detail.includes('80% source cap')) {
+				if (isSizeCapBlock) {
 					return 'The requested size is larger than the allowed 80% of the original file.';
 				}
 				return 'Mediaforce cannot start this movie until the issue below is resolved.';
@@ -478,18 +509,6 @@
 
 	function reviewStatusLabel(): string {
 		return movieReviewStatusLabel(reviewGate.status, inheritedParentSample);
-	}
-
-	function formatBytes(value: unknown): string {
-		let size = Number(value ?? 0);
-		if (!Number.isFinite(size) || size <= 0) return 'Unknown';
-		const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-		let unit = 0;
-		while (size >= 1024 && unit < units.length - 1) {
-			size /= 1024;
-			unit += 1;
-		}
-		return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
 	}
 
 	function memberRole(member: MovieMember): string {
@@ -570,30 +589,41 @@
 		</div>
 	{/if}
 
-	<section class="movie-facts" aria-label="Movie compression facts">
+	<section
+		class:movie-facts--limited={isComplete || isSizeCapBlock}
+		class="movie-facts"
+		aria-label="Movie facts"
+	>
 		<div><span>Runtime</span><strong>{movieGoalFacts.duration}</strong></div>
-		<div><span>Current size</span><strong>{movieGoalFacts.sourceSize}</strong></div>
 		<div>
-			<span>Expected output</span><strong>{movieGoalFacts.expectedOutput}</strong>
-			<small>Target range {movieGoalFacts.targetRange}</small>
+			<span>{isComplete ? 'Original size' : 'Current size'}</span><strong
+				>{movieGoalFacts.sourceSize}</strong
+			>
 		</div>
-		<div>
-			<span>Expected savings</span><strong>{movieGoalFacts.expectedSavings}</strong>
-			<small>{movieGoalFacts.estimateQuality}</small>
-		</div>
+		{#if !isComplete && !isSizeCapBlock}
+			<div>
+				<span>Expected output</span><strong>{movieGoalFacts.expectedOutput}</strong>
+				<small>Target range {movieGoalFacts.targetRange}</small>
+			</div>
+			<div>
+				<span>Expected savings</span><strong>{movieGoalFacts.expectedSavings}</strong>
+				<small>{movieGoalFacts.estimateQuality}</small>
+			</div>
+		{/if}
 	</section>
 
 	<div class="studio-grid">
 		<div class="studio-grid__main">
 			{#if currentWork}
 				<WorkstationPanel
-					eyebrow="Current movie work"
+					eyebrow="Movie work status"
 					title={currentWork.headline}
-					meta={currentWork.label}
+					meta={currentWork.tone === 'active' || currentWork.queuePosition === 'Not available'
+						? currentWork.label
+						: currentWork.queuePosition}
 				>
 					<div class:current-work--active={currentWork.tone === 'active'} class="current-work">
 						<div class="current-work__summary">
-							<strong>{currentWork.state}</strong>
 							<p>{currentWork.detail}</p>
 						</div>
 						{#if currentWork.tone === 'active'}
@@ -625,10 +655,22 @@
 						<div class="current-work__facts">
 							<div><span>Queue position</span><strong>{currentWork.queuePosition}</strong></div>
 							<div><span>Worker</span><strong>{currentWork.worker}</strong></div>
-							<div><span>Workers ready</span><strong>{currentWork.availableWorkers}</strong></div>
-							<div><span>Elapsed</span><strong>{currentWork.elapsed}</strong></div>
-							<div><span>Speed</span><strong>{currentWork.speed}</strong></div>
-							<div><span>ETA</span><strong>{currentWork.eta}</strong></div>
+							{#if currentWork.tone === 'active'}
+								<div><span>Elapsed</span><strong>{currentWork.elapsed}</strong></div>
+								<div><span>Speed</span><strong>{currentWork.speed}</strong></div>
+								<div><span>ETA</span><strong>{currentWork.eta}</strong></div>
+							{:else}
+								{#if currentWork.preferredWorker}
+									<div>
+										<span>Preferred worker</span><strong>{currentWork.preferredWorker}</strong>
+										<small>Not assigned until work starts</small>
+									</div>
+								{/if}
+								<div><span>Workers ready</span><strong>{currentWork.availableWorkers}</strong></div>
+								{#if currentWork.eta}
+									<div><span>ETA</span><strong>{currentWork.eta}</strong></div>
+								{/if}
+							{/if}
 						</div>
 						<div class="current-work__actions">
 							<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
@@ -637,7 +679,11 @@
 					</div>
 				</WorkstationPanel>
 			{:else}
-				<WorkstationPanel eyebrow="Next step" title="What to do next" meta={scopeDisplay}>
+				<WorkstationPanel
+					eyebrow="Next step"
+					title="What to do next"
+					meta={isWorkflowBlocked ? 'Cannot start' : scopeDisplay}
+				>
 					<div class="decision-panel">
 						<div class="decision-copy">
 							<strong>{workflowSummary()}</strong>
@@ -656,12 +702,29 @@
 									The checked replacement is installed. The original remains in Completed until you
 									decide to delete backups.
 								</p>
-							{:else}
+							{:else if primaryAction() === 'monitor-sample'}
+								<p>
+									{sampleWorkStatus === 'queued'
+										? 'The review sample is queued and will start when its worker is ready.'
+										: 'The review sample is running. Studio will refresh when review media is ready.'}
+								</p>
+							{:else if isSizeCapBlock}
+								<p>
+									Choose a smaller target in library settings. Then Mediaforce can prepare a valid
+									movie plan.
+								</p>
+							{:else if !isWorkflowBlocked}
 								<p>
 									{exactScope
 										? 'Only the file you opened will change.'
 										: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
 								</p>
+							{/if}
+							{#if primaryAction() === 'prepare' && !hostOptions.length}
+								<small class="decision-note">
+									No sample worker is ready. Check Activity for worker availability before preparing
+									the review sample.
+								</small>
 							{/if}
 							{#if primaryAction() === 'promote'}
 								<small class="decision-note">
@@ -674,20 +737,27 @@
 							{#if primaryAction() === 'prepare'}
 								<button
 									class="primary"
-									disabled={folderPending || isBusy || !selectedHostKey}
+									disabled={folderPending || isBusy || !hostOptions.length}
 									onclick={prepareSample}
 								>
-									{pendingAction === 'prepare-sample' ? 'Preparing…' : 'Prepare review sample'}
+									{pendingAction === 'prepare-sample'
+										? 'Preparing…'
+										: hostOptions.length
+											? 'Prepare review sample'
+											: 'No sample worker ready'}
 								</button>
+								{#if !hostOptions.length}
+									<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
+								{/if}
 							{:else if primaryAction() === 'start'}
 								<button class="primary" disabled={isBusy} onclick={startSample}>
 									{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
 								</button>
 							{:else if primaryAction() === 'monitor-sample'}
-								<a class="primary" href={resolve('/ops')}>Monitor sample</a>
 								<button class="secondary" disabled={isBusy} onclick={stopSample}
 									>Stop sample work</button
 								>
+								<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
 							{:else if primaryAction() === 'retry-sample'}
 								<button class="primary" disabled={isBusy} onclick={retrySample}>
 									{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
@@ -731,7 +801,10 @@
 			<WorkstationPanel
 				eyebrow="Review sample"
 				title="Prepare and review"
-				hidden={primaryAction() === 'complete' || Boolean(currentWork)}
+				hidden={primaryAction() === 'complete' ||
+					Boolean(currentWork) ||
+					isSizeCapBlock ||
+					sampleWorkActive}
 				meta={reviewReady
 					? 'Ready to review'
 					: inheritedParentSample
@@ -747,7 +820,9 @@
 						</div>
 						<div>
 							<span>Source size</span><strong
-								>{formatBytes(sampleItem.source_size_bytes ?? activeMember?.size_bytes)}</strong
+								>{formatMovieBytes(
+									sampleItem.source_size_bytes ?? activeMember?.size_bytes
+								)}</strong
 							>
 						</div>
 						<div>
@@ -863,7 +938,7 @@
 			<WorkstationPanel
 				eyebrow="Files in this title"
 				title="Files and editions"
-				meta={`${context?.members.length ?? 0} files`}
+				meta={memberCountLabel}
 			>
 				<div class="member-list">
 					{#each context?.members ?? [] as member (member.item_id)}
@@ -876,7 +951,7 @@
 								<strong>{memberRole(member)}</strong>
 								<span>{member.label}</span>
 								<small>
-									{formatBytes(member.size_bytes)} · {memberStatusLabel(member)}
+									{formatMovieBytes(member.size_bytes)} · {memberStatusLabel(member)}
 									{member.included_by_default
 										? ' · Runs with the whole title'
 										: ' · Only runs when opened directly'}
@@ -1001,6 +1076,10 @@
 		margin-bottom: var(--mf-space-6);
 	}
 
+	.movie-facts--limited {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
 	.movie-facts div {
 		border-left: var(--mf-border-muted);
 		padding: 10px 12px;
@@ -1116,16 +1195,11 @@
 		border-left-color: var(--mf-active-fg);
 	}
 
-	.current-work__summary strong {
-		font-size: var(--mf-text-xl);
-		line-height: var(--mf-leading-snug);
-	}
-
 	.current-work__summary p {
 		color: var(--mf-fg-secondary);
 		font-size: var(--mf-text-sm);
 		line-height: var(--mf-leading-normal);
-		margin-top: var(--mf-space-3);
+		margin: 0;
 	}
 
 	.current-work__progress {
@@ -1156,26 +1230,30 @@
 	}
 
 	.current-work__facts {
+		background: var(--mf-line-muted);
 		border: var(--mf-border-muted);
 		display: grid;
-		grid-template-columns: repeat(6, minmax(0, 1fr));
+		gap: 1px;
+		grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
 	}
 
 	.current-work__facts div {
-		border-left: var(--mf-border-muted);
+		background: var(--mf-bg-panel);
 		padding: 10px 12px;
 	}
 
-	.current-work__facts div:first-child {
-		border-left: 0;
-	}
-
 	.current-work__facts strong,
+	.current-work__facts small,
 	.current-work__next strong {
 		display: block;
 		font-size: var(--mf-text-xs);
 		line-height: var(--mf-leading-normal);
 		margin-top: 3px;
+	}
+
+	.current-work__facts small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
 	}
 
 	.current-work__blockers {
@@ -1456,22 +1534,6 @@
 	}
 
 	@media (max-width: 1100px) {
-		.current-work__facts {
-			grid-template-columns: repeat(3, minmax(0, 1fr));
-		}
-
-		.current-work__facts div:nth-child(3n + 1) {
-			border-left: 0;
-		}
-
-		.current-work__facts div {
-			border-bottom: var(--mf-border-muted);
-		}
-
-		.current-work__facts div:nth-last-child(-n + 3) {
-			border-bottom: 0;
-		}
-
 		.studio-grid {
 			grid-template-columns: minmax(0, 1fr);
 		}
@@ -1494,22 +1556,22 @@
 
 		.movie-facts,
 		.current-work__facts {
-			grid-template-columns: minmax(0, 1fr);
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.current-work__facts > div:last-child:nth-child(odd) {
+			grid-column: 1 / -1;
 		}
 
 		.movie-facts div,
 		.movie-facts div:nth-child(odd),
-		.movie-facts div:nth-last-child(-n + 2),
-		.current-work__facts div,
-		.current-work__facts div:nth-child(odd),
-		.current-work__facts div:last-child {
+		.movie-facts div:nth-last-child(-n + 2) {
 			border-bottom: var(--mf-border-muted);
 			border-left: 0;
 			grid-column: auto;
 		}
 
-		.movie-facts div:last-child,
-		.current-work__facts div:last-child {
+		.movie-facts div:nth-last-child(-n + 2) {
 			border-bottom: 0;
 		}
 

@@ -1739,6 +1739,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         policy = config.resolve_policy(rows[0]["rel_path"])
         sampling_policy = _policy_with_target(policy, 225)
         retry_policy = _policy_with_target(policy, 225)
+        movie_loose_row = next(row for row in rows if row["rel_path"] == MOVIE_LOOSE_PREFIX)
         active_started_at = (fixture_now - timedelta(minutes=15)).isoformat(timespec="seconds")
         heartbeat_at = fixture_now.isoformat(timespec="seconds")
         for item_id, row, job in (
@@ -1753,6 +1754,34 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                         "library_item_id": inserted_ids[4],
                         **rows[4],
                         "source_size_bytes": rows[4]["size_bytes"],
+                        "resolved_policy": sampling_policy,
+                    },
+                    started_at=active_started_at,
+                    heartbeat_at=heartbeat_at,
+                    progress={
+                        "schema_version": 1,
+                        "stage": "building_review",
+                        "stage_started_at": (
+                            fixture_now - timedelta(minutes=3)
+                        ).isoformat(timespec="seconds"),
+                        "last_progress_at": (
+                            fixture_now - timedelta(seconds=20)
+                        ).isoformat(timespec="seconds"),
+                        "work": {"completed": 2, "total": 3},
+                    },
+                ),
+            ),
+            (
+                ids_by_rel_path[MOVIE_LOOSE_PREFIX],
+                movie_loose_row,
+                _job(
+                    job_id="web-smoke-movie-sampling",
+                    prefix=MOVIE_LOOSE_PREFIX,
+                    status="starting",
+                    sample_item={
+                        "library_item_id": ids_by_rel_path[MOVIE_LOOSE_PREFIX],
+                        **movie_loose_row,
+                        "source_size_bytes": movie_loose_row["size_bytes"],
                         "resolved_policy": sampling_policy,
                     },
                     started_at=active_started_at,
@@ -2100,10 +2129,22 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "stageMarker": "Files and editions",
             },
             {
+                "label": "Movie Studio review-sample requirement fixture",
+                "route": "/folders/movies/Editions%20Showcase",
+                "marker": "Editions Showcase",
+                "stageMarker": "need a review sample before compressing",
+            },
+            {
                 "label": "Movie Studio exact-file fixture",
                 "route": "/folders/movies/Loose%20Feature.mkv",
                 "marker": "Loose Feature",
                 "stageMarker": "Only this file",
+            },
+            {
+                "label": "Movie Studio sample-monitoring fixture",
+                "route": "/folders/movies/Loose%20Feature.mkv",
+                "marker": "Loose Feature",
+                "stageMarker": "Mediaforce is preparing the review sample now.",
             },
             {
                 "label": "Movie Studio promotion-conflict fixture",
@@ -2122,6 +2163,18 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/movies/Target%20Too%20Large",
                 "marker": "Target Too Large",
                 "stageMarker": "The requested size is larger than the allowed 80% of the original file.",
+            },
+            {
+                "label": "Movie Studio infeasible-target remedy fixture",
+                "route": "/folders/movies/Target%20Too%20Large",
+                "marker": "Target Too Large",
+                "stageMarker": "Choose a smaller target in library settings.",
+            },
+            {
+                "label": "Movie Studio completed fixture",
+                "route": "/folders/movies/Archive%20Ready",
+                "marker": "Archive Ready",
+                "stageMarker": "This movie is finished.",
             },
             {
                 "label": "Folder Studio sampling fixture",

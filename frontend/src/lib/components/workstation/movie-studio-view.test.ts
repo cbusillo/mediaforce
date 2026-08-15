@@ -2,11 +2,20 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	canRetrySampleJob,
+	formatMovieBytes,
 	movieCurrentWorkView,
 	movieGoalFactsView,
 	movieReviewStatusLabel,
+	parseServerTimestamp,
 	parentSampleAppliesToExactItem
 } from './movie-studio-view';
+
+describe('formatMovieBytes', () => {
+	it('uses the same decimal precision across movie facts and member rows', () => {
+		expect(formatMovieBytes(11_800_000_000)).toBe('11.8 GB');
+		expect(formatMovieBytes(400_000_000)).toBe('400 MB');
+	});
+});
 
 describe('canRetrySampleJob', () => {
 	it('allows retry when the failed sample has no replacement proposal', () =>
@@ -82,13 +91,16 @@ describe('movieCurrentWorkView', () => {
 		);
 
 		expect(view).toMatchObject({
-			state: 'Nothing is processing yet',
 			headline: 'Queued, but not able to start',
+			detail: 'Clear the conditions below and Mediaforce starts this movie automatically.',
 			queuePosition: '1 of 1',
 			worker: 'Not assigned',
 			availableWorkers: 'None ready',
 			blockers: ['The processing queue is paused.', 'No processing worker is ready.']
 		});
+		expect(view?.elapsed).toBeUndefined();
+		expect(view?.speed).toBeUndefined();
+		expect(view?.eta).toBeUndefined();
 		expect(view?.nextCondition).toBe(
 			'This movie starts automatically after the global processing queue is resumed and a processing worker becomes available.'
 		);
@@ -112,7 +124,27 @@ describe('movieCurrentWorkView', () => {
 			headline: 'Queued 2 of 4',
 			detail: 'Ready when a worker is free.',
 			blockers: [],
-			queuePosition: '2 of 4'
+			queuePosition: '2 of 4',
+			eta: undefined
+		});
+	});
+
+	it('treats a queued host as preferred rather than assigned', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				host: { key: 'studio-mac', label: 'Studio Mac' }
+			},
+			{ is_paused: false, stop_requested: false },
+			1
+		);
+
+		expect(view).toMatchObject({
+			worker: 'Not assigned',
+			preferredWorker: 'Studio Mac',
+			queuePosition: 'Not available'
 		});
 	});
 
@@ -138,7 +170,6 @@ describe('movieCurrentWorkView', () => {
 		);
 
 		expect(view).toMatchObject({
-			state: 'Processing',
 			headline: 'Processing movie.mkv',
 			detail: 'Encoding',
 			percentComplete: 42.4,
@@ -148,6 +179,55 @@ describe('movieCurrentWorkView', () => {
 			speed: '1.25× realtime',
 			eta: '24m'
 		});
+	});
+
+	it('does not borrow the preferred host when a running worker is not reported', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				host: { label: 'Preferred Mac' },
+				progress: { percent_complete: 1 }
+			},
+			{ is_paused: false, stop_requested: false },
+			0
+		);
+
+		expect(view?.worker).toBe('Not reported');
+	});
+
+	it('parses naive SQLite timestamps as UTC', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				started_at: '2026-08-15 12:00:00',
+				progress: { percent_complete: 10 }
+			},
+			{ is_paused: false, stop_requested: false },
+			1,
+			Date.parse('2026-08-15T12:05:30Z')
+		);
+
+		expect(view?.elapsed).toBe('5m 30s');
+	});
+
+	it('clamps small future clock skew to zero elapsed time', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				started_at: '2026-08-15T12:00:30Z'
+			},
+			{ is_paused: false, stop_requested: false },
+			1,
+			Date.parse('2026-08-15T12:00:00Z')
+		);
+
+		expect(view?.elapsed).toBe('0s');
 	});
 
 	it('normalizes malformed running telemetry', () => {
@@ -167,7 +247,7 @@ describe('movieCurrentWorkView', () => {
 
 		expect(view).toMatchObject({
 			percentComplete: 0,
-			worker: 'Not assigned',
+			worker: 'Not reported',
 			currentItem: null
 		});
 	});
@@ -180,6 +260,20 @@ describe('movieCurrentWorkView', () => {
 				1
 			)
 		).toBeNull());
+});
+
+describe('parseServerTimestamp', () => {
+	it('normalizes UTC, offset, and naive timestamps', () => {
+		const expected = Date.parse('2026-08-15T12:00:00Z');
+		expect(parseServerTimestamp('2026-08-15T12:00:00Z')).toBe(expected);
+		expect(parseServerTimestamp('2026-08-15T12:00:00+00:00')).toBe(expected);
+		expect(parseServerTimestamp('2026-08-15 12:00:00')).toBe(expected);
+	});
+
+	it('rejects missing and invalid timestamps', () => {
+		expect(parseServerTimestamp('')).toBeNull();
+		expect(parseServerTimestamp('not-a-date')).toBeNull();
+	});
 });
 
 describe('movieGoalFactsView', () => {

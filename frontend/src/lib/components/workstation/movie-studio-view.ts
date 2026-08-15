@@ -8,17 +8,17 @@ import type {
 export interface MovieCurrentWorkView {
 	label: string;
 	tone: 'active' | 'wait';
-	state: string;
 	headline: string;
 	detail: string;
 	blockers: string[];
 	percentComplete: number;
 	queuePosition: string;
 	worker: string;
+	preferredWorker?: string;
 	availableWorkers: string;
-	eta: string;
-	elapsed: string;
-	speed: string;
+	eta?: string;
+	elapsed?: string;
+	speed?: string;
 	nextCondition: string;
 	currentItem: string | null;
 }
@@ -80,28 +80,26 @@ export function movieCurrentWorkView(
 			? `${job.queue_position} of ${job.queue_depth}`
 			: job.status === 'running'
 				? 'Running'
-				: 'Queued';
-	const worker = currentWorkerLabel(job);
+				: 'Not available';
+	const assignedWorker = assignedWorkerLabel(job);
+	const preferredWorker = preferredWorkerLabel(job);
 	const currentItem = textValue(progress?.current_item_rel_path) || null;
-	const eta = textValue(progress?.eta_copy) || 'Not available yet';
-	const elapsed = formatElapsed(job.started_at, nowMs);
-	const speed = formatSpeed(progress?.speed, progress?.fps);
+	const eta = textValue(progress?.eta_copy);
 
 	if (job.status === 'running') {
 		return {
 			label: 'Processing now',
 			tone: 'active',
-			state: 'Processing',
 			headline: currentItem ? `Processing ${fileName(currentItem)}` : 'Processing this movie now',
 			detail: textValue(progress?.phase_label) || 'Mediaforce is compressing the current movie.',
 			blockers: [],
 			percentComplete,
 			queuePosition,
-			worker: worker || 'Not assigned',
+			worker: assignedWorker || 'Not reported',
 			availableWorkers: availableWorkersLabel(availableWorkerCount),
-			eta,
-			elapsed,
-			speed,
+			eta: eta || 'Not available yet',
+			elapsed: formatElapsed(job.started_at, nowMs),
+			speed: formatSpeed(progress?.speed, progress?.fps),
 			nextCondition: 'Mediaforce is processing this movie now.',
 			currentItem
 		};
@@ -111,7 +109,7 @@ export function movieCurrentWorkView(
 	const startConditions: string[] = [];
 	if (queueState?.is_paused) blockers.push('The processing queue is paused.');
 	if (queueState?.is_paused) startConditions.push('the global processing queue is resumed');
-	if (!worker && availableWorkerCount === 0) {
+	if (availableWorkerCount === 0) {
 		blockers.push('No processing worker is ready.');
 		startConditions.push('a processing worker becomes available');
 	}
@@ -141,24 +139,22 @@ export function movieCurrentWorkView(
 		: job.queue_position && job.queue_depth
 			? `Queued ${job.queue_position} of ${job.queue_depth}`
 			: 'Queued for processing';
-	const detail = blockers.length
-		? 'Nothing is processing yet. Clear the conditions below and Mediaforce can start automatically.'
-		: waitingCopy || 'Mediaforce will start this movie when a worker accepts it.';
+	const detail = waitingCopy || 'Mediaforce will start this movie when a worker accepts it.';
 
 	return {
 		label: job.status === 'retry_backoff' ? 'Waiting to retry' : 'Queued',
 		tone: 'wait',
-		state: 'Nothing is processing yet',
 		headline,
-		detail,
+		detail: blockers.length
+			? 'Clear the conditions below and Mediaforce starts this movie automatically.'
+			: detail,
 		blockers,
 		percentComplete,
 		queuePosition,
-		worker: worker || 'Not assigned',
+		worker: 'Not assigned',
+		preferredWorker: preferredWorker || undefined,
 		availableWorkers: availableWorkersLabel(availableWorkerCount),
-		eta: blockers.length ? 'Starts after blockers clear' : eta,
-		elapsed: 'Not started',
-		speed: 'Not started',
+		eta: !blockers.length && eta ? eta : undefined,
 		nextCondition: startConditions.length
 			? `This movie starts automatically after ${joinConditions(startConditions)}.`
 			: 'This movie starts automatically when a processing worker accepts it.',
@@ -188,18 +184,18 @@ export function movieGoalFactsView(
 	const expectedSavings =
 		sourceSize && targetSizeBytes
 			? targetSizeBytes < sourceSize && savingsBytes != null && savingsPercent != null
-				? `${formatBytes(savingsBytes)} · ${savingsPercent}%`
+				? `${formatMovieBytes(savingsBytes)} · ${savingsPercent}%`
 				: 'No size reduction planned'
 			: 'Not available';
 
 	return {
 		duration: formatDuration(durationSeconds),
-		sourceSize: formatBytes(sourceSize),
-		expectedOutput: formatBytes(targetSizeBytes),
+		sourceSize: formatMovieBytes(sourceSize),
+		expectedOutput: formatMovieBytes(targetSizeBytes),
 		expectedSavings,
 		targetRange:
 			lowerBound && upperBound
-				? `${formatBytes(lowerBound)}–${formatBytes(upperBound)}`
+				? `${formatMovieBytes(lowerBound)}–${formatMovieBytes(upperBound)}`
 				: 'Not available',
 		estimateQuality:
 			targetSizeBytes && lowerBound && upperBound
@@ -210,14 +206,21 @@ export function movieGoalFactsView(
 	};
 }
 
-function currentWorkerLabel(job: EncodeQueueJob): string {
-	const progressWorker = job.progress?.active_host_labels?.find((label) => label.trim());
-	if (progressWorker) return progressWorker;
-	for (const host of [...(job.active_hosts ?? []), job.host ?? {}]) {
+function assignedWorkerLabel(job: EncodeQueueJob): string {
+	for (const label of job.progress?.active_host_labels ?? []) {
+		const worker = textValue(label);
+		if (worker) return worker;
+	}
+	for (const host of job.active_hosts ?? []) {
 		const label = textValue(host.label) || textValue(host.key) || textValue(host.host);
 		if (label) return label;
 	}
 	return '';
+}
+
+function preferredWorkerLabel(job: EncodeQueueJob): string {
+	const host = job.host;
+	return textValue(host?.label) || textValue(host?.key) || textValue(host?.host);
 }
 
 function textValue(value: unknown): string {
@@ -229,9 +232,19 @@ function fileName(value: string): string {
 }
 
 function formatElapsed(value: string | null | undefined, nowMs: number): string {
-	const startedAt = value ? Date.parse(value) : Number.NaN;
-	if (!Number.isFinite(startedAt) || startedAt > nowMs) return 'Not available yet';
+	const startedAt = parseServerTimestamp(value);
+	if (startedAt == null) return 'Not available yet';
+	if (startedAt > nowMs) return startedAt - nowMs <= 300_000 ? '0s' : 'Not available yet';
 	return formatDuration((nowMs - startedAt) / 1000);
+}
+
+export function parseServerTimestamp(value: unknown): number | null {
+	const timestamp = textValue(value);
+	if (!timestamp) return null;
+	const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp);
+	const normalized = hasTimezone ? timestamp : `${timestamp.replace(' ', 'T')}Z`;
+	const parsed = Date.parse(normalized);
+	return Number.isFinite(parsed) ? parsed : null;
 }
 
 function formatSpeed(speed: number | null | undefined, fps: number | null | undefined): string {
@@ -254,7 +267,7 @@ function formatDuration(value: number | null | undefined): string {
 	return `${remainingSeconds}s`;
 }
 
-function formatBytes(value: number | null | undefined): string {
+export function formatMovieBytes(value: unknown): string {
 	const bytes = finitePositive(value);
 	if (!bytes) return 'Unknown';
 	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
