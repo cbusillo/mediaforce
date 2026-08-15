@@ -9158,7 +9158,7 @@ raise SystemExit(0)
     @patch("mediaforce.web.app.recommend_review_timestamps")
     @patch("mediaforce.web.app.run_sample_encode")
     @patch("mediaforce.web.app.search_quality_for_source")
-    def test_run_sampled_calibration_uses_configured_host_staging_root_for_quality_temp(
+    def test_run_sampled_calibration_uses_runtime_temp_for_self_ssh_quality_work(
             self,
             search_quality_mock: Mock,
             sample_encode_mock: Mock,
@@ -9243,7 +9243,7 @@ raise SystemExit(0)
             process_controller=web_app.ManagedProcessController(),
         )
 
-        expected_temp_dir = self.root / "custom-local-staging"
+        expected_temp_dir = quality.default_local_quality_temp_root()
         self.assertEqual(search_quality_mock.call_args.kwargs["quality_temp_dir"], expected_temp_dir)
         self.assertEqual(sample_encode_mock.call_args.kwargs["quality_temp_dir"], expected_temp_dir)
 
@@ -12315,6 +12315,23 @@ raise SystemExit(0)
             )
 
         self.assertEqual(resolved, fallback_root)
+
+    def test_calibration_self_ssh_quality_temp_dir_uses_runtime_temp(self) -> None:
+        temp_root = quality.default_local_quality_temp_root()
+        with patch(
+                "mediaforce.quality._quality_temp_root_is_writable",
+                return_value=True,
+        ):
+            resolved = calibration_runtime._quality_temp_dir_for_host(
+                self.config,
+                {
+                    "mode": "ssh",
+                    "host": "cbusillo@localhost",
+                    "media_access": "mounted",
+                },
+            )
+
+        self.assertEqual(resolved, temp_root)
 
     def test_stream_quality_temp_dir_uses_system_temp_when_state_fallback_is_not_writable(self) -> None:
         fallback_root = quality.default_local_quality_temp_root()
