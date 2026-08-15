@@ -5,16 +5,18 @@
 		eyebrow,
 		title,
 		meta,
+		hidden = false,
 		children
 	}: {
 		eyebrow?: string;
 		title?: string;
 		meta?: string;
+		hidden?: boolean;
 		children: Snippet;
 	} = $props();
 </script>
 
-<section class="panel">
+<section class="panel" {hidden}>
 	{#if eyebrow || title || meta}
 		<header class="panel__header">
 			{#if eyebrow && !title}

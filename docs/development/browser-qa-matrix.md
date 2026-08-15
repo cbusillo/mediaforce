@@ -270,7 +270,9 @@ Verify this path at 1024px and 390px: Library → Movies → recommended title �
 Studio. Movie Studio must describe the action with plain-language labels such
 as `Action covers`, `Next step`, and `checked file`; a ready replacement must
 state that it runs immediately, preserves a backup of the original, and must
-not be triggered during browser QA.
+not be triggered during browser QA. After replacement completes, Movie Studio
+must show `Finished`, explain that the original remains in Completed, hide all
+sample and processing actions, and offer only a safe route back to Movies.
 
 On Finished, the finished-season list must fit without horizontal scrolling at
 1024px and must become readable stacked rows at 390px. The light/dark control
