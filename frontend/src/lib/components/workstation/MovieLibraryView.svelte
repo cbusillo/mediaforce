@@ -7,6 +7,7 @@
 		movieReclaimLowerBound,
 		movieReclaimTotalIsLowerBound,
 		movieTitleNeedsAction,
+		movieWorkflowIsComplete,
 		movieWorkflowLabel,
 		selectMovieLeadTitle,
 		type MovieLibrarySortMode
@@ -94,6 +95,7 @@
 	function titlePriority(title: MovieTitle): number {
 		if (title.promotion_conflicts.length) return 0;
 		if (title.workflow_state?.state === 'explicit_selection_required') return 6;
+		if (movieWorkflowIsComplete(title.workflow_state)) return 9;
 		return {
 			attention: 1,
 			processing: 2,
@@ -108,11 +110,11 @@
 	}
 
 	function titleStateGroup(title: MovieTitle): typeof stateFilter {
-		if (title.promotion_conflicts.length || title.workflow_state?.primary_lane === 'attention') {
-			return 'attention';
-		}
-		if (title.workflow_state?.primary_lane === 'processing') return 'processing';
+		if (title.promotion_conflicts.length) return 'attention';
 		if (title.workflow_state?.state === 'explicit_selection_required') return 'explicit';
+		if (movieWorkflowIsComplete(title.workflow_state)) return 'all';
+		if (title.workflow_state?.primary_lane === 'attention') return 'attention';
+		if (title.workflow_state?.primary_lane === 'processing') return 'processing';
 		if (
 			['encode', 'validate', 'promote', 'mixed'].includes(title.workflow_state?.primary_lane ?? '')
 		) {
@@ -183,6 +185,7 @@
 
 	function workflowTone(title: MovieTitle): string {
 		if (title.promotion_conflicts.length) return 'attention';
+		if (movieWorkflowIsComplete(title.workflow_state)) return 'success';
 		return title.workflow_state?.tone ?? 'idle';
 	}
 
@@ -197,6 +200,7 @@
 			const explicitCount = title.members.filter((member) => !member.included_by_default).length;
 			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
 		}
+		if (movieWorkflowIsComplete(title.workflow_state)) return 'This movie is finished.';
 		const count = title.included_item_count || title.item_count;
 		const fileWord = count === 1 ? 'file' : 'files';
 		switch (title.workflow_state?.primary_lane) {

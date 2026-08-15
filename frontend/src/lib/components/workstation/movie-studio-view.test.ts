@@ -2,9 +2,20 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	canRetrySampleJob,
+	formatMovieBytes,
+	movieCurrentWorkView,
+	movieGoalFactsView,
 	movieReviewStatusLabel,
+	parseServerTimestamp,
 	parentSampleAppliesToExactItem
 } from './movie-studio-view';
+
+describe('formatMovieBytes', () => {
+	it('uses the same decimal precision across movie facts and member rows', () => {
+		expect(formatMovieBytes(11_800_000_000)).toBe('11.8 GB');
+		expect(formatMovieBytes(400_000_000)).toBe('400 MB');
+	});
+});
 
 describe('canRetrySampleJob', () => {
 	it('allows retry when the failed sample has no replacement proposal', () =>
@@ -20,7 +31,7 @@ describe('canRetrySampleJob', () => {
 });
 
 describe('parentSampleAppliesToExactItem', () => {
-	it('recognizes a parent sample prepared from the exact file', () => {
+	it('recognizes a parent sample prepared from the exact file', () =>
 		expect(
 			parentSampleAppliesToExactItem('movies/title/movie.mkv', null, {
 				job_id: 'sample-job-1',
@@ -28,10 +39,9 @@ describe('parentSampleAppliesToExactItem', () => {
 				status: 'completed',
 				sample_item: { rel_path: 'movies/title/movie.mkv' }
 			})
-		).toBe(true);
-	});
+		).toBe(true));
 
-	it('does not replace an exact-file sample job', () => {
+	it('does not replace an exact-file sample job', () =>
 		expect(
 			parentSampleAppliesToExactItem(
 				'movies/title/movie.mkv',
@@ -43,10 +53,9 @@ describe('parentSampleAppliesToExactItem', () => {
 					sample_item: { rel_path: 'movies/title/movie.mkv' }
 				}
 			)
-		).toBe(false);
-	});
+		).toBe(false));
 
-	it('rejects a parent sample prepared from another file', () => {
+	it('rejects a parent sample prepared from another file', () =>
 		expect(
 			parentSampleAppliesToExactItem('movies/title/extra.mkv', null, {
 				job_id: 'title-job',
@@ -54,8 +63,7 @@ describe('parentSampleAppliesToExactItem', () => {
 				status: 'completed',
 				sample_item: { rel_path: 'movies/title/movie.mkv' }
 			})
-		).toBe(false);
-	});
+		).toBe(false));
 });
 
 describe('movieReviewStatusLabel', () => {
@@ -66,4 +74,245 @@ describe('movieReviewStatusLabel', () => {
 
 	it('directs inherited samples back to the title workspace', () =>
 		expect(movieReviewStatusLabel('missing_sample', true)).toBe('Review at title level'));
+});
+
+describe('movieCurrentWorkView', () => {
+	it('explains a paused queue with no available worker', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				queue_position: 1,
+				queue_depth: 1
+			},
+			{ is_paused: true, stop_requested: false },
+			0
+		);
+
+		expect(view).toMatchObject({
+			headline: 'Queued, but not able to start',
+			detail: 'Clear the conditions below and Mediaforce starts this movie automatically.',
+			queuePosition: '1 of 1',
+			worker: 'Not assigned',
+			availableWorkers: 'None ready',
+			blockers: ['The processing queue is paused.', 'No processing worker is ready.']
+		});
+		expect(view?.elapsed).toBeUndefined();
+		expect(view?.speed).toBeUndefined();
+		expect(view?.eta).toBeUndefined();
+		expect(view?.nextCondition).toBe(
+			'This movie starts automatically after the global processing queue is resumed and a processing worker becomes available.'
+		);
+	});
+
+	it('shows a queued movie with no known blockers', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				queue_position: 2,
+				queue_depth: 4,
+				scheduler_status_copy: 'Ready when a worker is free.'
+			},
+			{ is_paused: false, stop_requested: false },
+			1
+		);
+
+		expect(view).toMatchObject({
+			headline: 'Queued 2 of 4',
+			detail: 'Ready when a worker is free.',
+			blockers: [],
+			queuePosition: '2 of 4',
+			eta: undefined
+		});
+	});
+
+	it('treats a queued host as preferred rather than assigned', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				host: { key: 'studio-mac', label: 'Studio Mac' }
+			},
+			{ is_paused: false, stop_requested: false },
+			1
+		);
+
+		expect(view).toMatchObject({
+			worker: 'Not assigned',
+			preferredWorker: 'Studio Mac',
+			queuePosition: 'Not available'
+		});
+	});
+
+	it('shows running progress, worker, speed, elapsed time, and ETA', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				started_at: '2026-08-15T12:00:00Z',
+				progress: {
+					percent_complete: 42.4,
+					phase_label: 'Encoding',
+					current_item_rel_path: 'movies/title/movie.mkv',
+					active_host_labels: ['Studio Mac'],
+					speed: 1.25,
+					eta_copy: '24m'
+				}
+			},
+			{ is_paused: false, stop_requested: false },
+			1,
+			Date.parse('2026-08-15T12:05:30Z')
+		);
+
+		expect(view).toMatchObject({
+			headline: 'Processing movie.mkv',
+			detail: 'Encoding',
+			percentComplete: 42.4,
+			worker: 'Studio Mac',
+			availableWorkers: '1 ready',
+			elapsed: '5m 30s',
+			speed: '1.25× realtime',
+			eta: '24m'
+		});
+	});
+
+	it('does not borrow the preferred host when a running worker is not reported', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				host: { label: 'Preferred Mac' },
+				progress: { percent_complete: 1 }
+			},
+			{ is_paused: false, stop_requested: false },
+			0
+		);
+
+		expect(view?.worker).toBe('Not reported');
+	});
+
+	it('parses naive SQLite timestamps as UTC', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				started_at: '2026-08-15 12:00:00',
+				progress: { percent_complete: 10 }
+			},
+			{ is_paused: false, stop_requested: false },
+			1,
+			Date.parse('2026-08-15T12:05:30Z')
+		);
+
+		expect(view?.elapsed).toBe('5m 30s');
+	});
+
+	it('clamps small future clock skew to zero elapsed time', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				started_at: '2026-08-15T12:00:30Z'
+			},
+			{ is_paused: false, stop_requested: false },
+			1,
+			Date.parse('2026-08-15T12:00:00Z')
+		);
+
+		expect(view?.elapsed).toBe('0s');
+	});
+
+	it('normalizes malformed running telemetry', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'running',
+				progress: {
+					percent_complete: Number.NaN,
+					current_item_rel_path: '   '
+				}
+			},
+			{ is_paused: false, stop_requested: false },
+			1
+		);
+
+		expect(view).toMatchObject({
+			percentComplete: 0,
+			worker: 'Not reported',
+			currentItem: null
+		});
+	});
+
+	it('ignores non-active encode jobs', () =>
+		expect(
+			movieCurrentWorkView(
+				{ job_id: 'encode-1', prefix: 'movies/title', status: 'completed' },
+				{ is_paused: false, stop_requested: false },
+				1
+			)
+		).toBeNull());
+});
+
+describe('parseServerTimestamp', () => {
+	it('normalizes UTC, offset, and naive timestamps', () => {
+		const expected = Date.parse('2026-08-15T12:00:00Z');
+		expect(parseServerTimestamp('2026-08-15T12:00:00Z')).toBe(expected);
+		expect(parseServerTimestamp('2026-08-15T12:00:00+00:00')).toBe(expected);
+		expect(parseServerTimestamp('2026-08-15 12:00:00')).toBe(expected);
+	});
+
+	it('rejects missing and invalid timestamps', () => {
+		expect(parseServerTimestamp('')).toBeNull();
+		expect(parseServerTimestamp('not-a-date')).toBeNull();
+	});
+});
+
+describe('movieGoalFactsView', () => {
+	it('formats duration, expected output, savings, and final target range', () =>
+		expect(
+			movieGoalFactsView(6454.857, 2_824_183_089, {
+				schema_version: 1,
+				mode: 'absolute',
+				source: 'profile',
+				status: 'resolved',
+				requires_confirmation: false,
+				target_size_bytes: 717_206_333,
+				sample_projection_tolerance_percent: 8,
+				final_output_tolerance_percent: 5,
+				final_lower_bound_bytes: 681_346_016,
+				final_upper_bound_bytes: 753_066_650,
+				rationale: 'Runtime-adjusted movie target.'
+			})
+		).toEqual({
+			duration: '1h 47m 35s',
+			sourceSize: '2.82 GB',
+			expectedOutput: '717 MB',
+			expectedSavings: '2.11 GB · 75%',
+			targetRange: '681 MB–753 MB',
+			estimateQuality: 'Planning range, not a guarantee'
+		}));
+
+	it('does not claim savings when the target is not smaller', () =>
+		expect(
+			movieGoalFactsView(3600, 1_000_000_000, {
+				schema_version: 1,
+				mode: 'absolute',
+				source: 'profile',
+				status: 'resolved',
+				requires_confirmation: false,
+				target_size_bytes: 1_000_000_000,
+				sample_projection_tolerance_percent: 8,
+				final_output_tolerance_percent: 5,
+				rationale: 'No reduction.'
+			}).expectedSavings
+		).toBe('No size reduction planned'));
 });

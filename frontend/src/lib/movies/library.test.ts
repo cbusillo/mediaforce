@@ -6,6 +6,7 @@ import {
 	movieReclaimLowerBound,
 	movieReclaimTotalIsLowerBound,
 	movieTitleNeedsAction,
+	movieWorkflowIsComplete,
 	movieWorkflowLabel,
 	selectMovieLeadTitle
 } from './library';
@@ -244,5 +245,37 @@ describe('movie action discoverability', () => {
 	it('does not show a next-up shortcut while the operator is searching or using another sort', () => {
 		expect(selectMovieLeadTitle([readyTitle], 'priority', 'ready')).toBeNull();
 		expect(selectMovieLeadTitle([readyTitle], 'name', '')).toBeNull();
+	});
+
+	it('lets completion override stale actionable lane data', () => {
+		const completedTitle: MovieTitle = {
+			...readyTitle,
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'complete',
+				primary_lane: 'encode',
+				label: 'Stale encode label'
+			}
+		};
+
+		expect(movieWorkflowIsComplete(completedTitle.workflow_state)).toBe(true);
+		expect(movieTitleNeedsAction(completedTitle)).toBe(false);
+		expect(movieWorkflowLabel(completedTitle)).toBe('Finished');
+	});
+
+	it('recognizes a complete lane when the aggregate state is stale', () => {
+		const completedTitle: MovieTitle = {
+			...readyTitle,
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'ready_to_encode',
+				primary_lane: 'complete',
+				label: 'Stale state label'
+			}
+		};
+
+		expect(movieWorkflowIsComplete(completedTitle.workflow_state)).toBe(true);
+		expect(movieTitleNeedsAction(completedTitle)).toBe(false);
+		expect(movieWorkflowLabel(completedTitle)).toBe('Finished');
 	});
 });
