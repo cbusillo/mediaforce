@@ -20,13 +20,13 @@ from mediaforce.encoding.quality_search import search_quality
 
 
 class QualityToolchainIdentityTests(unittest.TestCase):
-    def test_quality_execution_preserves_explicit_ssh_mode_for_localhost(self) -> None:
+    def test_quality_execution_routes_explicit_self_ssh_locally(self) -> None:
         self.assertEqual(
             _quality_execution_mode({"mode": "ssh", "host": "cbusillo@localhost"}),
-            "ssh",
+            "local",
         )
 
-    def test_localhost_ssh_quality_command_uses_remote_transport(self) -> None:
+    def test_localhost_ssh_ab_av1_command_uses_trusted_local_transport(self) -> None:
         process_controller = ManagedProcessController()
         host = {"mode": "ssh", "host": "cbusillo@localhost"}
         command = ["ab-av1", "--version"]
@@ -34,6 +34,36 @@ class QualityToolchainIdentityTests(unittest.TestCase):
 
         with (
             patch("mediaforce.encoding.quality.run_command") as local_command,
+            patch(
+                "mediaforce.encoding.quality.run_trusted_local_orchestrator_command",
+                return_value=completed,
+            ) as trusted_command,
+            patch("mediaforce.encoding.quality.run_remote_command") as remote_command,
+        ):
+            result = _run_quality_command(
+                command,
+                process_controller=process_controller,
+                host=host,
+            )
+
+        self.assertIs(result, completed)
+        local_command.assert_not_called()
+        trusted_command.assert_called_once_with(
+            command,
+            process_controller=process_controller,
+            env=ANY,
+        )
+        remote_command.assert_not_called()
+
+    def test_nonlocal_ssh_quality_command_uses_remote_transport(self) -> None:
+        process_controller = ManagedProcessController()
+        host = {"mode": "ssh", "host": "encoder@example.invalid"}
+        command = ["ab-av1", "--version"]
+        completed = subprocess.CompletedProcess(command, 0, "ab-av1 0.11.3\n", "")
+
+        with (
+            patch("mediaforce.encoding.quality.run_command") as local_command,
+            patch("mediaforce.encoding.quality.run_trusted_local_orchestrator_command") as trusted_command,
             patch("mediaforce.encoding.quality.run_remote_command", return_value=completed) as remote_command,
         ):
             result = _run_quality_command(
@@ -44,6 +74,7 @@ class QualityToolchainIdentityTests(unittest.TestCase):
 
         self.assertIs(result, completed)
         local_command.assert_not_called()
+        trusted_command.assert_not_called()
         remote_command.assert_called_once_with(
             host,
             command,

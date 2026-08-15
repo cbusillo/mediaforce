@@ -28,6 +28,11 @@ class _ContainmentUnavailableError(RuntimeError):
     pass
 
 
+class _ContainmentMode(Enum):
+    STRICT = "strict"
+    TRUSTED_PROCESS_GROUP = "trusted-process-group"
+
+
 class _ParentLivenessMonitor:
     def __init__(self, descriptor: int) -> None:
         self._poller = select.poll()
@@ -171,6 +176,10 @@ class _LinuxProcessTree:
 
     @property
     def compromised(self) -> bool:
+        return False
+
+    @property
+    def requires_immediate_shutdown(self) -> bool:
         return False
 
     def add_root(self, pid: int) -> None:
@@ -332,17 +341,24 @@ class _DarwinProcessIdentity:
 
 
 class _DarwinProcessTree:
-    def __init__(self) -> None:
+    def __init__(
+            self,
+            containment_mode: _ContainmentMode = _ContainmentMode.STRICT,
+    ) -> None:
         if not hasattr(select, "kqueue"):
             raise _ContainmentUnavailableError("kqueue process monitoring is unavailable")
         self._libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
         self._configure_functions()
+        self._trusted_process_group = containment_mode is _ContainmentMode.TRUSTED_PROCESS_GROUP
+        self._process_group_id = os.getpgrp()
+        self._session_id = os.getsid(0)
         self._queue = select.kqueue()
         self._next_serial = 1
         self._processes: dict[int, _DarwinProcessIdentity] = {}
         self._current_by_pid: dict[int, int] = {}
         self._serial_by_unique_id: dict[int, int] = {}
         self._compromised = False
+        self._scope_violation = False
         if self._unique_process_info(os.getpid()) is None:
             raise _ContainmentUnavailableError(
                 "unique Darwin process identity is unavailable"
@@ -352,6 +368,10 @@ class _DarwinProcessTree:
     def compromised(self) -> bool:
         return self._compromised
 
+    @property
+    def requires_immediate_shutdown(self) -> bool:
+        return self._scope_violation
+
     def add_root(self, pid: int) -> None:
         if self._register(pid, None, required=True) is None:
             raise _ContainmentUnavailableError(
@@ -360,22 +380,29 @@ class _DarwinProcessTree:
 
     def refresh(self, timeout: float = 0.0) -> None:
         self._discover_until_stable()
+        self._discover_trusted_process_group_members()
         events = self._read_events(timeout)
         self._discover_until_stable()
+        self._discover_trusted_process_group_members()
         for event in events:
             if not event.fflags & select.KQ_NOTE_FORK:
                 continue
-            self._compromised = True
+            if not self._trusted_process_group:
+                self._compromised = True
             self._discover_reparented_descendants()
+            self._discover_trusted_process_group_members()
         for event in events:
             if event.fflags & select.KQ_NOTE_EXIT:
                 identity = self._processes.get(int(event.udata))
                 if identity is not None:
                     self._mark_exited(identity)
         self._refresh_liveness()
+        self._validate_trusted_process_group()
 
     def live(self) -> bool:
+        self._discover_trusted_process_group_members()
         self._refresh_liveness()
+        self._validate_trusted_process_group()
         return any(not identity.exited for identity in self._processes.values())
 
     def signal_all(self, signal_number: int) -> bool:
@@ -453,6 +480,12 @@ class _DarwinProcessTree:
             ctypes.c_int,
         ]
         self._libc.proc_listchildpids.restype = ctypes.c_int
+        self._libc.proc_listpgrppids.argtypes = [
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        self._libc.proc_listpgrppids.restype = ctypes.c_int
         self._libc.proc_listallpids.argtypes = [ctypes.c_void_p, ctypes.c_int]
         self._libc.proc_listallpids.restype = ctypes.c_int
         self._libc.proc_pidinfo.argtypes = [
@@ -543,6 +576,34 @@ class _DarwinProcessTree:
             capacity *= 2
         raise _ContainmentUnavailableError(
             "Darwin process table exceeds the supported bound"
+        )
+
+    def _process_group_pids(self) -> set[int]:
+        capacity = 64
+        while capacity <= 65_536:
+            buffer = (ctypes.c_int * capacity)()
+            ctypes.set_errno(0)
+            count = self._libc.proc_listpgrppids(
+                self._process_group_id,
+                buffer,
+                ctypes.sizeof(buffer),
+            )
+            if count < 0:
+                error_number = ctypes.get_errno()
+                if error_number == errno.ESRCH:
+                    return set()
+                raise _ContainmentUnavailableError(
+                    f"cannot inspect process group {self._process_group_id}"
+                ) from OSError(error_number, os.strerror(error_number))
+            if count < capacity:
+                return {
+                    int(buffer[index])
+                    for index in range(count)
+                    if buffer[index] > 0
+                }
+            capacity *= 2
+        raise _ContainmentUnavailableError(
+            f"process group {self._process_group_id} exceeds the supported bound"
         )
 
     def _unique_process_info(self, pid: int) -> _UniqueProcessInfo | None:
@@ -662,6 +723,51 @@ class _DarwinProcessTree:
                     if after is not None and after != before:
                         changed = True
 
+    def _discover_trusted_process_group_members(self) -> None:
+        if not self._trusted_process_group:
+            return
+        for pid in self._process_group_pids():
+            if pid == os.getpid():
+                continue
+            self._register(pid, None)
+
+    def _validate_trusted_process_group(self) -> None:
+        if not self._trusted_process_group:
+            return
+        for identity in self._processes.values():
+            if identity.exited:
+                continue
+            scope = self._process_scope(identity)
+            if scope is None:
+                self._mark_exited(identity)
+                continue
+            if scope != (self._process_group_id, self._session_id):
+                self._compromised = True
+                self._scope_violation = True
+
+    def _process_scope(
+            self,
+            identity: _DarwinProcessIdentity,
+    ) -> tuple[int, int] | None:
+        initial_info = self._unique_process_info(identity.pid)
+        if initial_info is None or int(initial_info.unique_id) != identity.unique_id:
+            return None
+        try:
+            process_group_id = os.getpgid(identity.pid)
+            session_id = os.getsid(identity.pid)
+        except ProcessLookupError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return None
+            raise _ContainmentUnavailableError(
+                f"cannot inspect process scope for {identity.pid}"
+            ) from exc
+        confirmed_info = self._unique_process_info(identity.pid)
+        if confirmed_info is None or int(confirmed_info.unique_id) != identity.unique_id:
+            return None
+        return process_group_id, session_id
+
     def _discover_reparented_descendants(self) -> None:
         candidates: list[tuple[int, _UniqueProcessInfo]] = []
         for pid in self._all_pids():
@@ -754,11 +860,13 @@ class _DarwinProcessTree:
         return depth
 
 
-def _process_tree() -> _LinuxProcessTree | _DarwinProcessTree:
+def _process_tree(
+        containment_mode: _ContainmentMode = _ContainmentMode.STRICT,
+) -> _LinuxProcessTree | _DarwinProcessTree:
     if sys.platform.startswith("linux"):
         return _LinuxProcessTree()
     if sys.platform == "darwin":
-        return _DarwinProcessTree()
+        return _DarwinProcessTree(containment_mode)
     raise _ContainmentUnavailableError(
         "managed process containment is unavailable on this host"
     )
@@ -860,6 +968,7 @@ def _run(
         status_descriptor: int,
         parent_liveness_descriptor: int,
         command: list[str],
+        containment_mode: _ContainmentMode = _ContainmentMode.STRICT,
 ) -> int:
     if not command:
         _notify(status_descriptor, _STATUS_UNAVAILABLE)
@@ -888,7 +997,7 @@ def _run(
         return 125
 
     try:
-        tree = _process_tree()
+        tree = _process_tree(containment_mode)
     except BaseException:
         _notify(status_descriptor, _STATUS_UNAVAILABLE)
         return 125
@@ -971,6 +1080,10 @@ def _run(
                     _STATUS_EXPIRED if cleanup_succeeded else _STATUS_UNAVAILABLE,
                 )
                 return 124
+            if tree.requires_immediate_shutdown:
+                _terminate_tree(tree, reap)
+                _notify(status_descriptor, _STATUS_UNAVAILABLE)
+                return 125
             if target_status is not None and not tree.live():
                 if empty_since is None:
                     empty_since = time.monotonic()
@@ -1002,6 +1115,13 @@ def main() -> int:
         deadline_ns = int(sys.argv[1])
         status_descriptor = int(sys.argv[2])
         parent_liveness_descriptor = int(sys.argv[3])
+        containment_mode = (
+            _ContainmentMode(sys.argv[4])
+            if separator == 5
+            else _ContainmentMode.STRICT
+        )
+        if separator not in {4, 5}:
+            return 125
         command = sys.argv[separator + 1:]
     except (ValueError, IndexError):
         return 125
@@ -1011,6 +1131,7 @@ def main() -> int:
             status_descriptor,
             parent_liveness_descriptor,
             command,
+            containment_mode,
         )
     finally:
         try:

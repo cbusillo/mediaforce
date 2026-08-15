@@ -79,14 +79,23 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     managed command that forks cannot report successful completion on macOS;
     unproven cleanup remains the primary enforcement failure even when a
     deadline or cancellation also occurred
-  - quality commands preserve an explicit SSH execution mode even when the SSH
-    target resolves to the controller Mac. This keeps `ab-av1` and its FFmpeg
-    descendants on the supported remote-command path instead of routing their
-    normal forks through strict local Darwin containment. Local capability
-    probes invoke FFmpeg directly rather than adding an avoidable shell fork.
-    Self-SSH quality scratch uses the user runtime temp area instead of mounted
-    staging because macOS login sessions may not have permission to create
-    transient directories on the mounted volume
+  - strict `run_command` behavior is unchanged: arbitrary Darwin forks still
+    make successful containment unprovable
+  - `run_trusted_local_orchestrator_command` is a separate, fail-closed API
+    restricted to local `ab-av1` commands. On macOS it allows normal child forks
+    only while every observed descendant remains in the supervisor's private
+    session and process group. The supervisor enumerates that group directly,
+    retains unique Darwin process identities, and immediately terminates the
+    tracked tree if a descendant changes process group or session. Cancellation,
+    absolute deadlines, parent-liveness cleanup, and unavailable-status poisoning
+    use the same managed-process protocol as strict commands. This trusted path
+    is an explicit orchestrator contract, not a sandbox for arbitrary programs
+  - quality commands targeting the controller Mac, including explicit self-SSH
+    hosts, execute locally. `ab-av1` uses trusted orchestrator containment while
+    direct FFmpeg capability probes keep strict containment. This avoids macOS
+    SSH login-session TCC denial for mounted media without weakening remote SSH
+    routing for other hosts. Self-SSH quality scratch continues to use the user
+    runtime temp area instead of mounted staging
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
     back to same-user process scans or signals

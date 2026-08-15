@@ -22,6 +22,7 @@ from mediaforce.core.process_control import (
     ScheduleWindowClosedError,
     _terminate_process,
     run_command,
+    run_trusted_local_orchestrator_command,
 )
 
 
@@ -54,6 +55,16 @@ def _kill_exact_pid(pid: int) -> None:
         pass
 
 
+def _write_ab_av1_script(root: Path, source: str) -> Path:
+    script_path = root / "ab-av1"
+    script_path.write_text(
+        f"#!{sys.executable}\n{source}\n",
+        encoding="utf-8",
+    )
+    script_path.chmod(0o700)
+    return script_path
+
+
 class ProcessControlTests(TestCase):
     def test_managed_command_accepts_stdin_text(self) -> None:
         result = run_command(
@@ -64,6 +75,105 @@ class ProcessControlTests(TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "hello")
+
+    @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
+    def test_trusted_local_orchestrator_allows_same_process_group_forks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = _write_ab_av1_script(
+                Path(temp_dir),
+                "\n".join((
+                    "import os",
+                    "import time",
+                    "child_pid = os.fork()",
+                    "if child_pid == 0:",
+                    "    time.sleep(0.1)",
+                    "    os._exit(0)",
+                    "os.waitpid(child_pid, 0)",
+                    "print('trusted-fork-complete')",
+                )),
+            )
+
+            result = run_trusted_local_orchestrator_command([str(script_path)])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "trusted-fork-complete\n")
+
+    @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
+    def test_trusted_local_orchestrator_fails_closed_for_session_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            child_pid_path = root / "detached-child.pid"
+            script_path = _write_ab_av1_script(
+                root,
+                "\n".join((
+                    "from pathlib import Path",
+                    "import os",
+                    "import sys",
+                    "import time",
+                    "child_pid = os.fork()",
+                    "if child_pid == 0:",
+                    "    Path(sys.argv[1]).write_text(str(os.getpid()))",
+                    "    os.setsid()",
+                    "    time.sleep(10)",
+                    "    os._exit(0)",
+                    "os.waitpid(child_pid, 0)",
+                )),
+            )
+
+            with self.assertRaises(ProcessDeadlineEnforcementError):
+                run_trusted_local_orchestrator_command(
+                    [str(script_path), str(child_pid_path)],
+                    process_controller=ManagedProcessController(),
+                )
+
+            self.assertTrue(child_pid_path.exists())
+            child_pid = int(child_pid_path.read_text())
+            exit_deadline = time.monotonic() + 2
+            while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
+                time.sleep(0.02)
+            self.assertFalse(_pid_is_alive(child_pid))
+
+    @skipUnless(sys.platform == "darwin", "requires trusted Darwin process groups")
+    def test_trusted_local_orchestrator_deadline_kills_same_group_children(self) -> None:
+        controller = ManagedProcessController()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            child_pid_path = root / "child.pid"
+            script_path = _write_ab_av1_script(
+                root,
+                "\n".join((
+                    "from pathlib import Path",
+                    "import os",
+                    "import sys",
+                    "import time",
+                    "child_pid = os.fork()",
+                    "if child_pid == 0:",
+                    "    Path(sys.argv[1]).write_text(str(os.getpid()))",
+                    "    time.sleep(10)",
+                    "    os._exit(0)",
+                    "os.waitpid(child_pid, 0)",
+                )),
+            )
+
+            with controller.absolute_deadline(
+                datetime.now(UTC) + timedelta(seconds=0.3)
+            ):
+                with self.assertRaises(ProcessDeadlineExpiredError):
+                    run_trusted_local_orchestrator_command(
+                        [str(script_path), str(child_pid_path)],
+                        process_controller=controller,
+                    )
+
+            self.assertTrue(child_pid_path.exists())
+            child_pid = int(child_pid_path.read_text())
+            exit_deadline = time.monotonic() + 2
+            while _pid_is_alive(child_pid) and time.monotonic() < exit_deadline:
+                time.sleep(0.02)
+            self.assertFalse(_pid_is_alive(child_pid))
+
+    def test_trusted_local_orchestrator_rejects_other_commands(self) -> None:
+        with self.assertRaisesRegex(ValueError, "restricted to ab-av1"):
+            run_trusted_local_orchestrator_command(["ffmpeg", "-version"])
 
     def test_deadline_managed_command_retries_communicate_with_stdin_text(self) -> None:
         controller = ManagedProcessController()
@@ -1131,6 +1241,38 @@ class ProcessControlTests(TestCase):
                 tree.refresh()
             self.assertEqual(reconcile.call_count, len(events))
             self.assertTrue(tree.compromised)
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_trusted_darwin_process_group_reconciles_forks_without_compromise(
+            self,
+    ) -> None:
+        tree = process_deadline_module._DarwinProcessTree(
+            process_deadline_module._ContainmentMode.TRUSTED_PROCESS_GROUP
+        )
+        events = [
+            Mock(
+                fflags=process_deadline_module.select.KQ_NOTE_FORK,
+                udata=1,
+            )
+        ]
+        try:
+            with (
+                patch.object(tree, "_discover_until_stable"),
+                patch.object(tree, "_discover_trusted_process_group_members"),
+                patch.object(tree, "_read_events", return_value=events),
+                patch.object(
+                    tree,
+                    "_discover_reparented_descendants",
+                ) as reconcile,
+                patch.object(tree, "_refresh_liveness"),
+                patch.object(tree, "_validate_trusted_process_group"),
+            ):
+                tree.refresh()
+            reconcile.assert_called_once_with()
+            self.assertFalse(tree.compromised)
+            self.assertFalse(tree.requires_immediate_shutdown)
         finally:
             tree.close()
 
