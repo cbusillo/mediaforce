@@ -267,12 +267,17 @@ requiring search. The full title list must remain reachable in a bounded,
 independently scrolling region with a sticky header, and the selected movie
 details must stay adjacent rather than appearing after the complete library.
 Verify this path at 1024px and 390px: Library → Movies → recommended title →
-Studio. Movie Studio must describe the action with plain-language labels such
-as `Action covers`, `Next step`, and `checked file`; a ready replacement must
-state that it runs immediately, preserves a backup of the original, and must
-not be triggered during browser QA. After replacement completes, Movie Studio
-must show `Finished`, explain that the original remains in Completed, hide all
-sample and processing actions, and offer only a safe route back to Movies.
+Studio. Before full work starts, Movie Studio must show runtime, current size,
+expected output, planned savings, and the target range. Once full work is queued
+or running, Studio must replace sample controls with the current movie's status:
+queue position, assignment and worker availability, progress, blockers, and the
+exact condition that allows work to continue. Activity remains a secondary
+diagnostics route and must not be required to understand this movie. A ready
+replacement must state that it runs immediately, preserves a backup of the
+original, and must not be triggered during browser QA. After replacement
+completes, Movie Studio must show `Finished`, explain that the original remains
+in Completed, hide all sample and processing actions, and offer only a safe
+route back to Movies.
 
 On Finished, the finished-season list must fit without horizontal scrolling at
 1024px and must become readable stacked rows at 390px. The light/dark control

@@ -367,6 +367,7 @@ export interface EncodeJobProgressTelemetry {
 	total_duration_seconds?: number;
 	remaining_duration_seconds?: number;
 	percent_complete?: number;
+	phase_label?: string | null;
 	fps?: number | null;
 	speed?: number | null;
 	eta_seconds?: number | null;
@@ -439,6 +440,7 @@ export interface EncodeQueueJob {
 	last_failure_kind?: string | null;
 	last_failure_at?: string | null;
 	created_at?: string | null;
+	started_at?: string | null;
 	finished_at?: string | null;
 	updated_at?: string | null;
 	schedule_close_deadline_at?: string | null;

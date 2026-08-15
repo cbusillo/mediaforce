@@ -2115,7 +2115,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio active-processing fixture",
                 "route": "/folders/movies/Waiting%20Encode",
                 "marker": "Waiting Encode",
-                "stageMarker": "Monitor processing",
+                "stageMarker": "Queued, but not able to start",
             },
             {
                 "label": "Movie Studio infeasible-target fixture",

@@ -21,6 +21,8 @@
 	import { movieWorkflowLabel } from '$lib/movies/library';
 	import {
 		canRetrySampleJob,
+		movieCurrentWorkView,
+		movieGoalFactsView,
 		movieReviewStatusLabel,
 		parentSampleAppliesToExactItem
 	} from './movie-studio-view';
@@ -84,13 +86,31 @@
 	const retryableSampleJob = $derived(asRecord(status.retryable_sample_job));
 	const canRetrySample = $derived(canRetrySampleJob(retryableSampleJob.job_id, hasPendingProposal));
 	const encodeJob = $derived(folder.encode_job ?? null);
+	const availableEncodeWorkerCount = $derived(
+		hosts.hosts.filter((host) => host.available && host.capabilities.includes('encode_queue'))
+			.length
+	);
+	const currentWork = $derived(
+		movieCurrentWorkView(
+			encodeJob,
+			folder.encode_queue_state ?? folder.encode_queue?.state,
+			availableEncodeWorkerCount
+		)
+	);
 	const sampleItem = $derived(asRecord(folder.sample_item));
 	const hostOptions = $derived(
 		(folder.sample_host_options ?? [])
 			.map((host) => asRecord(host))
 			.filter((host) => asText(host.key) && host.available !== false)
 	);
-	const activeHostCount = $derived(hosts.hosts.filter((host) => host.available).length);
+	const streamBudgetLedger = $derived(folder.stream_budget_ledger);
+	const movieGoalFacts = $derived(
+		movieGoalFactsView(
+			streamBudgetLedger?.source.duration_seconds ?? activeMember?.duration_seconds,
+			streamBudgetLedger?.source.source_size_bytes ?? activeMember?.size_bytes,
+			streamBudgetLedger?.size_goal ?? folder.resolved_operator_intent?.size_goal
+		)
+	);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');
 	const isWorkflowBlocked = $derived(workflow?.primary_lane === 'blocked');
 	const isBusy = $derived(Boolean(pendingAction));
@@ -113,16 +133,18 @@
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
 	const workflowDisplayLabel = $derived(
-		canRetrySample
-			? 'Sample needs retry'
-			: pendingProposalCanQueue
-				? 'Sample plan ready'
-				: movieWorkflowLabel({
-						workflow_state: workflow,
-						promotion_conflicts: conflicts,
-						details_loading: folderPending,
-						availability: context?.availability ?? 'production'
-					})
+		currentWork
+			? currentWork.label
+			: canRetrySample
+				? 'Sample needs retry'
+				: pendingProposalCanQueue
+					? 'Sample plan ready'
+					: movieWorkflowLabel({
+							workflow_state: workflow,
+							promotion_conflicts: conflicts,
+							details_loading: folderPending,
+							availability: context?.availability ?? 'production'
+						})
 	);
 
 	$effect(() => {
@@ -339,16 +361,16 @@
 		| 'validate'
 		| 'promote'
 		| 'retry'
-		| 'monitor'
+		| 'current-work'
 		| 'complete'
 		| 'none' {
 		if (isBrowseOnly) return 'none';
+		if (currentWork) return 'current-work';
 		if (workflow?.primary_lane === 'complete') return 'complete';
 		const calibrationStatus = asText(calibrationJob.status);
 		if (['queued', 'running'].includes(calibrationStatus)) return 'monitor-sample';
 		if (canRetrySample) return 'retry-sample';
 		const encodeStatus = String(encodeJob?.status ?? '');
-		if (['queued', 'running', 'retry_backoff'].includes(encodeStatus)) return 'monitor';
 		if (['failed', 'stopped', 'needs_attention'].includes(encodeStatus)) return 'retry';
 		if (workflow?.next_action.kind === 'validate_outputs') return 'validate';
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
@@ -363,6 +385,7 @@
 	}
 
 	function badgeTone(): 'active' | 'ready' | 'wait' | 'fail' | 'idle' {
+		if (currentWork) return currentWork.tone;
 		if (canRetrySample || conflicts.length || workflow?.tone === 'attention') return 'fail';
 		if (workflow?.tone === 'active') return 'active';
 		if (workflow?.tone === 'ready' || workflow?.tone === 'success') return 'ready';
@@ -437,39 +460,6 @@
 			return 'Mediaforce stopped because it could not verify that every sample process was cleaned up safely.';
 		}
 		return error;
-	}
-
-	function sampleStatusLabel(): string {
-		const status = asText(calibrationJob.status);
-		if (!status && ['validate', 'promote', 'complete'].includes(workflow?.primary_lane ?? '')) {
-			return 'Not needed now';
-		}
-		return (
-			{
-				queued: 'Sample waiting',
-				running: 'Sampling',
-				pending_review: 'Ready to review',
-				completed: 'Finished',
-				failed: 'Sample needs retry',
-				stopped: 'Stopped'
-			}[status] ??
-			(status ? 'Status unavailable' : reviewReady ? 'Ready to review' : 'Not prepared')
-		);
-	}
-
-	function processingStatusLabel(): string {
-		const status = String(encodeJob?.status ?? '');
-		return (
-			{
-				queued: 'Waiting to process',
-				running: 'Processing',
-				retry_backoff: 'Waiting to retry',
-				failed: 'Processing needs attention',
-				stopped: 'Stopped',
-				needs_attention: 'Processing needs attention',
-				completed: 'Finished'
-			}[status] ?? (status ? 'Status unavailable' : 'No work running')
-		);
 	}
 
 	function memberStatusLabel(member: MovieMember): string {
@@ -580,116 +570,168 @@
 		</div>
 	{/if}
 
-	<section class="status-strip" aria-label="Movie status">
-		<div><span>Action covers</span><strong>{scopeDisplay}</strong></div>
-		<div><span>Next step</span><strong>{workflowDisplayLabel}</strong></div>
+	<section class="movie-facts" aria-label="Movie compression facts">
+		<div><span>Runtime</span><strong>{movieGoalFacts.duration}</strong></div>
+		<div><span>Current size</span><strong>{movieGoalFacts.sourceSize}</strong></div>
 		<div>
-			<span>Review sample</span><strong>{sampleStatusLabel()}</strong>
+			<span>Expected output</span><strong>{movieGoalFacts.expectedOutput}</strong>
+			<small>Target range {movieGoalFacts.targetRange}</small>
 		</div>
 		<div>
-			<span>Current work</span><strong>{processingStatusLabel()}</strong>
+			<span>Expected savings</span><strong>{movieGoalFacts.expectedSavings}</strong>
+			<small>{movieGoalFacts.estimateQuality}</small>
 		</div>
-		<div><span>Workers ready</span><strong>{activeHostCount}</strong></div>
 	</section>
 
 	<div class="studio-grid">
 		<div class="studio-grid__main">
-			<WorkstationPanel eyebrow="Next step" title="What to do next" meta={scopeDisplay}>
-				<div class="decision-panel">
-					<div class="decision-copy">
-						<strong>{workflowSummary()}</strong>
-						{#if primaryAction() === 'retry-sample'}
-							<p>{sampleFailureDetail()}</p>
-							<small class="decision-note">
-								Retry uses the same file, request, and worker. No full movie work was queued.
-							</small>
-						{:else if primaryAction() === 'review-title-sample'}
-							<p>
-								The completed title sample was prepared from this file. Review or approve it in the
-								title workspace; this page stays scoped to only this file.
-							</p>
-						{:else if primaryAction() === 'complete'}
-							<p>
-								The checked replacement is installed. The original remains in Completed until you
-								decide to delete backups.
-							</p>
-						{:else}
-							<p>
-								{exactScope
-									? 'Only the file you opened will change.'
-									: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
-							</p>
-						{/if}
-						{#if primaryAction() === 'promote'}
-							<small class="decision-note">
-								Runs immediately. Mediaforce keeps a backup of the original before installing the
-								checked replacement.
-							</small>
-						{/if}
-					</div>
-					<div class="decision-actions">
-						{#if primaryAction() === 'prepare'}
-							<button
-								class="primary"
-								disabled={folderPending || isBusy || !selectedHostKey}
-								onclick={prepareSample}
-							>
-								{pendingAction === 'prepare-sample' ? 'Preparing…' : 'Prepare review sample'}
-							</button>
-						{:else if primaryAction() === 'start'}
-							<button class="primary" disabled={isBusy} onclick={startSample}>
-								{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
-							</button>
-						{:else if primaryAction() === 'monitor-sample'}
-							<a class="primary" href={resolve('/ops')}>Monitor sample</a>
-							<button class="secondary" disabled={isBusy} onclick={stopSample}
-								>Stop sample work</button
-							>
-						{:else if primaryAction() === 'retry-sample'}
-							<button class="primary" disabled={isBusy} onclick={retrySample}>
-								{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
-							</button>
-						{:else if primaryAction() === 'review-title-sample'}
-							<a class="primary" href={parentTitleHref}>Review title sample</a>
-						{:else if primaryAction() === 'queue'}
-							{#if reviewGate.status === 'accepted'}
-								<button class="primary" disabled={isBusy} onclick={queueApproved}
-									>Queue movie work</button
+			{#if currentWork}
+				<WorkstationPanel
+					eyebrow="Current movie work"
+					title={currentWork.headline}
+					meta={currentWork.label}
+				>
+					<div class:current-work--active={currentWork.tone === 'active'} class="current-work">
+						<div class="current-work__summary">
+							<strong>{currentWork.state}</strong>
+							<p>{currentWork.detail}</p>
+						</div>
+						{#if currentWork.tone === 'active'}
+							<div class="current-work__progress">
+								<div>
+									<span>Movie progress</span><strong
+										>{Math.round(currentWork.percentComplete)}%</strong
+									>
+								</div>
+								<progress max="100" value={currentWork.percentComplete}
+									>{currentWork.percentComplete}%</progress
 								>
+							</div>
+						{/if}
+						{#if currentWork.blockers.length}
+							<div class="current-work__blockers">
+								<strong>Why it has not started</strong>
+								<ul>
+									{#each currentWork.blockers as blocker (blocker)}
+										<li>{blocker}</li>
+									{/each}
+								</ul>
+							</div>
+						{/if}
+						<div class="current-work__next">
+							<span>What happens next</span>
+							<strong>{currentWork.nextCondition}</strong>
+						</div>
+						<div class="current-work__facts">
+							<div><span>Queue position</span><strong>{currentWork.queuePosition}</strong></div>
+							<div><span>Worker</span><strong>{currentWork.worker}</strong></div>
+							<div><span>Workers ready</span><strong>{currentWork.availableWorkers}</strong></div>
+							<div><span>Elapsed</span><strong>{currentWork.elapsed}</strong></div>
+							<div><span>Speed</span><strong>{currentWork.speed}</strong></div>
+							<div><span>ETA</span><strong>{currentWork.eta}</strong></div>
+						</div>
+						<div class="current-work__actions">
+							<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
+							<small>Global queue and worker details</small>
+						</div>
+					</div>
+				</WorkstationPanel>
+			{:else}
+				<WorkstationPanel eyebrow="Next step" title="What to do next" meta={scopeDisplay}>
+					<div class="decision-panel">
+						<div class="decision-copy">
+							<strong>{workflowSummary()}</strong>
+							{#if primaryAction() === 'retry-sample'}
+								<p>{sampleFailureDetail()}</p>
+								<small class="decision-note">
+									Retry uses the same file, request, and worker. No full movie work was queued.
+								</small>
+							{:else if primaryAction() === 'review-title-sample'}
+								<p>
+									The completed title sample was prepared from this file. Review or approve it in
+									the title workspace; this page stays scoped to only this file.
+								</p>
+							{:else if primaryAction() === 'complete'}
+								<p>
+									The checked replacement is installed. The original remains in Completed until you
+									decide to delete backups.
+								</p>
 							{:else}
-								<button class="primary" disabled={isBusy} onclick={approveAndQueue}
-									>Approve sample and queue</button
-								>
+								<p>
+									{exactScope
+										? 'Only the file you opened will change.'
+										: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
+								</p>
 							{/if}
-						{:else if primaryAction() === 'validate'}
-							<button class="primary" disabled={isBusy} onclick={validateOutputs}
-								>Check compressed file</button
-							>
-						{:else if primaryAction() === 'promote'}
-							<button
-								class="primary"
-								disabled={isBusy || conflicts.length > 0}
-								onclick={promoteOutputs}>Replace original now</button
-							>
-						{:else if primaryAction() === 'retry'}
-							<button class="primary" disabled={isBusy} onclick={retryEncode}
-								>Resume unfinished work</button
-							>
-						{:else if primaryAction() === 'monitor'}
-							<a class="primary" href={resolve('/ops')}>Monitor processing</a>
-						{:else if primaryAction() === 'complete'}
-							<a class="secondary" href={resolve('/movies')}>Back to Movies</a>
-						{:else}
-							<a class="primary" href={resolve('/settings')}>Open library settings</a>
-						{/if}
+							{#if primaryAction() === 'promote'}
+								<small class="decision-note">
+									Runs immediately. Mediaforce keeps a backup of the original before installing the
+									checked replacement.
+								</small>
+							{/if}
+						</div>
+						<div class="decision-actions">
+							{#if primaryAction() === 'prepare'}
+								<button
+									class="primary"
+									disabled={folderPending || isBusy || !selectedHostKey}
+									onclick={prepareSample}
+								>
+									{pendingAction === 'prepare-sample' ? 'Preparing…' : 'Prepare review sample'}
+								</button>
+							{:else if primaryAction() === 'start'}
+								<button class="primary" disabled={isBusy} onclick={startSample}>
+									{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
+								</button>
+							{:else if primaryAction() === 'monitor-sample'}
+								<a class="primary" href={resolve('/ops')}>Monitor sample</a>
+								<button class="secondary" disabled={isBusy} onclick={stopSample}
+									>Stop sample work</button
+								>
+							{:else if primaryAction() === 'retry-sample'}
+								<button class="primary" disabled={isBusy} onclick={retrySample}>
+									{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
+								</button>
+							{:else if primaryAction() === 'review-title-sample'}
+								<a class="primary" href={parentTitleHref}>Review title sample</a>
+							{:else if primaryAction() === 'queue'}
+								{#if reviewGate.status === 'accepted'}
+									<button class="primary" disabled={isBusy} onclick={queueApproved}
+										>Queue movie work</button
+									>
+								{:else}
+									<button class="primary" disabled={isBusy} onclick={approveAndQueue}
+										>Approve sample and queue</button
+									>
+								{/if}
+							{:else if primaryAction() === 'validate'}
+								<button class="primary" disabled={isBusy} onclick={validateOutputs}
+									>Check compressed file</button
+								>
+							{:else if primaryAction() === 'promote'}
+								<button
+									class="primary"
+									disabled={isBusy || conflicts.length > 0}
+									onclick={promoteOutputs}>Replace original now</button
+								>
+							{:else if primaryAction() === 'retry'}
+								<button class="primary" disabled={isBusy} onclick={retryEncode}
+									>Resume unfinished work</button
+								>
+							{:else if primaryAction() === 'complete'}
+								<a class="secondary" href={resolve('/movies')}>Back to Movies</a>
+							{:else}
+								<a class="primary" href={resolve('/settings')}>Open library settings</a>
+							{/if}
+						</div>
 					</div>
-				</div>
-			</WorkstationPanel>
+				</WorkstationPanel>
+			{/if}
 
 			<WorkstationPanel
 				eyebrow="Review sample"
 				title="Prepare and review"
-				hidden={primaryAction() === 'complete'}
+				hidden={primaryAction() === 'complete' || Boolean(currentWork)}
 				meta={reviewReady
 					? 'Ready to review'
 					: inheritedParentSample
@@ -951,29 +993,30 @@
 		word-break: break-all;
 	}
 
-	.status-strip {
+	.movie-facts {
 		background: var(--mf-bg-strip);
 		border: var(--mf-border);
 		display: grid;
-		grid-template-columns: repeat(5, minmax(0, 1fr));
+		grid-template-columns: repeat(4, minmax(0, 1fr));
 		margin-bottom: var(--mf-space-6);
 	}
 
-	.status-strip div {
+	.movie-facts div {
 		border-left: var(--mf-border-muted);
 		padding: 10px 12px;
 	}
 
-	.status-strip div:first-child {
+	.movie-facts div:first-child {
 		border-left: 0;
 	}
 
-	.status-strip span,
-	.status-strip strong {
+	.movie-facts span,
+	.movie-facts strong,
+	.movie-facts small {
 		display: block;
 	}
 
-	.status-strip span {
+	.movie-facts span {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-2xs);
 		font-weight: var(--mf-weight-bold);
@@ -981,9 +1024,16 @@
 		text-transform: uppercase;
 	}
 
-	.status-strip strong {
+	.movie-facts strong {
 		font-size: var(--mf-text-sm);
 		margin-top: 3px;
+	}
+
+	.movie-facts small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		line-height: var(--mf-leading-normal);
+		margin-top: 2px;
 	}
 
 	.studio-grid {
@@ -1053,6 +1103,115 @@
 
 	.decision-actions .primary {
 		min-width: 150px;
+	}
+
+	.current-work {
+		border-left: 4px solid var(--mf-wait-fg);
+		display: grid;
+		gap: var(--mf-space-6);
+		padding: var(--mf-space-7);
+	}
+
+	.current-work--active {
+		border-left-color: var(--mf-active-fg);
+	}
+
+	.current-work__summary strong {
+		font-size: var(--mf-text-xl);
+		line-height: var(--mf-leading-snug);
+	}
+
+	.current-work__summary p {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-sm);
+		line-height: var(--mf-leading-normal);
+		margin-top: var(--mf-space-3);
+	}
+
+	.current-work__progress {
+		display: grid;
+		gap: var(--mf-space-3);
+	}
+
+	.current-work__progress div {
+		align-items: baseline;
+		display: flex;
+		justify-content: space-between;
+	}
+
+	.current-work__progress span,
+	.current-work__facts span,
+	.current-work__next span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-bold);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.current-work__progress progress {
+		accent-color: var(--mf-active-fg);
+		height: 10px;
+		width: 100%;
+	}
+
+	.current-work__facts {
+		border: var(--mf-border-muted);
+		display: grid;
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+	}
+
+	.current-work__facts div {
+		border-left: var(--mf-border-muted);
+		padding: 10px 12px;
+	}
+
+	.current-work__facts div:first-child {
+		border-left: 0;
+	}
+
+	.current-work__facts strong,
+	.current-work__next strong {
+		display: block;
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		margin-top: 3px;
+	}
+
+	.current-work__blockers {
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		padding: 12px 14px;
+	}
+
+	.current-work__blockers > strong {
+		color: var(--mf-wait-fg);
+		font-size: var(--mf-text-sm);
+	}
+
+	.current-work__blockers ul {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		margin: var(--mf-space-3) 0 0;
+		padding-left: 18px;
+	}
+
+	.current-work__next {
+		border-left: 2px solid var(--mf-active-line);
+		padding-left: var(--mf-space-4);
+	}
+
+	.current-work__actions {
+		align-items: center;
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--mf-space-4);
+	}
+
+	.current-work__actions small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
 	}
 
 	.primary,
@@ -1297,20 +1456,20 @@
 	}
 
 	@media (max-width: 1100px) {
-		.status-strip {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+		.current-work__facts {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 
-		.status-strip div:nth-child(odd) {
+		.current-work__facts div:nth-child(3n + 1) {
 			border-left: 0;
 		}
 
-		.status-strip div {
+		.current-work__facts div {
 			border-bottom: var(--mf-border-muted);
 		}
 
-		.status-strip div:last-child {
-			grid-column: 1 / -1;
+		.current-work__facts div:nth-last-child(-n + 3) {
+			border-bottom: 0;
 		}
 
 		.studio-grid {
@@ -1331,6 +1490,36 @@
 
 		.sample-facts {
 			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.movie-facts,
+		.current-work__facts {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.movie-facts div,
+		.movie-facts div:nth-child(odd),
+		.movie-facts div:nth-last-child(-n + 2),
+		.current-work__facts div,
+		.current-work__facts div:nth-child(odd),
+		.current-work__facts div:last-child {
+			border-bottom: var(--mf-border-muted);
+			border-left: 0;
+			grid-column: auto;
+		}
+
+		.movie-facts div:last-child,
+		.current-work__facts div:last-child {
+			border-bottom: 0;
+		}
+
+		.current-work {
+			padding: var(--mf-space-6);
+		}
+
+		.current-work__actions {
+			align-items: stretch;
+			display: grid;
 		}
 
 		.sample-facts div,
