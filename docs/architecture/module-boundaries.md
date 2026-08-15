@@ -83,7 +83,10 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     target resolves to the controller Mac. This keeps `ab-av1` and its FFmpeg
     descendants on the supported remote-command path instead of routing their
     normal forks through strict local Darwin containment. Local capability
-    probes invoke FFmpeg directly rather than adding an avoidable shell fork
+    probes invoke FFmpeg directly rather than adding an avoidable shell fork.
+    Self-SSH quality scratch uses the user runtime temp area instead of mounted
+    staging because macOS login sessions may not have permission to create
+    transient directories on the mounted volume
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
     back to same-user process scans or signals

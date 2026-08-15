@@ -18,9 +18,10 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.helpers import resolve_item_source_path
-from mediaforce.encoding.quality import quality_error_message, resolve_local_quality_temp_root
+from mediaforce.encoding.quality import default_local_quality_temp_root, quality_error_message, \
+    resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
-from mediaforce.hosts.config import host_media_access_for_host
+from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.content_intent_observations import (
@@ -1037,6 +1038,15 @@ def _quality_host_data(config: MediaforceConfig, host_data: dict[str, Any]) -> d
 
 
 def _quality_temp_dir_for_host(config: MediaforceConfig, host_data: dict[str, Any]) -> Path:
+    if (
+            str(host_data.get("mode") or "").strip().lower() == "ssh"
+            and host_targets_current_machine(host_data)
+    ):
+        return resolve_local_quality_temp_root(
+            default_local_quality_temp_root(),
+            config.paths.web_state_dir / "quality-temp",
+        )
+
     if str(host_data.get("media_access") or "").strip().lower() == "stream":
         return resolve_local_quality_temp_root(
             config.staging_root,
