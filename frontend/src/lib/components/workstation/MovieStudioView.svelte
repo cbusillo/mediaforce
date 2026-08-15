@@ -67,6 +67,8 @@
 	const pendingProposalRecovery = $derived(proposalRecoveryView(pendingProposal));
 	const reviewGate = $derived(asRecord(folder.review_gate));
 	const calibrationJob = $derived(asRecord(folder.calibration_job));
+	const retryableSampleJob = $derived(asRecord(status.retryable_sample_job));
+	const hasRetryableSample = $derived(Boolean(asText(retryableSampleJob.job_id)));
 	const encodeJob = $derived(folder.encode_job ?? null);
 	const sampleItem = $derived(asRecord(folder.sample_item));
 	const hostOptions = $derived(
@@ -93,14 +95,16 @@
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
 	const workflowDisplayLabel = $derived(
-		pendingProposalCanQueue
-			? 'Sample plan ready'
-			: movieWorkflowLabel({
-					workflow_state: workflow,
-					promotion_conflicts: conflicts,
-					details_loading: folderPending,
-					availability: context?.availability ?? 'production'
-				})
+		hasRetryableSample
+			? 'Sample needs retry'
+			: pendingProposalCanQueue
+				? 'Sample plan ready'
+				: movieWorkflowLabel({
+						workflow_state: workflow,
+						promotion_conflicts: conflicts,
+						details_loading: folderPending,
+						availability: context?.availability ?? 'production'
+					})
 	);
 
 	$effect(() => {
@@ -311,6 +315,7 @@
 		| 'prepare'
 		| 'start'
 		| 'monitor-sample'
+		| 'retry-sample'
 		| 'queue'
 		| 'validate'
 		| 'promote'
@@ -320,6 +325,7 @@
 		if (isBrowseOnly) return 'none';
 		const calibrationStatus = asText(calibrationJob.status);
 		if (['queued', 'running'].includes(calibrationStatus)) return 'monitor-sample';
+		if (hasRetryableSample) return 'retry-sample';
 		const encodeStatus = String(encodeJob?.status ?? '');
 		if (['queued', 'running', 'retry_backoff'].includes(encodeStatus)) return 'monitor';
 		if (['failed', 'stopped', 'needs_attention'].includes(encodeStatus)) return 'retry';
@@ -333,7 +339,7 @@
 	}
 
 	function badgeTone(): 'active' | 'ready' | 'wait' | 'fail' | 'idle' {
-		if (conflicts.length || workflow?.tone === 'attention') return 'fail';
+		if (hasRetryableSample || conflicts.length || workflow?.tone === 'attention') return 'fail';
 		if (workflow?.tone === 'active') return 'active';
 		if (workflow?.tone === 'ready' || workflow?.tone === 'success') return 'ready';
 		if (workflow?.state === 'explicit_selection_required') return 'wait';
@@ -353,6 +359,9 @@
 			const explicitCount =
 				context?.members.filter((member) => !member.included_by_default).length ?? 0;
 			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
+		}
+		if (hasRetryableSample) {
+			return 'The review sample did not finish.';
 		}
 		switch (workflow?.primary_lane) {
 			case 'promote':
@@ -393,6 +402,17 @@
 					? 'Mediaforce is checking what this movie needs next.'
 					: 'No work is waiting for this movie.';
 		}
+	}
+
+	function sampleFailureDetail(): string {
+		const error = asText(retryableSampleJob.error);
+		if (!error) {
+			return 'Mediaforce stopped before review media was ready.';
+		}
+		if (error.toLowerCase().includes('containment cleanup is unproven')) {
+			return 'Mediaforce stopped because it could not verify that every sample process was cleaned up safely.';
+		}
+		return error;
 	}
 
 	function sampleStatusLabel(): string {
@@ -562,11 +582,18 @@
 				<div class="decision-panel">
 					<div class="decision-copy">
 						<strong>{workflowSummary()}</strong>
-						<p>
-							{exactScope
-								? 'Only the file you opened will change.'
-								: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
-						</p>
+						{#if primaryAction() === 'retry-sample'}
+							<p>{sampleFailureDetail()}</p>
+							<small class="decision-note">
+								Retry uses the same file, request, and worker. No full movie work was queued.
+							</small>
+						{:else}
+							<p>
+								{exactScope
+									? 'Only the file you opened will change.'
+									: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
+							</p>
+						{/if}
 						{#if primaryAction() === 'promote'}
 							<small class="decision-note">
 								Runs immediately. Mediaforce keeps a backup of the original before installing the
@@ -592,6 +619,10 @@
 							<button class="secondary" disabled={isBusy} onclick={stopSample}
 								>Stop sample work</button
 							>
+						{:else if primaryAction() === 'retry-sample'}
+							<button class="primary" disabled={isBusy} onclick={retrySample}>
+								{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
+							</button>
 						{:else if primaryAction() === 'queue'}
 							{#if reviewGate.status === 'accepted'}
 								<button class="primary" disabled={isBusy} onclick={queueApproved}
@@ -693,16 +724,19 @@
 						</div>
 					{/if}
 
-					<details class="sample-plan-editor" open={!pendingProposalCanQueue}>
+					<details
+						class="sample-plan-editor"
+						open={!pendingProposalCanQueue && !hasRetryableSample}
+					>
 						<summary
-							>{pendingProposalCanQueue
+							>{pendingProposalCanQueue || hasRetryableSample
 								? 'Change sample plan'
 								: isWorkflowBlocked
 									? 'Revise sample plan'
 									: 'Prepare sample plan'}</summary
 						>
 						<div class="sample-plan-editor__body">
-							{#if pendingProposalCanQueue}
+							{#if pendingProposalCanQueue || hasRetryableSample}
 								<p class="sample-plan-editor__note">
 									This replaces the current plan. It does not start sample work.
 								</p>
@@ -733,17 +767,12 @@
 									class="secondary"
 									disabled={isBusy || isBrowseOnly || !selectedHostKey}
 									onclick={prepareSample}
-									>{pendingProposalCanQueue
+									>{pendingProposalCanQueue || hasRetryableSample
 										? 'Prepare replacement plan'
 										: isWorkflowBlocked
 											? 'Prepare revised sample'
 											: 'Prepare sample plan'}</button
 								>
-								{#if status.retryable_sample_job}
-									<button class="secondary" disabled={isBusy || isBrowseOnly} onclick={retrySample}
-										>Retry failed sample</button
-									>
-								{/if}
 								{#if reviewReady}
 									<button class="secondary" type="button" onclick={downloadReviewPack}
 										>Download review files</button
