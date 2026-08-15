@@ -37,6 +37,7 @@ _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
 _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
 _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES = 1024 * 1024
+_TRUSTED_PROCESS_GROUP_CONTAINMENT_MODE = "trusted-process-group"
 
 
 def _process_deadline_helper_state(info: os.stat_result) -> tuple[int, ...]:
@@ -720,6 +721,64 @@ def run_command(
             input=input_text,
         )
 
+    return _run_managed_command(
+        cmd,
+        process_controller=process_controller,
+        capture_output=capture_output,
+        text=text,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+        check=check,
+        input_text=input_text,
+    )
+
+
+def run_trusted_local_orchestrator_command(
+        cmd: list[str],
+        *,
+        process_controller: ManagedProcessController | None = None,
+        capture_output: bool = True,
+        text: bool = True,
+        cwd: str | os.PathLike[str] | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        check: bool = False,
+        input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    if not cmd or os.path.basename(cmd[0]) != "ab-av1":
+        raise ValueError(
+            "Trusted local orchestrator containment is restricted to ab-av1."
+        )
+    controller = process_controller or ManagedProcessController()
+    return _run_managed_command(
+        cmd,
+        process_controller=controller,
+        capture_output=capture_output,
+        text=text,
+        cwd=cwd,
+        env=env,
+        timeout=timeout,
+        check=check,
+        input_text=input_text,
+        containment_mode=_TRUSTED_PROCESS_GROUP_CONTAINMENT_MODE,
+    )
+
+
+def _run_managed_command(
+        cmd: list[str],
+        *,
+        process_controller: ManagedProcessController,
+        capture_output: bool,
+        text: bool,
+        cwd: str | os.PathLike[str] | None,
+        env: Mapping[str, str] | None,
+        timeout: float | None,
+        check: bool,
+        input_text: str | None,
+        containment_mode: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+
     process_controller.throw_if_cancelled()
     process_deadline_ns = process_controller.process_deadline_ns()
     stdout_pipe = subprocess.PIPE if capture_output else None
@@ -744,9 +803,10 @@ def run_command(
             str(process_deadline_ns if process_deadline_ns is not None else -1),
             str(deadline_status_write_descriptor),
             str(parent_liveness_descriptor),
-            "--",
-            *cmd,
         ]
+        if containment_mode is not None:
+            process_cmd.append(containment_mode)
+        process_cmd.extend(["--", *cmd])
         try:
             process = subprocess.Popen(
                 process_cmd,

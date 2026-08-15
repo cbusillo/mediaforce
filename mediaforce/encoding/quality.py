@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -17,8 +18,9 @@ from mediaforce.core.process_control import (
     ProcessCancelledError,
     ScheduleWindowClosedError,
     run_command,
+    run_trusted_local_orchestrator_command,
 )
-from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, guard_command_for_schedule_deadline, \
+from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, managed_schedule_close_deadline, \
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import object_dict
 from mediaforce.remote import execution_mode_for_host, run_remote_command
@@ -701,11 +703,25 @@ def _run_quality_command(
 ) -> subprocess.CompletedProcess[str]:
     host_mode = _quality_execution_mode(host)
     if host_mode != "ssh":
-        result = run_command(
-            guard_command_for_schedule_deadline(cmd, host, process_controller=process_controller),
-            process_controller=process_controller,
-            env=_local_quality_environment(),
+        deadline = managed_schedule_close_deadline(host, process_controller)
+        deadline_context = (
+            process_controller.absolute_deadline(deadline)
+            if deadline is not None and process_controller is not None
+            else nullcontext()
         )
+        with deadline_context:
+            if cmd and Path(cmd[0]).name == "ab-av1":
+                result = run_trusted_local_orchestrator_command(
+                    cmd,
+                    process_controller=process_controller,
+                    env=_local_quality_environment(),
+                )
+            else:
+                result = run_command(
+                    cmd,
+                    process_controller=process_controller,
+                    env=_local_quality_environment(),
+                )
         if process_result_reached_schedule_deadline(result, host):
             raise ScheduleWindowClosedError("Encode host schedule window closed.")
         return result
@@ -865,11 +881,7 @@ def _quality_temp_setup_error(
 
 
 def _quality_execution_mode(host: dict[str, object] | None) -> str:
-    host_payload = object_dict(host)
-    explicit_mode = str(host_payload.get("mode") or "").strip().lower()
-    if explicit_mode:
-        return explicit_mode
-    return execution_mode_for_host(host_payload)
+    return execution_mode_for_host(object_dict(host))
 
 
 def _quality_temp_dir_arg(cmd: list[str]) -> str | None:

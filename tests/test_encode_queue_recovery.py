@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, cast
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from fastapi import HTTPException
 from sqlalchemy import func
@@ -9246,6 +9246,11 @@ raise SystemExit(0)
         expected_temp_dir = quality.default_local_quality_temp_root()
         self.assertEqual(search_quality_mock.call_args.kwargs["quality_temp_dir"], expected_temp_dir)
         self.assertEqual(sample_encode_mock.call_args.kwargs["quality_temp_dir"], expected_temp_dir)
+        self.assertEqual(search_quality_mock.call_args.kwargs["host"]["mode"], "ssh")
+        self.assertEqual(
+            quality._quality_execution_mode(search_quality_mock.call_args.kwargs["host"]),
+            "local",
+        )
 
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
@@ -13254,13 +13259,15 @@ raise SystemExit(0)
         )
         self.assertEqual(resolved, Path("/Volumes/media/tv/show/episode.mkv"))
 
-    def test_run_quality_command_localhost_ssh_preserves_remote_execution(self) -> None:
+    def test_run_quality_command_localhost_ssh_uses_trusted_local_execution(self) -> None:
         command = ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"]
         host = {"key": "cbusillo@localhost", "mode": "ssh"}
-        completed = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="{}", stderr="")
+        completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="{}", stderr="")
         with patch("mediaforce.quality.run_command") as run_command_mock, patch(
-                "mediaforce.quality.run_remote_command",
+                "mediaforce.quality.run_trusted_local_orchestrator_command",
                 return_value=completed,
+        ) as trusted_command_mock, patch(
+                "mediaforce.quality.run_remote_command",
         ) as run_remote_command_mock:
             result = quality._run_quality_command(
                 command,
@@ -13269,14 +13276,14 @@ raise SystemExit(0)
             )
         self.assertIs(result, completed)
         run_command_mock.assert_not_called()
-        run_remote_command_mock.assert_called_once_with(
-            host,
+        trusted_command_mock.assert_called_once_with(
             command,
-            quality.REMOTE_QUALITY_TIMEOUT_SECONDS,
             process_controller=None,
+            env=ANY,
         )
+        run_remote_command_mock.assert_not_called()
 
-    def test_run_quality_command_routes_host_deadline_through_remote_execution(self) -> None:
+    def test_run_quality_command_routes_self_ssh_deadline_through_trusted_execution(self) -> None:
         deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
         command = ["ab-av1", "sample-encode", "-i", "/tmp/input.mkv"]
         host = {
@@ -13285,10 +13292,18 @@ raise SystemExit(0)
             SCHEDULE_CLOSE_DEADLINE_KEY: deadline,
         }
         process_controller = ManagedProcessController()
-        completed = subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="{}", stderr="")
+        completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="{}", stderr="")
+        observed_deadlines: list[int | None] = []
+
+        def run_trusted_command(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            observed_deadlines.append(process_controller.process_deadline_ns())
+            return completed
+
         with patch("mediaforce.quality.run_command") as run_command_mock, patch(
+                "mediaforce.quality.run_trusted_local_orchestrator_command",
+                side_effect=run_trusted_command,
+        ) as trusted_command_mock, patch(
                 "mediaforce.quality.run_remote_command",
-                return_value=completed,
         ) as run_remote_command_mock:
             quality._run_quality_command(
                 command,
@@ -13297,12 +13312,17 @@ raise SystemExit(0)
             )
 
         run_command_mock.assert_not_called()
-        run_remote_command_mock.assert_called_once_with(
-            host,
+        trusted_command_mock.assert_called_once_with(
             command,
-            quality.REMOTE_QUALITY_TIMEOUT_SECONDS,
             process_controller=process_controller,
+            env=ANY,
         )
+        self.assertEqual(
+            observed_deadlines,
+            [int(datetime.fromisoformat(deadline).timestamp() * 1_000_000_000)],
+        )
+        self.assertIsNone(process_controller.process_deadline_ns())
+        run_remote_command_mock.assert_not_called()
 
     def test_local_quality_environment_prefers_mediaforce_binary_overrides(self) -> None:
         with patch.dict(
