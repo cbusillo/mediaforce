@@ -19,6 +19,7 @@
 		proposalRecoveryView
 	} from '$lib/folders/studio';
 	import { movieWorkflowLabel } from '$lib/movies/library';
+	import { canRetrySampleJob } from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 
@@ -63,12 +64,13 @@
 	);
 	const calibration = $derived(asRecord(folder.calibration));
 	const pendingProposal = $derived(asRecord(folder.pending_proposal));
+	const hasPendingProposal = $derived(Object.keys(pendingProposal).length > 0);
 	const pendingProposalCanQueue = $derived(pendingProposal.can_queue === true);
 	const pendingProposalRecovery = $derived(proposalRecoveryView(pendingProposal));
 	const reviewGate = $derived(asRecord(folder.review_gate));
 	const calibrationJob = $derived(asRecord(folder.calibration_job));
 	const retryableSampleJob = $derived(asRecord(status.retryable_sample_job));
-	const hasRetryableSample = $derived(Boolean(asText(retryableSampleJob.job_id)));
+	const canRetrySample = $derived(canRetrySampleJob(retryableSampleJob.job_id, hasPendingProposal));
 	const encodeJob = $derived(folder.encode_job ?? null);
 	const sampleItem = $derived(asRecord(folder.sample_item));
 	const hostOptions = $derived(
@@ -95,7 +97,7 @@
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
 	const workflowDisplayLabel = $derived(
-		hasRetryableSample
+		canRetrySample
 			? 'Sample needs retry'
 			: pendingProposalCanQueue
 				? 'Sample plan ready'
@@ -325,13 +327,13 @@
 		if (isBrowseOnly) return 'none';
 		const calibrationStatus = asText(calibrationJob.status);
 		if (['queued', 'running'].includes(calibrationStatus)) return 'monitor-sample';
-		if (hasRetryableSample) return 'retry-sample';
+		if (canRetrySample) return 'retry-sample';
 		const encodeStatus = String(encodeJob?.status ?? '');
 		if (['queued', 'running', 'retry_backoff'].includes(encodeStatus)) return 'monitor';
 		if (['failed', 'stopped', 'needs_attention'].includes(encodeStatus)) return 'retry';
 		if (workflow?.next_action.kind === 'validate_outputs') return 'validate';
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
-		if (Object.keys(pendingProposal).length && pendingProposalCanQueue) return 'start';
+		if (hasPendingProposal && pendingProposalCanQueue) return 'start';
 		if (reviewGate.status === 'accepted') return 'queue';
 		if (reviewReady) return 'queue';
 		if (isWorkflowBlocked) return 'none';
@@ -339,7 +341,7 @@
 	}
 
 	function badgeTone(): 'active' | 'ready' | 'wait' | 'fail' | 'idle' {
-		if (hasRetryableSample || conflicts.length || workflow?.tone === 'attention') return 'fail';
+		if (canRetrySample || conflicts.length || workflow?.tone === 'attention') return 'fail';
 		if (workflow?.tone === 'active') return 'active';
 		if (workflow?.tone === 'ready' || workflow?.tone === 'success') return 'ready';
 		if (workflow?.state === 'explicit_selection_required') return 'wait';
@@ -360,7 +362,7 @@
 				context?.members.filter((member) => !member.included_by_default).length ?? 0;
 			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
 		}
-		if (hasRetryableSample) {
+		if (canRetrySample) {
 			return 'The review sample did not finish.';
 		}
 		switch (workflow?.primary_lane) {
@@ -724,19 +726,16 @@
 						</div>
 					{/if}
 
-					<details
-						class="sample-plan-editor"
-						open={!pendingProposalCanQueue && !hasRetryableSample}
-					>
+					<details class="sample-plan-editor" open={!pendingProposalCanQueue && !canRetrySample}>
 						<summary
-							>{pendingProposalCanQueue || hasRetryableSample
+							>{pendingProposalCanQueue || canRetrySample
 								? 'Change sample plan'
 								: isWorkflowBlocked
 									? 'Revise sample plan'
 									: 'Prepare sample plan'}</summary
 						>
 						<div class="sample-plan-editor__body">
-							{#if pendingProposalCanQueue || hasRetryableSample}
+							{#if pendingProposalCanQueue || canRetrySample}
 								<p class="sample-plan-editor__note">
 									This replaces the current plan. It does not start sample work.
 								</p>
@@ -767,7 +766,7 @@
 									class="secondary"
 									disabled={isBusy || isBrowseOnly || !selectedHostKey}
 									onclick={prepareSample}
-									>{pendingProposalCanQueue || hasRetryableSample
+									>{pendingProposalCanQueue || canRetrySample
 										? 'Prepare replacement plan'
 										: isWorkflowBlocked
 											? 'Prepare revised sample'
