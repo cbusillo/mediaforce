@@ -107,8 +107,13 @@ export function movieCurrentWorkView(
 
 	const blockers: string[] = [];
 	const startConditions: string[] = [];
-	if (queueState?.is_paused) blockers.push('The processing queue is paused.');
-	if (queueState?.is_paused) startConditions.push('the global processing queue is resumed');
+	if (queueState?.stop_requested) {
+		blockers.push('The processing queue is stopping and will not start new work.');
+		startConditions.push('the global processing queue is resumed');
+	} else if (queueState?.is_paused) {
+		blockers.push('The processing queue is paused.');
+		startConditions.push('the global processing queue is resumed');
+	}
 	if (availableWorkerCount === 0) {
 		blockers.push('No processing worker is ready.');
 		startConditions.push('a processing worker becomes available');
@@ -142,7 +147,11 @@ export function movieCurrentWorkView(
 	const detail = waitingCopy || 'Mediaforce will start this movie when a worker accepts it.';
 
 	return {
-		label: job.status === 'retry_backoff' ? 'Waiting to retry' : 'Queued',
+		label: queueState?.stop_requested
+			? 'Queue stopping'
+			: job.status === 'retry_backoff'
+				? 'Waiting to retry'
+				: 'Queued',
 		tone: 'wait',
 		headline,
 		detail: blockers.length
