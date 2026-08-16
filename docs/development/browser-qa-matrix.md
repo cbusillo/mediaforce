@@ -51,7 +51,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/movies/Promotion%20Conflict` cover exact-file, editions/extras,
   active-job, and collision-blocked states on desktop and narrow viewports.
   `/folders/movies/Target%20Too%20Large` proves a source-cap-infeasible target
-  shows `Cannot start`, explains the 80% cap, and disables sample/queue work.
+  shows `Cannot start`, explains the configured source-size cap, and disables
+  sample/queue work.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.

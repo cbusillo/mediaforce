@@ -32,6 +32,27 @@ export interface MovieGoalFactsView {
 	estimateQuality: string;
 }
 
+export interface MovieSizeCapBlockView {
+	blocked: boolean;
+	headline: string;
+	remedy: string;
+}
+
+interface MovieSizeCapWorkflow {
+	primary_lane?: string | null;
+	detail?: string | null;
+}
+
+interface MovieSizeCapLedger {
+	size_goal?: { target_size_bytes?: number | null } | null;
+	source_relative_cap?: {
+		configured_total_percent?: number | null;
+		total_cap_bytes?: number | null;
+		status?: string | null;
+	} | null;
+	feasibility?: { reasons?: string[] | null } | null;
+}
+
 export function canRetrySampleJob(jobId: unknown, hasPendingProposal: boolean): boolean {
 	return typeof jobId === 'string' && jobId.trim().length > 0 && !hasPendingProposal;
 }
@@ -61,6 +82,66 @@ export function movieReviewStatusLabel(status: unknown, inheritedParentSample = 
 			missing_sample: 'Not prepared'
 		}[normalized] ?? (normalized ? 'Status unavailable' : 'Not reviewed')
 	);
+}
+
+export function movieSizeCapBlockView(
+	workflow: MovieSizeCapWorkflow | null | undefined,
+	ledger: MovieSizeCapLedger | null | undefined
+): MovieSizeCapBlockView {
+	const detail = textValue(workflow?.detail);
+	const reasons = (ledger?.feasibility?.reasons ?? []).filter(
+		(reason): reason is string => typeof reason === 'string' && reason.trim().length > 0
+	);
+	const blockerText = [detail, ...reasons].join(' ');
+	const sourceCapInfeasible = ledger?.source_relative_cap?.status === 'arithmetically_infeasible';
+	const mentionsSourceCap = /source(?:-size)? cap/i.test(blockerText);
+	const preservedContentReason = reasons.includes(
+		'source_relative_cap_consumed_by_non_video_budget'
+	);
+	const targetExceedsReason = reasons.includes('target_lower_bound_exceeds_source_relative_cap');
+	if (
+		workflow?.primary_lane !== 'blocked' ||
+		(!mentionsSourceCap && !preservedContentReason && !targetExceedsReason)
+	) {
+		return { blocked: false, headline: '', remedy: '' };
+	}
+
+	const configuredPercent = finitePositive(ledger?.source_relative_cap?.configured_total_percent);
+	const detailPercent = Number(blockerText.match(/(\d+(?:\.\d+)?)%\s+source(?:-size)? cap/i)?.[1]);
+	const capPercent = configuredPercent ?? (Number.isFinite(detailPercent) ? detailPercent : null);
+	const capCopy = capPercent == null ? null : `${formatPercent(capPercent)}%`;
+	const targetSize = finitePositive(ledger?.size_goal?.target_size_bytes);
+	const totalCap = finitePositive(ledger?.source_relative_cap?.total_cap_bytes);
+	const preservedContentConsumesCap =
+		preservedContentReason || /preserved streams consume .*source(?:-size)? cap/i.test(blockerText);
+	const targetExceedsCap =
+		targetExceedsReason ||
+		/target size exceeds .*source(?:-size)? cap/i.test(blockerText) ||
+		Boolean(!sourceCapInfeasible && targetSize && totalCap && targetSize > totalCap);
+
+	if (preservedContentConsumesCap) {
+		return {
+			blocked: true,
+			headline:
+				'The sound, subtitles, and other content being kept already use the allowed movie size.',
+			remedy: 'Review the movie settings and either keep less content or allow a larger output.'
+		};
+	}
+	if (targetExceedsCap) {
+		return {
+			blocked: true,
+			headline: capCopy
+				? `The requested size is larger than the allowed ${capCopy} of the original file.`
+				: 'The requested size is larger than the configured limit for this movie.',
+			remedy:
+				'Choose a smaller target in library settings. Then Mediaforce can prepare a valid movie plan.'
+		};
+	}
+	return {
+		blocked: true,
+		headline: 'The current movie plan cannot fit within the configured size limit.',
+		remedy: 'Review the movie settings and choose a size and content plan that can fit.'
+	};
 }
 
 export function movieCurrentWorkView(
@@ -262,6 +343,10 @@ function formatSpeed(speed: number | null | undefined, fps: number | null | unde
 	}
 	if (Number.isFinite(fps) && Number(fps) > 0) return `${Number(fps).toFixed(1)} fps`;
 	return 'Not available yet';
+}
+
+function formatPercent(value: number): string {
+	return value.toFixed(Number.isInteger(value) ? 0 : 1);
 }
 
 function formatDuration(value: number | null | undefined): string {
