@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { DashboardSummaryPayload, HostsPayload } from '$lib/api/types';
+import type { DashboardSummaryPayload, HostsPayload, MediaScopePayload } from '$lib/api/types';
 import {
 	buildOpsBlockers,
 	buildOpsHistoryRows,
@@ -18,6 +18,33 @@ import {
 	retryableEncodeJobIds,
 	workerCapabilitiesSummary
 } from './ops-workstation';
+
+function mediaScope(
+	prefix: string,
+	domain: MediaScopePayload['domain'],
+	kind: MediaScopePayload['kind'],
+	match: MediaScopePayload['match'] = 'descendants'
+): MediaScopePayload {
+	const segments = prefix.split('/');
+	return {
+		schema_version: 1,
+		prefix,
+		root: segments[0] ?? '',
+		domain,
+		kind,
+		match,
+		title: segments.at(-1) ?? prefix,
+		subtitle: segments.at(-2) ?? '',
+		scope_label:
+			kind === 'tv_season'
+				? 'Season'
+				: kind === 'tv_series'
+					? 'Series'
+					: match === 'exact_item'
+						? 'File'
+						: 'Title'
+	};
+}
 
 describe('RefreshCoordinator', () => {
 	it('lets a manual refresh supersede an in-flight quiet poll', () => {
@@ -100,6 +127,7 @@ function dashboardFixture(): DashboardSummaryPayload {
 				{
 					job_id: 'encode-1',
 					prefix: 'movies/feature',
+					media_scope: mediaScope('movies/feature', 'movie', 'movie_title'),
 					status: 'running',
 					host: { label: 'worker-1' },
 					progress: { percent_complete: 42, current_item_number: 2, total_item_count: 4 },
@@ -110,6 +138,7 @@ function dashboardFixture(): DashboardSummaryPayload {
 				{
 					job_id: 'encode-2',
 					prefix: 'tv/show/season 2',
+					media_scope: mediaScope('tv/show/season 2', 'tv', 'tv_season'),
 					status: 'retry_backoff',
 					error: 'transient worker fault',
 					scheduler_status_copy: 'retry backoff'
@@ -119,6 +148,7 @@ function dashboardFixture(): DashboardSummaryPayload {
 				{
 					job_id: 'encode-3',
 					prefix: 'tv/show/season 3',
+					media_scope: mediaScope('tv/show/season 3', 'tv', 'tv_season'),
 					status: 'needs_attention',
 					error: 'quality target missed'
 				}
@@ -194,12 +224,14 @@ describe('Ops workstation mapping', () => {
 			'sample:sample-1'
 		]);
 		expect(rows[1]).toMatchObject({
+			scopeLabel: 'Season',
 			tone: 'wait',
 			action: undefined,
 			actionScope: undefined,
 			host: 'Selecting computer',
 			detail: 'transient worker fault'
 		});
+		expect(rows[0]).toMatchObject({ scopeLabel: 'Movie' });
 		expect(rows[2]).toMatchObject({
 			tone: 'wait',
 			action: 'retry-encode-prefix',
@@ -264,6 +296,7 @@ describe('Ops workstation mapping', () => {
 			{
 				job_id: 'encode-window-impossible',
 				prefix: 'tv/Long Show/Season 1',
+				media_scope: mediaScope('tv/Long Show/Season 1', 'tv', 'tv_season'),
 				status: 'queued',
 				schedule_state: 'draining_impossible',
 				waiting_reason:
@@ -288,6 +321,20 @@ describe('Ops workstation mapping', () => {
 			metricLabel: 'Blocked',
 			metricValue: '1'
 		});
+
+		dashboard.encode_queue.running = [
+			{
+				job_id: 'encode-running',
+				prefix: 'movies/Arrival (2016)',
+				status: 'running'
+			}
+		];
+		dashboard.encode_queue.running_count = 1;
+
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
+			tone: 'fail',
+			title: 'A season needs a longer work window'
+		});
 	});
 
 	it('keeps old sample failures in history instead of current work', () => {
@@ -309,6 +356,159 @@ describe('Ops workstation mapping', () => {
 		expect(blockers.map((blocker) => blocker.key)).toEqual(['runtime-load', 'needs-attention']);
 		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Activity is unavailable' });
 		expect(blockers[1]).toMatchObject({ tone: 'wait', action: 'retry-failed-encode' });
+	});
+
+	it('uses the active media scope in paused and mixed queue headlines', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.state.is_paused = true;
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.queued = [
+			{
+				job_id: 'movie-queued',
+				prefix: 'movies/Arrival (2016)',
+				media_scope: mediaScope('movies/Arrival (2016)', 'movie', 'movie_title'),
+				job_kind: 'folder',
+				item_count: 1,
+				status: 'queued'
+			}
+		];
+		dashboard.encode_queue.queued_count = 1;
+
+		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].title).toBe('Movie work is paused');
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
+			'Movie work is paused'
+		);
+
+		dashboard.encode_queue.queued.push({
+			job_id: 'season-queued',
+			prefix: 'tv/Constellation/Season 1',
+			media_scope: mediaScope('tv/Constellation/Season 1', 'tv', 'tv_season'),
+			job_kind: 'folder',
+			item_count: 8,
+			status: 'queued'
+		});
+		dashboard.encode_queue.queued_count = 2;
+
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
+			'Media work is paused'
+		);
+
+		dashboard.encode_queue.queued = [dashboard.encode_queue.queued[1]];
+		dashboard.encode_queue.queued_count = 9;
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
+			'Media work is paused'
+		);
+	});
+
+	it('recognizes exact episode work in attention copy', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.queued = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.queued_count = 0;
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'episode-attention',
+				prefix: 'tv/Constellation/Season 1/S01E01.mkv',
+				media_scope: mediaScope(
+					'tv/Constellation/Season 1/S01E01.mkv',
+					'tv',
+					'media_file',
+					'exact_item'
+				),
+				job_kind: 'folder',
+				item_count: 1,
+				status: 'needs_attention'
+			}
+		];
+		dashboard.encode_queue.needs_attention_count = 1;
+
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
+			'An episode needs attention'
+		);
+
+		dashboard.encode_queue.recent[0].prefix = 'tv/Constellation/S01E01.mkv';
+		dashboard.encode_queue.recent[0].media_scope = mediaScope(
+			'tv/Constellation/S01E01.mkv',
+			'tv',
+			'media_file',
+			'exact_item'
+		);
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
+			'An episode needs attention'
+		);
+	});
+
+	it('routes final-size misses back to Studio instead of offering a plain retry', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.queued = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.queued_count = 0;
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'episode-size-miss',
+				prefix: 'tv/Constellation/Season 1/S01E01.mkv',
+				media_scope: mediaScope(
+					'tv/Constellation/Season 1/S01E01.mkv',
+					'tv',
+					'media_file',
+					'exact_item'
+				),
+				job_kind: 'folder',
+				item_count: 1,
+				status: 'needs_attention',
+				progress: {
+					failure_analysis: {
+						kind: 'final_size_target_miss',
+						retry_strategy: 'fresh_goal_required',
+						summary: 'Choose a fresh size or compression goal before retrying.'
+					}
+				}
+			}
+		];
+		dashboard.encode_queue.needs_attention_count = 1;
+
+		const row = buildOpsQueueRows(dashboard, hostsFixture()).find(
+			(candidate) => candidate.key === 'encode:episode-size-miss'
+		);
+
+		expect(row).toMatchObject({
+			action: undefined,
+			detail: 'Choose a fresh size or compression goal before retrying.'
+		});
+	});
+
+	it('uses media-item copy for mixed attention work', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.queued = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.queued_count = 0;
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'movie-attention',
+				prefix: 'movies/Arrival (2016)',
+				job_kind: 'folder',
+				item_count: 1,
+				status: 'needs_attention'
+			},
+			{
+				job_id: 'season-attention',
+				prefix: 'tv/Constellation/Season 1',
+				job_kind: 'folder',
+				item_count: 8,
+				status: 'needs_attention'
+			}
+		];
+		dashboard.encode_queue.needs_attention_count = 2;
+
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
+			'2 media items need attention'
+		);
 	});
 
 	it('explains controller storage failures instead of exposing raw errno copy', () => {
@@ -419,7 +619,14 @@ describe('Ops workstation mapping', () => {
 	});
 
 	it('summarizes the first-glance Ops readiness answer', () => {
-		const summary = buildOpsReadinessSummary(dashboardFixture(), hostsFixture(), null);
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.running = [];
+		dashboard.encode_queue.running_count = 0;
+		dashboard.encode_queue.queued = [];
+		dashboard.encode_queue.queued_count = 0;
+		dashboard.calibration_queue.sample.running = [];
+		dashboard.calibration_queue.active_count = 0;
+		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
 
 		expect(summary).toMatchObject({
 			tone: 'wait',
@@ -429,21 +636,21 @@ describe('Ops workstation mapping', () => {
 		});
 	});
 
-	it('treats active work as the headline when nothing needs operator attention', () => {
+	it('keeps active work as the headline while surfacing queued and attention context', () => {
 		const dashboard = dashboardFixture();
-		dashboard.encode_queue.needs_attention_count = 0;
-		dashboard.encode_queue.recent = [];
 
 		const summary = buildOpsReadinessSummary(dashboard, hostsFixture(), null);
 
 		expect(summary).toMatchObject({
 			tone: 'active',
-			title: 'Mediaforce is working',
+			title: 'feature is working',
 			metricLabel: 'Running',
 			metricValue: '2'
 		});
-		expect(summary.detail).toContain('1 episode part across 1 computer');
+		expect(summary.detail).toContain('1 item processing across 1 computer');
 		expect(summary.detail).toContain('1 test active');
+		expect(summary.detail).toContain('show · season 2 is queued');
+		expect(summary.detail).toContain('A season needs attention');
 	});
 
 	it('distinguishes available, scheduled-off, and unavailable host states', () => {
@@ -511,7 +718,7 @@ describe('Ops workstation mapping', () => {
 
 		expect(buildOpsQueueRows(dashboard)[0]).toMatchObject({
 			host: 'M2 MBP, M1 MBP',
-			phase: '2 active episode parts'
+			phase: '2 active processing tasks'
 		});
 	});
 
@@ -540,7 +747,7 @@ describe('Ops workstation mapping', () => {
 
 		expect(hostWorkReason(hosts.hosts[0], hosts, dashboard)).toBe('Working at capacity.');
 		expect(hostWorkReason(hosts.hosts[1], hosts, dashboard)).toBe(
-			'Next in line; all current episode parts are already assigned.'
+			'Next in line; all current media work is already assigned.'
 		);
 	});
 

@@ -105,7 +105,7 @@
 				!encodeQueue?.state.stop_requested &&
 				encodeWorkCount > 0 &&
 				actionPending === null,
-			unavailable: 'No season work is running or waiting.'
+			unavailable: 'No media work is running or waiting.'
 		},
 		{
 			id: 'resume-encode' as const,
@@ -133,7 +133,7 @@
 					encodeQueue?.state.is_paused
 				) &&
 				actionPending === null,
-			unavailable: 'No season work is running, waiting, or paused.'
+			unavailable: 'No media work is running, waiting, or paused.'
 		},
 		{
 			id: 'stop-calibration' as const,
@@ -167,7 +167,7 @@
 	}
 
 	function actionTitle(action: OpsActionId): string {
-		if (action === 'stop-encode') return 'Stop current season work and pause what is waiting';
+		if (action === 'stop-encode') return 'Stop current media work and pause what is waiting';
 		if (action === 'stop-calibration') return 'Stop tests that are running or waiting';
 		if (action === 'retry-failed-encode')
 			return 'Retry approved folders that are ready to process again';
@@ -299,8 +299,8 @@
 		if (action === 'pause-encode') return 'Pause';
 		if (action === 'resume-encode') return 'Resume';
 		if (action === 'retry-failed-encode') return 'Retry unfinished work';
-		if (action === 'retry-encode-prefix') return 'Retry season';
-		if (action === 'stop-encode') return 'Stop season work';
+		if (action === 'retry-encode-prefix') return 'Retry item';
+		if (action === 'stop-encode') return 'Stop media work';
 		if (action === 'stop-calibration') return 'Stop tests';
 		if (action === 'start-host') return 'Start';
 		if (action === 'prepare-host') return 'Prepare';
@@ -313,7 +313,7 @@
 	}
 
 	function queueKindLabel(row: OpsQueueRow): string {
-		if (row.kind === 'encode') return 'Season';
+		if (row.kind === 'encode') return row.scopeLabel ?? 'Media';
 		if (row.kind === 'proof') return 'Review';
 		return 'Test';
 	}
@@ -421,7 +421,7 @@
 						<div>
 							<strong>{encodeQueue?.state.scheduler_summary ?? 'Work schedule unavailable'}</strong>
 							<span
-								>{queuedWaitingCount.toLocaleString('en-US')} waiting · {needsAttentionCount.toLocaleString(
+								>{(encodeQueue?.queued_count ?? 0).toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
 									'en-US'
 								)}
 								need attention</span
@@ -482,7 +482,7 @@
 
 			<WorkstationPanel
 				eyebrow="Current work"
-				title="Seasons in progress"
+				title="Media in progress"
 				meta={queueRows.length ? `${queueRows.length.toLocaleString('en-US')} current` : undefined}
 			>
 				{#if queueRows.length > 0}
@@ -558,7 +558,7 @@
 						<StateBadge tone="ready" label="No current work" />
 						<div>
 							<strong>Nothing is running right now.</strong>
-							<span>Tests and seasons will appear here when work begins.</span>
+							<span>Tests and media work will appear here when work begins.</span>
 						</div>
 					</div>
 				{/if}
@@ -647,7 +647,7 @@
 								<dt>Now</dt>
 								<dd>
 									{host.active_encode_count > 0
-										? `${host.active_encode_count.toLocaleString('en-US')} episode ${host.active_encode_count === 1 ? 'part' : 'parts'}`
+										? `${host.active_encode_count.toLocaleString('en-US')} processing ${host.active_encode_count === 1 ? 'task' : 'tasks'}`
 										: 'Idle'}
 								</dd>
 								<dt>Can make</dt>
@@ -709,7 +709,7 @@
 						<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
 						<small
 							>{queuedWaitingCount.toLocaleString('en-US')}
-							{queuedWaitingCount === 1 ? 'season' : 'seasons'} waiting for the next work window</small
+							{queuedWaitingCount === 1 ? 'item' : 'items'} waiting for the next work window</small
 						>
 						<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
 					</div>
@@ -1550,9 +1550,18 @@
 		border: 1px solid var(--mf-line);
 		border-radius: var(--mf-radius-3);
 		display: flex;
+		flex-wrap: wrap;
 		gap: 12px;
-		min-width: 250px;
+		max-width: min(100%, 420px);
+		min-width: 0;
 		padding: 10px 11px;
+	}
+
+	:global(.ops-header__status .state-badge) {
+		line-height: 1.25;
+		min-width: 0;
+		overflow-wrap: anywhere;
+		white-space: normal;
 	}
 
 	.ops-header__status::before {
@@ -1796,6 +1805,13 @@
 		}
 
 		.ops-header__status {
+			display: flex;
+			max-width: none;
+			min-width: 0;
+			width: 100%;
+		}
+
+		.ops-header__status > .control {
 			display: none;
 		}
 

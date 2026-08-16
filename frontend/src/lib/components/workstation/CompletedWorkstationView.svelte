@@ -512,13 +512,13 @@
 									<StateBadge
 										compact
 										tone={eventTone(event.tone)}
-										label={completedHistoryLabel(event.label)}
+										label={completedHistoryLabel(event)}
 									/>
 									<div>
 										<strong>{event.title}</strong>
 										<span>{event.prefix}</span>
 									</div>
-									<p>{completedHistoryDetail(event.detail)}</p>
+									<p>{completedHistoryDetail(event.detail, event)}</p>
 									<time>{formatTimestamp(event.created_at)}</time>
 								</div>
 							{/each}
@@ -910,13 +910,13 @@
 									<StateBadge
 										compact
 										tone={eventTone(event.tone)}
-										label={completedHistoryLabel(event.label)}
+										label={completedHistoryLabel(event)}
 									/>
 									<div>
 										<strong>{event.title}</strong>
 										<span>{event.prefix}</span>
 									</div>
-									<p>{completedHistoryDetail(event.detail)}</p>
+									<p>{completedHistoryDetail(event.detail, event)}</p>
 									<time>{formatTimestamp(event.created_at)}</time>
 								</div>
 							{:else}
@@ -979,7 +979,7 @@
 								<StateBadge
 									compact
 									tone={eventTone(event.tone)}
-									label={completedHistoryLabel(event.label)}
+									label={completedHistoryLabel(event)}
 								/>
 								<div>
 									<strong>{event.title}</strong>

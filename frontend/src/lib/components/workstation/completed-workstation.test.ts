@@ -132,12 +132,36 @@ describe('Completed workstation mapping', () => {
 	});
 
 	it('keeps failed season work distinct from an operator stop', () => {
-		expect(completedHistoryLabel('Encoding failed')).toBe('Season failed');
-		expect(completedHistoryLabel('Encoding stopped')).toBe('Season stopped');
-		expect(completedHistoryLabel('Encoding started')).toBe('Season started');
-		expect(completedHistoryDetail('Encode worker failed while processing an item.')).toBe(
+		const event = {
+			id: 1,
+			event_type: 'encoding_failed',
+			label: 'Encoding failed',
+			tone: 'fail',
+			prefix: 'tv/show/season 1',
+			title: 'Season 1',
+			subtitle: 'Show',
+			scope_label: 'Season',
+			domain: 'tv' as const,
+			created_at: '2026-07-11T12:00:00Z',
+			detail: 'Encode worker failed while processing an item.',
+			size_bytes: null,
+			source: 'api' as const
+		};
+
+		expect(completedHistoryLabel(event)).toBe('Episode failed');
+		expect(completedHistoryLabel({ ...event, label: 'Encoding stopped' })).toBe('Episode stopped');
+		expect(completedHistoryLabel({ ...event, label: 'Encoding started' })).toBe('Episode started');
+		expect(completedHistoryDetail(event.detail, event)).toBe(
 			'A computer failed while making an episode.'
 		);
+		expect(
+			completedHistoryLabel({
+				...event,
+				prefix: 'movies/Arrival (2016)',
+				domain: 'movie',
+				label: 'Promotion completed'
+			})
+		).toBe('Movie finished');
 	});
 
 	it('indexes the same plain-language history copy shown to operators', () => {
@@ -150,12 +174,60 @@ describe('Completed workstation mapping', () => {
 			title: 'Season 1',
 			subtitle: 'Show',
 			scope_label: 'tv',
+			domain: 'tv' as const,
 			created_at: '2026-07-11T12:00:00Z',
 			detail: 'Encode worker failed while processing an item.',
 			size_bytes: null
 		};
 
-		expect(completedHistorySearchText(event)).toContain('season failed');
-		expect(completedHistorySearchText(event)).toContain('a computer failed');
+		expect(completedHistorySearchText({ ...event, source: 'api' })).toContain('episode failed');
+		expect(completedHistorySearchText({ ...event, source: 'api' })).toContain('a computer failed');
+	});
+
+	it('uses backend media domains when library roots are customized', () => {
+		const event = {
+			id: 2,
+			event_type: 'promotion_completed',
+			label: 'Promotion completed',
+			tone: 'ready',
+			prefix: 'series/Show/Season 1',
+			title: 'Season 1',
+			subtitle: 'Show',
+			scope_label: 'Season',
+			domain: 'tv' as const,
+			created_at: '2026-08-16T12:00:00Z',
+			detail: 'Promoted item.',
+			size_bytes: null,
+			source: 'api' as const
+		};
+
+		expect(completedHistoryLabel(event)).toBe('Episode finished');
+		expect(
+			completedHistoryLabel({
+				...event,
+				prefix: 'cinema/Arrival (2016)',
+				domain: 'movie'
+			})
+		).toBe('Movie finished');
+	});
+
+	it('normalizes originals-removed history labels from the event type', () => {
+		const event = {
+			id: 3,
+			event_type: 'originals_removed_confirmed',
+			label: 'Originals marked removed',
+			tone: 'idle',
+			prefix: 'series/Show/Season 1',
+			title: 'Season 1',
+			subtitle: 'Show',
+			scope_label: 'Season',
+			domain: 'tv' as const,
+			created_at: '2026-08-16T12:00:00Z',
+			detail: 'Operator confirmed the originals were removed.',
+			size_bytes: null,
+			source: 'api' as const
+		};
+
+		expect(completedHistoryLabel(event)).toBe('Originals removed');
 	});
 });

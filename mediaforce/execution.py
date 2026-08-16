@@ -35,8 +35,8 @@ from mediaforce.encoding.streams import ProductionStreamPlan, _audio_codec as _a
 from mediaforce.encoding.video_filters import most_common_crop
 from mediaforce.encoding.ffmpeg import ffmpeg_hwaccel_input_args
 from mediaforce.library.probe import probe_media
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError, \
-    run_command
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
+    ProcessDeadlineEnforcementError, ScheduleWindowClosedError, run_command
 from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError, guard_command_for_schedule_deadline, \
     process_result_reached_schedule_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict
@@ -550,7 +550,7 @@ def _detect_video_crop(
                 if process_result_reached_schedule_deadline(result, host_payload):
                     raise ScheduleWindowClosedError("Encode host schedule window closed.")
             stderr_parts.append(result.stderr or "")
-    except (ProcessCancelledError, ScheduleDeadlineConfigurationError):
+    except (ProcessCancelledError, ProcessDeadlineEnforcementError, ScheduleDeadlineConfigurationError):
         raise
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return None

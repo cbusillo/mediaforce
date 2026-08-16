@@ -36,6 +36,9 @@ worker`, `Needs sample`, `Safe to delete`.
   state.
 - Encode: use `Process` for basic route summaries; keep `encode` in technical
   job tables.
+- Exact TV item: use singular `episode` language through recovery, processing,
+  checking, finishing, and completed states. Do not reuse season-wide copy for
+  a route that targets one episode.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
 - Movie validation: use `Check compressed file` and `checked file` instead of
@@ -111,6 +114,9 @@ remain unchanged` while memory is observation-only.
   continuing.
 - Retryable failures exist: `Retry available`. Failed approved work can be
   tried again.
+- Cross-media queue summaries: derive `movie`, `episode`, `season`, `show`, or
+  `file` from the full relevant job set. Use `media work` or `media items` for
+  mixed scopes, and let active work outrank stale attention in the headline.
 - Historical sample failures: `Past sample issues`. Old sample/proof failures
   are history unless they block current work.
 - Catalog facts match policy: `Current`. Mediaforce can browse remembered file
@@ -130,6 +136,10 @@ remain unchanged` while memory is observation-only.
   polling in the background.
 
 ### Completed
+
+- Item history: use `Movie`, `Episode`, or `File` for item-level processing,
+  checking, and promotion events. Use `Season` only for a folder-level summary,
+  not for every TV item event.
 
 - Archived originals exist: `Originals ready to delete`. Files can be removed
   from the cleanup folder after review.

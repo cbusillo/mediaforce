@@ -11,7 +11,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import item_events, library_items, staged_artifacts
 from mediaforce.encoding.staging import safe_unlink
-from mediaforce.library.media_scopes import path_matches_scope
+from mediaforce.library.media_scopes import media_scope_from_prefix, path_matches_scope
 FolderGroup = tuple[str, str, str, str]
 ORIGINALS_REMOVED_EVENT = "originals_removed_confirmed"
 HISTORY_DETAIL_MAX_CHARS = 320
@@ -45,6 +45,7 @@ class CompletedHistoryEvent:
     title: str
     subtitle: str
     scope_label: str
+    domain: str
     created_at: str
     detail: str
     size_bytes: int | None = None
@@ -70,7 +71,11 @@ def completed_page_payload(
         "archive_cleanup": completed_archive_cleanup_summary(archive_root, folders),
         "history": [
             asdict(event)
-            for event in list_completed_history_events(connection, folder_group=folder_group)
+            for event in list_completed_history_events(
+                connection,
+                folder_group=folder_group,
+                library_types=config.library_type_map,
+            )
         ],
     }
 
@@ -284,6 +289,7 @@ def list_completed_history_events(
         connection: DBClient,
         *,
         folder_group: Callable[[str], FolderGroup | None],
+        library_types: dict[str, str] | None = None,
         limit: int = 80,
 ) -> list[CompletedHistoryEvent]:
     rows = connection.execute(
@@ -323,6 +329,11 @@ def list_completed_history_events(
         if group is None:
             continue
         prefix, title, subtitle, scope_label = group
+        domain = media_scope_from_prefix(
+            prefix,
+            match="descendants",
+            library_types=library_types,
+        ).domain
         event_type = _clean_text(row["event_type"])
         details = _event_details(row["details_json"])
         label, tone, detail, size_bytes = _history_event_copy(event_type, details)
@@ -336,6 +347,7 @@ def list_completed_history_events(
                 title=title,
                 subtitle=subtitle,
                 scope_label=scope_label,
+                domain=domain,
                 created_at=_clean_text(row["created_at"]),
                 detail=detail,
                 size_bytes=size_bytes,

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shlex
 import socket
 import threading
@@ -77,6 +78,12 @@ class EncodeQueueRuntimeDeps:
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
 SCHEDULE_CLOSE_ERROR_MESSAGE = "Encode host schedule window closed."
+FINAL_SIZE_MISS_RE = re.compile(
+    r"Final output size missed the approved target band: "
+    r"status=(?P<status>[a-z_]+), "
+    r"actual=(?P<actual>\d+|None), target=(?P<target>\d+|None), "
+    r"lower=(?P<lower>\d+|None), upper=(?P<upper>\d+|None)\."
+)
 
 
 def recover_encode_queue(
@@ -969,6 +976,28 @@ def _encode_failure_analysis(
     indexes = _manifest_indexes_for_job(job, manifest_items)
     if not indexes:
         return None
+    final_size_analysis = _final_size_failure_analysis(error_message)
+    if final_size_analysis is not None:
+        valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
+        if len(valid_indexes) != 1:
+            return {
+                **final_size_analysis,
+                "manifest_indexes": valid_indexes,
+                "summary": (
+                    "At least one selected item missed the approved final size contract. "
+                    "Choose a fresh size or compression goal and make another representative test before retrying."
+                ),
+            }
+        index = valid_indexes[0]
+        item = manifest_items[index]
+        final_size_analysis.update(
+            {
+                "manifest_index": index,
+                "manifest_indexes": [index],
+                "item_rel_path": str(item.get("rel_path") or item.get("source_path") or ""),
+            }
+        )
+        return _aggregate_quality_failure_analysis(indexes, [final_size_analysis])
     item_analyses: list[dict[str, Any]] = []
     for index in indexes:
         if index < 0 or index >= len(manifest_items):
@@ -996,6 +1025,45 @@ def _encode_failure_analysis(
     return _aggregate_quality_failure_analysis(indexes, item_analyses)
 
 
+def _final_size_failure_analysis(error_message: str) -> dict[str, Any] | None:
+    match = FINAL_SIZE_MISS_RE.search(error_message)
+    if match is None:
+        return None
+    status = match.group("status")
+    actual = _optional_int(match.group("actual"))
+    target = _optional_int(match.group("target"))
+    lower = _optional_int(match.group("lower"))
+    upper = _optional_int(match.group("upper"))
+    summary = (
+        "Mediaforce could not verify the final output against the approved target band. "
+        "Choose a fresh size or compression goal and make another representative test before retrying."
+        if status == "missing_target"
+        else (
+            f"The final output landed {'below' if status == 'under_target' else 'above'} the approved target band. "
+            "Choose a fresh size or compression goal and make another representative test before retrying."
+        )
+    )
+    return {
+        "kind": "final_size_target_miss",
+        "retry_strategy": "fresh_goal_required",
+        "auto_retry_allowed": False,
+        "status": status,
+        "target_size_verification": {
+            "status": status,
+            "passed": False,
+            "actual_output_bytes": actual,
+            "target_size_bytes": target,
+            "lower_bound_bytes": lower,
+            "upper_bound_bytes": upper,
+        },
+        "summary": summary,
+    }
+
+
+def _optional_int(value: str) -> int | None:
+    return int(value) if value != "None" else None
+
+
 def _aggregate_quality_failure_analysis(
         indexes: list[int],
         item_analyses: list[dict[str, Any]],
@@ -1007,6 +1075,34 @@ def _aggregate_quality_failure_analysis(
         if int_value(item.get("manifest_index")) >= 0
     }
     all_selected_analyzed = selected_indexes == analyzed_indexes
+    final_size_analyses = [
+        item for item in item_analyses if str(item.get("kind") or "") == "final_size_target_miss"
+    ]
+    if final_size_analyses:
+        analysis = dict(final_size_analyses[0])
+        all_analyses_are_final_size = len(final_size_analyses) == len(item_analyses)
+        if len(final_size_analyses) == 1 and all_selected_analyzed and all_analyses_are_final_size:
+            summary = str(analysis.get("summary") or "").strip()
+        elif all_selected_analyzed and all_analyses_are_final_size:
+            summary = (
+                f"{len(final_size_analyses)} selected items missed the approved final size contract. "
+                "Choose a fresh size or compression goal and make another representative test before retrying."
+            )
+        else:
+            summary = (
+                "At least one selected item missed the approved final size contract. "
+                "Choose a fresh size or compression goal and make another representative test before retrying."
+            )
+        analysis.update(
+            {
+                "manifest_indexes": indexes,
+                "item_analyses": item_analyses,
+                "auto_retry_allowed": False,
+                "retry_strategy": "fresh_goal_required",
+                "summary": summary,
+            }
+        )
+        return analysis
     if len(item_analyses) == 1:
         analysis = dict(item_analyses[0])
         analysis["manifest_indexes"] = indexes
@@ -2312,6 +2408,7 @@ def run_encode_job(
             final_status = "stopped"
             error = "Encode queue job was stopped and cleaned up."
     except Exception as exc:
+        deps.logger.exception("Encode job %s failed before terminal transition.", job_id)
         failure_kind = _classify_encode_failure(exc, job)
         error = quality_error_message(exc)
     finally:
@@ -2380,7 +2477,8 @@ def run_encode_job(
             if running_encode_job_count(connection) == 0:
                 state.update({"active_job_id": None, "stop_requested": False, "updated_at": deps.now_iso()})
                 save_queue_state(connection, state)
-        process_controller.reset()
+        if not process_controller.cleanup_unproven:
+            process_controller.reset()
 
 
 def _encode_job_worker_id() -> str:

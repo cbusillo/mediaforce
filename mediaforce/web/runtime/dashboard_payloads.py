@@ -45,7 +45,10 @@ def dashboard_summary_payload(
                 ).scalar_one()
             ) == 0
         calibration_queue = list_queue_summary(connection)
-        encode_queue = decorate_encode_queue_for_scheduler(config, summarize_encode_queue(connection))
+        encode_queue = decorate_encode_queue_for_scheduler(
+            config,
+            summarize_encode_queue(connection, library_types=config.library_type_map),
+        )
     return {
         "library_colors": library_color_map_for_config(config),
         "scan_job": scan_job,
