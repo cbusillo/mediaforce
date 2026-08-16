@@ -51,7 +51,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/movies/Promotion%20Conflict` cover exact-file, editions/extras,
   active-job, and collision-blocked states on desktop and narrow viewports.
   `/folders/movies/Target%20Too%20Large` proves a source-cap-infeasible target
-  shows `Cannot start`, explains the configured source-size cap, and disables
+  shows `Cannot start`, explains the configured source-size cap, keeps current
+  size, expected output, and expected savings visible, and disables
   sample/queue work.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
@@ -109,6 +110,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   original under the smoke archive root, so `/completed` has cleanup-ready work.
 - Completed history: the completed fixtures include earlier failed and
   operator-stopped encode events so History must distinguish the two outcomes.
+  Item events use media-aware labels such as `Movie failed` or `Episode
+finished`; season wording is reserved for folder-level summaries.
+- Exact-item Activity: a running episode fixture must keep the readiness badge
+  readable without horizontal overflow at 390px, including a long episode name.
 - Blocked cleanup: one promoted `movies/Blocked Cleanup` item with an archived
   original outside the configured archive root, so `/completed` exposes a
   blocked cleanup state.

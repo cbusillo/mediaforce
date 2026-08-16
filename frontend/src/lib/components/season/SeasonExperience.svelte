@@ -130,6 +130,8 @@
 
 	const identity = $derived(seasonIdentity(folder.prefix));
 	const isSeriesScope = $derived(isSeriesPrefix(folder.prefix));
+	const isExactItemScope = $derived(folder.media_scope?.match === 'exact_item');
+	const exactEpisodeName = $derived(episodeLabel(folder.prefix));
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
 	const seriesSeasonLabel = $derived(seriesSeasonCount === 1 ? 'season' : 'seasons');
 	const lifecycle = $derived(folder.lifecycle ?? null);
@@ -161,18 +163,26 @@
 	const lifecycleHoldReasons = $derived(currentSeasonLifecycle?.hold_reasons ?? []);
 	const lifecycleHold = $derived(lifecycleHoldReasons[0] ?? null);
 	const scopeTitle = $derived(
-		isSeriesScope ? identity.show : `${identity.show} · ${identity.season}`
+		isSeriesScope
+			? identity.show
+			: isExactItemScope
+				? `${identity.show} · ${identity.season} · ${exactEpisodeName}`
+				: `${identity.show} · ${identity.season}`
 	);
-	const scopeName = $derived(isSeriesScope ? identity.show : identity.season);
-	const scopeNoun = $derived(isSeriesScope ? 'show' : 'season');
+	const scopeName = $derived(
+		isSeriesScope ? identity.show : isExactItemScope ? exactEpisodeName : identity.season
+	);
+	const scopeNoun = $derived(isSeriesScope ? 'show' : isExactItemScope ? 'episode' : 'season');
 	const makeActionLabel = $derived(
 		isSeriesScope
 			? `Make ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
-			: heldEpisodeCount > 0
-				? canOverrideLifecycleHolds
-					? 'Override hold and make the season'
-					: 'Season remains protected'
-				: 'Make the season'
+			: isExactItemScope
+				? 'Make this episode'
+				: heldEpisodeCount > 0
+					? canOverrideLifecycleHolds
+						? 'Override hold and make the season'
+						: 'Season remains protected'
+					: 'Make the season'
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
@@ -246,11 +256,15 @@
 	const scopeActivityJob = $derived(scopeActivity?.job ?? null);
 	const scopeTargetContract = $derived(calibrationJobTargetContract(scopeActivityJob));
 	const activeJobTargetBytes = $derived(exactTargetContract?.target_size_bytes ?? 0);
+	const activeJobTargetIsCurrent = $derived(
+		['queued', 'running'].includes(asText(asRecord(exactCalibrationJob).status).toLowerCase())
+	);
 	const currentTargetBytes = $derived(
-		activeJobTargetBytes ||
+		(activeJobTargetIsCurrent ? activeJobTargetBytes : 0) ||
 			targetSummary?.targetBytes ||
 			sizeTarget.budgetBytes ||
 			selectedGoal?.targetSizeBytes ||
+			activeJobTargetBytes ||
 			0
 	);
 	const sizeTargetLabel = $derived(
@@ -315,8 +329,17 @@
 			? olderSeasonOverride.season_count
 			: 0
 	);
+	const recoveryNeedsFreshGoal = $derived(
+		asText(asRecord(folder.encode_job?.progress?.failure_analysis).retry_strategy) ===
+			'fresh_goal_required' ||
+			asText(folder.encode_job?.error)
+				.toLowerCase()
+				.includes('final output size missed the approved target band')
+	);
 	const recoveryNeedsAdjustment = $derived(
-		humanState.recoveryKind === 'season' && Boolean(folder.encode_job?.progress?.failure_analysis)
+		humanState.recoveryKind === 'season' &&
+			Boolean(folder.encode_job?.progress?.failure_analysis) &&
+			!recoveryNeedsFreshGoal
 	);
 	const pageIsCinematic = $derived(
 		['making_test', 'ready_to_compare', 'making_season'].includes(humanState.key) && !retryMode
@@ -331,7 +354,18 @@
 		['completed', 'pending_review'].includes(scopeActivityStatus)
 	);
 	const showScopeActivity = $derived(
-		shouldPrioritizeScopeActivity(scopeActivity, hasOwnCalibration)
+		shouldPrioritizeScopeActivity(
+			scopeActivity,
+			hasOwnCalibration,
+			[
+				'making_season',
+				'ready_to_check',
+				'ready_to_finish',
+				'finish_blocked',
+				'finished',
+				'needs_help'
+			].includes(humanState.key)
+		)
 	);
 	const scopeActivityScope = $derived(scopeActivityJob?.activity_scope ?? null);
 	const scopeActivityOwnerPrefix = $derived(scopeActivityJob?.prefix ?? '');
@@ -595,7 +629,9 @@
 					bypass_schedule: false,
 					override_policy_holds: overridePolicyHolds
 				}),
-				'We couldn’t start the remaining episodes.'
+				isExactItemScope
+					? 'We couldn’t start this episode.'
+					: 'We couldn’t start the remaining episodes.'
 			);
 		});
 	}
@@ -665,24 +701,36 @@
 	}
 
 	async function checkOutputs() {
-		await runAction('checking', 'We couldn’t check the new episodes.', async () => {
-			ensureOk(
-				await postJson<ActionResponse>(endpoint('validate-outputs'), {}),
-				'We couldn’t check the new episodes.'
-			);
-		});
+		await runAction(
+			'checking',
+			isExactItemScope ? 'We couldn’t check this episode.' : 'We couldn’t check the new episodes.',
+			async () => {
+				ensureOk(
+					await postJson<ActionResponse>(endpoint('validate-outputs'), {}),
+					isExactItemScope
+						? 'We couldn’t check this episode.'
+						: 'We couldn’t check the new episodes.'
+				);
+			}
+		);
 	}
 
 	async function finishSeason() {
 		await runAction('finishing', `We couldn’t finish the ${scopeNoun}.`, async () => {
 			ensureOk(
 				await postJson<ActionResponse>(endpoint('promote-outputs'), {}),
-				'We couldn’t put the new episodes into your library.'
+				isExactItemScope
+					? 'We couldn’t put the new episode into your library.'
+					: 'We couldn’t put the new episodes into your library.'
 			);
 		});
 	}
 
 	async function recoverSeason() {
+		if (recoveryNeedsFreshGoal) {
+			await chooseDifferentSize();
+			return;
+		}
 		const reviewGateStatus = asText(asRecord(folder.review_gate).status);
 		const incompleteSavedTest =
 			(Boolean(asText(calibration.job_id)) && !asText(calibration.draft_hash)) ||
@@ -712,32 +760,47 @@
 		if (failureAnalysis) {
 			await openSafetyDialog({
 				kind: 'recovery',
-				title: 'The unfinished episodes need a small adjustment.',
-				detail:
-					'Mediaforce found a measured setting that should let them finish. Those episodes may not match the approved test exactly; episodes already made will not change.',
+				title: isExactItemScope
+					? 'This episode needs a small adjustment.'
+					: 'The unfinished episodes need a small adjustment.',
+				detail: isExactItemScope
+					? 'Mediaforce found a measured setting that should let it finish. The result may not match the approved test exactly; nothing in your library has changed.'
+					: 'Mediaforce found a measured setting that should let them finish. Those episodes may not match the approved test exactly; episodes already made will not change.',
 				primaryLabel: 'Adjust and retry'
 			});
 			return;
 		}
-		await runAction('recovering', 'We couldn’t restart the unfinished episodes.', async () => {
-			ensureOk(
-				await postJson<ActionResponse>(endpoint('queue-encode'), {
-					notes: 'Retry unfinished episodes.',
-					bypass_schedule: false
-				}),
-				'We couldn’t retry the unfinished episodes.'
-			);
-		});
+		await runAction(
+			'recovering',
+			isExactItemScope
+				? 'We couldn’t restart this episode.'
+				: 'We couldn’t restart the unfinished episodes.',
+			async () => {
+				ensureOk(
+					await postJson<ActionResponse>(endpoint('queue-encode'), {
+						notes: isExactItemScope ? 'Retry this episode.' : 'Retry unfinished episodes.',
+						bypass_schedule: false
+					}),
+					isExactItemScope
+						? 'We couldn’t retry this episode.'
+						: 'We couldn’t retry the unfinished episodes.'
+				);
+			}
+		);
 	}
 
 	async function performMeasuredRecovery() {
 		await runAction(
 			'recovering',
-			'We couldn’t adjust and retry the unfinished episodes.',
+			isExactItemScope
+				? 'We couldn’t adjust and retry this episode.'
+				: 'We couldn’t adjust and retry the unfinished episodes.',
 			async () => {
 				ensureOk(
 					await postJson<ActionResponse>(endpoint('approve-recovery'), {}),
-					'We couldn’t adjust and retry the unfinished episodes.'
+					isExactItemScope
+						? 'We couldn’t adjust and retry this episode.'
+						: 'We couldn’t adjust and retry the unfinished episodes.'
 				);
 			}
 		);
@@ -857,21 +920,36 @@
 				detail: `Recording the test you chose and checking whether the ${scopeNoun} can start.`
 			},
 			queueing: {
-				title: isSeriesScope ? 'Starting selected seasons' : 'Starting the season',
-				detail: 'Preparing the remaining episodes and finding available computers.'
+				title: isSeriesScope
+					? 'Starting selected seasons'
+					: isExactItemScope
+						? 'Starting the episode'
+						: 'Starting the season',
+				detail: isExactItemScope
+					? 'Preparing this episode and finding an available computer.'
+					: 'Preparing the remaining episodes and finding available computers.'
 			},
 			checking: {
-				title: 'Checking every episode',
-				detail: 'Confirming that each new file opens, plays, and matches the original length.'
+				title: isExactItemScope ? 'Checking the episode' : 'Checking every episode',
+				detail: isExactItemScope
+					? 'Confirming that the new file opens, plays, and matches the original length.'
+					: 'Confirming that each new file opens, plays, and matches the original length.'
 			},
 			finishing: {
-				title: isSeriesScope ? 'Putting the show in place' : 'Putting the season in place',
-				detail:
-					'Moving the originals to the backup area and placing the checked smaller files in your library.'
+				title: isSeriesScope
+					? 'Putting the show in place'
+					: isExactItemScope
+						? 'Putting the episode in place'
+						: 'Putting the season in place',
+				detail: isExactItemScope
+					? 'Moving the original to the backup area and placing the checked smaller file in your library.'
+					: 'Moving the originals to the backup area and placing the checked smaller files in your library.'
 			},
 			recovering: {
 				title: 'Trying again',
-				detail: 'Keeping completed work and restarting only what still needs attention.'
+				detail: isExactItemScope
+					? 'Keeping your original safe and restarting only this episode.'
+					: 'Keeping completed work and restarting only what still needs attention.'
 			}
 		};
 		return phase === 'idle' ? { title: '', detail: '' } : copy[phase];
@@ -1197,7 +1275,7 @@
 								? `Choose one size for ${olderSeasonOverride.season_count} older ${olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'}`
 								: isSeriesScope
 									? `Choose one size for all ${seriesSeasonCount} ${seriesSeasonLabel}`
-									: `Choose a size for ${identity.season}`}
+									: `Choose a size for ${scopeName}`}
 					</h1>
 					<p class="lede">
 						{#if isSeriesScope && olderSeasonOverride?.available}
@@ -1210,11 +1288,12 @@
 							{#if cadenceExcludedEpisodeCount > 0}
 								{cadenceExcludedEpisodeCount} episodes without motion-pattern clearance stay original.
 							{/if}
+						{:else if isExactItemScope}
+							1 episode · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one test before
+							Mediaforce makes this episode.
 						{:else}
-							{episodeCount} episodes{isSeriesScope
-								? ` across ${seriesSeasonCount} ${seriesSeasonLabel}`
-								: ''} · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one representative
-							test before Mediaforce makes the rest.
+							{episodeCount} episodes · {formatDecimalFileSize(originalSeasonSize)} now. You will compare
+							one representative test before Mediaforce makes the rest.
 						{/if}
 					</p>
 				</div>
@@ -1642,15 +1721,23 @@
 				</div>
 
 				<div class="season-estimate-note">
-					<span>{isSeriesScope ? 'Estimated eligible output' : 'Estimated season total'}</span>
+					<span
+						>{isSeriesScope
+							? 'Estimated eligible output'
+							: isExactItemScope
+								? 'Estimated episode output'
+								: 'Estimated season total'}</span
+					>
 					<strong
 						>{expectedSeasonBytes
 							? formatDecimalFileSize(expectedSeasonBytes)
 							: 'Still estimating'}</strong
 					>
-					<small
-						>Representative estimate only; each production episode uses its own runtime target.</small
-					>
+					<small>
+						{isExactItemScope
+							? 'Estimate for this episode; final size is confirmed after validation.'
+							: 'Representative estimate only; each production episode uses its own runtime target.'}
+					</small>
 				</div>
 
 				{#if !riskSummary?.requiresCadenceResolution}
@@ -1833,9 +1920,11 @@
 								? 'Ready to choose which seasons to make.'
 								: 'Ready to process the older seasons.'
 							: 'Ready to make the eligible seasons.'
-						: heldEpisodeCount > 0
-							? 'This season is ready, but protected.'
-							: 'Ready to make the season.'}
+						: isExactItemScope
+							? 'Ready to make this episode.'
+							: heldEpisodeCount > 0
+								? 'This season is ready, but protected.'
+								: 'Ready to make the season.'}
 				</h1>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
 					<p class="lede">
@@ -1859,9 +1948,13 @@
 				{/if}
 				<div class="ready-summary">
 					<div>
-						<span>{isSeriesScope ? 'Eligible episodes' : 'Episodes'}</span><strong
-							>{productionEpisodeCount}</strong
-						>
+						<span
+							>{isSeriesScope
+								? 'Eligible episodes'
+								: isExactItemScope
+									? 'Episode'
+									: 'Episodes'}</span
+						><strong>{productionEpisodeCount}</strong>
 					</div>
 					<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
 					<div>
@@ -1870,13 +1963,22 @@
 						>
 					</div>
 					<div>
-						<span>{isSeriesScope ? 'Estimated eligible output' : 'Estimated season total'}</span
+						<span
+							>{isSeriesScope
+								? 'Estimated eligible output'
+								: isExactItemScope
+									? 'Estimated episode output'
+									: 'Estimated season total'}</span
 						><strong
 							>{expectedSeasonBytes
 								? formatDecimalFileSize(expectedSeasonBytes)
 								: 'Varies by episode'}</strong
 						>
-						<small>Each episode gets its own runtime-derived target.</small>
+						<small
+							>{isExactItemScope
+								? 'This episode uses its runtime-derived target.'
+								: 'Each episode gets its own runtime-derived target.'}</small
+						>
 					</div>
 				</div>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
@@ -1935,7 +2037,9 @@
 							? `Making ${activeOlderSeasonCount} older ${activeOlderSeasonCount === 1 ? 'season' : 'seasons'}`
 							: isSeriesScope
 								? `Making all ${seriesSeasonCount} ${seriesSeasonLabel}`
-								: `Making ${identity.season}`}
+								: isExactItemScope
+									? `Making ${exactEpisodeName}`
+									: `Making ${identity.season}`}
 					</h1>
 					<p class="lede">
 						{encodeProgress.currentEpisode === 'A representative episode'
@@ -1944,7 +2048,7 @@
 					</p>
 					<div class="progress-facts">
 						<strong>{seasonProgressCompleted} of {encodeProgress.total}</strong>
-						<span>episodes finished</span>
+						<span>{isExactItemScope ? 'episode finished' : 'episodes finished'}</span>
 						{#if encodeProgress.eta}<small>{encodeProgress.eta}</small>{/if}
 					</div>
 				</div>
@@ -1966,20 +2070,23 @@
 					<i style={`width: ${seasonProgressPercent}%`}></i>
 				</div>
 				<p class="progress-note">
-					Completed episodes are kept. If a computer disconnects, unfinished work can be retried.
+					{isExactItemScope
+						? 'Your original is kept. If the computer disconnects, this episode can be retried.'
+						: 'Completed episodes are kept. If a computer disconnects, unfinished work can be retried.'}
 				</p>
 			</section>
 		{:else if humanState.key === 'ready_to_check'}
 			<section class="ready-room ready-room--check">
 				<div class="ready-symbol" aria-hidden="true"><span>···</span></div>
-				<p class="eyebrow">Episodes made</p>
-				<h1>Let’s check every new file.</h1>
+				<p class="eyebrow">{isExactItemScope ? 'Episode made' : 'Episodes made'}</p>
+				<h1>{isExactItemScope ? 'Let’s check this episode.' : 'Let’s check every new file.'}</h1>
 				<p class="lede">
-					Before anything changes in your library, Mediaforce checks that each episode opens, plays,
-					and has the expected length.
+					{isExactItemScope
+						? 'Before anything changes in your library, Mediaforce checks that the episode opens, plays, and has the expected length.'
+						: 'Before anything changes in your library, Mediaforce checks that each episode opens, plays, and has the expected length.'}
 				</p>
 				<button class="primary-button" type="button" onclick={checkOutputs}>
-					Check the new episodes
+					{isExactItemScope ? 'Check this episode' : 'Check the new episodes'}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 				</button>
 			</section>
@@ -1989,16 +2096,23 @@
 				<p class="eyebrow">Every check passed</p>
 				<h1>Ready to finish.</h1>
 				<p class="lede">
-					Every episode is accounted for. {promotionIntegrity.readyCount === 0
+					{isExactItemScope ? 'This episode is accounted for.' : 'Every episode is accounted for.'}
+					{promotionIntegrity.readyCount === 0
 						? 'No checked episodes still need replacement.'
 						: promotionIntegrity.readyCount === 1
 							? 'Finishing replaces the checked episode.'
 							: `Finishing replaces all ${promotionIntegrity.readyCount} checked episodes together.`}
-					The current originals move to the backup area so they can be recovered later.
+					{isExactItemScope
+						? 'The current original moves to the backup area so it can be recovered later.'
+						: 'The current originals move to the backup area so they can be recovered later.'}
 				</p>
 				<SeasonIntegrityPanel integrity={promotionIntegrity} tone="ready" />
 				<button class="primary-button" type="button" onclick={finishSeason}>
-					{isSeriesScope ? 'Finish the show' : 'Finish the season'}
+					{isSeriesScope
+						? 'Finish the show'
+						: isExactItemScope
+							? 'Finish this episode'
+							: 'Finish the season'}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 				</button>
 				<p class="action-note">Nothing changes until you choose this action.</p>
@@ -2006,17 +2120,23 @@
 		{:else if humanState.key === 'finish_blocked'}
 			<section class="ready-room ready-room--blocked">
 				<div class="ready-symbol" aria-hidden="true"><span>!</span></div>
-				<p class="eyebrow">Whole season required</p>
+				<p class="eyebrow">
+					{isExactItemScope ? 'Whole episode required' : 'Whole season required'}
+				</p>
 				<h1>{humanState.label}.</h1>
 				<p class="lede">
-					{humanState.detail} Mediaforce will not replace a partial season or adopt an untracked file.
-					No originals move to backup while this check is blocked.
+					{humanState.detail} Mediaforce will not replace {isExactItemScope
+						? 'a partial episode'
+						: 'a partial season'} or adopt an untracked file. No originals move to backup while this check
+					is blocked.
 				</p>
 				{#if promotionIntegrity.available}
 					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
 				{:else if promotionIntegrity.error}
 					<div class="integrity-loading integrity-loading--error" role="alert">
-						<strong>Season check unavailable</strong>
+						<strong
+							>{isExactItemScope ? 'Episode check unavailable' : 'Season check unavailable'}</strong
+						>
 						<span
 							>{promotionIntegrity.error} No files can be replaced while this check is unavailable.</span
 						>
@@ -2037,12 +2157,19 @@
 				<p class="eyebrow">All finished</p>
 				<h1>{scopeName} is ready.</h1>
 				<p class="lede">
-					All {episodeCount} smaller episodes are in your library. The originals remain in the backup
-					area until you choose to remove them.
+					{isExactItemScope
+						? 'The smaller episode is in your library. The original remains in the backup area until you choose to remove it.'
+						: `All ${episodeCount} smaller episodes are in your library. The originals remain in the backup area until you choose to remove them.`}
 				</p>
 				<div class="finished-actions">
-					<a class="primary-button" href={resolve('/')}>Choose another show or season</a>
-					<a class="text-link" href={resolve('/completed')}>See finished seasons</a>
+					<a class="primary-button" href={resolve('/')}
+						>{isExactItemScope
+							? 'Choose another show or episode'
+							: 'Choose another show or season'}</a
+					>
+					<a class="text-link" href={resolve('/completed')}
+						>{isExactItemScope ? 'See finished media' : 'See finished seasons'}</a
+					>
 				</div>
 			</section>
 		{:else if humanState.key === 'needs_help'}
@@ -2059,8 +2186,15 @@
 						<strong>Your library is safe.</strong>
 						<span>Nothing was replaced. Trying again rebuilds the comparison.</span>
 					{:else}
-						<strong>Your completed work is safe.</strong>
-						<span>Retrying keeps finished episodes and starts only what still needs attention.</span
+						<strong
+							>{isExactItemScope ? 'Your episode is safe.' : 'Your completed work is safe.'}</strong
+						>
+						<span
+							>{recoveryNeedsFreshGoal
+								? `Nothing was replaced. Choosing a new size or compression goal makes a fresh test before this ${scopeNoun} can run again.`
+								: isExactItemScope
+									? 'Nothing was replaced. Retrying starts only this episode.'
+									: 'Retrying keeps finished episodes and starts only what still needs attention.'}</span
 						>
 					{/if}
 				</div>
@@ -2096,11 +2230,15 @@
 						onclick={() => (targetConstraint ? chooseDifferentSize() : recoverSeason())}
 					>
 						{targetConstraint?.recoveryLabel ||
-							(recoveryNeedsAdjustment
-								? 'Review retry'
-								: humanState.recoveryKind === 'test'
-									? 'Retry same test'
-									: 'Retry unfinished episodes')}
+							(recoveryNeedsFreshGoal
+								? 'Choose size and settings'
+								: recoveryNeedsAdjustment
+									? 'Review retry'
+									: humanState.recoveryKind === 'test'
+										? 'Retry same test'
+										: isExactItemScope
+											? 'Retry this episode'
+											: 'Retry unfinished episodes')}
 					</button>
 					{#if humanState.recoveryKind === 'test' && !targetConstraint}
 						<button class="secondary-button" type="button" onclick={chooseDifferentSize}>

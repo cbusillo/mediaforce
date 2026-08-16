@@ -594,18 +594,14 @@
 		</div>
 	{/if}
 
-	<section
-		class:movie-facts--limited={isComplete || isSizeCapBlock}
-		class="movie-facts"
-		aria-label="Movie facts"
-	>
+	<section class:movie-facts--limited={isComplete} class="movie-facts" aria-label="Movie facts">
 		<div><span>Runtime</span><strong>{movieGoalFacts.duration}</strong></div>
 		<div>
 			<span>{isComplete ? 'Original size' : 'Current size'}</span><strong
 				>{movieGoalFacts.sourceSize}</strong
 			>
 		</div>
-		{#if !isComplete && !isSizeCapBlock}
+		{#if !isComplete}
 			<div>
 				<span>Expected output</span><strong>{movieGoalFacts.expectedOutput}</strong>
 				<small>Target range {movieGoalFacts.targetRange}</small>

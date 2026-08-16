@@ -125,7 +125,7 @@ export function jobSchedulePresentation(
 			state,
 			label: 'Stops at close',
 			tone: 'active',
-			detail: `${timing}. If unfinished, this episode returns to the queue automatically.`,
+			detail: `${timing}. If unfinished, this item returns to the queue automatically.`,
 			transitionAt: job.schedule_close_deadline_at
 		};
 	}
@@ -142,8 +142,8 @@ export function jobSchedulePresentation(
 		const opening = nextOpening ? transitionCopy(nextOpening.opensAt, nextOpening.host, now) : null;
 		const detail =
 			nextOpening && opening
-				? `The interrupted episode will restart from the beginning automatically when ${nextOpening.host.label} opens ${opening}. No failure attempt was used.`
-				: 'The interrupted episode will restart from the beginning automatically in the next compatible work window. No failure attempt was used.';
+				? `The interrupted item will restart from the beginning automatically when ${nextOpening.host.label} opens ${opening}. No failure attempt was used.`
+				: 'The interrupted item will restart from the beginning automatically in the next compatible work window. No failure attempt was used.';
 		return {
 			state,
 			label: 'Paused by schedule',
@@ -157,8 +157,8 @@ export function jobSchedulePresentation(
 		const opening = nextOpening ? transitionCopy(nextOpening.opensAt, nextOpening.host, now) : null;
 		const detail =
 			nextOpening && opening
-				? `No queued episode safely fits the time left. It will retry automatically when ${nextOpening.host.label} opens ${opening}.`
-				: 'No queued episode safely fits the time left. It will retry automatically in the next compatible full work window.';
+				? `No queued item safely fits the time left. It will retry automatically when ${nextOpening.host.label} opens ${opening}.`
+				: 'No queued item safely fits the time left. It will retry automatically in the next compatible full work window.';
 		return {
 			state,
 			label: 'Waiting for full window',
@@ -174,7 +174,7 @@ export function jobSchedulePresentation(
 			tone: 'fail',
 			detail:
 				compactText(job.waiting_reason) ||
-				'The estimated episode is longer than every compatible work window. Widen a worker window or use Bypass scheduler.'
+				'The estimated item is longer than every compatible work window. Widen a worker window or use Bypass scheduler.'
 		};
 	}
 	if (state === 'off_schedule') {
@@ -280,8 +280,8 @@ export function hostSchedulePresentation(
 				close ? `Open until ${close}` : 'Open now',
 				countdown ? `${countdown} left` : null,
 				host.active_encode_count > 0
-					? 'current work continues, but no new episode safely fits the time left'
-					: 'no queued episode safely fits the time left'
+					? 'current work continues, but no new item safely fits the time left'
+					: 'no queued item safely fits the time left'
 			]
 				.filter(Boolean)
 				.join(' · '),

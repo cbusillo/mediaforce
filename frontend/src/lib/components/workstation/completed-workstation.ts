@@ -63,29 +63,45 @@ export function cleanupLabel(state: CleanupState): string {
 	return 'Finished';
 }
 
-export function completedHistoryLabel(value: string): string {
-	const normalized = value.toLowerCase();
-	if (normalized.includes('encoding started')) return 'Season started';
-	if (normalized.includes('encoding stopped')) return 'Season stopped';
-	if (normalized.includes('encoding failed')) return 'Season failed';
-	if (normalized.includes('promotion completed')) return 'Season finished';
-	if (normalized.includes('cleanup')) return 'Originals removed';
-	return value.replace(/encode/gi, 'season').replace(/promotion/gi, 'finish');
+function completedHistoryNoun(event: CompletedHistoryRow): string {
+	if (event.domain === 'movie') return 'Movie';
+	if (event.domain === 'tv') return event.source === 'folder' ? 'Season' : 'Episode';
+	if (event.domain === 'other') return 'File';
+	if (event.source === 'folder' && event.scope_label === 'Title') return 'Movie';
+	return event.scope_label || 'Media item';
 }
 
-export function completedHistoryDetail(value: string): string {
+export function completedHistoryLabel(event: CompletedHistoryRow): string {
+	const normalized = event.label.toLowerCase();
+	const noun = completedHistoryNoun(event);
+	if (normalized.includes('encoding started')) return `${noun} started`;
+	if (normalized.includes('encoding completed')) return `${noun} made`;
+	if (normalized.includes('encoding stopped')) return `${noun} stopped`;
+	if (normalized.includes('encoding failed')) return `${noun} failed`;
+	if (normalized.includes('validation completed')) return `${noun} checked`;
+	if (normalized.includes('promotion completed')) return `${noun} finished`;
+	if (event.event_type === 'originals_removed_confirmed' || normalized.includes('cleanup')) {
+		return 'Originals removed';
+	}
+	return event.label.replace(/encode/gi, noun.toLowerCase()).replace(/promotion/gi, 'finish');
+}
+
+export function completedHistoryDetail(value: string, event?: CompletedHistoryRow): string {
+	const noun = event ? completedHistoryNoun(event).toLowerCase() : 'media item';
+	const article = noun === 'episode' ? 'an' : 'a';
 	return value
 		.replace(/encode worker/gi, 'A computer')
-		.replace(/processing an item/gi, 'making an episode')
-		.replace(/promoted items?/gi, 'finished episodes')
+		.replace(/processing an item/gi, `making ${article} ${noun}`)
+		.replace(/promoted items/gi, `finished ${noun}s`)
+		.replace(/promoted item/gi, `finished ${noun}`)
 		.replace(/GiB/g, 'GB')
 		.replace(/MiB/g, 'MB');
 }
 
-export function completedHistorySearchText(event: CompletedHistoryEvent): string {
+export function completedHistorySearchText(event: CompletedHistoryRow): string {
 	return [
-		completedHistoryLabel(event.label),
-		completedHistoryDetail(event.detail),
+		completedHistoryLabel(event),
+		completedHistoryDetail(event.detail, event),
 		event.label,
 		event.prefix,
 		event.title,

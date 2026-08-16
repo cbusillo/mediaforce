@@ -73,7 +73,7 @@ describe('schedule presentation', () => {
 		expect(presentation.detail).toContain('3h');
 	});
 
-	it('explains automatic whole-episode restart after a schedule interruption', () => {
+	it('explains automatic whole-item restart after a schedule interruption', () => {
 		const presentation = jobSchedulePresentation(
 			job({
 				schedule_state: 'schedule_interrupted',
@@ -116,7 +116,7 @@ describe('schedule presentation', () => {
 		expect(offSchedule).toMatchObject({ label: 'Off schedule', tone: 'wait' });
 		expect(offSchedule?.detail).toContain('today at 6:00 PM EDT');
 		expect(draining).toMatchObject({ label: 'Draining', tone: 'wait' });
-		expect(draining?.detail).toContain('no queued episode safely fits');
+		expect(draining?.detail).toContain('no queued item safely fits');
 	});
 
 	it('makes bypassed work unmistakable', () => {

@@ -175,6 +175,7 @@ export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPro
 	);
 	const readyCount = integrity.counts.promotable ?? 0;
 	const alreadyPlacedCount = integrity.counts.tracked ?? 0;
+	const exactItemScope = integrity.scope?.match === 'exact_item';
 	const totalCount = Object.values(integrity.counts).reduce(
 		(total, count) => total + (count ?? 0),
 		0
@@ -213,7 +214,7 @@ export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPro
 		canFinish:
 			reportComplete &&
 			integrity.blocker_count === 0 &&
-			Boolean(integrity.promotion_readiness?.applicable) &&
+			(exactItemScope || Boolean(integrity.promotion_readiness?.applicable)) &&
 			Boolean(integrity.promotion_readiness?.can_promote),
 		error: integrity.load_error ?? '',
 		reportComplete,
@@ -623,6 +624,17 @@ function isFailedJob(job: unknown): boolean {
 	return FAILURE_JOB_STATUSES.has(jobStatus(job));
 }
 
+function jobTimestamp(job: unknown): number {
+	const payload = record(job);
+	return Date.parse(
+		text(payload.finished_at) ||
+			text(payload.last_failure_at) ||
+			text(payload.updated_at) ||
+			text(payload.started_at) ||
+			text(payload.created_at)
+	);
+}
+
 function matchesPrefix(job: Record<string, unknown>, prefix: string): boolean {
 	return text(job.prefix) === prefix;
 }
@@ -649,10 +661,12 @@ export function seasonIdentity(prefix: string): SeasonIdentity {
 	const segments = prefix.split('/').filter(Boolean);
 	const library = segments[0] ?? '';
 	const last = segments.at(-1) ?? prefix;
-	const hasSeasonSuffix = /^(season\b|specials?$)/i.test(last);
-	const showSegments = hasSeasonSuffix ? segments.slice(1, -1) : segments.slice(1);
+	const seasonIndex = segments.findIndex(
+		(segment, index) => index >= 2 && /^(season\b|specials?$)/i.test(segment)
+	);
+	const showSegments = seasonIndex > 0 ? segments.slice(1, seasonIndex) : segments.slice(1);
 	const show = showSegments.join(' / ') || last || 'Unknown show';
-	const season = hasSeasonSuffix ? last : 'Season';
+	const season = seasonIndex > 0 ? segments[seasonIndex] : 'Season';
 	return {
 		library,
 		show,
@@ -1082,9 +1096,10 @@ export function overlappingCalibrationActivity(
 
 export function shouldPrioritizeScopeActivity(
 	activity: CalibrationScopeActivityPayload | null | undefined,
-	hasOwnCalibration: boolean
+	hasOwnCalibration: boolean,
+	hasPrimaryScopeWork = false
 ): boolean {
-	if (!activity) return false;
+	if (!activity || hasPrimaryScopeWork) return false;
 	const status = activity.job.status ?? 'idle';
 	return ['queued', 'starting', 'running'].includes(status) || !hasOwnCalibration;
 }
@@ -1644,20 +1659,37 @@ export function detailSeasonState(
 	const acceptedHash = text(calibration.accepted_draft_hash);
 	const priorTestJobId = text(calibration.job_id);
 	const reviewGateStatus = text(reviewGate.status);
+	const exactEpisode = folder.media_scope?.match === 'exact_item';
+	const sampleTimestamp = jobTimestamp(sampleJob);
+	const encodeFailureTimestamp = jobTimestamp(encodeJob);
+	const sampleSupersedesEncodeFailure =
+		Number.isFinite(sampleTimestamp) &&
+		Number.isFinite(encodeFailureTimestamp) &&
+		sampleTimestamp > encodeFailureTimestamp &&
+		(isActiveJob(sampleJob) ||
+			reviewGateStatus === 'needs_approval' ||
+			(draftHash && draftHash !== acceptedHash));
 
 	if (isActiveJob(encodeJob) || workflow?.primary_lane === 'processing') {
 		return {
 			key: 'making_season',
-			label: 'Making the season',
-			detail: 'The smaller episodes are being made now.',
+			label: exactEpisode ? 'Making the episode' : 'Making the season',
+			detail: exactEpisode
+				? 'The smaller episode is being made now.'
+				: 'The smaller episodes are being made now.',
 			tone: 'active'
 		};
 	}
-	if (isFailedJob(encodeJob) || workflow?.primary_lane === 'attention') {
+	if (
+		(isFailedJob(encodeJob) || workflow?.primary_lane === 'attention') &&
+		!sampleSupersedesEncodeFailure
+	) {
 		return {
 			key: 'needs_help',
-			label: 'The season stopped',
-			detail: 'Completed episodes are safe. Try the unfinished work again.',
+			label: exactEpisode ? 'The episode stopped' : 'The season stopped',
+			detail: exactEpisode
+				? 'Nothing was replaced. Try this episode again.'
+				: 'Completed episodes are safe. Try the unfinished work again.',
 			tone: 'attention',
 			recoveryKind: 'season'
 		};
@@ -1666,7 +1698,9 @@ export function detailSeasonState(
 		return {
 			key: 'ready_to_check',
 			label: 'Ready to check',
-			detail: 'The new episodes are ready for a safety check.',
+			detail: exactEpisode
+				? 'The new episode is ready for a safety check.'
+				: 'The new episodes are ready for a safety check.',
 			tone: 'ready'
 		};
 	}
@@ -1675,17 +1709,29 @@ export function detailSeasonState(
 		if (!integrity.canFinish) {
 			return {
 				key: 'finish_blocked',
-				label: integrity.available ? 'Season not ready' : 'Checking the season',
+				label: integrity.available
+					? exactEpisode
+						? 'Episode not ready'
+						: 'Season not ready'
+					: exactEpisode
+						? 'Checking the episode'
+						: 'Checking the season',
 				detail: integrity.available
-					? 'Every episode must be accounted for before any file is replaced.'
-					: 'Mediaforce is confirming every episode before enabling finish.',
+					? exactEpisode
+						? 'The episode must be accounted for before its file is replaced.'
+						: 'Every episode must be accounted for before any file is replaced.'
+					: exactEpisode
+						? 'Mediaforce is confirming the episode before enabling finish.'
+						: 'Mediaforce is confirming every episode before enabling finish.',
 				tone: 'attention'
 			};
 		}
 		return {
 			key: 'ready_to_finish',
 			label: 'Ready to finish',
-			detail: 'The smaller episodes passed their checks.',
+			detail: exactEpisode
+				? 'The smaller episode passed its checks.'
+				: 'The smaller episodes passed their checks.',
 			tone: 'ready'
 		};
 	}
@@ -1693,7 +1739,7 @@ export function detailSeasonState(
 		return {
 			key: 'finished',
 			label: 'Finished',
-			detail: 'Every episode is in place.',
+			detail: exactEpisode ? 'The episode is in place.' : 'Every episode is in place.',
 			tone: 'success'
 		};
 	}
@@ -1748,7 +1794,7 @@ export function detailSeasonState(
 		return {
 			key: 'ready_to_make',
 			label: 'Test approved',
-			detail: 'The rest of the season can be made.',
+			detail: exactEpisode ? 'This episode can be made.' : 'The rest of the season can be made.',
 			tone: 'ready'
 		};
 	}
@@ -1893,11 +1939,24 @@ export function plainFailureMessage(folder: FolderPayload, status: FolderStatusP
 	const encodeJob = record(folder.encode_job);
 	const calibration = record(folder.calibration);
 	const reviewGate = record(folder.review_gate);
-	const raw = text(retryable.error) || text(sampleJob.error) || text(encodeJob.error);
+	const retryableError = text(retryable.error);
+	const sampleError = retryableError || text(sampleJob.error);
+	const encodeError = text(encodeJob.error);
+	const sampleErrorJob = retryableError ? retryable : sampleJob;
+	const sampleTimestamp = jobTimestamp(sampleErrorJob);
+	const encodeTimestamp = jobTimestamp(encodeJob);
+	const sampleErrorIsNewer =
+		Boolean(sampleError) &&
+		(!encodeError ||
+			(Number.isFinite(sampleTimestamp) &&
+				Number.isFinite(encodeTimestamp) &&
+				sampleTimestamp > encodeTimestamp));
+	const raw = sampleErrorIsNewer ? sampleError : encodeError || sampleError;
 	const normalized = raw.toLowerCase();
 	if (
-		text(reviewGate.status) === 'missing_review_media' ||
-		(text(calibration.job_id) && !text(calibration.draft_hash))
+		(!encodeError || sampleErrorIsNewer) &&
+		(text(reviewGate.status) === 'missing_review_media' ||
+			(text(calibration.job_id) && !text(calibration.draft_hash)))
 	) {
 		return 'The previous test ended before the comparison was ready. Nothing was replaced.';
 	}
@@ -1907,6 +1966,15 @@ export function plainFailureMessage(folder: FolderPayload, status: FolderStatusP
 	}
 	if (normalized.includes('permission') || normalized.includes('denied')) {
 		return 'The selected computer could not reach one of the files. Check its connection, then try again.';
+	}
+	if (normalized.includes('final output size missed the approved target band')) {
+		if (normalized.includes('status=under_target')) {
+			return 'The finished file was smaller than the approved range. Choose a fresh size or compression goal and make another test.';
+		}
+		if (normalized.includes('status=over_target')) {
+			return 'The finished file was larger than the approved range. Choose a fresh size or compression goal and make another test.';
+		}
+		return 'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or compression goal and make another test.';
 	}
 	if (normalized.includes('suitable crf') || normalized.includes('quality target')) {
 		return 'That size goal was too small for this episode. Try a roomier goal.';

@@ -432,6 +432,10 @@ export interface EncodeFailureAnalysis {
 export interface EncodeQueueJob {
 	job_id: string;
 	prefix: string;
+	job_kind?: string;
+	manifest_indexes?: number[] | null;
+	item_count?: number;
+	media_scope?: MediaScopePayload | null;
 	status: string;
 	bypass_schedule?: boolean;
 	recoverable_item_count?: number;
@@ -766,6 +770,7 @@ export interface CompletedHistoryEvent {
 	title: string;
 	subtitle: string;
 	scope_label: string;
+	domain?: MediaScopeDomain;
 	created_at: string;
 	detail: string;
 	size_bytes?: number | null;

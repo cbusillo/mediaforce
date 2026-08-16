@@ -667,6 +667,26 @@ describe('season experience translation', () => {
 		});
 	});
 
+	it('keeps show and season identity for an exact episode path', () => {
+		expect(
+			seasonIdentity('tv/The Wonder Years/Season 2/The.Wonder.Years.S02E01.DVDRip.x264-DEiMOS.mkv')
+		).toEqual({
+			library: 'tv',
+			show: 'The Wonder Years',
+			season: 'Season 2',
+			showPrefix: 'tv/The Wonder Years'
+		});
+	});
+
+	it('does not mistake a show name beginning with Season for the season folder', () => {
+		expect(seasonIdentity('tv/Season of the Witch/Season 1/S01E01.mkv')).toEqual({
+			library: 'tv',
+			show: 'Season of the Witch',
+			season: 'Season 1',
+			showPrefix: 'tv/Season of the Witch'
+		});
+	});
+
 	it('uses the active encode job scope for progress counts', () => {
 		const activeJob: EncodeQueueJob = {
 			job_id: 'folder-encode',
@@ -1122,6 +1142,67 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'needs_help', label: 'The season stopped' });
 	});
 
+	it('uses episode language when exact-item work stops', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					media_scope: {
+						schema_version: 1,
+						prefix: `${card.prefix}/1e01-Pilot.mkv`,
+						root: 'tv',
+						domain: 'tv',
+						kind: 'media_file',
+						match: 'exact_item',
+						title: '1e01 Pilot',
+						subtitle: 'Constellation · Season 4',
+						scope_label: 'Episode'
+					},
+					encode_job: {
+						job_id: 'job-1',
+						prefix: `${card.prefix}/1e01-Pilot.mkv`,
+						status: 'needs_attention',
+						error: 'Final output size missed the approved target band.'
+					}
+				}),
+				status
+			)
+		).toMatchObject({
+			key: 'needs_help',
+			label: 'The episode stopped',
+			detail: 'Nothing was replaced. Try this episode again.'
+		});
+	});
+
+	it('shows a newer recovery test instead of stale encode attention', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-new',
+						draft_hash: 'draft-new',
+						accepted_draft_hash: null,
+						browser_review_ready: true
+					},
+					calibration_job: {
+						job_id: 'sample-new',
+						prefix: card.prefix,
+						status: 'completed',
+						finished_at: '2026-08-16T05:42:00+00:00'
+					},
+					review_gate: { status: 'needs_approval', can_confirm_full: false },
+					encode_job: {
+						job_id: 'encode-old',
+						prefix: card.prefix,
+						status: 'needs_attention',
+						finished_at: '2026-08-16T05:21:35+00:00',
+						error: 'Final output size missed the approved target band.'
+					}
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_compare', label: 'Test ready' });
+	});
+
 	it('recognizes a saved test that never produced comparison media', () => {
 		expect(
 			detailSeasonState(
@@ -1252,6 +1333,28 @@ describe('season experience translation', () => {
 		expect(
 			detailSeasonState(folder({ workflow_state: workflowState('promote') }), promotionStatus())
 		).toMatchObject({ key: 'ready_to_finish', label: 'Ready to finish' });
+	});
+
+	it('enables exact-item finishing without season-wide promotion applicability', () => {
+		const exactStatus = promotionStatus();
+		exactStatus.staged_integrity!.scope = {
+			...exactStatus.staged_integrity!.scope,
+			kind: 'media_file',
+			match: 'exact_item'
+		};
+		exactStatus.staged_integrity!.counts = { promotable: 1 };
+		exactStatus.staged_integrity!.promotion_readiness = {
+			applicable: false,
+			can_promote: true,
+			blockers: []
+		};
+
+		expect(seasonPromotionIntegrity(exactStatus)).toMatchObject({
+			available: true,
+			canFinish: true,
+			readyCount: 1,
+			unresolvedCount: 0
+		});
 	});
 
 	it('blocks finishing when the integrity report is truncated', () => {
@@ -1485,6 +1588,65 @@ describe('season experience translation', () => {
 		});
 		expect(plainFailureMessage(failedFolder, status)).toContain(
 			'Retrying that saved test would repeat the same limit'
+		);
+	});
+
+	it('explains that a final size-band miss needs a fresh goal', () => {
+		const failedFolder = folder({
+			encode_job: {
+				job_id: 'final-size-miss',
+				prefix: card.prefix,
+				status: 'needs_attention',
+				error:
+					'Final output size missed the approved target band: status=under_target, actual=112263931, target=153560889, lower=145882845, upper=161238933.'
+			}
+		});
+
+		expect(plainFailureMessage(failedFolder, status)).toBe(
+			'The finished file was smaller than the approved range. Choose a fresh size or compression goal and make another test.'
+		);
+	});
+
+	it('keeps final-size recovery primary when the fresh baseline also fails', () => {
+		const failedFolder = folder({
+			encode_job: {
+				job_id: 'final-size-and-baseline-miss',
+				prefix: card.prefix,
+				status: 'needs_attention',
+				error:
+					'Final output size missed the approved target band: status=missing_target, actual=112263931, target=None, lower=None, upper=None. The fresh baseline search also failed: Failed to find a suitable crf for the quality target.'
+			}
+		});
+
+		expect(plainFailureMessage(failedFolder, status)).toBe(
+			'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or compression goal and make another test.'
+		);
+	});
+
+	it('prefers a newer encode failure over stale sample failure copy', () => {
+		const failedFolder = folder({
+			encode_job: {
+				job_id: 'newer-final-size-miss',
+				prefix: card.prefix,
+				status: 'needs_attention',
+				finished_at: '2026-08-16T12:00:00Z',
+				error:
+					'Final output size missed the approved target band: status=under_target, actual=112263931, target=153560889, lower=145882845, upper=161238933.'
+			}
+		});
+		const staleSampleStatus: FolderStatusPayload = {
+			...status,
+			retryable_sample_job: {
+				job_id: 'older-sample-failure',
+				prefix: card.prefix,
+				status: 'failed',
+				finished_at: '2026-08-16T10:00:00Z',
+				error: 'Failed to find a suitable crf for the quality target.'
+			}
+		};
+
+		expect(plainFailureMessage(failedFolder, staleSampleStatus)).toBe(
+			'The finished file was smaller than the approved range. Choose a fresh size or compression goal and make another test.'
 		);
 	});
 
@@ -1760,6 +1922,7 @@ describe('season experience translation', () => {
 
 		expect(shouldPrioritizeScopeActivity(activity, true)).toBe(false);
 		expect(shouldPrioritizeScopeActivity(activity, false)).toBe(true);
+		expect(shouldPrioritizeScopeActivity(activity, false, true)).toBe(false);
 		expect(
 			shouldPrioritizeScopeActivity(
 				{ ...activity, job: { ...activity.job, status: 'running' } },
