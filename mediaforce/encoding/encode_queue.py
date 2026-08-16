@@ -1,5 +1,5 @@
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import delete
 from sqlalchemy import func
@@ -348,7 +348,11 @@ def list_child_encode_jobs(connection: DBClient, parent_job_id: str) -> list[dic
     return [_hydrate_job(row) for row in rows]
 
 
-def summarize_encode_queue(connection: DBClient) -> dict[str, Any]:
+def summarize_encode_queue(
+        connection: DBClient,
+        *,
+        library_types: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     queued = list_encode_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
     running = list_encode_jobs(connection, statuses=("running",), limit=2, job_kinds=DISPLAY_ENCODE_JOB_KINDS)
     recent = list_encode_jobs(
@@ -358,6 +362,12 @@ def summarize_encode_queue(connection: DBClient) -> dict[str, Any]:
         job_kinds=DISPLAY_ENCODE_JOB_KINDS,
         newest_first=True,
     )
+    for job in [*queued, *running, *recent]:
+        job["media_scope"] = resolve_media_scope(
+            connection,
+            str(job.get("prefix") or ""),
+            library_types=library_types,
+        ).to_payload()
     counts = {
         "queued": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "running": _count_jobs(connection, statuses=("running",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),

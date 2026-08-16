@@ -16,6 +16,7 @@ from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.process_control import (
     ManagedProcessController,
     ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
     ScheduleWindowClosedError,
     run_command,
     run_trusted_local_orchestrator_command,
@@ -183,7 +184,7 @@ def quality_toolchain_identity(
             process_controller=process_controller,
             host=host,
         )
-    except (ProcessCancelledError, ScheduleWindowClosedError):
+    except (ProcessCancelledError, ProcessDeadlineEnforcementError, ScheduleWindowClosedError):
         raise
     except Exception as exc:
         return _unavailable_toolchain(type(exc).__name__)

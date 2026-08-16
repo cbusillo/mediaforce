@@ -43,11 +43,13 @@ from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
 from mediaforce.core.models import ProbeSummary
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
+    ProcessDeadlineEnforcementError, ScheduleWindowClosedError
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, SCHEDULE_DEADLINE_MARKER
 from mediaforce.core.schedule_deadline import ScheduleDeadlineConfigurationError
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.encoding import manifest as manifest
+from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
@@ -1578,6 +1580,164 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "measured_item_variance",
         )
 
+    def test_final_size_miss_requires_a_fresh_goal_instead_of_plain_retry(self) -> None:
+        source_path = self._create_source_file("episode-final-size-miss.mkv")
+        staging_path = self._staging_path("episode-final-size-miss.mkv")
+        error_message = (
+            "Final output size missed the approved target band: "
+            "status=under_target, actual=112263931, target=153560889, "
+            "lower=145882845, upper=161238933."
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-final-size-miss.json",
+                [
+                    {
+                        "library_item_id": item_id,
+                        "rel_path": "tv/show/episode-final-size-miss.mkv",
+                        "source_size_bytes": 355_430_067,
+                        "staging_path": str(staging_path),
+                        "resolved_policy": {"video": {"quality_metric": "vmaf"}},
+                    }
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="job-final-size-miss",
+                manifest_name="manifest-final-size-miss.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-final-size-miss")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="deterministic",
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-final-size-miss")
+
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(analysis["kind"], "final_size_target_miss")
+        self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
+        self.assertFalse(analysis["auto_retry_allowed"])
+        self.assertEqual(analysis["status"], "under_target")
+        verification = object_dict(analysis["target_size_verification"])
+        self.assertEqual(verification["actual_output_bytes"], 112_263_931)
+        self.assertEqual(verification["target_size_bytes"], 153_560_889)
+        self.assertEqual(verification["lower_bound_bytes"], 145_882_845)
+        self.assertEqual(verification["upper_bound_bytes"], 161_238_933)
+        self.assertEqual(
+            analysis["summary"],
+            "The final output landed below the approved target band. "
+            "Choose a fresh size or compression goal and make another representative test before retrying.",
+        )
+
+    def test_missing_final_size_target_still_requires_a_fresh_goal(self) -> None:
+        analysis = encode_runtime._final_size_failure_analysis(
+            "Final output size missed the approved target band: "
+            "status=missing_target, actual=112263931, target=None, lower=None, upper=None."
+        )
+
+        self.assertIsNotNone(analysis)
+        assert analysis is not None
+        self.assertEqual(analysis["kind"], "final_size_target_miss")
+        self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
+        self.assertFalse(analysis["auto_retry_allowed"])
+        self.assertEqual(analysis["status"], "missing_target")
+        verification = object_dict(analysis["target_size_verification"])
+        self.assertEqual(verification["actual_output_bytes"], 112_263_931)
+        self.assertIsNone(verification["target_size_bytes"])
+        self.assertIsNone(verification["lower_bound_bytes"])
+        self.assertIsNone(verification["upper_bound_bytes"])
+        self.assertEqual(
+            analysis["summary"],
+            "Mediaforce could not verify the final output against the approved target band. "
+            "Choose a fresh size or compression goal and make another representative test before retrying.",
+        )
+
+    def test_multiple_final_size_misses_keep_fresh_goal_recovery(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-multiple-final-size-misses.json",
+            [
+                {"rel_path": "tv/show/season/episode-0.mkv"},
+                {"rel_path": "tv/show/season/episode-1.mkv"},
+            ],
+        )
+
+        analysis = encode_runtime._encode_failure_analysis(
+            {
+                "manifest_path": str(manifest_path),
+                "manifest_indexes": [0, 1],
+                "item_count": 2,
+            },
+            failure_kind="deterministic",
+            error_message=(
+                "Final output size missed the approved target band: "
+                "status=under_target, actual=112263931, target=153560889, "
+                "lower=145882845, upper=161238933."
+            ),
+        )
+
+        self.assertIsNotNone(analysis)
+        assert analysis is not None
+        self.assertEqual(analysis["kind"], "final_size_target_miss")
+        self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
+        self.assertFalse(analysis["auto_retry_allowed"])
+        self.assertEqual(analysis["manifest_indexes"], [0, 1])
+        self.assertIn("At least one selected item", analysis["summary"])
+
+    def test_parent_final_size_failures_keep_plain_fresh_goal_recovery(self) -> None:
+        child_analyses = [
+            {
+                "kind": "final_size_target_miss",
+                "retry_strategy": "fresh_goal_required",
+                "auto_retry_allowed": False,
+                "manifest_index": index,
+                "manifest_indexes": [index],
+                "item_rel_path": f"tv/show/season/episode-{index}.mkv",
+                "status": "under_target",
+                "summary": "The final output landed below the approved target band.",
+            }
+            for index in (0, 1)
+        ]
+
+        analysis = encode_runtime._aggregate_quality_failure_analysis([0, 1], child_analyses)
+
+        self.assertEqual(analysis["kind"], "final_size_target_miss")
+        self.assertEqual(analysis["retry_strategy"], "fresh_goal_required")
+        self.assertFalse(analysis["auto_retry_allowed"])
+        self.assertEqual(analysis["manifest_indexes"], [0, 1])
+        self.assertEqual(len(object_list(analysis["item_analyses"])), 2)
+        self.assertEqual(
+            analysis["summary"],
+            "2 selected items missed the approved final size contract. "
+            "Choose a fresh size or compression goal and make another representative test before retrying.",
+        )
+
+    def test_broad_retry_excludes_final_size_miss_that_needs_changed_inputs(self) -> None:
+        progress_json = json.dumps(
+            {
+                "failure_analysis": {
+                    "kind": "final_size_target_miss",
+                    "retry_strategy": "fresh_goal_required",
+                }
+            }
+        )
+
+        self.assertTrue(queue_actions_runtime._terminal_encode_requires_changed_inputs(progress_json))
+        self.assertFalse(queue_actions_runtime._terminal_encode_requires_changed_inputs(None))
+
     def test_quality_policy_legacy_near_miss_does_not_raise_size_cap(self) -> None:
         source_path = self._create_source_file("episode-legacy-near-miss.mkv")
         staging_path = self._staging_path("episode-legacy-near-miss.mkv")
@@ -2355,12 +2515,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                     attempt_count=1,
                 )
 
-            summary = summarize_encode_queue(connection)
+            summary = summarize_encode_queue(connection, library_types={"tv": "movie"})
 
         self.assertEqual(
             [job["job_id"] for job in summary["recent"]],
             ["recent-6", "recent-5", "recent-4", "recent-3", "recent-2", "recent-1"],
         )
+        self.assertTrue(all(object_dict(job["media_scope"])["domain"] == "movie" for job in summary["recent"]))
 
     def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-permission.mkv")
@@ -7832,6 +7993,63 @@ raise SystemExit(0)
         self.assertEqual(result["queued_prefixes"], [])
         self.assertIn("No failed folder encode was ready", result["message"])
 
+    def test_retry_failed_encode_prefix_action_explains_fresh_goal_requirement(self) -> None:
+        prefix = "tv/show/episode-final-size-miss.mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            now = web_app._now_iso()
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "job-fresh-goal-required",
+                    "prefix": prefix,
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(self.root / "runs" / "fresh-goal-required.json"),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 3,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": None,
+                    "last_failure_kind": "deterministic",
+                    "last_failure_at": now,
+                    "host_cooldown_until": None,
+                    "progress": {
+                        "failure_analysis": {
+                            "kind": "final_size_target_miss",
+                            "retry_strategy": "fresh_goal_required",
+                        }
+                    },
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+
+        result = queue_actions_runtime.retry_failed_encode_prefix_action(
+            connection_factory=lambda: open_db(self.config.paths.db_path),
+            config=self.config,
+            prefix=prefix,
+            load_calibration_state=lambda _config, _prefix: None,
+            review_gate=self._accepted_review_gate,
+            queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule: {"ok": True},
+        )
+
+        self.assertEqual(result["queued_count"], 0)
+        self.assertIn("Choose a fresh size or compression goal", result["message"])
+
     def test_save_profile_action_requires_high_impact_confirmation(self) -> None:
         calibration_payload: folder_actions_runtime.ActionPayload = {
             "mode": "sample",
@@ -8330,9 +8548,26 @@ raise SystemExit(0)
             coverage=1.0,
             evidence_id="ev1_fingerprint",
         )
+        toolchain_identity = {
+            "schema_version": 1,
+            "status": "available",
+            "encoder": "libsvtav1",
+            "encoder_version": "test",
+            "encoder_runtime_version": "test",
+            "encoder_runtime_signature_id": "test-encoder",
+            "quality_tool": "libvmaf",
+            "quality_tool_version": "test",
+            "metric_runtime_signature_id": "test-metric",
+        }
 
-        with patch.object(web_app, "search_quality_for_source",
-                          return_value=QualitySearchResult(27.0, "VMAF", 94.5, 94.6, "ok")):
+        with (
+                patch.object(web_app, "quality_toolchain_identity", return_value=toolchain_identity),
+                patch.object(
+                    web_app,
+                    "search_quality_for_source",
+                    return_value=QualitySearchResult(27.0, "VMAF", 94.5, 94.6, "ok"),
+                ),
+        ):
             with patch.object(
                     web_app,
                     "run_sample_encode",
@@ -11120,10 +11355,62 @@ raise SystemExit(0)
                     "lower_bound_bytes": 95,
                     "upper_bound_bytes": 105,
                     "tolerance_percent": 5.0,
+                    "accepted_under_target": False,
                 },
             )
             self.assertIn(
-                {"passed": False, "message": "staged file is within the final size target band"},
+                {"passed": False, "message": "staged file satisfies the approved final size contract"},
+                validation["checks"],
+            )
+
+    def test_validate_one_item_accepts_under_target_result_for_perceptual_floor(self) -> None:
+        source_path = self._create_source_file("episode-under-target-accepted.mkv")
+        staging_path = self._staging_path("episode-under-target-accepted.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_bytes(b"x" * 90)
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoded")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            item = {
+                "library_item_id": item_id,
+                "source_size_bytes": 200,
+                "duration_seconds": 60.0,
+                "subtitle_summary": [],
+                "compression_intent": self._compression_intent_snapshot("perceptual_floor"),
+                "resolved_operator_intent": {
+                    "size_goal": {
+                        "target_size_bytes": 100,
+                        "final_output_tolerance_percent": 5,
+                        "final_lower_bound_bytes": 95,
+                        "final_upper_bound_bytes": 105,
+                    }
+                },
+            }
+            with patch("mediaforce.execution.probe_media", return_value=staged_probe):
+                validation = execution.validate_one_item(connection, self.config, item)
+
+            self.assertTrue(validation["passed"])
+            self.assertTrue(object_dict(validation["final_size_goal"])["accepted_under_target"])
+            self.assertIn(
+                {"passed": True, "message": "staged file satisfies the approved final size contract"},
                 validation["checks"],
             )
 
@@ -11711,6 +11998,33 @@ raise SystemExit(0)
                     },
                 )
 
+    def test_detect_video_crop_propagates_containment_failure(self) -> None:
+        with patch(
+                "mediaforce.execution.run_remote_command",
+                side_effect=ProcessDeadlineEnforcementError("containment cleanup is unproven"),
+        ):
+            with self.assertRaisesRegex(ProcessDeadlineEnforcementError, "cleanup is unproven"):
+                execution.detect_video_crop(
+                    Path("/tmp/input.mkv"),
+                    {"black_bar_handling": "auto"},
+                    duration_seconds=60.0,
+                    process_controller=ManagedProcessController(),
+                    host={"key": "remote", "mode": "ssh", "media_access": "mounted"},
+                )
+
+    def test_quality_toolchain_probe_propagates_containment_failure(self) -> None:
+        with patch.object(
+                encoding_quality,
+                "_run_quality_command",
+                side_effect=ProcessDeadlineEnforcementError("containment cleanup is unproven"),
+        ):
+            with self.assertRaisesRegex(ProcessDeadlineEnforcementError, "cleanup is unproven"):
+                encoding_quality.quality_toolchain_identity(
+                    quality_metric="vmaf",
+                    process_controller=ManagedProcessController(),
+                    host={"key": "remote", "mode": "ssh", "media_access": "mounted"},
+                )
+
     def test_detect_video_crop_rejects_deadline_without_managed_controller(self) -> None:
         deadline = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat(timespec="seconds")
 
@@ -12060,13 +12374,15 @@ raise SystemExit(0)
 
             history = completed_runtime.list_completed_history_events(
                 connection,
-                folder_group=lambda _rel_path: ("tv/show", "Show", "Season 1", "tv"),
+                folder_group=lambda _rel_path: ("series/show", "Show", "Season 1", "Season"),
+                library_types={"series": "tv"},
             )
 
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0].event_type, "encoding_stopped")
         self.assertEqual(history[0].label, "Encoding stopped")
         self.assertEqual(history[0].tone, "idle")
+        self.assertEqual(history[0].domain, "tv")
         self.assertEqual(
             completed_runtime._history_event_copy(
                 "encoding_stopped",
@@ -17089,6 +17405,51 @@ raise SystemExit(0)
             self.assertEqual(queued["attempt_count"], 1)
             self.assertEqual(queued["waiting_reason"], encode_runtime.SCHEDULE_CLOSE_WAITING_REASON)
             self.assertIsNone(queued["schedule_close_deadline_at"])
+
+    def test_run_encode_job_preserves_containment_failure_without_reset_masking(self) -> None:
+        source_path = self._create_source_file("movie-containment-failure.mkv")
+        staging_path = self._staging_path("movie-containment-failure.mkv")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-containment-failure.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-containment-failure",
+                manifest_name="manifest-containment-failure.json",
+                host={"key": "remote", "label": "Remote", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+            )
+            connection.commit()
+
+        controller = ManagedProcessController()
+
+        def fail_with_unproven_cleanup(*_args: object, **_kwargs: object) -> None:
+            controller.clear(Mock(), cleanup_unproven=True)
+            raise ProcessDeadlineEnforcementError("first containment cleanup is unproven")
+
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.ensure_encode_host_ready = Mock(return_value=False)
+        deps.encode_manifest_items = Mock(side_effect=fail_with_unproven_cleanup)
+
+        encode_runtime.run_encode_job(
+            config_path=self.config.paths.config_path,
+            job_id="job-containment-failure",
+            process_controller=controller,
+            deps=deps,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-containment-failure")
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertIn("first containment cleanup is unproven", str(job["error"]))
+        self.assertTrue(controller.cleanup_unproven)
 
     def test_run_encode_job_marks_completed_output_complete_after_late_cancellation(self) -> None:
         source_path = self._create_source_file("episode-late-cancel.mkv")

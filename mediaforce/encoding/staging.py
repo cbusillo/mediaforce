@@ -22,6 +22,7 @@ from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
 from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.library.media_scopes import logical_library_rel_path
+from mediaforce.tuning.compression_intent import compression_intent_from_item
 
 LOGGER = logging.getLogger(__name__)
 
@@ -219,16 +220,22 @@ def validate_one_item(
     final_lower_bound_bytes = int_value(resolved_size_goal.get("final_lower_bound_bytes"))
     final_upper_bound_bytes = int_value(resolved_size_goal.get("final_upper_bound_bytes"))
     if final_lower_bound_bytes > 0 and final_upper_bound_bytes >= final_lower_bound_bytes:
+        compression_intent = compression_intent_from_item(item)
+        accepted_under_target = (
+            staged_size_bytes < final_lower_bound_bytes
+            and compression_intent.accepts_under_target_result
+        )
         validation["final_size_goal"] = {
             "target_size_bytes": int_value(resolved_size_goal.get("target_size_bytes")) or None,
             "lower_bound_bytes": final_lower_bound_bytes,
             "upper_bound_bytes": final_upper_bound_bytes,
             "tolerance_percent": float_value(resolved_size_goal.get("final_output_tolerance_percent")) or None,
+            "accepted_under_target": accepted_under_target,
         }
         check(
             validation,
-            final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
-            "staged file is within the final size target band",
+            accepted_under_target or final_lower_bound_bytes <= staged_size_bytes <= final_upper_bound_bytes,
+            "staged file satisfies the approved final size contract",
         )
 
     if source_duration_seconds > 0:

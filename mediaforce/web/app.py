@@ -1294,7 +1294,10 @@ def create_app(
             calibration_queue = list_queue_summary(connection, limit_per_lane=3)
             encode_job = load_latest_encode_job(connection, normalized_prefix)
             encode_job = runtime_resolve_encode_job_for_display(connection, encode_job, _encode_queue_runtime_deps())
-            encode_queue = _decorate_encode_queue_for_scheduler(config, summarize_encode_queue(connection))
+            encode_queue = _decorate_encode_queue_for_scheduler(
+                config,
+                summarize_encode_queue(connection, library_types=config.library_type_map),
+            )
             if encode_job and encode_job.get("status") == "queued":
                 position = encode_queue_position(connection, str(encode_job["job_id"]))
                 if position is not None:

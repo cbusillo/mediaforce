@@ -123,3 +123,10 @@ Legacy manifests without a ledger remain runnable through the compatibility
 stream selector. Newly planned or retried work receives a ledger and must use
 its production stream plan consistently across sample search, API payloads,
 queued jobs, command construction, and final validation.
+
+The final validator must apply the same compression-intent contract as the
+production encode. When an approved intent explicitly accepts an under-target
+result, an otherwise healthy staged file below the lower size bound passes the
+size-contract check; results above the upper bound remain blocked. Validation
+must record that the under-target result was accepted so promotion evidence
+does not contradict the encode decision.
