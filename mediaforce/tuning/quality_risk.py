@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 import math
 import re
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 from mediaforce.advisor import apply_seed_policy
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
@@ -27,6 +27,7 @@ QUALITY_RISK_VERDICTS = (
 )
 
 QUALITY_RISK_LEVELS = ("low", "medium", "high", "unknown")
+TargetSizeTraceEvidenceRole = Literal["current_sample", "historical_reference"]
 
 QUALITY_RISK_TAGS = (
     "softness_detail_loss",
@@ -466,6 +467,7 @@ def build_quality_risk_contract(
         calibration: Mapping[str, Any] | None = None,
         advice_state: Mapping[str, Any] | None = None,
         latest_failed_sample_job: Mapping[str, Any] | None = None,
+        target_size_trace_evidence_role: TargetSizeTraceEvidenceRole = "current_sample",
         interpretation: Mapping[str, Any] | None = None,
         proposed_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -488,7 +490,9 @@ def build_quality_risk_contract(
         sample_result,
         failed_payload,
         current_sample_job_id=str(calibration_payload.get("job_id") or "") or None,
+        source_id=source_id,
         current_stream_budget=stream_budget,
+        evidence_role=target_size_trace_evidence_role,
     )
     evidence_ids = _current_evidence_ids(
         cadence_decision=cadence_decision,
@@ -965,10 +969,21 @@ def _target_size_trace(
         failed_sample_job: Mapping[str, Any],
         *,
         current_sample_job_id: str | None,
+        source_id: str,
         current_stream_budget: Mapping[str, Any],
+        evidence_role: TargetSizeTraceEvidenceRole,
 ) -> dict[str, Any]:
     direct = object_dict(sample_result.get("target_size_trace"))
     if direct:
+        if (
+                evidence_role == "historical_reference"
+                and _target_size_trace_incompatible_with_stream_budget(
+                    direct,
+                    source_id=source_id,
+                    current_stream_budget=current_stream_budget,
+                )
+        ):
+            return {}
         return direct
     failed_job_id = str(failed_sample_job.get("job_id") or "") or None
     if current_sample_job_id is not None and failed_job_id != current_sample_job_id:
@@ -981,6 +996,25 @@ def _target_size_trace(
     if not _target_size_trace_matches_stream_budget(historical, current_stream_budget):
         return {}
     return historical
+
+
+def _target_size_trace_incompatible_with_stream_budget(
+        trace: Mapping[str, Any],
+        *,
+        source_id: str,
+        current_stream_budget: Mapping[str, Any],
+) -> bool:
+    target_ledger = object_dict(trace.get("ledger"))
+    trace_source_id = str(target_ledger.get("source_id") or "")
+    ledger_mismatch, stream_plan_mismatch = _target_size_trace_budget_mismatches(
+        trace,
+        current_stream_budget,
+    )
+    return bool(
+        (source_id and trace_source_id and trace_source_id != source_id)
+        or ledger_mismatch
+        or stream_plan_mismatch
+    )
 
 
 def _target_size_trace_matches_stream_budget(
