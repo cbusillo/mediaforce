@@ -173,8 +173,8 @@ export function buildCompletedReadinessSummary(
 	if (!payload) {
 		return {
 			tone: loadError ? 'fail' : 'idle',
-			title: loadError ? 'Finished seasons are unavailable' : 'Finished seasons are loading',
-			detail: loadError ?? 'Opening finished seasons and their original-file status.',
+			title: loadError ? 'Finished media is unavailable' : 'Finished media is loading',
+			detail: loadError ?? 'Opening finished media and its original-file status.',
 			metricLabel: 'Finished',
 			metricValue: loadError ? 'offline' : 'loading'
 		};
@@ -187,7 +187,7 @@ export function buildCompletedReadinessSummary(
 		return {
 			tone: 'ready',
 			title: 'Originals are waiting',
-			detail: `${counts.ready.toLocaleString('en-US')} finished ${counts.ready === 1 ? 'season has' : 'seasons have'} originals waiting for your decision.`,
+			detail: `${counts.ready.toLocaleString('en-US')} finished ${counts.ready === 1 ? 'item has' : 'items have'} originals waiting for your decision.`,
 			metricLabel: 'Waiting',
 			metricValue: String(counts.ready)
 		};
@@ -199,8 +199,8 @@ export function buildCompletedReadinessSummary(
 				counts.blocked > 0 ? 'Check before deleting' : 'Confirm originals that are already gone',
 			detail:
 				counts.blocked > 0
-					? `${counts.blocked.toLocaleString('en-US')} finished ${counts.blocked === 1 ? 'season needs' : 'seasons need'} settings checked before originals can be removed.`
-					: `${counts.unknown.toLocaleString('en-US')} finished ${counts.unknown === 1 ? 'season has' : 'seasons have'} originals already gone; confirm after checking the new files.`,
+					? `${counts.blocked.toLocaleString('en-US')} finished ${counts.blocked === 1 ? 'item needs' : 'items need'} settings checked before originals can be removed.`
+					: `${counts.unknown.toLocaleString('en-US')} finished ${counts.unknown === 1 ? 'item has' : 'items have'} originals already gone; confirm after checking the new files.`,
 			metricLabel: counts.blocked > 0 ? 'Check' : 'Confirm',
 			metricValue: String(reviewCount)
 		};
@@ -208,7 +208,7 @@ export function buildCompletedReadinessSummary(
 	return {
 		tone: 'idle',
 		title: 'Everything is settled',
-		detail: `${folders.length.toLocaleString('en-US')} finished ${folders.length === 1 ? 'season is' : 'seasons are'} settled. Recent changes remain available in History.`,
+		detail: `${folders.length.toLocaleString('en-US')} finished ${folders.length === 1 ? 'item is' : 'items are'} settled. Recent changes remain available in History.`,
 		metricLabel: 'Finished',
 		metricValue: String(counts.cleaned)
 	};

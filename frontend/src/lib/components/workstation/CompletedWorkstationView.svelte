@@ -148,14 +148,14 @@
 	);
 	const cleanupStatusTitle = $derived(
 		cleanupReadyFolders.length > 0
-			? `${cleanupReadyFolders.length.toLocaleString('en-US')} finished seasons have originals waiting.`
+			? `${cleanupReadyFolders.length.toLocaleString('en-US')} finished items have originals waiting.`
 			: cleanupReviewCount > 0
-				? `${cleanupReviewCount.toLocaleString('en-US')} finished seasons need review.`
+				? `${cleanupReviewCount.toLocaleString('en-US')} finished items need review.`
 				: 'No originals are waiting.'
 	);
 	const cleanupStatusDetail = $derived(
 		cleanupReadyFolders.length > 0
-			? 'Review the seasons below before removing their originals.'
+			? 'Review the media below before removing its originals.'
 			: cleanupReviewCount > 0
 				? 'Check the new files, then confirm which originals are already gone.'
 				: 'Past changes remain available in History.'
@@ -439,11 +439,11 @@
 	{footerSignals}
 >
 	<main class="completed">
-		<section class="completed__main" aria-label="Finished seasons">
+		<section class="completed__main" aria-label="Finished media">
 			<header class="completed-header">
 				<div>
 					<span class="mf-eyebrow">Finished</span>
-					<h1>Finished seasons</h1>
+					<h1>Finished media</h1>
 					<p>{readiness.detail}</p>
 				</div>
 				<div class="completed-header__facts" aria-label="Completed cleanup totals">
@@ -466,7 +466,7 @@
 				</div>
 			</header>
 
-			<div class="modebar" role="tablist" aria-label="Finished season views">
+			<div class="modebar" role="tablist" aria-label="Finished media views">
 				<button
 					type="button"
 					role="tab"
@@ -484,9 +484,9 @@
 			</div>
 
 			{#if !completed}
-				<WorkstationPanel eyebrow="Status" title="Finished seasons are unavailable">
+				<WorkstationPanel eyebrow="Status" title="Finished media is unavailable">
 					<div class="empty-note empty-note--error">
-						{actionError || 'Finished season data is loading or unavailable.'}
+						{actionError || 'Finished media data is loading or unavailable.'}
 					</div>
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
@@ -526,15 +526,15 @@
 					</WorkstationPanel>
 				{/if}
 
-				<WorkstationPanel eyebrow="Library" title="Find a finished season">
+				<WorkstationPanel eyebrow="Library" title="Find finished media">
 					<div class="completed-filter" aria-label="Completed cleanup filters">
 						<div class="completed-filter__summary">
-							<span>Visible seasons</span>
+							<span>Visible media</span>
 							<strong
 								>{filteredFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
 									'en-US'
 								)}
-								seasons</strong
+								items</strong
 							>
 							<small>{reviewFolders.length > 0 ? reviewSummary : selectedSummary}</small>
 						</div>
@@ -544,7 +544,7 @@
 							<input
 								type="search"
 								value={searchQuery}
-								placeholder="Show, season, or status"
+								placeholder="Title, season, file, or status"
 								oninput={handleSearchInput}
 							/>
 						</label>
@@ -807,15 +807,15 @@
 				{/if}
 
 				<WorkstationPanel
-					eyebrow="Seasons"
-					title="Finished season list"
+					eyebrow="Media"
+					title="Finished media list"
 					meta={`${filteredFolders.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="table-wrap">
 						<table class="completed-table">
 							<colgroup>
 								<col class="completed-table__select" />
-								<col class="completed-table__season" />
+								<col class="completed-table__media" />
 								<col class="completed-table__originals" />
 								<col class="completed-table__saved" />
 								<col class="completed-table__latest" />
@@ -823,7 +823,7 @@
 							<thead>
 								<tr>
 									<th aria-label="Choose"></th>
-									<th>Season and state</th>
+									<th>Media and state</th>
 									<th>Originals</th>
 									<th>Saved</th>
 									<th>Latest</th>
@@ -853,7 +853,7 @@
 												/>
 											{/if}
 										</td>
-										<td class="season-state-cell">
+										<td class="media-state-cell">
 											<a class="folder-link" href={resolve(folderRoutePath(folder.prefix))}>
 												<strong>{folder.title}</strong>
 												<span>{folder.prefix}</span>
@@ -881,7 +881,7 @@
 									</tr>
 								{:else}
 									<tr>
-										<td colspan="5">No finished seasons match this search.</td>
+										<td colspan="5">No finished media match this search.</td>
 									</tr>
 								{/each}
 							</tbody>
@@ -1425,7 +1425,7 @@
 		width: 42px;
 	}
 
-	.completed-table__season {
+	.completed-table__media {
 		width: 48%;
 	}
 
@@ -1470,7 +1470,7 @@
 		background: var(--mf-fail-bg);
 	}
 
-	.season-state-cell {
+	.media-state-cell {
 		min-width: 0;
 	}
 
@@ -1491,7 +1491,7 @@
 	}
 
 	.row-state {
-		align-items: center;
+		align-items: flex-start;
 		display: flex;
 		gap: var(--mf-space-3);
 		min-width: 0;
@@ -1499,9 +1499,10 @@
 	}
 
 	.row-state .state-detail {
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
+		line-height: 1.4;
+		min-width: 0;
+		overflow-wrap: anywhere;
+		white-space: normal;
 	}
 
 	.completed-table th {
@@ -1716,7 +1717,7 @@
 			width: 32px;
 		}
 
-		.completed-table .season-state-cell,
+		.completed-table .media-state-cell,
 		.completed-table .originals-cell,
 		.completed-table .saved-cell,
 		.completed-table .latest-cell {
@@ -1745,7 +1746,7 @@
 		}
 	}
 
-	/* Human finished-seasons surface */
+	/* Human finished-media surface */
 	.completed {
 		display: grid;
 		gap: 18px;

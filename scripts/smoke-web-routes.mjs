@@ -60,7 +60,7 @@ const routeChecks = [
   ["Folders compatibility", "/folders", "Your library"],
   ["Activity", "/ops", "Remembered media state"],
   ["Settings", "/settings", "Library and working space"],
-  ["Finished", "/completed", "Finished seasons"],
+  ["Finished", "/completed", "Finished media"],
 ];
 
 function parseArgs(argv) {
@@ -814,7 +814,7 @@ async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
     ["Empty Folders", "/folders", "Point Mediaforce at your TV folder"],
     ["Empty Other Library", "/other", "No Other media is indexed"],
     ["Empty Activity", "/ops", "Nothing is running right now"],
-    ["Empty Finished", "/completed", "No finished seasons match this search"],
+    ["Empty Finished", "/completed", "No finished media match this search"],
   ];
   await checkRoutes(baseUrl, emptyRouteChecks, timeoutMs);
   if (narrow) {
