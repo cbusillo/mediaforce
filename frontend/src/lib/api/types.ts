@@ -1478,7 +1478,6 @@ export interface RepresentativeSampleItemPayload {
 		traits?: string[];
 		findings?: Array<{
 			id?: string | null;
-			label?: string | null;
 			confidence?: number | null;
 			advisory?: boolean;
 			rationale?: string | null;

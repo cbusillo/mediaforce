@@ -133,6 +133,9 @@
 	const isWorkflowBlocked = $derived(!isComplete && workflow?.primary_lane === 'blocked');
 	const sizeCapBlock = $derived(movieSizeCapBlockView(workflow, streamBudgetLedger));
 	const isSizeCapBlock = $derived(isWorkflowBlocked && sizeCapBlock.blocked);
+	const canChangeGoals = $derived(
+		!isBrowseOnly && !isComplete && !isSizeCapBlock && !sampleWorkActive && !currentWork
+	);
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
 	const reviewReady = $derived(
@@ -569,7 +572,7 @@
 				<span>{label}</span>
 				<strong>Resolved movie goals</strong>
 			</div>
-			{#if showChangeAction && !isBrowseOnly && movieGoalContract.status === 'ready'}
+			{#if showChangeAction && canChangeGoals && movieGoalContract.status === 'ready'}
 				<button class="secondary" type="button" onclick={editRequest}>Change goals</button>
 			{/if}
 		</div>
@@ -1291,7 +1294,7 @@
 		border-top: var(--mf-border-muted);
 		display: grid;
 		gap: var(--mf-space-4);
-		padding: var(--mf-space-6) var(--mf-space-7);
+		padding: var(--mf-space-5) 0 0;
 	}
 
 	.goal-contract__heading {

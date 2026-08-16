@@ -690,7 +690,7 @@ describe('movieGoalContractView', () => {
 					status: 'measured',
 					findings: [
 						{ id: 'high_motion', confidence: 0.95 },
-						{ id: 'banding_dark_scene_damage', confidence: 0.62, advisory: true }
+						{ id: 'dark_gradient_banding_risk', confidence: 0.62, advisory: true }
 					]
 				}
 			},
@@ -732,6 +732,37 @@ describe('movieGoalContractView', () => {
 		expect(JSON.stringify(view)).not.toMatch(
 			/semantic-id|snapshot-id|ledger-id|policy-hash|evidence-id/i
 		);
+	});
+
+	it('maps every fingerprint producer id to operator-facing copy', () => {
+		const producerIds = [
+			'dark_luma',
+			'dark_gradient_banding_risk',
+			'high_motion',
+			'high_texture',
+			'duplicate_cadence',
+			'animation_cues',
+			'likely_film_grain',
+			'likely_analog_noise',
+			'compression_noise_advisory',
+			'uncertain_noise_mix',
+			'audio_complexity'
+		];
+		const view = movieGoalContractView(
+			resolvedMovieIntent(),
+			streamBudgetLedger([]),
+			{
+				media_fingerprint_decision: {
+					status: 'measured',
+					findings: producerIds.map((id) => ({ id, confidence: 0.9 }))
+				}
+			},
+			null
+		);
+		const copy = JSON.stringify(view.findings);
+
+		for (const id of producerIds) expect(copy).not.toContain(id);
+		expect(view.findings.length).toBeGreaterThan(0);
 	});
 
 	it('uses one resolving state when operator intent is missing', () =>

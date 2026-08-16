@@ -326,7 +326,13 @@ export function movieGoalContractView(
 	sampleItem: RepresentativeSampleItemPayload | null | undefined,
 	qualityRisk: QualityRiskPayload | null | undefined
 ): MovieGoalContractView {
-	if (!intent?.size_goal || !intent.resolution) {
+	if (
+		!intent?.size_goal ||
+		!intent.resolution ||
+		!intent.quality ||
+		!intent.streams ||
+		!ledger?.stream_plan
+	) {
 		return { status: 'resolving', rows: [], findings: [] };
 	}
 
@@ -363,7 +369,7 @@ export function movieGoalContractView(
 
 	const quality = qualityContractCopy(intent);
 	const compression = compressionContractCopy(intent);
-	const streamSource = intent.streams?.source ?? ledger?.entries[0]?.provenance ?? '';
+	const streamSource = intent.streams.source ?? '';
 	const plannedStreams = ledger?.stream_plan.streams ?? [];
 	const audioStreams: StreamBudgetLedgerPayload['stream_plan']['streams'] = [];
 	const subtitleStreams: StreamBudgetLedgerPayload['stream_plan']['streams'] = [];
@@ -454,8 +460,8 @@ function qualityContractCopy(intent: ResolvedOperatorIntentPayload): MovieGoalCo
 			label: 'Quality floor',
 			value: 'Still resolving',
 			detail: 'Mediaforce is resolving the acceptance guardrail for this movie.',
-			provenance: provenanceLabel(quality?.source, true),
-			tone: 'attention'
+			provenance: 'Still resolving',
+			tone: 'normal'
 		};
 	}
 	return {
@@ -530,8 +536,8 @@ function goalContractFindings(
 	const fingerprint = sampleItem?.media_fingerprint_decision;
 	const fingerprintStatus = textValue(fingerprint?.status).toLowerCase();
 	for (const finding of fingerprint?.findings ?? []) {
-		const label = qualityFindingLabel(finding.label ?? finding.id);
-		if (!label) continue;
+		const label = qualityFindingLabel(finding.id);
+		if (!label || hasFindingLabel(findings, label)) continue;
 		findings.push({
 			kind: finding.advisory
 				? 'Advisory'
@@ -633,6 +639,7 @@ function qualityFindingLabel(value: unknown): string {
 	const normalized = textValue(value).toLowerCase().replaceAll('-', '_').replaceAll(' ', '_');
 	return (
 		{
+			dark_luma: 'Banding / dark-scene damage',
 			softness_detail_loss: 'Softness / detail loss',
 			high_texture: 'Softness / detail loss',
 			animation_cues: 'Softness / detail loss',
@@ -643,6 +650,8 @@ function qualityFindingLabel(value: unknown): string {
 			grain_noise_treatment: 'Grain / noise treatment',
 			likely_film_grain: 'Grain / noise treatment',
 			likely_analog_noise: 'Grain / noise treatment',
+			compression_noise_advisory: 'Grain / noise treatment',
+			uncertain_noise_mix: 'Grain / noise treatment',
 			cadence_interlace_artifacts: 'Cadence / interlace artifacts',
 			duplicate_cadence: 'Cadence / interlace artifacts',
 			audio_quality_layout: 'Audio quality / layout',
@@ -655,6 +664,7 @@ function qualityFindingLabel(value: unknown): string {
 function provenanceLabel(source: unknown, requiresChoice: boolean): string {
 	if (requiresChoice) return 'Needs your choice';
 	const normalized = textValue(source).toLowerCase();
+	if (!normalized) return 'Still resolving';
 	if (/operator|request|note|user/.test(normalized)) return 'You set this';
 	if (/folder|profile|library|policy/.test(normalized)) return 'Library setting';
 	if (/legacy|snapshot|persisted/.test(normalized)) return 'Carried over';
