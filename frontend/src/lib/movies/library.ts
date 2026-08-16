@@ -48,6 +48,41 @@ export function movieReclaimTotalIsLowerBound(titles: MovieTitle[]): boolean {
 	return titles.some((title) => title.projected_reclaim_bytes == null);
 }
 
+export function movieTitleRuntimeSeconds(title: MovieTitle): number | null {
+	const featureDurations = title.members
+		.filter((member) => member.role === 'feature' && member.duration_seconds != null)
+		.map((member) => member.duration_seconds as number);
+	const availableDurations = featureDurations.length
+		? featureDurations
+		: title.members
+				.filter((member) => member.duration_seconds != null)
+				.map((member) => member.duration_seconds as number);
+	return availableDurations.length ? Math.max(...availableDurations) : null;
+}
+
+export function movieExpectedOutputBytes(title: MovieTitle): number | null {
+	return title.projected_reclaim_bytes == null
+		? null
+		: Math.max(0, title.total_size_bytes - title.projected_reclaim_bytes);
+}
+
+export function moviePrimaryStudioPrefix(title: MovieTitle): string {
+	return title.members.length === 1 && title.members[0] ? title.members[0].prefix : title.prefix;
+}
+
+export function movieCompositionDetail(title: MovieTitle): string | null {
+	const details: string[] = [];
+	if (title.edition_count > 1) details.push(`${title.edition_count} editions`);
+	if (title.extra_count)
+		details.push(`${title.extra_count} ${title.extra_count === 1 ? 'extra' : 'extras'}`);
+	if (title.uncertain_count) {
+		details.push(
+			`${title.uncertain_count} ${title.uncertain_count === 1 ? 'file needs' : 'files need'} a choice`
+		);
+	}
+	return details.length ? details.join(' · ') : null;
+}
+
 export function movieTitleNeedsAction(title: MovieTitle): boolean {
 	if (title.promotion_conflicts.length) return true;
 	if (title.workflow_state?.state === 'explicit_selection_required') return true;
@@ -82,6 +117,8 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 		case 'complete':
 			return 'Finished';
 		case 'none':
+			return title.details_loading ? 'Loading' : 'No work needed';
+		default:
 			return title.details_loading ? 'Loading' : 'No work needed';
 	}
 }

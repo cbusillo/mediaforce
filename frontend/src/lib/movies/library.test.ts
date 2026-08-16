@@ -3,9 +3,13 @@ import { describe, expect, it } from 'vitest';
 import type { MovieLibraryPayload, MovieTitle } from '$lib/api/types';
 import {
 	mergeMovieLibraryPayloads,
+	movieCompositionDetail,
+	movieExpectedOutputBytes,
+	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
 	movieReclaimTotalIsLowerBound,
 	movieTitleNeedsAction,
+	movieTitleRuntimeSeconds,
 	movieWorkflowIsComplete,
 	movieWorkflowLabel,
 	selectMovieLeadTitle
@@ -156,6 +160,71 @@ describe('movieReclaimTotalIsLowerBound', () => {
 				}
 			])
 		).toBe(false);
+	});
+});
+
+describe('movie decision facts', () => {
+	it('uses the longest feature runtime without adding alternate editions together', () => {
+		expect(
+			movieTitleRuntimeSeconds({
+				...title,
+				edition_count: 2,
+				members: [
+					{ ...title.members[0], duration_seconds: 5400 },
+					{
+						...title.members[0],
+						item_id: 2,
+						prefix: 'films/Example/Directors Cut.mkv',
+						duration_seconds: 6000
+					}
+				]
+			})
+		).toBe(6000);
+	});
+
+	it('derives expected output from measured or projected savings', () => {
+		expect(
+			movieExpectedOutputBytes({ ...title, total_size_bytes: 100, projected_reclaim_bytes: 35 })
+		).toBe(65);
+		expect(movieExpectedOutputBytes({ ...title, projected_reclaim_bytes: null })).toBeNull();
+		expect(
+			movieExpectedOutputBytes({
+				...title,
+				total_size_bytes: 100,
+				projected_reclaim_bytes: null,
+				known_saved_bytes: 35
+			})
+		).toBeNull();
+	});
+
+	it('uses the exact member route as the one action for one-file titles', () => {
+		expect(moviePrimaryStudioPrefix(title)).toBe('films/Example/Example.mkv');
+		expect(
+			moviePrimaryStudioPrefix({
+				...title,
+				item_count: 2,
+				members: [
+					title.members[0],
+					{ ...title.members[0], item_id: 2, prefix: 'films/Example/Alternate.mkv' }
+				]
+			})
+		).toBe(title.prefix);
+	});
+
+	it('only calls out exceptional file composition', () => {
+		expect(movieCompositionDetail(title)).toBeNull();
+		expect(movieCompositionDetail({ ...title, edition_count: 2 })).toBe('2 editions');
+		expect(movieCompositionDetail({ ...title, extra_count: 1 })).toBe('1 extra');
+		expect(movieCompositionDetail({ ...title, uncertain_count: 2 })).toBe('2 files need a choice');
+		expect(
+			movieCompositionDetail({
+				...title,
+				item_count: 4,
+				edition_count: 2,
+				extra_count: 1,
+				uncertain_count: 1
+			})
+		).toBe('2 editions · 1 extra · 1 file needs a choice');
 	});
 });
 
