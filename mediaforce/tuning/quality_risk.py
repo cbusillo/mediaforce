@@ -488,6 +488,7 @@ def build_quality_risk_contract(
         sample_result,
         failed_payload,
         current_sample_job_id=str(calibration_payload.get("job_id") or "") or None,
+        current_stream_budget=stream_budget,
     )
     evidence_ids = _current_evidence_ids(
         cadence_decision=cadence_decision,
@@ -964,6 +965,7 @@ def _target_size_trace(
         failed_sample_job: Mapping[str, Any],
         *,
         current_sample_job_id: str | None,
+        current_stream_budget: Mapping[str, Any],
 ) -> dict[str, Any]:
     direct = object_dict(sample_result.get("target_size_trace"))
     if direct:
@@ -972,9 +974,30 @@ def _target_size_trace(
     if current_sample_job_id is not None and failed_job_id != current_sample_job_id:
         return {}
     failed_result = object_dict(failed_sample_job.get("result"))
-    return (
+    historical = (
         object_dict(failed_result.get("target_size_trace"))
         or object_dict(object_dict(failed_result.get("sample_result")).get("target_size_trace"))
+    )
+    if not _target_size_trace_matches_stream_budget(historical, current_stream_budget):
+        return {}
+    return historical
+
+
+def _target_size_trace_matches_stream_budget(
+        trace: Mapping[str, Any],
+        stream_budget: Mapping[str, Any],
+) -> bool:
+    target_ledger = object_dict(trace.get("ledger"))
+    current_ledger_id = str(stream_budget.get("ledger_id") or "")
+    trace_ledger_id = str(target_ledger.get("ledger_id") or "")
+    if current_ledger_id and trace_ledger_id and trace_ledger_id != current_ledger_id:
+        return False
+    current_stream_plan_id = str(object_dict(stream_budget.get("stream_plan")).get("plan_id") or "")
+    trace_stream_plan_id = str(target_ledger.get("stream_plan_id") or "")
+    return not (
+        current_stream_plan_id
+        and trace_stream_plan_id
+        and trace_stream_plan_id != current_stream_plan_id
     )
 
 
