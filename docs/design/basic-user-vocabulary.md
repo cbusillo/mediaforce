@@ -174,6 +174,9 @@ remain unchanged` while memory is observation-only.
   actually encoded and `shadow recommendation` for the observation-only first
   CRF suggestion. Keep `Bench` out of visible labels unless a product naming
   decision intentionally keeps it.
+- When a saved sample plan no longer matches the current compression goal, say
+  `Sample plan is out of date`, hide the Start action, and put `Prepare again`
+  in the first decision viewport. Explain that nothing was queued.
 - Movie Library should lead with `Recommended next`, `Next step`, and plain
   descriptions of the work. Its only primary Studio action must visibly name
   the selected movie; one-file titles must not expose a second equivalent route.

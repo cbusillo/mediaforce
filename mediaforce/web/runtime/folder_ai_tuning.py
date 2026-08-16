@@ -33,7 +33,9 @@ from mediaforce.web.runtime.folder_tuning_advice import operator_preserves_sourc
 from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
+    compression_intent_snapshot,
     measured_size_budget_policy_fragment,
+    proposal_compression_intent_drift,
 )
 from mediaforce.web.runtime.proposal_recovery import proposal_recovery
 from mediaforce.library.folder_profiles import inspect_prefix
@@ -155,21 +157,6 @@ def _prepare_sample_item(
     )
     prepared["stream_budget_ledger"] = ledger.to_payload()
     return prepared, stream_budget_projection_blocker(ledger)
-
-
-def _compression_intent_snapshot(config: MediaforceConfig, policy: dict[str, Any]) -> dict[str, Any]:
-    return operator_intent_from_policy(
-        object_dict(policy.get("video")),
-        default_video_policy=object_dict(config.raw.get("video")),
-        audio_policy=object_dict(policy.get("audio")),
-        subtitle_policy=object_dict(policy.get("subtitle")),
-    ).compression_intent.to_payload()
-
-
-def _compression_intent_matches(expected: dict[str, Any], current: dict[str, Any]) -> bool:
-    expected_id = str(expected.get("semantic_id") or "").strip()
-    current_id = str(current.get("semantic_id") or "").strip()
-    return bool(expected_id and current_id and expected_id == current_id)
 
 
 def _target_size_blocker_response(blocker: StreamBudgetProjectionBlocker) -> dict[str, Any]:
@@ -355,7 +342,7 @@ def _proposal_ready_message(
         if recovery is not None:
             return str(recovery["detail"])
     if can_queue and has_policy_change:
-        return f"Review the bench draft, then confirm when you are ready to run the {run_label}."
+        return f"Review the sample plan, then confirm when you are ready to run the {run_label}."
     if can_queue:
         return f"The bench kept the current policy. Confirm when you are ready to rerun the {run_label} unchanged."
     return "Nothing was queued. Update the request and prepare another sample."
@@ -773,15 +760,15 @@ def folder_ai_tune_confirm_action(
     pending_proposal_raw = deps.load_pending_proposal(config, normalized_prefix)
     if pending_proposal_raw is None:
         if proposal_id.strip():
-            return {"ok": False, "message": "This bench draft is out of date. Refresh it before queueing a sample."}
+            return {"ok": False, "message": "This sample plan is out of date. Prepare it again before starting a sample."}
         return _retry_latest_sample_job(config, deps, normalized_prefix)
     pending_proposal = object_dict(pending_proposal_raw)
     if str(pending_proposal.get("proposal_id") or "") != proposal_id:
-        return {"ok": False, "message": "This bench draft is out of date. Refresh it before queueing a sample."}
+        return {"ok": False, "message": "This sample plan is out of date. Prepare it again before starting a sample."}
     if not pending_proposal.get("can_queue"):
         return {
             "ok": False,
-            "message": str(pending_proposal.get("message") or "The current bench draft is not ready to queue."),
+            "message": str(pending_proposal.get("message") or "The current sample plan is not ready to start."),
         }
 
     host_key = str(object_dict(pending_proposal.get("host")).get("key") or "").strip()
@@ -813,7 +800,7 @@ def folder_ai_tune_confirm_action(
         if action == "baseline" and calibration is not None:
             return {
                 "ok": False,
-                "message": "A measured draft already exists. Refresh the bench draft before queueing another sample.",
+                "message": "A measured sample already exists. Prepare the sample plan again before starting another sample.",
             }
         if action == "ai_tune" and calibration is None:
             return {"ok": False, "message": "The folder needs a first sample before the bench can tune a retry."}
@@ -824,22 +811,22 @@ def folder_ai_tune_confirm_action(
             if calibration
             else resolved_policy
         )
-        if not _compression_intent_matches(
-                object_dict(pending_proposal.get("base_compression_intent")),
-                _compression_intent_snapshot(config, policy_source),
-        ):
-            return {
-                "ok": False,
-                "message": "This bench draft uses an older compression goal. Refresh it before queueing a sample.",
-            }
         final_policy = deps.apply_policy_fragment(policy_source, applied_policy)
-        if not _compression_intent_matches(
-                object_dict(pending_proposal.get("compression_intent")),
-                _compression_intent_snapshot(config, final_policy),
-        ):
+        compression_intent_drift = proposal_compression_intent_drift(
+            config,
+            pending_proposal,
+            policy_source=policy_source,
+            final_policy=final_policy,
+        )
+        if compression_intent_drift == "base":
             return {
                 "ok": False,
-                "message": "This bench draft no longer matches its saved compression goal. Refresh it before queueing.",
+                "message": "This sample plan uses an older compression goal. Prepare it again before starting a sample.",
+            }
+        if compression_intent_drift == "final":
+            return {
+                "ok": False,
+                "message": "This sample plan no longer matches its saved compression goal. Prepare it again before starting.",
             }
         legacy_size_issue = _unconfirmed_legacy_size_issue(
             config,
@@ -942,7 +929,7 @@ def folder_ai_tune_confirm_action(
     deps.clear_pending_proposal(config, normalized_prefix)
     return {
         "ok": True,
-        "message": "Queued the sample run from the bench draft.",
+        "message": "Queued the sample run from the sample plan.",
         "job": job_payload,
         "advice": advice_payload,
     }
@@ -975,7 +962,7 @@ def _retry_latest_sample_job(
         stored_host = object_dict(existing_job.get("host"))
         host_key = str(stored_host.get("key") or "").strip()
         if not host_key:
-            return {"ok": False, "message": "Refresh the bench draft before queueing another sample."}
+            return {"ok": False, "message": "Prepare the sample plan again before starting another sample."}
         host = deps.resolve_sample_host(config, host_key)
 
         stored_sample_item = object_dict(existing_job.get("sample_item"))
@@ -1051,7 +1038,7 @@ def folder_ai_tune_action(
     proposal = object_dict(preview.get("proposal"))
     proposal_id = str(proposal.get("proposal_id") or "")
     if not proposal_id:
-        return {"ok": False, "message": "The bench draft could not be queued."}
+        return {"ok": False, "message": "The sample plan could not be queued."}
     return folder_ai_tune_confirm_action(config, deps, normalized_prefix, proposal_id)
 
 
@@ -1274,8 +1261,8 @@ def _seed_preview_action(
         "applied_policy": combined_fragment,
         "preview_policy": seeded_policy,
         "current_policy": base_policy,
-        "base_compression_intent": _compression_intent_snapshot(config, base_policy),
-        "compression_intent": _compression_intent_snapshot(config, seeded_policy),
+        "base_compression_intent": compression_intent_snapshot(config, base_policy),
+        "compression_intent": compression_intent_snapshot(config, seeded_policy),
         "host": asdict(host),
         "self_check": None,
         "evidence_checked": [],
@@ -1706,8 +1693,8 @@ def _tuned_preview_action(
         "applied_policy": combined_fragment,
         "preview_policy": tuned_policy,
         "current_policy": current_policy,
-        "base_compression_intent": _compression_intent_snapshot(config, current_policy),
-        "compression_intent": _compression_intent_snapshot(config, tuned_policy),
+        "base_compression_intent": compression_intent_snapshot(config, current_policy),
+        "compression_intent": compression_intent_snapshot(config, tuned_policy),
         "host": asdict(host),
         "self_check": tuning.self_check,
         "evidence_checked": tuning.evidence_checked,

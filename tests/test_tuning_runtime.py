@@ -119,7 +119,9 @@ from mediaforce.web.runtime.folder_tuning_advice import (
 )
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
+    compression_intent_snapshot,
     measured_size_budget_policy_fragment,
+    proposal_compression_intent_drift,
     proposal_alignment_issue,
     recent_tuning_sessions,
     size_budget_sample_issue,
@@ -819,7 +821,10 @@ class TuningRuntimeTests(unittest.TestCase):
         result = folder_ai_tune_confirm_action(self.config, deps, "tv/show", "stale-proposal-id")
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["message"], "This bench draft is out of date. Refresh it before queueing a sample.")
+        self.assertEqual(
+            result["message"],
+            "This sample plan is out of date. Prepare it again before starting a sample.",
+        )
 
     def test_folder_ai_tune_confirm_retries_saved_sample_even_if_latest_job_is_full(self) -> None:
         host = HostStatus(
@@ -4119,6 +4124,137 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(public["host"], {"key": "worker-1"})
         self.assertEqual(public["recovery"]["cause"], "assistant_failure")
         self.assertIsNone(public["trace"])
+
+    def test_stale_plan_does_not_override_nonqueueable_recovery_causes(self) -> None:
+        assistant_recovery = proposal_recovery(
+            {
+                "can_queue": False,
+                "request_disposition": "unavailable",
+                "failure_kind": "assistant_unavailable",
+            },
+            stale_plan=True,
+        )
+        unclear_recovery = proposal_recovery(
+            {"can_queue": False, "request_disposition": "unclear"},
+            stale_plan=True,
+        )
+
+        assert assistant_recovery is not None
+        assert unclear_recovery is not None
+        self.assertEqual(assistant_recovery["cause"], "assistant_failure")
+        self.assertEqual(assistant_recovery["action"], "prepare_again")
+        self.assertEqual(unclear_recovery["cause"], "unclear_request")
+        self.assertEqual(unclear_recovery["action"], "edit_request")
+
+    def test_pending_proposal_public_view_replaces_stale_start_with_prepare_again(self) -> None:
+        public = pending_proposal_public_view(
+            FolderStateDeps(
+                review_file_from_url=lambda *_args: None,
+                load_advice_state=lambda *_args: None,
+                calibration_draft_hash=lambda *_args: "",
+                tuning_policy_focus=lambda policy: policy,
+                pending_proposal_trace_public_view=lambda trace: trace or None,
+            ),
+            {
+                "proposal_id": "stale-plan",
+                "can_queue": True,
+                "message": "Start this sample.",
+                "operator_note": "Balance size and detail.",
+                "host": {"key": "worker-1"},
+            },
+            stale_plan=True,
+        )
+
+        assert public is not None
+        self.assertFalse(public["can_queue"])
+        self.assertEqual(public["recovery"]["cause"], "stale_plan")
+        self.assertEqual(public["recovery"]["action"], "prepare_again")
+        self.assertEqual(public["recovery"]["headline"], "Sample plan is out of date")
+        self.assertIn("compression goal changed", public["message"])
+
+    def test_pending_proposal_public_view_preserves_nonqueueable_recovery_when_stale(self) -> None:
+        deps = FolderStateDeps(
+            review_file_from_url=lambda *_args: None,
+            load_advice_state=lambda *_args: None,
+            calibration_draft_hash=lambda *_args: "",
+            tuning_policy_focus=lambda policy: policy,
+            pending_proposal_trace_public_view=lambda trace: trace or None,
+        )
+        assistant_public = pending_proposal_public_view(
+            deps,
+            {
+                "proposal_id": "assistant-failure",
+                "can_queue": False,
+                "message": "The assistant did not prepare this plan.",
+                "request_disposition": "unavailable",
+                "failure_kind": "assistant_unavailable",
+                "trace": {"raw_response": "attempt 1: provider_error: private command failed"},
+            },
+            stale_plan=True,
+        )
+        unclear_public = pending_proposal_public_view(
+            deps,
+            {
+                "proposal_id": "unclear-request",
+                "can_queue": False,
+                "message": "Edit the request before preparing again.",
+                "request_disposition": "unclear",
+            },
+            stale_plan=True,
+        )
+
+        assert assistant_public is not None
+        assert unclear_public is not None
+        self.assertEqual(assistant_public["recovery"]["cause"], "assistant_failure")
+        self.assertEqual(assistant_public["message"], "The assistant did not prepare this plan.")
+        self.assertIsNone(assistant_public["trace"])
+        self.assertEqual(unclear_public["recovery"]["cause"], "unclear_request")
+        self.assertEqual(unclear_public["recovery"]["action"], "edit_request")
+        self.assertEqual(unclear_public["message"], "Edit the request before preparing again.")
+
+    def test_proposal_compression_intent_drift_covers_base_and_final_policy(self) -> None:
+        balanced_policy = {"video": object_dict(self.config.raw.get("video"))}
+        balanced_snapshot = compression_intent_snapshot(self.config, balanced_policy)
+        reference_policy = {
+            "video": {
+                "compression_intent_schema_version": 1,
+                "compression_intent": "reference",
+                "compression_intent_source": "operator",
+                "compression_intent_confirmed": True,
+            }
+        }
+        reference_snapshot = compression_intent_snapshot(self.config, reference_policy)
+
+        current_proposal = {
+            "base_compression_intent": balanced_snapshot,
+            "compression_intent": balanced_snapshot,
+        }
+        self.assertIsNone(
+            proposal_compression_intent_drift(
+                self.config,
+                current_proposal,
+                policy_source=balanced_policy,
+                final_policy=balanced_policy,
+            )
+        )
+        self.assertEqual(
+            proposal_compression_intent_drift(
+                self.config,
+                {**current_proposal, "base_compression_intent": reference_snapshot},
+                policy_source=balanced_policy,
+                final_policy=balanced_policy,
+            ),
+            "base",
+        )
+        self.assertEqual(
+            proposal_compression_intent_drift(
+                self.config,
+                {**current_proposal, "compression_intent": reference_snapshot},
+                policy_source=balanced_policy,
+                final_policy=balanced_policy,
+            ),
+            "final",
+        )
 
     def test_pending_proposal_public_view_covers_nonretryable_legacy_transport_failures(self) -> None:
         for failure_code in ("command_unavailable", "missing_image", "transport_error", "unsupported_image"):

@@ -88,6 +88,7 @@ export type WorkflowAction =
 	| 'open-ops'
 	| 'open-series'
 	| 'promote-outputs'
+	| 'prepare-again'
 	| 'queue-encode'
 	| 'revise-smaller'
 	| 'retry-encode'
@@ -488,6 +489,11 @@ export function resolveWorkflowActionState(
 		};
 	}
 	if (action === 'focus-bench') return { disabled: false, title: '' };
+	if (action === 'prepare-again') {
+		return pendingProposal?.proposal_id
+			? { disabled: false, title: '' }
+			: { disabled: true, title: 'No saved sample plan is available to prepare again.' };
+	}
 	if (action === 'open-completed') return { disabled: false, title: '' };
 	if (action === 'approve-size-tradeoff') {
 		if (qualityRiskBlocked) {
@@ -1961,6 +1967,20 @@ export function resolveWorkflow(
 			primaryAction: 'focus-bench',
 			secondary: 'Download old pack',
 			secondaryAction: 'download-review-pack'
+		};
+	}
+	if (pendingProposal?.proposal_id && pendingProposal.recovery?.cause === 'stale_plan') {
+		return {
+			tone: 'wait',
+			label: 'Sample plan is out of date',
+			title: pendingProposal.recovery.headline || 'Sample plan is out of date',
+			copy:
+				pendingProposal.recovery.detail ||
+				'Your compression goal changed after this plan was made. Prepare the sample again to use the current goal.',
+			primary: 'Prepare again',
+			primaryAction: 'prepare-again',
+			secondary: 'Edit request',
+			secondaryAction: 'revise-proposal'
 		};
 	}
 	if (pendingProposal?.self_check?.status && pendingProposal.self_check.status !== 'passed') {

@@ -339,11 +339,17 @@ def clear_pending_proposal(proposal_file: Path) -> None:
         return
 
 
-def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+def pending_proposal_public_view(
+        deps: FolderStateDeps,
+        payload: dict[str, Any] | None,
+        *,
+        stale_plan: bool = False,
+) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     self_check = object_dict(payload.get("self_check"))
-    recovery = proposal_recovery(payload)
+    recovery = proposal_recovery(payload, stale_plan=stale_plan)
+    stale_recovery = recovery if recovery is not None and recovery.get("cause") == "stale_plan" else None
     trace = object_dict(payload.get("trace"))
     if recovery is not None and recovery.get("cause") == "assistant_failure":
         trace = {key: value for key, value in trace.items() if key != "raw_response"}
@@ -353,8 +359,8 @@ def pending_proposal_public_view(deps: FolderStateDeps, payload: dict[str, Any] 
         "kind": payload.get("kind"),
         "action": payload.get("action"),
         "created_at": payload.get("created_at"),
-        "can_queue": bool(payload.get("can_queue")),
-        "message": payload.get("message"),
+        "can_queue": bool(payload.get("can_queue")) and not stale_plan,
+        "message": stale_recovery.get("detail") if stale_recovery is not None else payload.get("message"),
         "operator_note": payload.get("operator_note"),
         "operator_request": payload.get("operator_request"),
         "request_disposition": payload.get("request_disposition"),

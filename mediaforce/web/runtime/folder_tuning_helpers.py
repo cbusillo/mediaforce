@@ -3,12 +3,49 @@ from typing import Any
 
 from sqlalchemy import select
 
+from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.type_defs import JSONValue, object_dict
 from mediaforce.tuning.compression_intent import compression_intent_from_policy
+from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.tuning.size_goals import DEFAULT_SAMPLE_PROJECTION_TOLERANCE_PERCENT
 from mediaforce.web.runtime.proposal_recovery import has_assistant_failure
+
+
+def compression_intent_snapshot(config: MediaforceConfig, policy: dict[str, Any]) -> dict[str, Any]:
+    return operator_intent_from_policy(
+        object_dict(policy.get("video")),
+        default_video_policy=object_dict(config.raw.get("video")),
+        audio_policy=object_dict(policy.get("audio")),
+        subtitle_policy=object_dict(policy.get("subtitle")),
+    ).compression_intent.to_payload()
+
+
+def compression_intent_matches(expected: dict[str, Any], current: dict[str, Any]) -> bool:
+    expected_id = str(expected.get("semantic_id") or "").strip()
+    current_id = str(current.get("semantic_id") or "").strip()
+    return bool(expected_id and current_id and expected_id == current_id)
+
+
+def proposal_compression_intent_drift(
+        config: MediaforceConfig,
+        proposal: dict[str, Any],
+        *,
+        policy_source: dict[str, Any],
+        final_policy: dict[str, Any],
+) -> str | None:
+    if not compression_intent_matches(
+            object_dict(proposal.get("base_compression_intent")),
+            compression_intent_snapshot(config, policy_source),
+    ):
+        return "base"
+    if not compression_intent_matches(
+            object_dict(proposal.get("compression_intent")),
+            compression_intent_snapshot(config, final_policy),
+    ):
+        return "final"
+    return None
 
 
 def video_quality_improvement_change(current_video: dict[str, Any], preview_video: dict[str, Any]) -> bool:

@@ -16,7 +16,20 @@ def proposal_recovery(
         payload: dict[str, Any],
         *,
         deterministic_detail: str | None = None,
+        stale_plan: bool = False,
 ) -> dict[str, Any] | None:
+    if stale_plan and bool(payload.get("can_queue")):
+        return {
+            "cause": "stale_plan",
+            "headline": "Sample plan is out of date",
+            "detail": (
+                "Your compression goal changed after this plan was made. Nothing was queued. "
+                "Prepare the sample again to use the current goal."
+            ),
+            "nothing_queued": True,
+            "action": "prepare_again",
+            "same_request_retryable": True,
+        }
     if bool(payload.get("can_queue")):
         return None
     if has_assistant_failure(payload):

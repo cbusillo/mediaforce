@@ -452,6 +452,16 @@ describe('Folder Studio review request mapping', () => {
 			})
 		).toEqual({ disabled: false, title: '' });
 		expect(
+			resolveWorkflowActionState('prepare-again', {
+				reviewPackReady: false,
+				pendingProposal: {
+					proposal_id: 'stale-plan',
+					can_queue: false
+				} as PendingSampleProposal,
+				calibrationJob: null
+			})
+		).toEqual({ disabled: false, title: '' });
+		expect(
 			resolveWorkflowActionState('stop-sample', {
 				reviewPackReady: false,
 				pendingProposal: null,
@@ -2002,6 +2012,43 @@ describe('Folder Studio review request mapping', () => {
 			copy: 'The draft lowers VMAF based only on a soft size target.',
 			primary: 'Revise sample plan',
 			primaryAction: 'revise-proposal'
+		});
+	});
+
+	it('puts stale sample-plan recovery ahead of Start sample', () => {
+		const pendingProposal = {
+			proposal_id: 'stale-plan',
+			can_queue: false,
+			message:
+				'Your compression goal changed after this plan was made. Nothing was queued. Prepare the sample again to use the current goal.',
+			recovery: {
+				cause: 'stale_plan',
+				headline: 'Sample plan is out of date',
+				detail:
+					'Your compression goal changed after this plan was made. Nothing was queued. Prepare the sample again to use the current goal.',
+				nothing_queued: true,
+				action: 'prepare_again',
+				same_request_retryable: true
+			}
+		} as PendingSampleProposal;
+
+		expect(
+			resolveWorkflow(
+				folderPayload({ pending_proposal: pendingProposal }),
+				folderStatusPayload(),
+				null,
+				pendingProposal,
+				null,
+				null,
+				null
+			)
+		).toMatchObject({
+			label: 'Sample plan is out of date',
+			title: 'Sample plan is out of date',
+			primary: 'Prepare again',
+			primaryAction: 'prepare-again',
+			secondary: 'Edit request',
+			secondaryAction: 'revise-proposal'
 		});
 	});
 

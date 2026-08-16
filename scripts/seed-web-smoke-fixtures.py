@@ -61,6 +61,7 @@ FINISHED_PREFIX = "tv/Finished Show/Season 1"
 ENCODE_WAITING_PREFIX = "movies/Waiting Encode"
 MOVIE_LOOSE_PREFIX = "movies/Loose Feature.mkv"
 MOVIE_EDITIONS_PREFIX = "movies/Editions Showcase"
+MOVIE_STALE_PLAN_PREFIX = "movies/Stale Sample Plan"
 MOVIE_CONFLICT_PREFIX = "movies/Promotion Conflict"
 MOVIE_TARGET_BLOCKED_PREFIX = "movies/Target Too Large"
 OTHER_FOLDER_PREFIX = "other/Field Notes"
@@ -100,6 +101,7 @@ FIXTURE_PREFIXES = (
     ENCODE_WAITING_PREFIX,
     MOVIE_LOOSE_PREFIX,
     MOVIE_EDITIONS_PREFIX,
+    MOVIE_STALE_PLAN_PREFIX,
     MOVIE_CONFLICT_PREFIX,
     MOVIE_TARGET_BLOCKED_PREFIX,
     OTHER_FOLDER_PREFIX,
@@ -819,6 +821,37 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
     )
 
 
+def _write_stale_proposal_state(config: Any) -> None:
+    stale_video_policy = {
+        "compression_intent_schema_version": 1,
+        "compression_intent": "reference",
+        "compression_intent_source": "browser_fixture",
+        "compression_intent_confirmed": True,
+    }
+    stale_intent = operator_intent_from_policy(
+        stale_video_policy,
+        default_video_policy=config.video,
+    ).compression_intent.to_payload()
+    payload = {
+        "proposal_id": "web-smoke-stale-sample-plan",
+        "status": "preview",
+        "kind": "sample_plan",
+        "action": "baseline",
+        "created_at": _now(),
+        "can_queue": True,
+        "message": "Sample plan ready. Nothing is queued until you confirm it.",
+        "operator_note": "Balance size and detail.",
+        "request_disposition": "honored",
+        "applied_policy": {"video": stale_video_policy},
+        "host": {"key": "studio-mini", "label": "M4 Studio"},
+        "base_compression_intent": stale_intent,
+        "compression_intent": stale_intent,
+    }
+    config.paths.web_state_dir.mkdir(parents=True, exist_ok=True)
+    proposal_file = config.paths.web_state_dir / f"{_slug(MOVIE_STALE_PLAN_PREFIX)}.proposal.json"
+    proposal_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 def _clear_fixture_files(config: Any) -> None:
     for path in config.paths.web_state_dir.glob("scan-*.job.json"):
         path.unlink(missing_ok=True)
@@ -1216,6 +1249,18 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation_reason="Fixture movie target exceeds the source-relative cap.",
                 duration_seconds=5_520.0,
                 age_days=1_100,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Stale Sample Plan/Feature.mkv",
+                size_bytes=8 * 1024**3,
+                status="planned",
+                video_codec="h264",
+                priority_score=73,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture outdated sample plan for browser QA.",
+                age_days=1_050,
             ),
             _library_item(
                 project_root=project_root,
@@ -2062,6 +2107,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         )
 
     _write_review_states(config, rows_by_prefix)
+    _write_stale_proposal_state(config)
     save_catalog_signature(config)
 
     return {
@@ -2133,6 +2179,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/movies/Editions%20Showcase",
                 "marker": "Editions Showcase",
                 "stageMarker": "need a review sample before compressing",
+            },
+            {
+                "label": "Movie Studio stale sample-plan fixture",
+                "route": "/folders/movies/Stale%20Sample%20Plan",
+                "marker": "Stale Sample Plan",
+                "stageMarker": "Sample plan is out of date",
             },
             {
                 "label": "Movie Studio exact-file fixture",

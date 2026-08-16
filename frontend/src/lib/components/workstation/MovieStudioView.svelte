@@ -76,6 +76,7 @@
 	const hasPendingProposal = $derived(Object.keys(pendingProposal).length > 0);
 	const pendingProposalCanQueue = $derived(pendingProposal.can_queue === true);
 	const pendingProposalRecovery = $derived(proposalRecoveryView(pendingProposal));
+	const pendingProposalIsStale = $derived(pendingProposalRecovery?.cause === 'stale_plan');
 	const reviewGate = $derived(asRecord(folder.review_gate));
 	const exactCalibrationJob = $derived(status.exact_calibration_job ?? folder.calibration_job);
 	const overlappingCalibrationJob = $derived(status.calibration_job);
@@ -162,16 +163,18 @@
 						: 'Sampling now'
 					: canRetrySample
 						? 'Sample needs retry'
-						: pendingProposalCanQueue
-							? 'Sample plan ready'
-							: needsReviewSample
-								? 'Needs a review sample'
-								: movieWorkflowLabel({
-										workflow_state: workflow,
-										promotion_conflicts: conflicts,
-										details_loading: folderPending,
-										availability: context?.availability ?? 'production'
-									})
+						: pendingProposalIsStale
+							? 'Sample plan is out of date'
+							: pendingProposalCanQueue
+								? 'Sample plan ready'
+								: needsReviewSample
+									? 'Needs a review sample'
+									: movieWorkflowLabel({
+											workflow_state: workflow,
+											promotion_conflicts: conflicts,
+											details_loading: folderPending,
+											availability: context?.availability ?? 'production'
+										})
 	);
 
 	$effect(() => {
@@ -223,12 +226,13 @@
 		if (isBrowseOnly || isBusy) return;
 		await runAction('prepare-again', async () => {
 			const request = prepareAgainRequest(pendingProposal);
-			if (!request.note || !request.hostKey) {
+			const hostKey = request.hostKey || selectedHostKey;
+			if (!hostKey) {
 				throw new Error('The saved request is unavailable. Edit the request and prepare it again.');
 			}
 			const response = await postJson<FolderBenchPreviewResponse>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/preview`,
-				{ note: request.note, host_key: request.hostKey }
+				{ note: request.note, host_key: hostKey }
 			);
 			if (!response.ok)
 				throw new Error(response.message || 'Mediaforce could not prepare the sample.');
@@ -382,6 +386,7 @@
 
 	function primaryAction():
 		| 'prepare'
+		| 'prepare-again'
 		| 'start'
 		| 'monitor-sample'
 		| 'retry-sample'
@@ -402,6 +407,7 @@
 		if (['failed', 'stopped', 'needs_attention'].includes(encodeStatus)) return 'retry';
 		if (workflow?.next_action.kind === 'validate_outputs') return 'validate';
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
+		if (pendingProposalIsStale) return 'prepare-again';
 		if (hasPendingProposal && pendingProposalCanQueue) return 'start';
 		if (inheritedParentSample && asText(calibrationJob.status) === 'completed') {
 			return 'review-title-sample';
@@ -416,6 +422,7 @@
 		if (isComplete) return 'ready';
 		if (currentWork) return currentWork.tone;
 		if (canRetrySample || conflicts.length || workflow?.tone === 'attention') return 'fail';
+		if (pendingProposalIsStale) return 'wait';
 		if (workflow?.tone === 'active') return 'active';
 		if (workflow?.tone === 'ready' || workflow?.tone === 'success') return 'ready';
 		if (workflow?.state === 'explicit_selection_required') return 'wait';
@@ -439,6 +446,9 @@
 		}
 		if (canRetrySample) {
 			return 'The review sample did not finish.';
+		}
+		if (pendingProposalIsStale) {
+			return pendingProposalRecovery?.headline || 'Sample plan is out of date';
 		}
 		switch (workflow?.primary_lane) {
 			case 'promote':
@@ -709,6 +719,8 @@
 										? 'The review sample is queued and will start when its worker is ready.'
 										: 'The review sample is running. Studio will refresh when review media is ready.'}
 								</p>
+							{:else if primaryAction() === 'prepare-again'}
+								<p>{pendingProposalRecovery?.detail}</p>
 							{:else if isSizeCapBlock}
 								<p>{sizeCapBlock.remedy}</p>
 							{:else if !isWorkflowBlocked}
@@ -747,6 +759,10 @@
 								{#if !hostOptions.length}
 									<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
 								{/if}
+							{:else if primaryAction() === 'prepare-again'}
+								<button class="primary" disabled={isBusy} onclick={prepareAgain}>
+									{pendingAction === 'prepare-again' ? 'Preparing…' : 'Prepare again'}
+								</button>
 							{:else if primaryAction() === 'start'}
 								<button class="primary" disabled={isBusy} onclick={startSample}>
 									{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
