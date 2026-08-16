@@ -185,6 +185,8 @@ remain unchanged` while memory is observation-only.
   use `workers`, `sample queue`, `processing queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete archived
 originals`, `selected originals`, `cleanup folder`, and `safe to delete`.
+  Its global headings and lists must remain media-neutral because movie, episode,
+  season, and file rows can appear together.
 - Settings should split basic labels from advanced fields. `Working folder`,
   `cleanup folder`, `remote workers`, and `work windows` should be visible
   before `transcode root`, `archive root`, `SSH host`, or `staging root`.

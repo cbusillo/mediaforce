@@ -78,6 +78,12 @@ describe('Completed workstation mapping', () => {
 	});
 
 	it('summarizes completed cleanup state for the page headline', () => {
+		expect(buildCompletedReadinessSummary(null, null)).toMatchObject({
+			tone: 'idle',
+			title: 'Finished media is loading',
+			detail: 'Opening finished media and its original-file status.'
+		});
+
 		expect(
 			buildCompletedReadinessSummary(
 				payload([folder({ archived_backup_count: 1, archived_backup_size_bytes: 1024 })]),
@@ -86,6 +92,7 @@ describe('Completed workstation mapping', () => {
 		).toMatchObject({
 			tone: 'ready',
 			title: 'Originals are waiting',
+			detail: '1 finished item has originals waiting for your decision.',
 			metricLabel: 'Waiting',
 			metricValue: '1'
 		});
@@ -93,6 +100,7 @@ describe('Completed workstation mapping', () => {
 		expect(buildCompletedReadinessSummary(payload([folder({})]), null)).toMatchObject({
 			tone: 'idle',
 			title: 'Everything is settled',
+			detail: '1 finished item is settled. Recent changes remain available in History.',
 			metricLabel: 'Finished',
 			metricValue: '1'
 		});
