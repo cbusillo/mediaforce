@@ -175,8 +175,11 @@ remain unchanged` while memory is observation-only.
   CRF suggestion. Keep `Bench` out of visible labels unless a product naming
   decision intentionally keeps it.
 - Movie Library should lead with `Recommended next`, `Next step`, and plain
-  descriptions of the work. Movie Studio should use `Current size`, `Expected
-output`, `Expected savings`, `Why it has not started`, `What happens next`,
+  descriptions of the work. Its only primary Studio action must visibly name
+  the selected movie; one-file titles must not expose a second equivalent route.
+  Show runtime, current size, expected output, and expected savings when known,
+  and state honestly when an estimate is unavailable. Movie Studio should use
+  `Current size`, `Expected output`, `Expected savings`, `Why it has not started`, `What happens next`,
   `checked file`, and `Replace original now` rather than backend workflow nouns.
 - Ops may expose more technical detail, but first-level headings should still
   use `workers`, `sample queue`, `processing queue`, and `retry available`.

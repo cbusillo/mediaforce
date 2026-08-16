@@ -4,9 +4,13 @@
 	import type { MovieLibraryPayload, MovieMember, MovieTitle } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
 	import {
+		movieCompositionDetail,
+		movieExpectedOutputBytes,
+		moviePrimaryStudioPrefix,
 		movieReclaimLowerBound,
 		movieReclaimTotalIsLowerBound,
 		movieTitleNeedsAction,
+		movieTitleRuntimeSeconds,
 		movieWorkflowIsComplete,
 		movieWorkflowLabel,
 		selectMovieLeadTitle,
@@ -149,6 +153,22 @@
 		return formatBytes(lowerBound);
 	}
 
+	function formatRuntime(title: MovieTitle): string {
+		const durationSeconds = movieTitleRuntimeSeconds(title);
+		if (durationSeconds == null) return title.details_loading ? 'Measuring…' : 'Not available';
+		const roundedSeconds = Math.round(durationSeconds);
+		const hours = Math.floor(roundedSeconds / 3600);
+		const minutes = Math.floor((roundedSeconds % 3600) / 60);
+		const seconds = roundedSeconds % 60;
+		return hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds}s`;
+	}
+
+	function formatExpectedOutput(title: MovieTitle): string {
+		if (title.details_loading) return 'Measuring…';
+		const expectedOutput = movieExpectedOutputBytes(title);
+		return expectedOutput == null ? 'Not estimated' : formatBytes(expectedOutput);
+	}
+
 	function reclaimSummary(title: MovieTitle): string {
 		if (title.details_loading) return 'Measuring savings…';
 		const lowerBound = movieReclaimLowerBound(title);
@@ -156,24 +176,6 @@
 		if (title.projected_reclaim_bytes == null) return `Save at least ${formatBytes(lowerBound)}`;
 		if (title.savings_confidence === 'estimated') return `Save about ${formatBytes(lowerBound)}`;
 		return `Save ${formatBytes(lowerBound)}`;
-	}
-
-	function formatAge(title: MovieTitle): string {
-		if (title.details_loading) return 'Loading date…';
-		if (!title.age?.timestamp) return 'Date unavailable';
-		const date = new Intl.DateTimeFormat(undefined, {
-			year: 'numeric',
-			month: 'short',
-			day: 'numeric'
-		}).format(new Date(title.age.timestamp));
-		return `${date} · ${ageSourceLabel(title.age.source)}`;
-	}
-
-	function ageSourceLabel(source: string): string {
-		if (source === 'plex') return 'Plex added';
-		if (source === 'mediaforce_discovered') return 'first scan';
-		if (source === 'filesystem_mtime') return 'file modified';
-		return 'unknown source';
 	}
 
 	function memberLabel(member: MovieMember): string {
@@ -227,8 +229,6 @@
 					? `${parts.join(', ')} across this title.`
 					: 'This title has several steps ready for review.';
 			}
-			case 'complete':
-				return 'This title is finished.';
 			case 'blocked':
 				return 'Open Studio to see what must be fixed before work can start.';
 			default:
@@ -243,16 +243,15 @@
 		return typeof value === 'string' && value ? value : fallback;
 	}
 
-	function editionsPolicyLabel(title: MovieTitle): string {
-		return policyValue(title, 'editions', 'separate') === 'separate'
-			? 'Editions stay separate'
-			: 'Editions follow the title';
-	}
-
-	function extrasPolicyLabel(title: MovieTitle): string {
-		return policyValue(title, 'extras', 'exclude') === 'include'
-			? 'Extras run with the title'
-			: 'Extras stay separate';
+	function policyExceptions(title: MovieTitle): string[] {
+		const exceptions: string[] = [];
+		if (policyValue(title, 'editions', 'separate') !== 'separate') {
+			exceptions.push('Editions run together');
+		}
+		if (policyValue(title, 'extras', 'exclude') === 'include') {
+			exceptions.push('Extras run with the title');
+		}
+		return exceptions;
 	}
 
 	function memberStatusLabel(member: MovieMember): string {
@@ -269,7 +268,10 @@
 		);
 	}
 
-	function memberSelectionReason(member: MovieMember): string {
+	function memberSelectionReason(member: MovieMember, title: MovieTitle): string {
+		if (title.members.length === 1) {
+			return 'Studio keeps this as an explicit file choice instead of adding it to automatic title work.';
+		}
 		if (member.role === 'extra') {
 			return 'This extra stays separate unless you open it directly.';
 		}
@@ -408,7 +410,7 @@
 			</label>
 		</header>
 
-		{#if leadTitle}
+		{#if leadTitle && selectedTitle?.prefix !== leadTitle.prefix}
 			<section class="next-up" aria-labelledby="movie-next-up-title">
 				<div class="next-up__copy">
 					<span class="eyebrow">Recommended next</span>
@@ -420,9 +422,13 @@
 					</div>
 					<p>{workflowExplanation(leadTitle)}</p>
 				</div>
-				<a class="primary-link next-up__action" href={resolve(folderRoutePath(leadTitle.prefix))}>
-					Open in Studio
-				</a>
+				<button
+					type="button"
+					class="secondary-button next-up__action"
+					onclick={() => selectTitle(leadTitle.prefix, true)}
+				>
+					Select {leadTitle.title}
+				</button>
 			</section>
 		{/if}
 
@@ -448,7 +454,7 @@
 			</div>
 		{:else}
 			<div class="workbench__body">
-				<div class="title-index" aria-label="Movie titles">
+				<div class="title-index" role="listbox" aria-label="Movie titles">
 					<div class="title-index__chrome">
 						<div class="title-index__summary">
 							<strong>{titleCountSummary}</strong>
@@ -464,10 +470,11 @@
 							class="title-row"
 							class:selected={selectedTitle?.prefix === title.prefix}
 							data-movie-title-row={title.prefix}
+							role="option"
 							tabindex={selectedTitle?.prefix === title.prefix ? 0 : -1}
 							onclick={() => selectTitle(title.prefix, true)}
 							onkeydown={(event) => moveTitleSelection(event, index)}
-							aria-pressed={selectedTitle?.prefix === title.prefix}
+							aria-selected={selectedTitle?.prefix === title.prefix}
 						>
 							<span class="title-row__identity">
 								<strong>{title.title}</strong>
@@ -478,13 +485,10 @@
 								>
 							</span>
 							<span class="title-row__count">
-								<strong>{title.item_count}</strong>
-								<small>
-									{title.feature_count}
-									{title.feature_count === 1 ? 'main movie' : 'main movies'}
-									{#if title.extra_count}
-										· {title.extra_count} extras{/if}
-								</small>
+								<strong>{title.item_count} {title.item_count === 1 ? 'file' : 'files'}</strong>
+								{#if movieCompositionDetail(title)}
+									<small>{movieCompositionDetail(title)}</small>
+								{/if}
 							</span>
 							<span class="title-row__size">
 								<strong>{formatBytes(title.total_size_bytes)}</strong>
@@ -499,6 +503,9 @@
 
 				{#if selectedTitle}
 					<aside class="title-inspector" aria-label={`${selectedTitle.title} details`}>
+						<span class="sr-only" aria-live="polite">
+							Selected {selectedTitle.title}. {movieWorkflowLabel(selectedTitle)}.
+						</span>
 						<header class="inspector-heading">
 							<div>
 								<span class="eyebrow">{selectedTitle.library_label}</span>
@@ -510,26 +517,38 @@
 							</span>
 						</header>
 
+						<div class="selection-command">
+							<div>
+								<span class="eyebrow">Selected movie</span>
+								<p>{workflowExplanation(selectedTitle)}</p>
+							</div>
+							<a
+								class="primary-link"
+								href={resolve(folderRoutePath(moviePrimaryStudioPrefix(selectedTitle)))}
+							>
+								Open {selectedTitle.title} in Studio
+							</a>
+						</div>
+
 						<div class="inspector-facts">
 							<div>
-								<span>Action covers</span><strong
-									>{selectedTitle.scope_mode === 'single_file'
-										? 'Only this file'
-										: 'The whole title'}</strong
+								<span>Runtime</span><strong>{formatRuntime(selectedTitle)}</strong>
+							</div>
+							<div>
+								<span>Current size</span><strong
+									>{formatBytes(selectedTitle.total_size_bytes)}</strong
 								>
 							</div>
 							<div>
-								<span>Stored now</span><strong>{formatBytes(selectedTitle.total_size_bytes)}</strong
-								>
+								<span>Expected output</span><strong>{formatExpectedOutput(selectedTitle)}</strong>
 							</div>
 							<div>
-								<span>Space you could save</span><strong
+								<span>Expected savings</span><strong
 									>{selectedTitle.details_loading
 										? 'Measuring…'
 										: formatReclaim(selectedTitle)}</strong
 								>
 							</div>
-							<div><span>Added to library</span><strong>{formatAge(selectedTitle)}</strong></div>
 						</div>
 
 						{#if selectedTitle.availability === 'browse_only'}
@@ -547,19 +566,24 @@
 							</div>
 						{/if}
 
-						<div class="policy-strip" aria-label="Movie library policy">
-							<span>Movie folders stay together</span>
-							<span>{editionsPolicyLabel(selectedTitle)}</span>
-							<span>{extrasPolicyLabel(selectedTitle)}</span>
-						</div>
+						{#if policyExceptions(selectedTitle).length}
+							<div class="policy-strip" aria-label="Movie library policy exceptions">
+								{#each policyExceptions(selectedTitle) as exception (exception)}
+									<span>{exception}</span>
+								{/each}
+							</div>
+						{/if}
 
 						<section class="member-list" aria-labelledby="movie-files-heading">
 							<div class="section-heading">
 								<div>
-									<h3 id="movie-files-heading">Files and editions</h3>
+									<h3 id="movie-files-heading">
+										{selectedTitle.members.length === 1 ? 'Movie file' : 'Files and editions'}
+									</h3>
 									<p>
-										Every file stays available here. Whole-title work includes only the main movie
-										unless you choose another file yourself.
+										{selectedTitle.members.length === 1
+											? 'This is the movie file that opens with the selected title.'
+											: 'Open an individual edition, extra, or uncertain file only when you want to work outside the whole-title scope.'}
 									</p>
 								</div>
 								<span>{selectedTitle.members.length}</span>
@@ -581,22 +605,19 @@
 												· Only runs if you pick it{/if}
 										</small>
 										{#if member.selection_blocker && !member.included_by_default}
-											<span class="member-row__reason">{memberSelectionReason(member)}</span>
+											<span class="member-row__reason"
+												>{memberSelectionReason(member, selectedTitle)}</span
+											>
 										{/if}
 									</div>
-									<a class="member-link" href={resolve(folderRoutePath(member.prefix))}
-										>Open this file</a
-									>
+									{#if selectedTitle.members.length > 1}
+										<a class="member-link" href={resolve(folderRoutePath(member.prefix))}
+											>Open file in Studio</a
+										>
+									{/if}
 								</div>
 							{/each}
 						</section>
-
-						<footer class="inspector-actions">
-							<a class="primary-link" href={resolve(folderRoutePath(selectedTitle.prefix))}>
-								Open in Studio
-							</a>
-							<span>{workflowExplanation(selectedTitle)}</span>
-						</footer>
 					</aside>
 				{/if}
 			</div>
@@ -647,7 +668,7 @@
 	.page-heading p,
 	.inspector-heading p,
 	.section-heading p,
-	.inspector-actions span {
+	.selection-command p {
 		color: var(--mf-fg-secondary);
 		font-size: 13px;
 		line-height: 1.55;
@@ -945,6 +966,7 @@
 	.title-inspector {
 		display: grid;
 		gap: 16px;
+		grid-template-columns: minmax(0, 1fr);
 		height: clamp(520px, 66vh, 720px);
 		min-width: 0;
 		overflow-y: auto;
@@ -953,8 +975,7 @@
 	}
 
 	.inspector-heading,
-	.section-heading,
-	.inspector-actions {
+	.section-heading {
 		align-items: start;
 		display: flex;
 		gap: 16px;
@@ -971,6 +992,35 @@
 		font-family: var(--mf-font-mono);
 		font-size: 11px;
 		word-break: break-all;
+	}
+
+	.selection-command {
+		align-items: center;
+		background: var(--mf-bg-strip);
+		border: 1px solid var(--mf-line-strong);
+		box-sizing: border-box;
+		display: grid;
+		gap: 14px;
+		grid-template-columns: minmax(0, 1fr) minmax(170px, auto);
+		min-width: 0;
+		padding: 12px;
+		width: 100%;
+	}
+
+	.selection-command > div {
+		min-width: 0;
+	}
+
+	.selection-command p {
+		margin-top: 4px;
+	}
+
+	.selection-command .primary-link {
+		max-width: 260px;
+		min-width: 0;
+		overflow-wrap: anywhere;
+		text-align: center;
+		white-space: normal;
 	}
 
 	.inspector-facts {
@@ -1029,10 +1079,13 @@
 	.member-list {
 		display: grid;
 		gap: 8px;
+		grid-template-columns: minmax(0, 1fr);
+		min-width: 0;
 	}
 
 	.section-heading {
 		border-bottom: 1px solid var(--mf-line);
+		min-width: 0;
 		padding-bottom: 9px;
 	}
 
@@ -1049,10 +1102,13 @@
 	.member-row {
 		align-items: center;
 		border: 1px solid var(--mf-line);
+		box-sizing: border-box;
 		display: flex;
 		gap: 12px;
 		justify-content: space-between;
+		min-width: 0;
 		padding: 10px 11px;
+		width: 100%;
 	}
 
 	.member-row[data-role='extra'],
@@ -1062,6 +1118,7 @@
 
 	.member-row__copy {
 		min-width: 0;
+		overflow: hidden;
 	}
 
 	.member-row__heading {
@@ -1093,7 +1150,8 @@
 	}
 
 	.member-link,
-	.primary-link {
+	.primary-link,
+	.secondary-button {
 		background: var(--mf-active-fg);
 		border: 1px solid var(--mf-active-fg);
 		border-radius: 4px;
@@ -1105,20 +1163,18 @@
 		white-space: nowrap;
 	}
 
+	.secondary-button {
+		background: transparent;
+		color: var(--mf-active-fg);
+		cursor: pointer;
+		font-family: inherit;
+		overflow-wrap: anywhere;
+		white-space: normal;
+	}
+
 	.member-link {
 		background: transparent;
 		color: var(--mf-active-fg);
-	}
-
-	.inspector-actions {
-		align-items: center;
-		border-top: 1px solid var(--mf-line);
-		padding-top: 14px;
-	}
-
-	.inspector-actions span {
-		max-width: 56%;
-		text-align: right;
 	}
 
 	.empty-state {
@@ -1142,6 +1198,17 @@
 		background: var(--mf-active-fg);
 		height: 8px;
 		width: 8px;
+	}
+
+	.sr-only {
+		height: 1px;
+		margin: -1px;
+		overflow: hidden;
+		padding: 0;
+		position: absolute;
+		width: 1px;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
 	}
 
 	@keyframes pulse {
@@ -1234,15 +1301,18 @@
 		}
 
 		.inspector-heading,
-		.inspector-actions,
+		.selection-command,
 		.member-row {
 			align-items: stretch;
 			flex-direction: column;
 		}
 
-		.inspector-actions span {
+		.selection-command {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.selection-command .primary-link {
 			max-width: none;
-			text-align: left;
 		}
 
 		.member-link,
