@@ -25,6 +25,7 @@
 		movieCurrentWorkView,
 		movieGoalFactsView,
 		movieReviewStatusLabel,
+		movieSizeCapBlockView,
 		parentSampleAppliesToExactItem
 	} from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
@@ -119,9 +120,8 @@
 	);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');
 	const isWorkflowBlocked = $derived(!isComplete && workflow?.primary_lane === 'blocked');
-	const isSizeCapBlock = $derived(
-		isWorkflowBlocked && workflow?.detail.includes('80% source cap') === true
-	);
+	const sizeCapBlock = $derived(movieSizeCapBlockView(workflow, streamBudgetLedger));
+	const isSizeCapBlock = $derived(isWorkflowBlocked && sizeCapBlock.blocked);
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
 	const reviewReady = $derived(
@@ -478,9 +478,7 @@
 			case 'complete':
 				return 'This movie is finished.';
 			case 'blocked':
-				if (isSizeCapBlock) {
-					return 'The requested size is larger than the allowed 80% of the original file.';
-				}
+				if (isSizeCapBlock) return sizeCapBlock.headline;
 				return 'Mediaforce cannot start this movie until the issue below is resolved.';
 			default:
 				return folderPending
@@ -716,10 +714,7 @@
 										: 'The review sample is running. Studio will refresh when review media is ready.'}
 								</p>
 							{:else if isSizeCapBlock}
-								<p>
-									Choose a smaller target in library settings. Then Mediaforce can prepare a valid
-									movie plan.
-								</p>
+								<p>{sizeCapBlock.remedy}</p>
 							{:else if !isWorkflowBlocked}
 								<p>
 									{exactScope

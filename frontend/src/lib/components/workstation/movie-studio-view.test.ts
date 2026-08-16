@@ -6,6 +6,7 @@ import {
 	movieCurrentWorkView,
 	movieGoalFactsView,
 	movieReviewStatusLabel,
+	movieSizeCapBlockView,
 	parseServerTimestamp,
 	parentSampleAppliesToExactItem
 } from './movie-studio-view';
@@ -27,6 +28,71 @@ describe('canRetrySampleJob', () => {
 	it('requires a retryable sample job identifier', () => {
 		expect(canRetrySampleJob('', false)).toBe(false);
 		expect(canRetrySampleJob(null, false)).toBe(false);
+	});
+});
+
+describe('movieSizeCapBlockView', () => {
+	it('uses the configured cap instead of assuming 80 percent', () => {
+		expect(
+			movieSizeCapBlockView(
+				{ primary_lane: 'blocked', detail: 'Target size exceeds the 75% source cap.' },
+				{
+					size_goal: { target_size_bytes: 800_000_000 },
+					source_relative_cap: {
+						configured_total_percent: 75,
+						total_cap_bytes: 750_000_000,
+						status: 'available'
+					},
+					feasibility: { reasons: [] }
+				}
+			)
+		).toEqual({
+			blocked: true,
+			headline: 'The requested size is larger than the allowed 75% of the original file.',
+			remedy:
+				'Choose a smaller target in library settings. Then Mediaforce can prepare a valid movie plan.'
+		});
+	});
+
+	it('gives a different remedy when preserved content consumes the cap', () => {
+		expect(
+			movieSizeCapBlockView(
+				{
+					primary_lane: 'blocked',
+					detail: 'Preserved streams consume the 75% source cap.'
+				},
+				{
+					size_goal: { target_size_bytes: 800_000_000 },
+					source_relative_cap: {
+						configured_total_percent: 75,
+						total_cap_bytes: 750_000_000,
+						status: 'arithmetically_infeasible'
+					},
+					feasibility: { reasons: ['source_relative_cap_consumed_by_non_video_budget'] }
+				}
+			)
+		).toEqual({
+			blocked: true,
+			headline:
+				'The sound, subtitles, and other content being kept already use the allowed movie size.',
+			remedy: 'Review the movie settings and either keep less content or allow a larger output.'
+		});
+	});
+
+	it('does not treat unrelated workflow blockers as size-cap failures', () => {
+		expect(
+			movieSizeCapBlockView(
+				{ primary_lane: 'blocked', detail: 'A destination file already exists.' },
+				{
+					source_relative_cap: {
+						configured_total_percent: 75,
+						total_cap_bytes: 750_000_000,
+						status: 'arithmetically_infeasible'
+					},
+					feasibility: { reasons: [] }
+				}
+			)
+		).toEqual({ blocked: false, headline: '', remedy: '' });
 	});
 });
 
