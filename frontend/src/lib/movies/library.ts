@@ -52,12 +52,7 @@ export function movieTitleRuntimeSeconds(title: MovieTitle): number | null {
 	const featureDurations = title.members
 		.filter((member) => member.role === 'feature' && member.duration_seconds != null)
 		.map((member) => member.duration_seconds as number);
-	const availableDurations = featureDurations.length
-		? featureDurations
-		: title.members
-				.filter((member) => member.duration_seconds != null)
-				.map((member) => member.duration_seconds as number);
-	return availableDurations.length ? Math.max(...availableDurations) : null;
+	return featureDurations.length ? Math.max(...featureDurations) : null;
 }
 
 export function movieExpectedOutputBytes(title: MovieTitle): number | null {

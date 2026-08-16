@@ -182,6 +182,25 @@ describe('movie decision facts', () => {
 		).toBe(6000);
 	});
 
+	it('keeps runtime unknown when only an extra has a measured duration', () => {
+		expect(
+			movieTitleRuntimeSeconds({
+				...title,
+				extra_count: 1,
+				members: [
+					{ ...title.members[0], duration_seconds: undefined },
+					{
+						...title.members[0],
+						item_id: 2,
+						prefix: 'films/Example/Behind the Scenes.mkv',
+						role: 'extra',
+						duration_seconds: 1800
+					}
+				]
+			})
+		).toBeNull();
+	});
+
 	it('derives expected output from measured or projected savings', () => {
 		expect(
 			movieExpectedOutputBytes({ ...title, total_size_bytes: 100, projected_reclaim_bytes: 35 })
