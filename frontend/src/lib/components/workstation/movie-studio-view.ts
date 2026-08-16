@@ -2,7 +2,11 @@ import type {
 	CalibrationJobPayload,
 	EncodeQueueJob,
 	EncodeQueueSummary,
-	ResolvedSizeGoalPayload
+	QualityRiskPayload,
+	RepresentativeSampleItemPayload,
+	ResolvedOperatorIntentPayload,
+	ResolvedSizeGoalPayload,
+	StreamBudgetLedgerPayload
 } from '$lib/api/types';
 
 export interface MovieCurrentWorkView {
@@ -30,6 +34,26 @@ export interface MovieGoalFactsView {
 	expectedSavings: string;
 	targetRange: string;
 	estimateQuality: string;
+}
+
+export interface MovieGoalContractRow {
+	label: string;
+	value: string;
+	detail: string;
+	provenance: string;
+	tone: 'normal' | 'attention';
+}
+
+export interface MovieGoalContractFinding {
+	kind: 'Measured' | 'Advisory' | 'Out of date';
+	label: string;
+	detail?: string;
+}
+
+export interface MovieGoalContractView {
+	status: 'ready' | 'resolving';
+	rows: MovieGoalContractRow[];
+	findings: MovieGoalContractFinding[];
 }
 
 export interface MovieSizeCapBlockView {
@@ -89,9 +113,10 @@ export function movieSizeCapBlockView(
 	ledger: MovieSizeCapLedger | null | undefined
 ): MovieSizeCapBlockView {
 	const detail = textValue(workflow?.detail);
-	const reasons = (ledger?.feasibility?.reasons ?? []).filter(
-		(reason): reason is string => typeof reason === 'string' && reason.trim().length > 0
-	);
+	const reasons: string[] = [];
+	for (const reason of ledger?.feasibility?.reasons ?? []) {
+		if (typeof reason === 'string' && reason.trim()) reasons.push(reason);
+	}
 	const blockerText = [detail, ...reasons].join(' ');
 	const sourceCapInfeasible = ledger?.source_relative_cap?.status === 'arithmetically_infeasible';
 	const mentionsSourceCap = /source(?:-size)? cap/i.test(blockerText);
@@ -99,10 +124,9 @@ export function movieSizeCapBlockView(
 		'source_relative_cap_consumed_by_non_video_budget'
 	);
 	const targetExceedsReason = reasons.includes('target_lower_bound_exceeds_source_relative_cap');
-	if (
-		workflow?.primary_lane !== 'blocked' ||
-		(!mentionsSourceCap && !preservedContentReason && !targetExceedsReason)
-	) {
+	const lacksSourceCapReason =
+		!mentionsSourceCap && !preservedContentReason && !targetExceedsReason;
+	if (workflow?.primary_lane !== 'blocked' || lacksSourceCapReason) {
 		return { blocked: false, headline: '', remedy: '' };
 	}
 
@@ -294,6 +318,351 @@ export function movieGoalFactsView(
 					? 'Target estimate, not a guarantee'
 					: 'Target not resolved'
 	};
+}
+
+export function movieGoalContractView(
+	intent: ResolvedOperatorIntentPayload | null | undefined,
+	ledger: StreamBudgetLedgerPayload | null | undefined,
+	sampleItem: RepresentativeSampleItemPayload | null | undefined,
+	qualityRisk: QualityRiskPayload | null | undefined
+): MovieGoalContractView {
+	if (!intent?.size_goal || !intent.resolution) {
+		return { status: 'resolving', rows: [], findings: [] };
+	}
+
+	const sizeGoal = intent.size_goal;
+	const sizeProvenance = provenanceLabel(sizeGoal.source, sizeGoal.requires_confirmation);
+	const sizeValue =
+		sizeGoal.mode === 'normalized'
+			? 'Runtime-scaled target'
+			: sizeGoal.mode === 'absolute'
+				? 'Fixed target'
+				: 'Needs your choice';
+	const sizeDetail =
+		sizeGoal.mode === 'normalized'
+			? normalizedSizeDetail(sizeGoal)
+			: sizeGoal.mode === 'absolute'
+				? 'Use one fixed size target for this movie.'
+				: 'Choose how the output size should be calculated before preparing.';
+
+	const resolution = intent.resolution;
+	const sourceWidth = finitePositive(sampleItem?.width);
+	const sourceHeight = finitePositive(sampleItem?.height);
+	const sourceResolution =
+		sourceWidth && sourceHeight ? `${Math.round(sourceWidth)}×${Math.round(sourceHeight)}` : null;
+	const resolutionProvenance = provenanceLabel(
+		resolution.source,
+		Boolean(resolution.requires_confirmation)
+	);
+	const resolutionCopy = resolutionContractCopy(
+		resolution.mode,
+		finitePositive(resolution.max_height),
+		sourceResolution,
+		sourceHeight
+	);
+
+	const quality = qualityContractCopy(intent);
+	const compression = compressionContractCopy(intent);
+	const streamSource = intent.streams?.source ?? ledger?.entries[0]?.provenance ?? '';
+	const plannedStreams = ledger?.stream_plan.streams ?? [];
+	const audioStreams: StreamBudgetLedgerPayload['stream_plan']['streams'] = [];
+	const subtitleStreams: StreamBudgetLedgerPayload['stream_plan']['streams'] = [];
+	for (const stream of plannedStreams) {
+		if (stream.kind === 'audio') audioStreams.push(stream);
+		if (stream.kind === 'subtitle') subtitleStreams.push(stream);
+	}
+	const audio = streamContractCopy('Audio', audioStreams, streamSource);
+	const subtitles = streamContractCopy('Subtitles', subtitleStreams, streamSource);
+	const findings = goalContractFindings(sampleItem, qualityRisk);
+	const reviewFocus = reviewFocusContractCopy(findings);
+
+	return {
+		status: 'ready',
+		rows: [
+			{
+				label: 'Size rule',
+				value: sizeValue,
+				detail: sizeDetail,
+				provenance: sizeProvenance,
+				tone: sizeProvenance === 'Needs your choice' ? 'attention' : 'normal'
+			},
+			{
+				label: 'Resolution',
+				...resolutionCopy,
+				provenance: resolutionProvenance,
+				tone: resolutionProvenance === 'Needs your choice' ? 'attention' : 'normal'
+			},
+			quality,
+			compression,
+			audio,
+			subtitles,
+			reviewFocus
+		],
+		findings
+	};
+}
+
+function normalizedSizeDetail(sizeGoal: ResolvedSizeGoalPayload): string {
+	const referenceSize = finitePositive(sizeGoal.reference_size_mb);
+	const referenceMinutes = finitePositive(sizeGoal.reference_runtime_minutes);
+	if (referenceSize && referenceMinutes) {
+		return `${formatCompactNumber(referenceSize)} MB per ${formatCompactNumber(referenceMinutes)} minutes, scaled to this movie.`;
+	}
+	return 'Scale the target to this movie’s runtime.';
+}
+
+function resolutionContractCopy(
+	mode: string,
+	maxHeight: number | null,
+	sourceResolution: string | null,
+	sourceHeight: number | null
+): Pick<MovieGoalContractRow, 'value' | 'detail'> {
+	if (mode === 'source') {
+		return {
+			value: sourceResolution ? `Preserve ${sourceResolution}` : 'Preserve source',
+			detail: 'Keep the source resolution; no downscale is planned.'
+		};
+	}
+	if (mode === 'max_height' && maxHeight) {
+		if (sourceHeight && sourceHeight <= maxHeight) {
+			return {
+				value: sourceResolution ? `Preserve ${sourceResolution}` : `Up to ${maxHeight}p`,
+				detail: `The source is already within the ${Math.round(maxHeight)}p cap.`
+			};
+		}
+		return {
+			value: `Cap at ${Math.round(maxHeight)}p`,
+			detail: sourceResolution
+				? `Downscale the ${sourceResolution} source to fit the height cap.`
+				: 'Downscale only when the source is taller than this cap.'
+		};
+	}
+	return {
+		value: 'Needs your choice',
+		detail: 'Choose whether to preserve the source resolution or apply a height cap.'
+	};
+}
+
+function qualityContractCopy(intent: ResolvedOperatorIntentPayload): MovieGoalContractRow {
+	const quality = intent.quality;
+	const metric = textValue(quality?.metric).toUpperCase();
+	const usesXpsnr = metric === 'XPSNR';
+	const target = finitePositive(usesXpsnr ? quality?.target_xpsnr : quality?.target_vmaf);
+	const floor = finitePositive(usesXpsnr ? quality?.min_target_xpsnr : quality?.min_target_vmaf);
+	if (!metric || !floor) {
+		return {
+			label: 'Quality floor',
+			value: 'Still resolving',
+			detail: 'Mediaforce is resolving the acceptance guardrail for this movie.',
+			provenance: provenanceLabel(quality?.source, true),
+			tone: 'attention'
+		};
+	}
+	return {
+		label: 'Quality floor',
+		value: `${metric} floor ${formatCompactNumber(floor)}`,
+		detail: target
+			? `Aim for ${formatCompactNumber(target)}; the floor is an acceptance guardrail, not a guarantee.`
+			: 'This floor is an acceptance guardrail, not a guarantee.',
+		provenance: provenanceLabel(quality?.source, false),
+		tone: 'normal'
+	};
+}
+
+function compressionContractCopy(intent: ResolvedOperatorIntentPayload): MovieGoalContractRow {
+	const compression = intent.compression_intent;
+	const requiresChoice =
+		!compression || compression.requires_confirmation || !compression.confirmed;
+	return {
+		label: 'Compression',
+		value: requiresChoice ? 'Needs your choice' : compression.title,
+		detail: requiresChoice
+			? 'Choose the intended balance between file size and visible detail before preparing.'
+			: `${compression.detail} ${compression.accepts_under_target_result ? 'A smaller result is acceptable when it still meets the quality floor.' : 'Stay near the size target when the quality floor allows it.'}`,
+		provenance: provenanceLabel(compression?.source, requiresChoice),
+		tone: requiresChoice ? 'attention' : 'normal'
+	};
+}
+
+function streamContractCopy(
+	label: 'Audio' | 'Subtitles',
+	streams: StreamBudgetLedgerPayload['stream_plan']['streams'],
+	source: string
+): MovieGoalContractRow {
+	if (!streams.length) {
+		return {
+			label,
+			value: label === 'Audio' ? 'No audio detected' : 'No subtitles detected',
+			detail: `No ${label.toLowerCase()} streams are present in the resolved stream plan.`,
+			provenance: provenanceLabel(source, false),
+			tone: 'normal'
+		};
+	}
+	let copied = 0;
+	let converted = 0;
+	let dropped = 0;
+	for (const stream of streams) {
+		if (stream.action === 'copy') copied += 1;
+		if (stream.action === 'transcode') converted += 1;
+		if (stream.action === 'drop') dropped += 1;
+	}
+	const kept = copied + converted;
+	const noun = label === 'Audio' ? 'track' : 'subtitle';
+	const parts = [
+		copied ? `${copied} copied` : '',
+		converted ? `${converted} converted` : '',
+		dropped ? `${dropped} dropped` : ''
+	].filter(Boolean);
+	return {
+		label,
+		value: kept ? `Keep ${kept} ${noun}${kept === 1 ? '' : 's'}` : `Drop all ${noun}s`,
+		detail: `${parts.join(', ')}. ${label === 'Audio' ? 'Copied tracks stay unchanged; converted tracks use the planned output codec.' : 'Only the listed subtitle streams are kept.'}`,
+		provenance: provenanceLabel(source, false),
+		tone: dropped === streams.length ? 'attention' : 'normal'
+	};
+}
+
+function goalContractFindings(
+	sampleItem: RepresentativeSampleItemPayload | null | undefined,
+	qualityRisk: QualityRiskPayload | null | undefined
+): MovieGoalContractFinding[] {
+	const findings: MovieGoalContractFinding[] = [];
+	const fingerprint = sampleItem?.media_fingerprint_decision;
+	const fingerprintStatus = textValue(fingerprint?.status).toLowerCase();
+	for (const finding of fingerprint?.findings ?? []) {
+		const label = qualityFindingLabel(finding.label ?? finding.id);
+		if (!label) continue;
+		findings.push({
+			kind: finding.advisory
+				? 'Advisory'
+				: fingerprintStatus === 'measured'
+					? 'Measured'
+					: 'Out of date',
+			label,
+			detail: textValue(finding.rationale) || undefined
+		});
+	}
+	for (const risk of qualityRisk?.typed_risks ?? []) {
+		const label = textValue(risk.label) || qualityFindingLabel(risk.tag);
+		if (!label || hasFindingLabel(findings, label)) continue;
+		const measured = Boolean(risk.evidence_ids?.length || risk.moment_indexes?.length);
+		findings.push({
+			kind: measured ? 'Measured' : 'Advisory',
+			label,
+			detail: textValue(risk.rationale) || undefined
+		});
+	}
+	for (const label of qualityRisk?.pre_test_instruction?.focus_labels ?? []) {
+		const normalized = textValue(label);
+		if (!normalized || hasFindingLabel(findings, normalized)) continue;
+		findings.push({ kind: 'Advisory', label: normalized });
+	}
+	if (
+		hasStaleEvidenceReason(qualityRisk?.blocking_reasons) &&
+		!hasFindingKind(findings, 'Out of date')
+	) {
+		findings.push({
+			kind: 'Out of date',
+			label: 'Earlier evidence no longer matches this source'
+		});
+	}
+	return findings;
+}
+
+function reviewFocusContractCopy(findings: MovieGoalContractFinding[]): MovieGoalContractRow {
+	let measured = 0;
+	let advisory = 0;
+	let outOfDate = 0;
+	for (const finding of findings) {
+		if (finding.kind === 'Measured') measured += 1;
+		if (finding.kind === 'Advisory') advisory += 1;
+		if (finding.kind === 'Out of date') outOfDate += 1;
+	}
+	const value = measured
+		? `${measured} measured ${measured === 1 ? 'finding' : 'findings'}`
+		: advisory
+			? `${advisory} review ${advisory === 1 ? 'focus' : 'focuses'}`
+			: 'Standard visual review';
+	const detail = outOfDate
+		? `${outOfDate} earlier ${outOfDate === 1 ? 'finding is' : 'findings are'} out of date; use the current measured and advisory focus.`
+		: measured && advisory
+			? 'Measured findings are confirmed by evidence; advisories are lower-confidence places to inspect.'
+			: measured
+				? 'These findings are confirmed by current evidence.'
+				: advisory
+					? 'These are lower-confidence places to inspect during review.'
+					: 'Check motion, dark gradients, texture, and sound before approval.';
+	return {
+		label: 'Review focus',
+		value,
+		detail,
+		provenance: measured
+			? 'Measured evidence'
+			: advisory
+				? 'Mediaforce advisory'
+				: 'Mediaforce default',
+		tone: outOfDate ? 'attention' : 'normal'
+	};
+}
+
+function hasFindingLabel(findings: MovieGoalContractFinding[], label: string): boolean {
+	for (const finding of findings) {
+		if (finding.label === label) return true;
+	}
+	return false;
+}
+
+function hasFindingKind(
+	findings: MovieGoalContractFinding[],
+	kind: MovieGoalContractFinding['kind']
+): boolean {
+	for (const finding of findings) {
+		if (finding.kind === kind) return true;
+	}
+	return false;
+}
+
+function hasStaleEvidenceReason(reasons: string[] | null | undefined): boolean {
+	for (const reason of reasons ?? []) {
+		if (/stale|different source/i.test(reason)) return true;
+	}
+	return false;
+}
+
+function qualityFindingLabel(value: unknown): string {
+	const normalized = textValue(value).toLowerCase().replaceAll('-', '_').replaceAll(' ', '_');
+	return (
+		{
+			softness_detail_loss: 'Softness / detail loss',
+			high_texture: 'Softness / detail loss',
+			animation_cues: 'Softness / detail loss',
+			motion_breakup: 'Motion breakup',
+			high_motion: 'Motion breakup',
+			banding_dark_scene_damage: 'Banding / dark-scene damage',
+			dark_gradient_banding_risk: 'Banding / dark-scene damage',
+			grain_noise_treatment: 'Grain / noise treatment',
+			likely_film_grain: 'Grain / noise treatment',
+			likely_analog_noise: 'Grain / noise treatment',
+			cadence_interlace_artifacts: 'Cadence / interlace artifacts',
+			duplicate_cadence: 'Cadence / interlace artifacts',
+			audio_quality_layout: 'Audio quality / layout',
+			audio_complexity: 'Audio quality / layout',
+			other: 'Other review concern'
+		}[normalized] ?? textValue(value)
+	);
+}
+
+function provenanceLabel(source: unknown, requiresChoice: boolean): string {
+	if (requiresChoice) return 'Needs your choice';
+	const normalized = textValue(source).toLowerCase();
+	if (/operator|request|note|user/.test(normalized)) return 'You set this';
+	if (/folder|profile|library|policy/.test(normalized)) return 'Library setting';
+	if (/legacy|snapshot|persisted/.test(normalized)) return 'Carried over';
+	return 'Mediaforce default';
+}
+
+function formatCompactNumber(value: number): string {
+	return value.toFixed(Number.isInteger(value) ? 0 : 1);
 }
 
 function assignedWorkerLabel(job: EncodeQueueJob): string {

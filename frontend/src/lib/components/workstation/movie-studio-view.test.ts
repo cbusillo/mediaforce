@@ -4,19 +4,168 @@ import {
 	canRetrySampleJob,
 	formatMovieBytes,
 	movieCurrentWorkView,
+	movieGoalContractView,
 	movieGoalFactsView,
 	movieReviewStatusLabel,
 	movieSizeCapBlockView,
 	parseServerTimestamp,
 	parentSampleAppliesToExactItem
 } from './movie-studio-view';
+import type {
+	PlannedStreamPayload,
+	ResolvedOperatorIntentPayload,
+	StreamBudgetLedgerPayload
+} from '$lib/api/types';
 
-describe('formatMovieBytes', () => {
+function resolvedMovieIntent(
+	overrides: Partial<ResolvedOperatorIntentPayload> = {}
+): ResolvedOperatorIntentPayload {
+	return {
+		schema_version: 2,
+		requires_confirmation: false,
+		size_goal: {
+			schema_version: 1,
+			mode: 'normalized',
+			source: 'config_default',
+			status: 'resolved',
+			requires_confirmation: false,
+			reference_size_mb: 300,
+			reference_runtime_minutes: 45,
+			target_size_bytes: 720_000_000,
+			sample_projection_tolerance_percent: 8,
+			final_output_tolerance_percent: 5,
+			rationale: 'Runtime-scaled target.'
+		},
+		resolution: {
+			mode: 'source',
+			max_height: null,
+			source: 'config_default',
+			requires_confirmation: false,
+			rationale: 'Keep the source resolution.'
+		},
+		compression_intent: {
+			schema_version: 1,
+			level: 'balanced',
+			confirmed: true,
+			source: 'config_default',
+			requires_confirmation: false,
+			accepts_under_target_result: true,
+			semantic_id: 'do-not-display-semantic-id',
+			snapshot_id: 'do-not-display-snapshot-id',
+			title: 'Balance size and detail',
+			detail: 'Prefer a practical balance between file size and visible detail.'
+		},
+		request: null,
+		quality: {
+			metric: 'vmaf',
+			target_vmaf: 85,
+			min_target_vmaf: 80,
+			source: 'config_default'
+		},
+		streams: { audio: {}, subtitle: {}, source: 'config_default' },
+		...overrides
+	};
+}
+
+function streamBudgetLedger(streams: PlannedStreamPayload[]): StreamBudgetLedgerPayload {
+	return {
+		schema_version: 1,
+		ledger_id: 'do-not-display-ledger-id',
+		source: {
+			source_id: 'movie-source',
+			source_fingerprint: 'fingerprint-1',
+			source_size_bytes: 2_800_000_000,
+			source_video_bitrate_bps: 10_000_000,
+			duration_seconds: 6480
+		},
+		policy_hash: 'do-not-display-policy-hash',
+		size_goal: resolvedMovieIntent().size_goal,
+		stream_plan: {
+			schema_version: 1,
+			plan_id: 'do-not-display-plan-id',
+			source_id: 'movie-source',
+			source_fingerprint: 'fingerprint-1',
+			policy_hash: 'do-not-display-policy-hash',
+			output_container: 'mkv',
+			attachments_known: true,
+			copy_unknown_attachments: false,
+			streams
+		},
+		entries: [],
+		totals: {
+			total_target_bytes: 720_000_000,
+			audio_bytes: 50_000_000,
+			subtitle_bytes: 1_000_000,
+			attachment_bytes: 0,
+			container_bytes: 1_000_000,
+			non_video_bytes: 52_000_000,
+			minimum_non_video_bytes: 52_000_000,
+			maximum_non_video_bytes: 52_000_000,
+			remaining_video_bytes: 668_000_000,
+			remaining_video_bitrate_bps: 824_691
+		},
+		source_relative_cap: {
+			configured_total_percent: 80,
+			total_cap_bytes: 2_240_000_000,
+			video_cap_bytes: 2_188_000_000,
+			video_cap_bitrate_bps: 2_701_234,
+			video_cap_percent: 78,
+			status: 'available'
+		},
+		feasibility: {
+			status: 'feasible',
+			reasons: [],
+			arithmetic_infeasible: false,
+			aggressive: false,
+			requires_measurement: false
+		},
+		uncertainty: {
+			confidence: 'high',
+			requires_measurement: false,
+			minimum_non_video_bytes: 52_000_000,
+			maximum_non_video_bytes: 52_000_000
+		}
+	};
+}
+
+function plannedStream(
+	kind: PlannedStreamPayload['kind'],
+	action: PlannedStreamPayload['action'],
+	sourceIndex: number
+): PlannedStreamPayload {
+	return {
+		kind,
+		source_index: sourceIndex,
+		source_codec: kind === 'audio' ? 'aac' : 'subrip',
+		action,
+		output_codec: action === 'drop' ? null : kind === 'audio' ? 'opus' : 'subrip',
+		codec_argument: null,
+		output_bitrate_bps: null,
+		output_bitrate_text: null,
+		channels: kind === 'audio' ? 6 : null,
+		language: 'eng',
+		default: sourceIndex === 0,
+		forced: false,
+		source_bitrate_bps: null,
+		source_duration_seconds: 6480,
+		source_size_bytes: null,
+		file_name: null,
+		mime_type: null
+	};
+}
+
+function goalRow(view: ReturnType<typeof movieGoalContractView>, label: string) {
+	for (const row of view.rows) {
+		if (row.label === label) return row;
+	}
+	return undefined;
+}
+
+describe('formatMovieBytes', () =>
 	it('uses the same decimal precision across movie facts and member rows', () => {
 		expect(formatMovieBytes(11_800_000_000)).toBe('11.8 GB');
 		expect(formatMovieBytes(400_000_000)).toBe('400 MB');
-	});
-});
+	}));
 
 describe('canRetrySampleJob', () => {
 	it('allows retry when the failed sample has no replacement proposal', () =>
@@ -32,7 +181,7 @@ describe('canRetrySampleJob', () => {
 });
 
 describe('movieSizeCapBlockView', () => {
-	it('uses the configured cap instead of assuming 80 percent', () => {
+	it('uses the configured cap instead of assuming 80 percent', () =>
 		expect(
 			movieSizeCapBlockView(
 				{ primary_lane: 'blocked', detail: 'Target size exceeds the 75% source cap.' },
@@ -51,10 +200,9 @@ describe('movieSizeCapBlockView', () => {
 			headline: 'The requested size is larger than the allowed 75% of the original file.',
 			remedy:
 				'Choose a smaller target in library settings. Then Mediaforce can prepare a valid movie plan.'
-		});
-	});
+		}));
 
-	it('gives a different remedy when preserved content consumes the cap', () => {
+	it('gives a different remedy when preserved content consumes the cap', () =>
 		expect(
 			movieSizeCapBlockView(
 				{
@@ -76,10 +224,9 @@ describe('movieSizeCapBlockView', () => {
 			headline:
 				'The sound, subtitles, and other content being kept already use the allowed movie size.',
 			remedy: 'Review the movie settings and either keep less content or allow a larger output.'
-		});
-	});
+		}));
 
-	it('does not treat unrelated workflow blockers as size-cap failures', () => {
+	it('does not treat unrelated workflow blockers as size-cap failures', () =>
 		expect(
 			movieSizeCapBlockView(
 				{ primary_lane: 'blocked', detail: 'A destination file already exists.' },
@@ -92,8 +239,7 @@ describe('movieSizeCapBlockView', () => {
 					feasibility: { reasons: [] }
 				}
 			)
-		).toEqual({ blocked: false, headline: '', remedy: '' });
-	});
+		).toEqual({ blocked: false, headline: '', remedy: '' }));
 });
 
 describe('parentSampleAppliesToExactItem', () => {
@@ -403,4 +549,195 @@ describe('movieGoalFactsView', () => {
 				rationale: 'No reduction.'
 			}).expectedSavings
 		).toBe('No size reduction planned'));
+});
+
+describe('movieGoalContractView', () => {
+	it('explains normalized goals, preserved resolution, quality guardrail, and stream actions', () => {
+		const view = movieGoalContractView(
+			resolvedMovieIntent(),
+			streamBudgetLedger([
+				plannedStream('audio', 'copy', 0),
+				plannedStream('audio', 'transcode', 1),
+				plannedStream('subtitle', 'copy', 2),
+				plannedStream('subtitle', 'drop', 3)
+			]),
+			{ width: 1920, height: 818 },
+			{
+				pre_test_instruction: {
+					focus_labels: ['Motion breakup', 'Banding / dark-scene damage']
+				}
+			}
+		);
+
+		expect(view.status).toBe('ready');
+		expect(view.rows).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					label: 'Size rule',
+					value: 'Runtime-scaled target',
+					detail: '300 MB per 45 minutes, scaled to this movie.',
+					provenance: 'Mediaforce default'
+				}),
+				expect.objectContaining({
+					label: 'Resolution',
+					value: 'Preserve 1920×818',
+					detail: 'Keep the source resolution; no downscale is planned.'
+				}),
+				expect.objectContaining({
+					label: 'Quality floor',
+					value: 'VMAF floor 80',
+					detail: 'Aim for 85; the floor is an acceptance guardrail, not a guarantee.'
+				}),
+				expect.objectContaining({
+					label: 'Audio',
+					value: 'Keep 2 tracks',
+					detail: expect.stringContaining('1 copied, 1 converted')
+				}),
+				expect.objectContaining({
+					label: 'Subtitles',
+					value: 'Keep 1 subtitle',
+					detail: expect.stringContaining('1 copied, 1 dropped')
+				})
+			])
+		);
+		expect(view.findings).toEqual([
+			{ kind: 'Advisory', label: 'Motion breakup' },
+			{ kind: 'Advisory', label: 'Banding / dark-scene damage' }
+		]);
+	});
+
+	it('distinguishes downscaling from a source already within the cap', () => {
+		const downscaleIntent = resolvedMovieIntent({
+			resolution: {
+				mode: 'max_height',
+				max_height: 1080,
+				source: 'operator_request',
+				requires_confirmation: false,
+				rationale: 'Limit height.'
+			}
+		});
+		const downscale = movieGoalContractView(
+			downscaleIntent,
+			streamBudgetLedger([]),
+			{ width: 3840, height: 2160 },
+			null
+		);
+		const preserve = movieGoalContractView(
+			downscaleIntent,
+			streamBudgetLedger([]),
+			{ width: 1920, height: 818 },
+			null
+		);
+
+		expect(goalRow(downscale, 'Resolution')).toMatchObject({
+			value: 'Cap at 1080p',
+			detail: 'Downscale the 3840×2160 source to fit the height cap.',
+			provenance: 'You set this'
+		});
+		expect(goalRow(preserve, 'Resolution')).toMatchObject({
+			value: 'Preserve 1920×818',
+			detail: 'The source is already within the 1080p cap.'
+		});
+	});
+
+	it('supports an absolute target, XPSNR floor, and unconfirmed compression choice', () => {
+		const intent = resolvedMovieIntent({
+			requires_confirmation: true,
+			size_goal: {
+				...resolvedMovieIntent().size_goal,
+				mode: 'absolute',
+				source: 'folder_override',
+				reference_runtime_minutes: null
+			},
+			quality: {
+				metric: 'xpsnr',
+				target_xpsnr: 42,
+				min_target_xpsnr: 40,
+				source: 'folder_override'
+			},
+			compression_intent: {
+				...resolvedMovieIntent().compression_intent!,
+				level: 'legacy_unconfirmed',
+				confirmed: false,
+				requires_confirmation: true,
+				source: 'legacy_snapshot'
+			}
+		});
+		const view = movieGoalContractView(intent, streamBudgetLedger([]), {}, null);
+
+		expect(goalRow(view, 'Size rule')).toMatchObject({
+			value: 'Fixed target',
+			detail: 'Use one fixed size target for this movie.',
+			provenance: 'Library setting'
+		});
+		expect(goalRow(view, 'Quality floor')).toMatchObject({
+			value: 'XPSNR floor 40',
+			detail: 'Aim for 42; the floor is an acceptance guardrail, not a guarantee.'
+		});
+		expect(goalRow(view, 'Compression')).toMatchObject({
+			value: 'Needs your choice',
+			provenance: 'Needs your choice',
+			tone: 'attention'
+		});
+	});
+
+	it('separates measured, advisory, and stale review evidence', () => {
+		const view = movieGoalContractView(
+			resolvedMovieIntent(),
+			streamBudgetLedger([]),
+			{
+				media_fingerprint_decision: {
+					status: 'measured',
+					findings: [
+						{ id: 'high_motion', confidence: 0.95 },
+						{ id: 'banding_dark_scene_damage', confidence: 0.62, advisory: true }
+					]
+				}
+			},
+			{
+				typed_risks: [
+					{
+						tag: 'audio_quality_layout',
+						label: 'Audio quality / layout',
+						level: 'medium',
+						rationale: 'Confirm the surround layout.',
+						evidence_ids: ['evidence-id-must-not-display']
+					},
+					{
+						tag: 'grain_noise_treatment',
+						label: 'Grain / noise treatment',
+						level: 'low',
+						rationale: 'Possible grain needs a visual check.'
+					}
+				],
+				blocking_reasons: ['The target-size search trace uses stale cadence evidence.']
+			}
+		);
+
+		expect(view.findings).toEqual([
+			{ kind: 'Measured', label: 'Motion breakup', detail: undefined },
+			{ kind: 'Advisory', label: 'Banding / dark-scene damage', detail: undefined },
+			{
+				kind: 'Measured',
+				label: 'Audio quality / layout',
+				detail: 'Confirm the surround layout.'
+			},
+			{
+				kind: 'Advisory',
+				label: 'Grain / noise treatment',
+				detail: 'Possible grain needs a visual check.'
+			},
+			{ kind: 'Out of date', label: 'Earlier evidence no longer matches this source' }
+		]);
+		expect(JSON.stringify(view)).not.toMatch(
+			/semantic-id|snapshot-id|ledger-id|policy-hash|evidence-id/i
+		);
+	});
+
+	it('uses one resolving state when operator intent is missing', () =>
+		expect(movieGoalContractView(null, streamBudgetLedger([]), {}, null)).toEqual({
+			status: 'resolving',
+			rows: [],
+			findings: []
+		}));
 });
