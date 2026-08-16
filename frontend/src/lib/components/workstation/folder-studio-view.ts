@@ -1972,7 +1972,7 @@ export function resolveWorkflow(
 	if (pendingProposal?.proposal_id && pendingProposal.recovery?.cause === 'stale_plan') {
 		return {
 			tone: 'wait',
-			label: 'Sample plan out of date',
+			label: 'Sample plan is out of date',
 			title: pendingProposal.recovery.headline || 'Sample plan is out of date',
 			copy:
 				pendingProposal.recovery.detail ||

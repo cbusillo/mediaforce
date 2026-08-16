@@ -164,7 +164,7 @@
 					: canRetrySample
 						? 'Sample needs retry'
 						: pendingProposalIsStale
-							? 'Sample plan out of date'
+							? 'Sample plan is out of date'
 							: pendingProposalCanQueue
 								? 'Sample plan ready'
 								: needsReviewSample
@@ -448,7 +448,7 @@
 			return 'The review sample did not finish.';
 		}
 		if (pendingProposalIsStale) {
-			return 'This sample plan was made for a different compression goal.';
+			return pendingProposalRecovery?.headline || 'Sample plan is out of date';
 		}
 		switch (workflow?.primary_lane) {
 			case 'promote':

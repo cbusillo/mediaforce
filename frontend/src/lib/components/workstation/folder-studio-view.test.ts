@@ -2043,7 +2043,7 @@ describe('Folder Studio review request mapping', () => {
 				null
 			)
 		).toMatchObject({
-			label: 'Sample plan out of date',
+			label: 'Sample plan is out of date',
 			title: 'Sample plan is out of date',
 			primary: 'Prepare again',
 			primaryAction: 'prepare-again',

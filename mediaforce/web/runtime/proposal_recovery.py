@@ -18,7 +18,7 @@ def proposal_recovery(
         deterministic_detail: str | None = None,
         stale_plan: bool = False,
 ) -> dict[str, Any] | None:
-    if stale_plan:
+    if stale_plan and bool(payload.get("can_queue")):
         return {
             "cause": "stale_plan",
             "headline": "Sample plan is out of date",
