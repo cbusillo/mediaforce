@@ -591,7 +591,7 @@
 							<strong>{row.value}</strong>
 							<span>{row.detail}</span>
 						</dd>
-						<small>{row.provenance}</small>
+						<dd class="goal-contract__provenance">{row.provenance}</dd>
 					</div>
 				{/each}
 			</dl>
@@ -1366,7 +1366,7 @@
 	}
 
 	.goal-contract__rows dd span,
-	.goal-contract__rows small,
+	.goal-contract__provenance,
 	.goal-contract__resolving span,
 	.goal-contract__browse-note,
 	.goal-contract__detail-body {
@@ -1375,7 +1375,7 @@
 		line-height: var(--mf-leading-normal);
 	}
 
-	.goal-contract__rows small {
+	.goal-contract__provenance {
 		text-align: right;
 	}
 
@@ -1844,7 +1844,7 @@
 			grid-template-columns: minmax(0, 1fr);
 		}
 
-		.goal-contract__rows small {
+		.goal-contract__provenance {
 			text-align: left;
 		}
 
