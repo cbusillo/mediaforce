@@ -217,7 +217,7 @@ from mediaforce.web.runtime.folder_tuning_advice import build_run_verdict_payloa
     apply_policy_fragment as runtime_apply_policy_fragment
 from mediaforce.web.runtime.tool_capabilities import metric_support as runtime_metric_support, \
     refresh_metric_support as runtime_refresh_metric_support
-from mediaforce.web.runtime.folder_tuning_helpers import size_budget_sample_analysis
+from mediaforce.web.runtime.folder_tuning_helpers import proposal_compression_intent_drift, size_budget_sample_analysis
 from mediaforce.web.runtime.catalog_signature import (
     catalog_signature_file as _catalog_signature_file,
     current_catalog_signature as _current_catalog_signature,
@@ -1281,8 +1281,32 @@ def create_app(
             sample_item = representative_selection.primary_item()
             advice_state = _load_advice_state(config, normalized_prefix)
             pending_proposal_raw = _load_pending_proposal(config, normalized_prefix)
-            pending_proposal = _pending_proposal_public_view(pending_proposal_raw)
             calibration = _load_calibration_state(config, normalized_prefix)
+            resolved_policy = object_dict(sample_item.get("resolved_policy"))
+            policy_source = (
+                _apply_policy_fragment(resolved_policy, object_dict(calibration.get("policy")))
+                if calibration
+                else resolved_policy
+            )
+            pending_proposal_payload = object_dict(pending_proposal_raw)
+            final_policy = _apply_policy_fragment(
+                policy_source,
+                object_dict(pending_proposal_payload.get("applied_policy")),
+            )
+            compression_intent_drift = (
+                proposal_compression_intent_drift(
+                    config,
+                    pending_proposal_payload,
+                    policy_source=policy_source,
+                    final_policy=final_policy,
+                )
+                if pending_proposal_payload
+                else None
+            )
+            pending_proposal = _pending_proposal_public_view(
+                pending_proposal_raw,
+                stale_plan=compression_intent_drift is not None,
+            )
             recent_sessions = _recent_tuning_sessions(connection, normalized_prefix)
             approved_season_shortcut = (
                 sibling_approved_season_memory(connection, prefix=normalized_prefix)
@@ -3494,8 +3518,12 @@ def _clear_pending_proposal(config: MediaforceConfig, prefix: str) -> None:
     clear_pending_proposal(_proposal_file(config, prefix))
 
 
-def _pending_proposal_public_view(payload: dict[str, Any] | None) -> dict[str, Any] | None:
-    return pending_proposal_public_view(_folder_state_deps(), payload)
+def _pending_proposal_public_view(
+        payload: dict[str, Any] | None,
+        *,
+        stale_plan: bool = False,
+) -> dict[str, Any] | None:
+    return pending_proposal_public_view(_folder_state_deps(), payload, stale_plan=stale_plan)
 
 
 def _pending_proposal_trace_public_view(trace: dict[str, Any]) -> dict[str, Any] | None:

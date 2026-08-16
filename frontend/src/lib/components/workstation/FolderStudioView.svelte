@@ -5,6 +5,7 @@
 	import {
 		formatDateTimeCopy,
 		pathFilename,
+		prepareAgainRequest,
 		type FolderCalibrationJob,
 		type FolderCalibrationState,
 		type FolderSampleItem,
@@ -324,6 +325,37 @@
 			await onMutate();
 		} catch (error) {
 			benchError = actionErrorMessage(error, 'Sample could not be queued.');
+		} finally {
+			workflowPending = null;
+		}
+	}
+
+	async function prepareAgain() {
+		const action: WorkflowAction = 'prepare-again';
+		const actionState = workflowActionState(action);
+		if (actionState.disabled) return;
+		const request = prepareAgainRequest(pendingProposal ?? {});
+		const hostKey = request.hostKey || selectedHostKey;
+		if (!hostKey) {
+			benchError =
+				'The saved worker is unavailable. Choose a worker and prepare the request again.';
+			return;
+		}
+		workflowPending = action;
+		benchMessage = '';
+		benchError = '';
+		blockerAction = null;
+		try {
+			const response = await postJson<FolderBenchPreviewResponse>(
+				`${resolve('/')}api/folders/${encodedPrefix}/ai-tune/preview`,
+				{ note: request.note, host_key: hostKey },
+				fetch
+			);
+			localPendingProposal = response.proposal ?? studioFolder.pending_proposal ?? null;
+			localProposalPrefix = prefix;
+			benchMessage = response.message || 'Mediaforce prepared the request again.';
+		} catch (error) {
+			benchError = actionErrorMessage(error, 'Mediaforce could not prepare the sample again.');
 		} finally {
 			workflowPending = null;
 		}
@@ -693,6 +725,17 @@
 							type="button"
 							onclick={downloadReviewPack}
 							data-mf-action={workflow.primaryAction}>{workflow.primary}</button
+						>
+					{:else if workflow.primaryAction === 'prepare-again'}
+						<button
+							class="control control--primary"
+							type="button"
+							disabled={workflowActionState(workflow.primaryAction).disabled}
+							title={workflowActionState(workflow.primaryAction).title}
+							onclick={prepareAgain}
+							data-mf-action={workflow.primaryAction}
+							data-mf-wire="live"
+							>{workflowPending === workflow.primaryAction ? 'Preparing' : workflow.primary}</button
 						>
 					{:else if workflow.primaryAction === 'start-sample' || workflow.primaryAction === 'retry-sample'}
 						<button

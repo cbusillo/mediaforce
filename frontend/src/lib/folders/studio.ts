@@ -508,7 +508,7 @@ export type PendingSampleProposal = {
 	trace?: ProposalTrace | null;
 };
 export type PendingProposalRecovery = {
-	cause?: 'assistant_failure' | 'unclear_request' | 'deterministic_blocker';
+	cause?: 'assistant_failure' | 'unclear_request' | 'deterministic_blocker' | 'stale_plan';
 	headline?: string;
 	detail?: string;
 	nothing_queued?: boolean;
@@ -533,7 +533,8 @@ export function proposalRecoveryView(
 	if (
 		recovery.cause !== 'assistant_failure' &&
 		recovery.cause !== 'unclear_request' &&
-		recovery.cause !== 'deterministic_blocker'
+		recovery.cause !== 'deterministic_blocker' &&
+		recovery.cause !== 'stale_plan'
 	)
 		return null;
 	if (

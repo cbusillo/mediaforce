@@ -100,6 +100,29 @@ describe('proposalRecoveryView', () => {
 			})
 		).toMatchObject({ action: 'change_request', nothingQueued: true });
 	});
+
+	it('accepts stale sample plans only on the prepare-again path', () => {
+		expect(
+			proposalRecoveryView({
+				can_queue: false,
+				recovery: {
+					cause: 'stale_plan',
+					headline: 'Sample plan is out of date',
+					detail: 'Your compression goal changed after this plan was made.',
+					nothing_queued: true,
+					action: 'prepare_again',
+					same_request_retryable: true
+				}
+			})
+		).toEqual({
+			cause: 'stale_plan',
+			headline: 'Sample plan is out of date',
+			detail: 'Your compression goal changed after this plan was made.',
+			action: 'prepare_again',
+			nothingQueued: true,
+			sameRequestRetryable: true
+		});
+	});
 });
 
 describe('describeHighImpactApprovalGate', () => {
