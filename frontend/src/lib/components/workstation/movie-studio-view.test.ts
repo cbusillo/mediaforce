@@ -681,6 +681,31 @@ describe('movieGoalContractView', () => {
 		});
 	});
 
+	it('uses the resolved metric for automatic quality guardrails', () => {
+		const intent = resolvedMovieIntent({
+			quality: {
+				metric: 'auto',
+				target_vmaf: 85,
+				min_target_vmaf: 80,
+				target_xpsnr: 41,
+				min_target_xpsnr: 35,
+				source: 'config_default'
+			}
+		});
+		const resolved = movieGoalContractView(intent, streamBudgetLedger([]), {}, null, 'XPSNR');
+		const unresolved = movieGoalContractView(intent, streamBudgetLedger([]), {}, null);
+
+		expect(goalRow(resolved, 'Quality floor')).toMatchObject({
+			value: 'XPSNR floor 35',
+			detail: 'Aim for 41; the floor is an acceptance guardrail, not a guarantee.'
+		});
+		expect(goalRow(unresolved, 'Quality floor')).toMatchObject({
+			value: 'Automatic metric guardrail',
+			detail:
+				'Use VMAF when available, otherwise XPSNR; Mediaforce resolves the active floor before sampling.'
+		});
+	});
+
 	it('separates measured, advisory, and stale review evidence', () => {
 		const view = movieGoalContractView(
 			resolvedMovieIntent(),

@@ -126,7 +126,8 @@
 			folder.resolved_operator_intent,
 			streamBudgetLedger,
 			folder.sample_item,
-			folder.quality_risk
+			folder.quality_risk,
+			folder.resolved_metric
 		)
 	);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');

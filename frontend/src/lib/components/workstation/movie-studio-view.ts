@@ -324,7 +324,8 @@ export function movieGoalContractView(
 	intent: ResolvedOperatorIntentPayload | null | undefined,
 	ledger: StreamBudgetLedgerPayload | null | undefined,
 	sampleItem: RepresentativeSampleItemPayload | null | undefined,
-	qualityRisk: QualityRiskPayload | null | undefined
+	qualityRisk: QualityRiskPayload | null | undefined,
+	resolvedMetric?: string | null
 ): MovieGoalContractView {
 	if (
 		!intent?.size_goal ||
@@ -367,7 +368,7 @@ export function movieGoalContractView(
 		sourceHeight
 	);
 
-	const quality = qualityContractCopy(intent);
+	const quality = qualityContractCopy(intent, resolvedMetric);
 	const compression = compressionContractCopy(intent);
 	const streamSource = intent.streams.source ?? '';
 	const plannedStreams = ledger?.stream_plan.streams ?? [];
@@ -449,9 +450,24 @@ function resolutionContractCopy(
 	};
 }
 
-function qualityContractCopy(intent: ResolvedOperatorIntentPayload): MovieGoalContractRow {
+function qualityContractCopy(
+	intent: ResolvedOperatorIntentPayload,
+	resolvedMetric: string | null | undefined
+): MovieGoalContractRow {
 	const quality = intent.quality;
-	const metric = textValue(quality?.metric).toUpperCase();
+	const configuredMetric = textValue(quality?.metric).toUpperCase();
+	const metric =
+		configuredMetric === 'AUTO' ? textValue(resolvedMetric).toUpperCase() : configuredMetric;
+	if (configuredMetric === 'AUTO' && !metric) {
+		return {
+			label: 'Quality floor',
+			value: 'Automatic metric guardrail',
+			detail:
+				'Use VMAF when available, otherwise XPSNR; Mediaforce resolves the active floor before sampling.',
+			provenance: provenanceLabel(quality?.source, false),
+			tone: 'normal'
+		};
+	}
 	const usesXpsnr = metric === 'XPSNR';
 	const target = finitePositive(usesXpsnr ? quality?.target_xpsnr : quality?.target_vmaf);
 	const floor = finitePositive(usesXpsnr ? quality?.min_target_xpsnr : quality?.min_target_vmaf);
