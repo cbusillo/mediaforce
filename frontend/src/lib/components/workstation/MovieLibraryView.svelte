@@ -14,6 +14,8 @@
 		movieWorkflowIsComplete,
 		movieWorkflowLabel,
 		selectMovieLeadTitle,
+		selectMovieTitle,
+		sortMovieTitles,
 		type MovieLibrarySortMode
 	} from '$lib/movies/library';
 	import LibraryModeNav from './LibraryModeNav.svelte';
@@ -54,12 +56,10 @@
 			}
 			return stateFilter === 'all' || titleStateGroup(title) === stateFilter;
 		});
-		return [...filtered].sort((left, right) => compareTitles(left, right, sortMode));
+		return sortMovieTitles(filtered, sortMode);
 	});
 
-	const selectedTitle = $derived(
-		titles.find((title) => title.prefix === selectedPrefix) ?? titles[0] ?? null
-	);
+	const selectedTitle = $derived(selectMovieTitle(titles, selectedPrefix));
 	const leadTitle = $derived(selectMovieLeadTitle(titles, sortMode, query));
 	const totalSize = $derived(
 		payload.titles.reduce((total, title) => total + title.total_size_bytes, 0)
@@ -86,33 +86,6 @@
 			selectedPrefix = selectedTitle.prefix;
 	});
 
-	function compareTitles(left: MovieTitle, right: MovieTitle, mode: typeof sortMode): number {
-		if (mode === 'name') return left.title.localeCompare(right.title);
-		if (mode === 'size') return right.total_size_bytes - left.total_size_bytes;
-		if (mode === 'savings')
-			return (right.projected_reclaim_bytes ?? -1) - (left.projected_reclaim_bytes ?? -1);
-		if (mode === 'oldest')
-			return ageValue(left) - ageValue(right) || left.title.localeCompare(right.title);
-		return titlePriority(left) - titlePriority(right) || left.title.localeCompare(right.title);
-	}
-
-	function titlePriority(title: MovieTitle): number {
-		if (title.promotion_conflicts.length) return 0;
-		if (title.workflow_state?.state === 'explicit_selection_required') return 6;
-		if (movieWorkflowIsComplete(title.workflow_state)) return 9;
-		return {
-			attention: 1,
-			processing: 2,
-			validate: 3,
-			promote: 4,
-			encode: 5,
-			mixed: 7,
-			none: 8,
-			complete: 9,
-			blocked: 10
-		}[title.workflow_state?.primary_lane ?? 'none'];
-	}
-
 	function titleStateGroup(title: MovieTitle): typeof stateFilter {
 		if (title.promotion_conflicts.length) return 'attention';
 		if (title.workflow_state?.state === 'explicit_selection_required') return 'explicit';
@@ -125,11 +98,6 @@
 			return 'ready';
 		}
 		return 'all';
-	}
-
-	function ageValue(title: MovieTitle): number {
-		const timestamp = title.age?.timestamp;
-		return timestamp ? Date.parse(timestamp) || Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
 	}
 
 	function formatBytes(value: number | null | undefined): string {
@@ -176,6 +144,40 @@
 		if (title.projected_reclaim_bytes == null) return `Save at least ${formatBytes(lowerBound)}`;
 		if (title.savings_confidence === 'estimated') return `Save about ${formatBytes(lowerBound)}`;
 		return `Save ${formatBytes(lowerBound)}`;
+	}
+
+	function priorityOrderingExplanation(): string {
+		if (detailsPending) {
+			return 'Workflow and savings details are loading. Your selected movie stays open while the order settles.';
+		}
+		if (!leadTitle) {
+			return 'No movie has a safe next action right now. Attention, status, and view-only titles stay visible, with A–Z breaking ties.';
+		}
+		return 'Work closest to finished comes first. Within the same next step, bigger known savings rank higher; movies without an estimate stay visible.';
+	}
+
+	function recommendationExplanation(title: MovieTitle): string {
+		let stageReason = 'No later-stage work is ready, so this file choice is next.';
+		switch (title.workflow_state?.primary_lane) {
+			case 'promote':
+				stageReason = 'Ready-to-replace work comes first.';
+				break;
+			case 'validate':
+				stageReason = 'Safety checks come before starting new compression work.';
+				break;
+			case 'mixed':
+				stageReason = 'Later-stage work comes before starting new compression work.';
+				break;
+			case 'encode':
+				stageReason = 'This is the highest-ranked movie ready for new compression.';
+		}
+		const reclaim = movieReclaimLowerBound(title);
+		if (reclaim == null) return `${stageReason} Savings are not measured, so A–Z breaks the tie.`;
+		if (title.projected_reclaim_bytes == null) {
+			return `${stageReason} Its known savings of at least ${formatBytes(reclaim)} rank highest at this step.`;
+		}
+		const qualifier = title.savings_confidence === 'estimated' ? 'estimated ' : '';
+		return `${stageReason} Its ${qualifier}savings of ${formatBytes(reclaim)} rank highest at this step.`;
 	}
 
 	function memberLabel(member: MovieMember): string {
@@ -409,6 +411,12 @@
 				</select>
 			</label>
 		</header>
+		{#if sortMode === 'priority'}
+			<div class="ranking-note" role="note">
+				<span class="eyebrow">How next is ranked</span>
+				<p>{priorityOrderingExplanation()}</p>
+			</div>
+		{/if}
 
 		{#if leadTitle && selectedTitle?.prefix !== leadTitle.prefix}
 			<section class="next-up" aria-labelledby="movie-next-up-title">
@@ -420,7 +428,7 @@
 							{movieWorkflowLabel(leadTitle)}
 						</span>
 					</div>
-					<p>{workflowExplanation(leadTitle)}</p>
+					<p>{workflowExplanation(leadTitle)} {recommendationExplanation(leadTitle)}</p>
 				</div>
 				<button
 					type="button"
@@ -461,7 +469,8 @@
 							<span>Use arrow keys to move through the list</span>
 						</div>
 						<div class="title-index__header" aria-hidden="true">
-							<span>Title</span><span>Files</span><span>Stored</span><span>Next step</span>
+							<span>Title</span><span>Files</span><span>Stored / savings</span><span>Next step</span
+							>
 						</div>
 					</div>
 					{#each titles as title, index (title.prefix)}
@@ -478,11 +487,16 @@
 						>
 							<span class="title-row__identity">
 								<strong>{title.title}</strong>
-								<small
-									>{title.scope_mode === 'single_file'
-										? 'One movie file'
-										: title.library_label}</small
+								<small class:recommended={leadTitle?.prefix === title.prefix}
+									>{leadTitle?.prefix === title.prefix
+										? `Recommended next · ${title.library_label}`
+										: title.scope_mode === 'single_file'
+											? 'One movie file'
+											: title.library_label}</small
 								>
+								<small class="title-row__mobile-meta">
+									{reclaimSummary(title)} · {formatBytes(title.total_size_bytes)} stored
+								</small>
 							</span>
 							<span class="title-row__count">
 								<strong>{title.item_count} {title.item_count === 1 ? 'file' : 'files'}</strong>
@@ -519,8 +533,17 @@
 
 						<div class="selection-command">
 							<div>
-								<span class="eyebrow">Selected movie</span>
-								<p>{workflowExplanation(selectedTitle)}</p>
+								<span class="eyebrow"
+									>{selectedTitle.prefix === leadTitle?.prefix
+										? 'Recommended next'
+										: 'Selected movie'}</span
+								>
+								<p>
+									{workflowExplanation(selectedTitle)}
+									{#if selectedTitle.prefix === leadTitle?.prefix}
+										{recommendationExplanation(selectedTitle)}
+									{/if}
+								</p>
 							</div>
 							<a
 								class="primary-link"
@@ -793,6 +816,22 @@
 		padding: 16px 18px 17px;
 	}
 
+	.ranking-note {
+		align-items: baseline;
+		background: var(--mf-bg-strip);
+		border-bottom: 1px solid var(--mf-line);
+		display: grid;
+		gap: 12px;
+		grid-template-columns: auto minmax(0, 1fr);
+		padding: 9px 14px;
+	}
+
+	.ranking-note p {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+		line-height: 1.45;
+	}
+
 	.next-up__copy {
 		display: grid;
 		gap: 6px;
@@ -841,8 +880,8 @@
 	.title-index__header,
 	.title-row {
 		display: grid;
-		grid-template-columns: minmax(210px, 1.5fr) minmax(105px, 0.65fr) minmax(120px, 0.7fr) minmax(
-				130px,
+		grid-template-columns: minmax(165px, 1.5fr) minmax(75px, 0.65fr) minmax(100px, 0.7fr) minmax(
+				105px,
 				0.8fr
 			);
 	}
@@ -915,6 +954,15 @@
 	.title-row strong,
 	.title-row small {
 		display: block;
+	}
+
+	.title-row small.recommended {
+		color: var(--mf-active-fg);
+		font-weight: 800;
+	}
+
+	.title-row__mobile-meta {
+		display: none !important;
 	}
 
 	.title-row__identity strong {
@@ -1247,6 +1295,16 @@
 		}
 	}
 
+	@container (max-width: 1100px) {
+		.selection-command {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.selection-command .primary-link {
+			max-width: none;
+		}
+	}
+
 	@media (max-width: 760px) {
 		.movie-library {
 			padding: 20px 12px 42px;
@@ -1296,6 +1354,10 @@
 			display: none;
 		}
 
+		.title-row__mobile-meta {
+			display: block !important;
+		}
+
 		.title-inspector {
 			padding: 16px;
 		}
@@ -1322,6 +1384,11 @@
 	}
 
 	@media (max-width: 460px) {
+		.ranking-note {
+			gap: 5px;
+			grid-template-columns: minmax(0, 1fr);
+		}
+
 		.workbench__toolbar,
 		.inspector-facts {
 			grid-template-columns: minmax(0, 1fr);
