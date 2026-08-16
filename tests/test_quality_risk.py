@@ -250,6 +250,171 @@ class QualityRiskContractTests(unittest.TestCase):
         self.assertEqual(contract["facts"]["target_size_trace"], {})
         self.assertNotIn("Old failed search.", contract["deterministic_gates"]["blocking_reasons"])
 
+    def test_old_failed_target_trace_does_not_block_fresh_preview_with_new_ledger(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "ledger_id": "ledger-current",
+            "stream_plan": {"plan_id": "plan-current"},
+            "feasibility": {"status": "feasible"},
+        }
+        failed_trace = self._target_size_trace(status="selected")
+        failed_trace["ledger"] = {
+            "source_id": "src-house-s2",
+            "ledger_id": "ledger-old",
+            "stream_plan_id": "plan-old",
+        }
+
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0, "target_size_mb": 82.0}},
+            calibration=None,
+            latest_failed_sample_job={
+                "job_id": "job-old",
+                "result": {"target_size_trace": failed_trace},
+            },
+        )
+
+        self.assertEqual(contract["facts"]["target_size_trace"], {})
+        reasons = contract["deterministic_gates"]["blocking_reasons"]
+        self.assertNotIn("The target-size search trace belongs to a different stream-budget ledger.", reasons)
+        self.assertNotIn("The target-size search trace belongs to a different production stream plan.", reasons)
+
+    def test_failed_target_trace_remains_current_when_ledger_matches(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "ledger_id": "ledger-current",
+            "stream_plan": {"plan_id": "plan-current"},
+            "feasibility": {"status": "feasible"},
+        }
+        failed_trace = self._target_size_trace(status="quality_conflict")
+        failed_trace["ledger"] = {
+            "source_id": "src-house-s2",
+            "ledger_id": "ledger-current",
+            "stream_plan_id": "plan-current",
+        }
+
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0}},
+            calibration=None,
+            latest_failed_sample_job={
+                "job_id": "job-current",
+                "result": {"target_size_trace": failed_trace},
+            },
+        )
+
+        self.assertEqual(contract["facts"]["target_size_trace"], failed_trace)
+
+    def test_failed_target_trace_is_discarded_when_only_ledger_changed(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "ledger_id": "ledger-current",
+            "stream_plan": {"plan_id": "plan-current"},
+            "feasibility": {"status": "feasible"},
+        }
+        failed_trace = self._target_size_trace(status="selected")
+        failed_trace["ledger"] = {
+            "source_id": "src-house-s2",
+            "ledger_id": "ledger-old",
+            "stream_plan_id": "plan-current",
+        }
+
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0, "target_size_mb": 82.0}},
+            calibration=None,
+            latest_failed_sample_job={
+                "job_id": "job-old",
+                "result": {"target_size_trace": failed_trace},
+            },
+        )
+
+        self.assertEqual(contract["facts"]["target_size_trace"], {})
+
+    def test_failed_target_trace_is_discarded_when_only_stream_plan_changed(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "ledger_id": "ledger-current",
+            "stream_plan": {"plan_id": "plan-current"},
+            "feasibility": {"status": "feasible"},
+        }
+        failed_trace = self._target_size_trace(status="selected")
+        failed_trace["ledger"] = {
+            "source_id": "src-house-s2",
+            "ledger_id": "ledger-current",
+            "stream_plan_id": "plan-old",
+        }
+
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0, "target_size_mb": 82.0}},
+            calibration=None,
+            latest_failed_sample_job={
+                "job_id": "job-old",
+                "result": {"target_size_trace": failed_trace},
+            },
+        )
+
+        self.assertEqual(contract["facts"]["target_size_trace"], {})
+
+    def test_failed_target_trace_with_missing_trace_identity_remains_visible_to_gates(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "ledger_id": "ledger-current",
+            "stream_plan": {"plan_id": "plan-current"},
+            "feasibility": {"status": "feasible"},
+        }
+        failed_trace = self._target_size_trace(status="selected")
+        failed_trace["ledger"] = {"source_id": "src-house-s2"}
+
+        contract = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0}},
+            calibration=None,
+            latest_failed_sample_job={
+                "job_id": "job-current",
+                "result": {"target_size_trace": failed_trace},
+            },
+        )
+
+        self.assertEqual(contract["facts"]["target_size_trace"], failed_trace)
+
+    def test_failed_target_trace_remains_visible_when_current_budget_identity_is_missing(self) -> None:
+        sample_without_identity = self._sample()
+        sample_without_identity["stream_budget_ledger"] = {"feasibility": {"status": "feasible"}}
+        trace_with_identity = self._target_size_trace(status="selected")
+        trace_with_identity["ledger"] = {
+            "source_id": "src-house-s2",
+            "ledger_id": "ledger-old",
+            "stream_plan_id": "plan-old",
+        }
+        contract_without_current_identity = build_quality_risk_contract(
+            prefix="tv/House/Season 2",
+            sample_item=sample_without_identity,
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0}},
+            calibration=None,
+            latest_failed_sample_job={
+                "job_id": "job-current",
+                "result": {"target_size_trace": trace_with_identity},
+            },
+        )
+
+        self.assertEqual(
+            contract_without_current_identity["facts"]["target_size_trace"],
+            trace_with_identity,
+        )
+
     def test_current_target_trace_must_match_ledger_stream_plan_and_cadence(self) -> None:
         sample = self._sample()
         sample["stream_budget_ledger"] = {
@@ -278,6 +443,118 @@ class QualityRiskContractTests(unittest.TestCase):
         reasons = contract["deterministic_gates"]["blocking_reasons"]
         self.assertIn("The target-size search trace belongs to a different stream-budget ledger.", reasons)
         self.assertIn("The target-size search trace belongs to a different production stream plan.", reasons)
+
+    def test_historical_direct_target_trace_discards_only_proven_identity_drift(self) -> None:
+        sample = self._sample()
+        sample["stream_budget_ledger"] = {
+            "ledger_id": "ledger-current",
+            "stream_plan": {"plan_id": "plan-current"},
+            "feasibility": {"status": "feasible"},
+        }
+        failed_trace = self._target_size_trace(status="quality_conflict")
+        failed_trace["ledger"] = {
+            "source_id": "src-house-s2",
+            "ledger_id": "ledger-current",
+            "stream_plan_id": "plan-current",
+        }
+        drift_cases = {
+            "source": {
+                "source_id": "src-house-old",
+                "ledger_id": "ledger-current",
+                "stream_plan_id": "plan-current",
+            },
+            "ledger": {
+                "source_id": "src-house-s2",
+                "ledger_id": "ledger-old",
+                "stream_plan_id": "plan-current",
+            },
+            "stream_plan": {
+                "source_id": "src-house-s2",
+                "ledger_id": "ledger-current",
+                "stream_plan_id": "plan-old",
+            },
+            "live_combined": {
+                "source_id": "src-house-s2",
+                "ledger_id": "ledger-old",
+                "stream_plan_id": "plan-old",
+            },
+        }
+
+        for case, ledger in drift_cases.items():
+            with self.subTest(case=case):
+                direct_trace = self._target_size_trace(status="selected")
+                direct_trace["ledger"] = ledger
+                contract = build_quality_risk_contract(
+                    prefix="tv/House/Season 2",
+                    sample_item=sample,
+                    current_policy={"video": {"target_vmaf": 90.0}},
+                    preview_policy={"video": {"target_vmaf": 90.0}},
+                    calibration={
+                        "job_id": "job-current",
+                        "sample_result": {"target_size_trace": direct_trace},
+                    },
+                    latest_failed_sample_job={
+                        "job_id": "job-current",
+                        "result": {"target_size_trace": failed_trace},
+                    },
+                    target_size_trace_evidence_role="historical_reference",
+                )
+
+                self.assertEqual(contract["facts"]["target_size_trace"], {})
+                reasons = contract["deterministic_gates"]["blocking_reasons"]
+                self.assertFalse(any("target-size search trace belongs" in reason for reason in reasons))
+
+    def test_historical_direct_target_trace_preserves_matching_or_unknown_identity(self) -> None:
+        trace = self._target_size_trace(status="selected")
+        cases = {
+            "matching": (
+                {
+                    "ledger_id": "ledger-current",
+                    "stream_plan": {"plan_id": "plan-current"},
+                    "feasibility": {"status": "feasible"},
+                },
+                {
+                    "source_id": "src-house-s2",
+                    "ledger_id": "ledger-current",
+                    "stream_plan_id": "plan-current",
+                },
+            ),
+            "missing_trace_identity": (
+                {
+                    "ledger_id": "ledger-current",
+                    "stream_plan": {"plan_id": "plan-current"},
+                    "feasibility": {"status": "feasible"},
+                },
+                {"source_id": "src-house-s2"},
+            ),
+            "missing_current_identity": (
+                {"feasibility": {"status": "feasible"}},
+                {
+                    "source_id": "src-house-s2",
+                    "ledger_id": "ledger-old",
+                    "stream_plan_id": "plan-old",
+                },
+            ),
+        }
+
+        for case, (stream_budget, ledger) in cases.items():
+            with self.subTest(case=case):
+                sample = self._sample()
+                sample["stream_budget_ledger"] = stream_budget
+                case_trace = {**trace, "ledger": ledger}
+                contract = build_quality_risk_contract(
+                    prefix="tv/House/Season 2",
+                    sample_item=sample,
+                    current_policy={"video": {"target_vmaf": 90.0}},
+                    preview_policy={"video": {"target_vmaf": 90.0}},
+                    calibration={
+                        "job_id": "job-current",
+                        "sample_result": {"target_size_trace": case_trace},
+                    },
+                    target_size_trace_evidence_role="historical_reference",
+                )
+
+                self.assertEqual(contract["facts"]["target_size_trace"], case_trace)
 
     def test_operator_concern_examples_become_structured_tags(self) -> None:
         request = with_quality_risk_intent(

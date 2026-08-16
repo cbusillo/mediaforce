@@ -105,6 +105,7 @@ from mediaforce.web.runtime.folder_ai_tuning import (
     _keep_first_size_budget_sample,
     _operator_request_with_retrieved_memory_authority,
     _proposal_can_queue,
+    _proposal_quality_risk_contract,
     _proposal_ready_message,
     _size_budget_measurement_fragment,
     _unconfirmed_legacy_size_issue,
@@ -7239,6 +7240,43 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(public_view["operator_decision"]["status"], "rejected")
         self.assertEqual(public_view["operator_decision"]["effective_record"]["details"], "Current rejection.")
         self.assertEqual(public_view["pre_test_instruction"]["moments"][0]["evidence_id"], "ev1_fingerprint")
+
+    def test_proposal_quality_risk_discards_incompatible_historical_calibration_trace(self) -> None:
+        contract = _proposal_quality_risk_contract(
+            prefix="tv/Show/Season 1",
+            sample_item={
+                "representative_source_id": "src-current",
+                "stream_budget_ledger": {
+                    "ledger_id": "ledger-current",
+                    "stream_plan": {"plan_id": "plan-current"},
+                    "feasibility": {"status": "feasible"},
+                },
+            },
+            current_policy={"video": {"target_vmaf": 90.0}},
+            preview_policy={"video": {"target_vmaf": 90.0}},
+            operator_request=None,
+            calibration={
+                "job_id": "historical-job",
+                "sample_result": {
+                    "target_size_trace": {
+                        "schema_version": 1,
+                        "status": "selected",
+                        "ledger": {
+                            "source_id": "src-current",
+                            "ledger_id": "ledger-old",
+                            "stream_plan_id": "plan-old",
+                        },
+                    }
+                },
+            },
+            advice_state=None,
+            latest_failed_sample_job=None,
+        )
+
+        self.assertEqual(contract["facts"]["target_size_trace"], {})
+        reasons = contract["deterministic_gates"]["blocking_reasons"]
+        self.assertNotIn("The target-size search trace belongs to a different stream-budget ledger.", reasons)
+        self.assertNotIn("The target-size search trace belongs to a different production stream plan.", reasons)
 
     def test_retrieve_learning_context_ignores_unrelated_visual_approval(self) -> None:
         approved_sample_item = {
