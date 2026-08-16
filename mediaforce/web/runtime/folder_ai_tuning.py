@@ -383,6 +383,7 @@ def _proposal_quality_risk_contract(
         calibration=calibration,
         advice_state=advice_state,
         latest_failed_sample_job=latest_failed_sample_job,
+        target_size_trace_evidence_role="historical_reference",
         interpretation=interpretation,
         proposed_policy=proposed_policy,
     )
