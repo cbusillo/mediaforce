@@ -106,6 +106,28 @@ describe('movieCurrentWorkView', () => {
 		);
 	});
 
+	it('blocks queued work while the processing queue is stopping', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				queue_position: 1,
+				queue_depth: 2
+			},
+			{ is_paused: false, stop_requested: true },
+			1
+		);
+
+		expect(view).toMatchObject({
+			label: 'Queue stopping',
+			headline: 'Queued, but not able to start',
+			detail: 'Clear the conditions below and Mediaforce starts this movie automatically.',
+			blockers: ['The processing queue is stopping and will not start new work.'],
+			nextCondition: 'This movie starts automatically after the global processing queue is resumed.'
+		});
+	});
+
 	it('shows a queued movie with no known blockers', () => {
 		const view = movieCurrentWorkView(
 			{
