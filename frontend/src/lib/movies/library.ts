@@ -79,6 +79,9 @@ export function movieCompositionDetail(title: MovieTitle): string | null {
 }
 
 export function movieTitleNeedsAction(title: MovieTitle): boolean {
+	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
+		return false;
+	}
 	if (title.promotion_conflicts.length) return true;
 	if (title.workflow_state?.state === 'explicit_selection_required') return true;
 	if (movieWorkflowIsComplete(title.workflow_state)) return false;
@@ -118,13 +121,94 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 	}
 }
 
+export function sortMovieTitles(
+	titles: MovieTitle[],
+	sortMode: MovieLibrarySortMode
+): MovieTitle[] {
+	return [...titles].sort((left, right) => compareMovieTitles(left, right, sortMode));
+}
+
+export function selectMovieTitle(titles: MovieTitle[], selectedPrefix: string): MovieTitle | null {
+	return titles.find((title) => title.prefix === selectedPrefix) ?? titles[0] ?? null;
+}
+
 export function selectMovieLeadTitle(
 	titles: MovieTitle[],
 	sortMode: MovieLibrarySortMode,
 	query: string
 ): MovieTitle | null {
 	if (sortMode !== 'priority' || query.trim()) return null;
-	return titles.find(movieTitleNeedsAction) ?? null;
+	return titles.find(movieTitleCanBeRecommended) ?? null;
+}
+
+function compareMovieTitles(
+	left: MovieTitle,
+	right: MovieTitle,
+	sortMode: MovieLibrarySortMode
+): number {
+	if (sortMode === 'name') return compareMovieTitleNames(left, right);
+	if (sortMode === 'size') {
+		return right.total_size_bytes - left.total_size_bytes || compareMovieTitleNames(left, right);
+	}
+	if (sortMode === 'savings') {
+		return compareMovieReclaim(right, left) || compareMovieTitleNames(left, right);
+	}
+	if (sortMode === 'oldest') {
+		return movieAgeValue(left) - movieAgeValue(right) || compareMovieTitleNames(left, right);
+	}
+	return (
+		moviePriorityStage(left) - moviePriorityStage(right) ||
+		compareMovieReclaim(right, left) ||
+		compareMovieTitleNames(left, right)
+	);
+}
+
+function moviePriorityStage(title: MovieTitle): number {
+	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only')
+		return 9;
+	if (title.promotion_conflicts.length) return 0;
+	if (movieWorkflowIsComplete(title.workflow_state)) return 10;
+	if (title.workflow_state?.state === 'explicit_selection_required') return 6;
+	return {
+		attention: 1,
+		promote: 2,
+		validate: 3,
+		mixed: 4,
+		encode: 5,
+		blocked: 7,
+		processing: 8,
+		none: 9,
+		complete: 10
+	}[title.workflow_state?.primary_lane ?? 'none'];
+}
+
+function movieTitleCanBeRecommended(title: MovieTitle): boolean {
+	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
+		return false;
+	}
+	if (title.promotion_conflicts.length || movieWorkflowIsComplete(title.workflow_state))
+		return false;
+	if (title.workflow_state?.state === 'explicit_selection_required') return true;
+	return ['promote', 'validate', 'mixed', 'encode'].includes(
+		title.workflow_state?.primary_lane ?? ''
+	);
+}
+
+function compareMovieReclaim(left: MovieTitle, right: MovieTitle): number {
+	const leftReclaim = movieReclaimLowerBound(left);
+	const rightReclaim = movieReclaimLowerBound(right);
+	if (leftReclaim == null) return rightReclaim == null ? 0 : -1;
+	if (rightReclaim == null) return 1;
+	return leftReclaim - rightReclaim;
+}
+
+function compareMovieTitleNames(left: MovieTitle, right: MovieTitle): number {
+	return left.title.localeCompare(right.title) || left.prefix.localeCompare(right.prefix);
+}
+
+function movieAgeValue(title: MovieTitle): number {
+	const timestamp = title.age?.timestamp;
+	return timestamp ? Date.parse(timestamp) || Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
 }
 
 function mergeMovieTitle(structure: MovieTitle, details?: MovieTitle): MovieTitle {

@@ -64,6 +64,9 @@ MOVIE_EDITIONS_PREFIX = "movies/Editions Showcase"
 MOVIE_STALE_PLAN_PREFIX = "movies/Stale Sample Plan"
 MOVIE_CONFLICT_PREFIX = "movies/Promotion Conflict"
 MOVIE_TARGET_BLOCKED_PREFIX = "movies/Target Too Large"
+MOVIE_VALIDATION_PREFIX = "movies/Validation Ready"
+MOVIE_PROMOTION_LARGE_PREFIX = "movies/Replacement Ready Large"
+MOVIE_PROMOTION_SMALL_PREFIX = "movies/Replacement Ready Small"
 OTHER_FOLDER_PREFIX = "other/Field Notes"
 OTHER_ROOT_FILE_PREFIX = "other/Loose Capture.mkv"
 OTHER_BLOCKED_PREFIX = "other/Needs Probe"
@@ -104,6 +107,9 @@ FIXTURE_PREFIXES = (
     MOVIE_STALE_PLAN_PREFIX,
     MOVIE_CONFLICT_PREFIX,
     MOVIE_TARGET_BLOCKED_PREFIX,
+    MOVIE_VALIDATION_PREFIX,
+    MOVIE_PROMOTION_LARGE_PREFIX,
+    MOVIE_PROMOTION_SMALL_PREFIX,
     OTHER_FOLDER_PREFIX,
     OTHER_ROOT_FILE_PREFIX,
     OTHER_BLOCKED_PREFIX,
@@ -1147,6 +1153,39 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             ),
             _library_item(
                 project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Validation Ready/Feature.mkv",
+                size_bytes=6 * 1024**3,
+                status="encoded",
+                video_codec="av1",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture movie output waiting for validation.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Replacement Ready Large/Feature.mkv",
+                size_bytes=12 * 1024**3,
+                status="validated",
+                video_codec="av1",
+                priority_score=16,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture higher-savings movie waiting for replacement.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Replacement Ready Small/Feature.mkv",
+                size_bytes=4 * 1024**3,
+                status="validated",
+                video_codec="av1",
+                priority_score=15,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture lower-savings movie waiting for replacement.",
+            ),
+            _library_item(
+                project_root=project_root,
                 media_root="tv",
                 rel_path="tv/Validation Ready/Season 1/Episode 01.mkv",
                 size_bytes=5 * 1024**3,
@@ -1657,6 +1696,9 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         for prefix, validated_at in (
             (VALIDATION_PREFIX, None),
             (PROMOTION_PREFIX, timestamp),
+            (MOVIE_VALIDATION_PREFIX, None),
+            (MOVIE_PROMOTION_LARGE_PREFIX, timestamp),
+            (MOVIE_PROMOTION_SMALL_PREFIX, timestamp),
             (OTHER_VALIDATION_PREFIX, None),
             (OTHER_PROMOTION_PREFIX, timestamp),
         ):
@@ -1672,9 +1714,14 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             validation_json = None
             staging_mtime_ns = None
             staging_size_bytes = max(1, int(row["size_bytes"]) // 2)
-            if prefix == PROMOTION_PREFIX:
+            if prefix in (
+                PROMOTION_PREFIX,
+                MOVIE_PROMOTION_LARGE_PREFIX,
+                MOVIE_PROMOTION_SMALL_PREFIX,
+            ):
                 policy = config.resolve_policy(str(row["rel_path"]))
-                manifest_path = config.paths.run_manifest_dir / "web-smoke-promotion-ready.json"
+                manifest_run_id = f"web-smoke-{_slug(prefix)}"
+                manifest_path = config.paths.run_manifest_dir / f"{manifest_run_id}.json"
                 manifest_path.parent.mkdir(parents=True, exist_ok=True)
                 manifest_path.write_text(json.dumps({
                     "items": [{"resolved_policy": policy}],
@@ -1686,7 +1733,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
-                    manifest_run_id="web-smoke-promotion-ready" if manifest_path else None,
+                    manifest_run_id=manifest_run_id if manifest_path else None,
                     manifest_path=str(manifest_path) if manifest_path else None,
                     item_index=item_index,
                     source_rel_path=row["rel_path"],

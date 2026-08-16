@@ -43,8 +43,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Movies Library: `/movies` includes a root-level exact file, a conventional
   title directory with two independently reachable editions, an excluded
   featurette, an uncertain nested file, active processing, completed titles,
-  and a preflight promotion conflict. Unmeasured titles show `No estimate`
-  rather than inheriting TV codec-history savings.
+  validation-ready work, two replacement-ready titles with different measured
+  savings, and a preflight promotion conflict. Unmeasured titles show
+  `No estimate` rather than inheriting TV codec-history savings.
 - Movie Studio: `/folders/movies/Loose%20Feature.mkv`,
   `/folders/movies/Editions%20Showcase`,
   `/folders/movies/Waiting%20Encode`, and

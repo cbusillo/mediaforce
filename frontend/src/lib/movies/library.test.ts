@@ -12,7 +12,9 @@ import {
 	movieTitleRuntimeSeconds,
 	movieWorkflowIsComplete,
 	movieWorkflowLabel,
-	selectMovieLeadTitle
+	selectMovieLeadTitle,
+	selectMovieTitle,
+	sortMovieTitles
 } from './library';
 
 const title: MovieTitle = {
@@ -335,6 +337,72 @@ describe('movie action discoverability', () => {
 		expect(selectMovieLeadTitle([readyTitle], 'name', '')).toBeNull();
 	});
 
+	it('ranks work by stage before projected savings', () => {
+		const promoteTitle = workflowTitle('Zulu replace', 'promote', 10);
+		const validateTitle = workflowTitle('Alpha check', 'validate', 100);
+		const mixedTitle = workflowTitle('Several steps', 'mixed', 500);
+		const encodeTitle = workflowTitle('Start compression', 'encode', 1000);
+
+		expect(
+			sortMovieTitles([encodeTitle, mixedTitle, validateTitle, promoteTitle], 'priority').map(
+				(currentTitle) => currentTitle.prefix
+			)
+		).toEqual([promoteTitle.prefix, validateTitle.prefix, mixedTitle.prefix, encodeTitle.prefix]);
+	});
+
+	it('ranks known savings first within a stage without inventing zero', () => {
+		const biggest = workflowTitle('Zulu', 'encode', 500);
+		const smaller = workflowTitle('Alpha', 'encode', 100);
+		const measuredZero = workflowTitle('Measured zero', 'encode', 0);
+		const unknown = workflowTitle('Unknown', 'encode', null);
+
+		expect(
+			sortMovieTitles([unknown, smaller, measuredZero, biggest], 'priority').map(
+				(currentTitle) => currentTitle.title
+			)
+		).toEqual(['Zulu', 'Alpha', 'Measured zero', 'Unknown']);
+	});
+
+	it('uses title A–Z as the stable final priority tie-break', () => {
+		const zulu = workflowTitle('Zulu', 'validate', null);
+		const alpha = workflowTitle('Alpha', 'validate', null);
+
+		expect(
+			sortMovieTitles([zulu, alpha], 'priority').map((currentTitle) => currentTitle.title)
+		).toEqual(['Alpha', 'Zulu']);
+	});
+
+	it('keeps attention visible but recommends the best safe next action', () => {
+		const attentionTitle = workflowTitle('Needs review', 'attention', 1000);
+		const processingTitle = workflowTitle('In progress', 'processing', 900);
+		const completeTitle = workflowTitle('Finished', 'complete', 800, 'complete');
+		const promoteTitle = workflowTitle('Ready', 'promote', 100);
+		const ranked = sortMovieTitles(
+			[processingTitle, completeTitle, promoteTitle, attentionTitle],
+			'priority'
+		);
+
+		expect(ranked[0]).toBe(attentionTitle);
+		expect(selectMovieLeadTitle(ranked, 'priority', '')).toBe(promoteTitle);
+	});
+
+	it('keeps the selected title stable when enrichment changes the ranking order', () => {
+		const selected = workflowTitle('Selected', 'encode', null);
+		const other = workflowTitle('Other', 'encode', null);
+		const initial = sortMovieTitles([selected, other], 'priority');
+		const enriched = sortMovieTitles(
+			[
+				{ ...selected, projected_reclaim_bytes: 10 },
+				{ ...other, projected_reclaim_bytes: 100 }
+			],
+			'priority'
+		);
+
+		expect(selectMovieTitle(initial, selected.prefix)?.prefix).toBe(selected.prefix);
+		expect(enriched[0]?.prefix).toBe(other.prefix);
+		expect(selectMovieTitle(enriched, selected.prefix)?.prefix).toBe(selected.prefix);
+	});
+
 	it('lets completion override stale actionable lane data', () => {
 		const completedTitle: MovieTitle = {
 			...readyTitle,
@@ -367,3 +435,37 @@ describe('movie action discoverability', () => {
 		expect(movieWorkflowLabel(completedTitle)).toBe('Finished');
 	});
 });
+
+function workflowTitle(
+	name: string,
+	lane: NonNullable<MovieTitle['workflow_state']>['primary_lane'],
+	projectedReclaim: number | null,
+	state = `ready_to_${lane}`
+): MovieTitle {
+	return {
+		...title,
+		prefix: `films/${name}`,
+		title: name,
+		projected_reclaim_bytes: projectedReclaim,
+		details_loading: false,
+		savings_confidence: projectedReclaim == null ? 'unavailable' : 'estimated',
+		workflow_state: {
+			prefix: `films/${name}`,
+			state,
+			primary_lane: lane,
+			label: name,
+			tone: 'ready',
+			detail: name,
+			counts: {},
+			lane_counts: {},
+			state_counts: {},
+			next_action: {
+				kind: 'review_scope',
+				label: 'Open movie',
+				enabled: true,
+				target_prefix: `films/${name}`
+			},
+			blockers: []
+		}
+	};
+}
