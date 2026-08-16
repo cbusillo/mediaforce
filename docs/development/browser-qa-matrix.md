@@ -286,6 +286,13 @@ in Completed, replace planning projections with only known completed facts,
 hide all sample and processing actions, and offer only a safe route back to
 Movies.
 
+Before Prepare, Movie Studio must also show one dense resolved goal contract for
+the size rule, resolution result, quality floor, compression intent, audio,
+subtitles, review focus, and provenance. Keep the primary action above that
+contract in the initial 1024px and 390px viewports. Browse-only libraries show
+the same contract without a goal-changing control, active processing labels it
+`Goals in use`, and completed movies suppress the forward-looking contract.
+
 On Finished, the finished-season list must fit without horizontal scrolling at
 1024px and must become readable stacked rows at 390px. The light/dark control
 must persist across route changes and reloads, and both themes must preserve

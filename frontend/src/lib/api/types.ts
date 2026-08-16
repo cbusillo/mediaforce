@@ -514,7 +514,7 @@ export interface CalibrationJobPayload {
 	host?: Record<string, unknown>;
 	notes?: string;
 	policy?: Record<string, unknown>;
-	sample_item?: Record<string, unknown>;
+	sample_item?: RepresentativeSampleItemPayload;
 	result?: Record<string, unknown> | null;
 	error?: string | null;
 	created_at?: string | null;
@@ -1046,6 +1046,27 @@ export interface ResolutionIntentRequestPayload {
 	max_height?: number | null;
 }
 
+export interface ResolvedResolutionIntentPayload extends ResolutionIntentRequestPayload {
+	source?: string;
+	requires_confirmation?: boolean;
+	rationale?: string;
+}
+
+export interface ResolvedQualityIntentPayload {
+	metric: string;
+	target_vmaf?: number | null;
+	min_target_vmaf?: number | null;
+	target_xpsnr?: number | null;
+	min_target_xpsnr?: number | null;
+	source?: string;
+}
+
+export interface ResolvedStreamIntentPayload {
+	audio: Record<string, unknown>;
+	subtitle: Record<string, unknown>;
+	source?: string;
+}
+
 export type CompressionIntentLevel = 'reference' | 'transparent' | 'balanced' | 'perceptual_floor';
 
 export interface CompressionIntentRequestPayload {
@@ -1116,11 +1137,11 @@ export interface ResolvedOperatorIntentPayload {
 	schema_version: 1 | 2;
 	requires_confirmation: boolean;
 	size_goal: ResolvedSizeGoalPayload;
-	resolution: Record<string, unknown>;
+	resolution: ResolvedResolutionIntentPayload;
 	compression_intent?: ResolvedCompressionIntentPayload;
 	request: OperatorIntentRequestPayload | null;
-	quality?: Record<string, unknown>;
-	streams?: Record<string, unknown>;
+	quality?: ResolvedQualityIntentPayload;
+	streams?: ResolvedStreamIntentPayload;
 }
 
 export interface SizeGoalOptionPayload {
@@ -1432,12 +1453,44 @@ export interface FolderQualityMemoryPayload {
 	} | null;
 }
 
+export interface RepresentativeSampleItemPayload {
+	library_item_id?: number | string;
+	rel_path?: string;
+	source_id?: string;
+	source_size_bytes?: number | null;
+	video_codec?: string | null;
+	video_bitrate?: number | null;
+	width?: number | null;
+	height?: number | null;
+	cadence_class?: string | null;
+	duration_seconds?: number | null;
+	container?: string | null;
+	status?: string | null;
+	recommendation?: string | null;
+	priority_score?: number | null;
+	recommendation_reason?: string | null;
+	audio_summary?: Array<Record<string, unknown>>;
+	subtitle_summary?: Array<Record<string, unknown>>;
+	attachment_summary?: Array<Record<string, unknown>>;
+	resolved_policy?: Record<string, unknown>;
+	media_fingerprint_decision?: {
+		status?: string | null;
+		traits?: string[];
+		findings?: Array<{
+			id?: string | null;
+			confidence?: number | null;
+			advisory?: boolean;
+			rationale?: string | null;
+		}>;
+	};
+}
+
 export interface FolderPayload {
 	prefix: string;
 	media_scope: MediaScopePayload;
 	pending: boolean;
 	summary?: FolderSummary;
-	sample_item?: Record<string, unknown>;
+	sample_item?: RepresentativeSampleItemPayload;
 	item_plan?: Record<string, unknown>;
 	policy?: Record<string, unknown>;
 	hot_spots?: number[];

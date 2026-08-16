@@ -23,6 +23,7 @@
 		canRetrySampleJob,
 		formatMovieBytes,
 		movieCurrentWorkView,
+		movieGoalContractView,
 		movieGoalFactsView,
 		movieReviewStatusLabel,
 		movieSizeCapBlockView,
@@ -54,6 +55,7 @@
 	let actionError = $state('');
 	let actionNeedsAttention = $state(false);
 	let noteInput = $state<HTMLTextAreaElement>();
+	let goalEditor = $state<HTMLDetailsElement>();
 	let noteHasNewerText = $state(false);
 	let hydratedFolderPrefix = $state('');
 	let hydratedProposalId = $state('');
@@ -119,10 +121,22 @@
 			streamBudgetLedger?.size_goal ?? folder.resolved_operator_intent?.size_goal
 		)
 	);
+	const movieGoalContract = $derived(
+		movieGoalContractView(
+			folder.resolved_operator_intent,
+			streamBudgetLedger,
+			folder.sample_item,
+			folder.quality_risk,
+			folder.resolved_metric
+		)
+	);
 	const isBrowseOnly = $derived(context?.availability === 'browse_only');
 	const isWorkflowBlocked = $derived(!isComplete && workflow?.primary_lane === 'blocked');
 	const sizeCapBlock = $derived(movieSizeCapBlockView(workflow, streamBudgetLedger));
 	const isSizeCapBlock = $derived(isWorkflowBlocked && sizeCapBlock.blocked);
+	const canChangeGoals = $derived(
+		!isBrowseOnly && !isComplete && !isSizeCapBlock && !sampleWorkActive && !currentWork
+	);
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
 	const reviewReady = $derived(
@@ -254,7 +268,11 @@
 
 	function editRequest() {
 		if (isBrowseOnly) return;
-		requestAnimationFrame(() => noteInput?.focus());
+		if (goalEditor) goalEditor.open = true;
+		requestAnimationFrame(() => {
+			noteInput?.focus();
+			noteInput?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		});
 	}
 
 	async function startSample() {
@@ -548,6 +566,66 @@
 	}
 </script>
 
+{#snippet goalContract(label: string, showChangeAction: boolean)}
+	<section class="goal-contract" aria-label={label}>
+		<div class="goal-contract__heading">
+			<div>
+				<span>{label}</span>
+				<strong>Resolved movie goals</strong>
+			</div>
+			{#if showChangeAction && canChangeGoals && movieGoalContract.status === 'ready'}
+				<button class="secondary" type="button" onclick={editRequest}>Change goals</button>
+			{/if}
+		</div>
+		{#if movieGoalContract.status === 'resolving'}
+			<div class="goal-contract__resolving" role="status">
+				<strong>Resolving movie goals</strong>
+				<span>Mediaforce is assembling the size, quality, stream, and review contract.</span>
+			</div>
+		{:else}
+			<dl class="goal-contract__rows">
+				{#each movieGoalContract.rows as row (row.label)}
+					<div class:goal-contract__row--attention={row.tone === 'attention'}>
+						<dt>{row.label}</dt>
+						<dd>
+							<strong>{row.value}</strong>
+							<span>{row.detail}</span>
+						</dd>
+						<dd class="goal-contract__provenance">{row.provenance}</dd>
+					</div>
+				{/each}
+			</dl>
+			<details class="goal-contract__details">
+				<summary>All findings and provenance detail</summary>
+				<div class="goal-contract__detail-body">
+					{#if movieGoalContract.findings.length}
+						<ul>
+							{#each movieGoalContract.findings as finding (`${finding.kind}:${finding.label}`)}
+								<li>
+									<strong>{finding.kind}: {finding.label}</strong>
+									{#if finding.detail}<span>{finding.detail}</span>{/if}
+								</li>
+							{/each}
+						</ul>
+					{:else}
+						<p>No movie-specific findings are active. Use the standard visual review.</p>
+					{/if}
+					<p>
+						<strong>Provenance:</strong> You set this comes from the current request; Library setting
+						comes from this library or folder; Mediaforce default comes from the configured baseline;
+						Carried over comes from an earlier compatible plan.
+					</p>
+				</div>
+			</details>
+		{/if}
+		{#if isBrowseOnly}
+			<small class="goal-contract__browse-note">
+				Enable changes in Settings when you want to choose different goals.
+			</small>
+		{/if}
+	</section>
+{/snippet}
+
 <svelte:head>
 	<title>{title} · Movie Studio · Mediaforce</title>
 </svelte:head>
@@ -687,6 +765,7 @@
 							<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
 							<small>Global queue and worker details</small>
 						</div>
+						{@render goalContract('Goals in use', false)}
 					</div>
 				</WorkstationPanel>
 			{:else}
@@ -696,118 +775,123 @@
 					meta={isWorkflowBlocked ? 'Cannot start' : scopeDisplay}
 				>
 					<div class="decision-panel">
-						<div class="decision-copy">
-							<strong>{workflowSummary()}</strong>
-							{#if primaryAction() === 'retry-sample'}
-								<p>{sampleFailureDetail()}</p>
-								<small class="decision-note">
-									Retry uses the same file, request, and worker. No full movie work was queued.
-								</small>
-							{:else if primaryAction() === 'review-title-sample'}
-								<p>
-									The completed title sample was prepared from this file. Review or approve it in
-									the title workspace; this page stays scoped to only this file.
-								</p>
-							{:else if primaryAction() === 'complete'}
-								<p>
-									The checked replacement is installed. The original remains in Completed until you
-									decide to delete backups.
-								</p>
-							{:else if primaryAction() === 'monitor-sample'}
-								<p>
-									{sampleWorkStatus === 'queued'
-										? 'The review sample is queued and will start when its worker is ready.'
-										: 'The review sample is running. Studio will refresh when review media is ready.'}
-								</p>
-							{:else if primaryAction() === 'prepare-again'}
-								<p>{pendingProposalRecovery?.detail}</p>
-							{:else if isSizeCapBlock}
-								<p>{sizeCapBlock.remedy}</p>
-							{:else if !isWorkflowBlocked}
-								<p>
-									{exactScope
-										? 'Only the file you opened will change.'
-										: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
-								</p>
-							{/if}
-							{#if primaryAction() === 'prepare' && !hostOptions.length}
-								<small class="decision-note">
-									No sample worker is ready. Check Activity for worker availability before preparing
-									the review sample.
-								</small>
-							{/if}
-							{#if primaryAction() === 'promote'}
-								<small class="decision-note">
-									Runs immediately. Mediaforce keeps a backup of the original before installing the
-									checked replacement.
-								</small>
-							{/if}
-						</div>
-						<div class="decision-actions">
-							{#if primaryAction() === 'prepare'}
-								<button
-									class="primary"
-									disabled={folderPending || isBusy || !hostOptions.length}
-									onclick={prepareSample}
-								>
-									{pendingAction === 'prepare-sample'
-										? 'Preparing…'
-										: hostOptions.length
-											? 'Prepare review sample'
-											: 'No sample worker ready'}
-								</button>
-								{#if !hostOptions.length}
+						<div class="decision-panel__row">
+							<div class="decision-copy">
+								<strong>{workflowSummary()}</strong>
+								{#if primaryAction() === 'retry-sample'}
+									<p>{sampleFailureDetail()}</p>
+									<small class="decision-note">
+										Retry uses the same file, request, and worker. No full movie work was queued.
+									</small>
+								{:else if primaryAction() === 'review-title-sample'}
+									<p>
+										The completed title sample was prepared from this file. Review or approve it in
+										the title workspace; this page stays scoped to only this file.
+									</p>
+								{:else if primaryAction() === 'complete'}
+									<p>
+										The checked replacement is installed. The original remains in Completed until
+										you decide to delete backups.
+									</p>
+								{:else if primaryAction() === 'monitor-sample'}
+									<p>
+										{sampleWorkStatus === 'queued'
+											? 'The review sample is queued and will start when its worker is ready.'
+											: 'The review sample is running. Studio will refresh when review media is ready.'}
+									</p>
+								{:else if primaryAction() === 'prepare-again'}
+									<p>{pendingProposalRecovery?.detail}</p>
+								{:else if isSizeCapBlock}
+									<p>{sizeCapBlock.remedy}</p>
+								{:else if !isWorkflowBlocked}
+									<p>
+										{exactScope
+											? 'Only the file you opened will change.'
+											: 'This includes the main movie. Extras and files Mediaforce is unsure about stay untouched unless you open them directly.'}
+									</p>
+								{/if}
+								{#if primaryAction() === 'prepare' && !hostOptions.length}
+									<small class="decision-note">
+										No sample worker is ready. Check Activity for worker availability before
+										preparing the review sample.
+									</small>
+								{/if}
+								{#if primaryAction() === 'promote'}
+									<small class="decision-note">
+										Runs immediately. Mediaforce keeps a backup of the original before installing
+										the checked replacement.
+									</small>
+								{/if}
+							</div>
+							<div class="decision-actions">
+								{#if primaryAction() === 'prepare'}
+									<button
+										class="primary"
+										disabled={folderPending || isBusy || !hostOptions.length}
+										onclick={prepareSample}
+									>
+										{pendingAction === 'prepare-sample'
+											? 'Preparing…'
+											: hostOptions.length
+												? 'Prepare review sample'
+												: 'No sample worker ready'}
+									</button>
+									{#if !hostOptions.length}
+										<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
+									{/if}
+								{:else if primaryAction() === 'prepare-again'}
+									<button class="primary" disabled={isBusy} onclick={prepareAgain}>
+										{pendingAction === 'prepare-again' ? 'Preparing…' : 'Prepare again'}
+									</button>
+								{:else if primaryAction() === 'start'}
+									<button class="primary" disabled={isBusy} onclick={startSample}>
+										{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
+									</button>
+								{:else if primaryAction() === 'monitor-sample'}
+									<button class="secondary" disabled={isBusy} onclick={stopSample}
+										>Stop sample work</button
+									>
 									<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
-								{/if}
-							{:else if primaryAction() === 'prepare-again'}
-								<button class="primary" disabled={isBusy} onclick={prepareAgain}>
-									{pendingAction === 'prepare-again' ? 'Preparing…' : 'Prepare again'}
-								</button>
-							{:else if primaryAction() === 'start'}
-								<button class="primary" disabled={isBusy} onclick={startSample}>
-									{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
-								</button>
-							{:else if primaryAction() === 'monitor-sample'}
-								<button class="secondary" disabled={isBusy} onclick={stopSample}
-									>Stop sample work</button
-								>
-								<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
-							{:else if primaryAction() === 'retry-sample'}
-								<button class="primary" disabled={isBusy} onclick={retrySample}>
-									{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
-								</button>
-							{:else if primaryAction() === 'review-title-sample'}
-								<a class="primary" href={parentTitleHref}>Review title sample</a>
-							{:else if primaryAction() === 'queue'}
-								{#if reviewGate.status === 'accepted'}
-									<button class="primary" disabled={isBusy} onclick={queueApproved}
-										>Queue movie work</button
+								{:else if primaryAction() === 'retry-sample'}
+									<button class="primary" disabled={isBusy} onclick={retrySample}>
+										{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
+									</button>
+								{:else if primaryAction() === 'review-title-sample'}
+									<a class="primary" href={parentTitleHref}>Review title sample</a>
+								{:else if primaryAction() === 'queue'}
+									{#if reviewGate.status === 'accepted'}
+										<button class="primary" disabled={isBusy} onclick={queueApproved}
+											>Queue movie work</button
+										>
+									{:else}
+										<button class="primary" disabled={isBusy} onclick={approveAndQueue}
+											>Approve sample and queue</button
+										>
+									{/if}
+								{:else if primaryAction() === 'validate'}
+									<button class="primary" disabled={isBusy} onclick={validateOutputs}
+										>Check compressed file</button
 									>
+								{:else if primaryAction() === 'promote'}
+									<button
+										class="primary"
+										disabled={isBusy || conflicts.length > 0}
+										onclick={promoteOutputs}>Replace original now</button
+									>
+								{:else if primaryAction() === 'retry'}
+									<button class="primary" disabled={isBusy} onclick={retryEncode}
+										>Resume unfinished work</button
+									>
+								{:else if primaryAction() === 'complete'}
+									<a class="secondary" href={resolve('/movies')}>Back to Movies</a>
 								{:else}
-									<button class="primary" disabled={isBusy} onclick={approveAndQueue}
-										>Approve sample and queue</button
-									>
+									<a class="primary" href={resolve('/settings')}>Open library settings</a>
 								{/if}
-							{:else if primaryAction() === 'validate'}
-								<button class="primary" disabled={isBusy} onclick={validateOutputs}
-									>Check compressed file</button
-								>
-							{:else if primaryAction() === 'promote'}
-								<button
-									class="primary"
-									disabled={isBusy || conflicts.length > 0}
-									onclick={promoteOutputs}>Replace original now</button
-								>
-							{:else if primaryAction() === 'retry'}
-								<button class="primary" disabled={isBusy} onclick={retryEncode}
-									>Resume unfinished work</button
-								>
-							{:else if primaryAction() === 'complete'}
-								<a class="secondary" href={resolve('/movies')}>Back to Movies</a>
-							{:else}
-								<a class="primary" href={resolve('/settings')}>Open library settings</a>
-							{/if}
+							</div>
 						</div>
+						{#if !isComplete}
+							{@render goalContract(isBrowseOnly ? 'Goals in view' : 'Before you prepare', true)}
+						{/if}
 					</div>
 				</WorkstationPanel>
 			{/if}
@@ -890,7 +974,11 @@
 						</div>
 					{/if}
 
-					<details class="sample-plan-editor" open={!pendingProposalCanQueue && !canRetrySample}>
+					<details
+						bind:this={goalEditor}
+						class="sample-plan-editor"
+						open={!pendingProposalCanQueue && !canRetrySample}
+					>
 						<summary
 							>{pendingProposalCanQueue || canRetrySample
 								? 'Change sample plan'
@@ -1147,11 +1235,16 @@
 	}
 
 	.decision-panel {
+		display: grid;
+		gap: var(--mf-space-6);
+		padding: var(--mf-space-7);
+	}
+
+	.decision-panel__row {
 		align-items: center;
 		display: flex;
 		gap: var(--mf-space-7);
 		justify-content: space-between;
-		padding: var(--mf-space-7);
 	}
 
 	.decision-copy {
@@ -1196,6 +1289,145 @@
 
 	.decision-actions .primary {
 		min-width: 150px;
+	}
+
+	.goal-contract {
+		border-top: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		padding: var(--mf-space-5) 0 0;
+	}
+
+	.goal-contract__heading {
+		align-items: center;
+		display: flex;
+		gap: var(--mf-space-5);
+		justify-content: space-between;
+	}
+
+	.goal-contract__heading span,
+	.goal-contract__heading strong {
+		display: block;
+	}
+
+	.goal-contract__heading span,
+	.goal-contract__rows dt {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-bold);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.goal-contract__heading strong {
+		font-size: var(--mf-text-sm);
+		margin-top: 2px;
+	}
+
+	.goal-contract__heading .secondary {
+		min-height: 30px;
+	}
+
+	.goal-contract__rows {
+		border: var(--mf-border-muted);
+		margin: 0;
+	}
+
+	.goal-contract__rows > div {
+		align-items: start;
+		border-bottom: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(88px, 0.3fr) minmax(0, 1fr) minmax(104px, auto);
+		padding: 8px 10px;
+	}
+
+	.goal-contract__rows > div:last-child {
+		border-bottom: 0;
+	}
+
+	.goal-contract__row--attention {
+		box-shadow: inset 3px 0 0 var(--mf-wait-fg);
+	}
+
+	.goal-contract__rows dt,
+	.goal-contract__rows dd {
+		margin: 0;
+	}
+
+	.goal-contract__rows dd strong,
+	.goal-contract__rows dd span {
+		display: block;
+	}
+
+	.goal-contract__rows dd strong {
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+	}
+
+	.goal-contract__rows dd span,
+	.goal-contract__provenance,
+	.goal-contract__resolving span,
+	.goal-contract__browse-note,
+	.goal-contract__detail-body {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		line-height: var(--mf-leading-normal);
+	}
+
+	.goal-contract__provenance {
+		text-align: right;
+	}
+
+	.goal-contract__details {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+	}
+
+	.goal-contract__details summary {
+		color: var(--mf-active-fg);
+		cursor: pointer;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-bold);
+		padding: 8px 10px;
+	}
+
+	.goal-contract__details[open] summary {
+		border-bottom: var(--mf-border-muted);
+	}
+
+	.goal-contract__detail-body {
+		display: grid;
+		gap: var(--mf-space-4);
+		padding: 10px;
+	}
+
+	.goal-contract__detail-body p,
+	.goal-contract__detail-body ul {
+		margin: 0;
+	}
+
+	.goal-contract__detail-body ul {
+		display: grid;
+		gap: var(--mf-space-3);
+		padding-left: 18px;
+	}
+
+	.goal-contract__detail-body li span {
+		display: block;
+		margin-top: 2px;
+	}
+
+	.goal-contract__resolving {
+		border-left: 3px solid var(--mf-wait-fg);
+		display: grid;
+		gap: 2px;
+		padding: 8px 10px;
+	}
+
+	.goal-contract__browse-note {
+		border-left: 2px solid var(--mf-active-line);
+		padding-left: var(--mf-space-4);
 	}
 
 	.current-work {
@@ -1559,7 +1791,7 @@
 		}
 
 		.studio-heading,
-		.decision-panel {
+		.decision-panel__row {
 			align-items: stretch;
 			flex-direction: column;
 		}
@@ -1591,6 +1823,29 @@
 
 		.current-work {
 			padding: var(--mf-space-6);
+		}
+
+		.goal-contract {
+			padding: var(--mf-space-5) 0 0;
+		}
+
+		.decision-panel .goal-contract {
+			margin: 0;
+			padding: var(--mf-space-5) 0 0;
+		}
+
+		.goal-contract__heading {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.goal-contract__rows > div {
+			gap: 3px;
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.goal-contract__provenance {
+			text-align: left;
 		}
 
 		.current-work__actions {
