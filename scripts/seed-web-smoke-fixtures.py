@@ -8,8 +8,10 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 from typing import Any
 
+from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import load_config, update_runtime_settings
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import (
@@ -134,6 +136,39 @@ def _resolve_under_project(project_root: Path, value: Path) -> Path:
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def _write_checked_movie_preview(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            str(ffmpeg_binary()),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=24:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libsvtav1",
+            "-preset",
+            "11",
+            "-crf",
+            "45",
+            "-c:a",
+            "libopus",
+            "-shortest",
+            str(path),
+        ],
+        capture_output=True,
+        check=True,
+    )
 
 
 def _library_item(
@@ -1708,7 +1743,10 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 staging_root / Path(str(row["rel_path"])).with_suffix(".av1.mkv")
             )
             staging_path.parent.mkdir(parents=True, exist_ok=True)
-            staging_path.write_bytes(b"mediaforce smoke staged output\n")
+            if prefix in (MOVIE_PROMOTION_LARGE_PREFIX, MOVIE_PROMOTION_SMALL_PREFIX):
+                _write_checked_movie_preview(staging_path)
+            else:
+                staging_path.write_bytes(b"mediaforce smoke staged output\n")
             manifest_path = None
             item_index = None
             validation_json = None
@@ -2250,6 +2288,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/movies/Promotion%20Conflict",
                 "marker": "Promotion Conflict",
                 "stageMarker": "Mediaforce cannot replace this movie yet.",
+            },
+            {
+                "label": "Movie Studio checked-output preview fixture",
+                "route": "/folders/movies/Replacement%20Ready%20Large",
+                "marker": "Replacement Ready Large",
+                "stageMarker": "Preview checked output",
             },
             {
                 "label": "Movie Studio active-processing fixture",

@@ -4,6 +4,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
 
@@ -41,8 +42,16 @@ def register_folder_routes(
         promote_folder_outputs_action: Callable[[str, str], dict[str, Any]],
         save_profile_action: Callable[[str, bool, bool, str, str], dict[str, Any]],
         folder_staged_integrity_payload: Callable[[str, int, int], dict[str, Any]] | None = None,
+        checked_output_preview_payload: Callable[[str], dict[str, Any]] | None = None,
+        checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
+    preview_payload = checked_output_preview_payload or (
+        lambda _prefix: {"available": False, "code": "checked_output_unavailable"}
+    )
+    preview_stream_action = checked_output_preview_stream_action or (
+        lambda _prefix, _range_header: Response(status_code=404)
+    )
 
     @app.get("/api/folders/{prefix:path}/status")
     def api_folder_status(prefix: str) -> JSONResponse:
@@ -51,6 +60,14 @@ def register_folder_routes(
     @app.get("/api/folders/{prefix:path}/staged-integrity")
     def api_folder_staged_integrity(prefix: str, offset: int = 0, limit: int = 50) -> JSONResponse:
         return JSONResponse(staged_integrity_payload(prefix.strip("/"), offset, limit))
+
+    @app.get("/api/folders/{prefix:path}/checked-output-preview")
+    def api_folder_checked_output_preview(prefix: str) -> JSONResponse:
+        return JSONResponse(preview_payload(prefix.strip("/")))
+
+    @app.get("/api/folders/{prefix:path}/checked-output-preview/stream")
+    def api_folder_checked_output_preview_stream(prefix: str, request: Request) -> Response:
+        return preview_stream_action(prefix.strip("/"), request.headers.get("range"))
 
     @app.get("/api/folders/{prefix:path}/review-compare/download")
     def api_folder_review_compare_download(prefix: str) -> FileResponse:

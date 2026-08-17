@@ -6,6 +6,8 @@ import unittest
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -14,6 +16,10 @@ from mediaforce.web.routes.folders import register_folder_routes
 from mediaforce.web.routes.queues import register_queue_routes
 from mediaforce.web.routes.settings import SETTINGS_SAVE_ERROR_MESSAGE, register_settings_routes
 from mediaforce.web.settings_runtime import SettingsValidationError
+
+
+def _empty_file_response(_prefix: str) -> FileResponse:
+    return FileResponse(__file__)
 
 
 def _json_request(payload: dict[str, Any]) -> Request:
@@ -41,6 +47,57 @@ def _route_endpoint(app: FastAPI, path: str, method: str) -> Any:
 
 
 class WebRouteSecurityTests(unittest.TestCase):
+    def test_checked_output_preview_routes_forward_normalized_scope_and_range(self) -> None:
+        app = FastAPI()
+        captured: list[tuple[str, str | None]] = []
+        register_folder_routes(
+            app,
+            folder_status_payload=lambda _prefix: {},
+            folder_content_payload=lambda _prefix: ({}, 200),
+            download_review_compare_action=_empty_file_response,
+            folder_ai_tune_action=lambda *_args: {},
+            folder_ai_tune_preview_action=lambda *_args: {},
+            folder_ai_tune_confirm_action=lambda *_args: {},
+            clear_folder_tuning_action=lambda _prefix: {},
+            save_series_lifecycle_action=lambda _prefix, _mode: {},
+            approve_measured_encode_recovery_action=lambda *_args: {},
+            queue_folder_encode_action=lambda *_args: {},
+            queue_older_seasons_encode_action=lambda *_args: {},
+            validate_folder_outputs_action=lambda *_args: {},
+            promote_folder_outputs_action=lambda *_args: {},
+            save_profile_action=lambda *_args: {},
+            checked_output_preview_payload=lambda prefix: {
+                "available": True,
+                "filename": f"{prefix}.mkv",
+            },
+            checked_output_preview_stream_action=lambda prefix, range_header: (
+                captured.append((prefix, range_header)) or Response(b"preview", status_code=206)
+            ),
+        )
+        preview_endpoint = _route_endpoint(
+            app,
+            "/api/folders/{prefix:path}/checked-output-preview",
+            "GET",
+        )
+        stream_endpoint = _route_endpoint(
+            app,
+            "/api/folders/{prefix:path}/checked-output-preview/stream",
+            "GET",
+        )
+        request = Request({
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [(b"range", b"bytes=0-99")],
+        })
+
+        preview_response = preview_endpoint("/movies/Ready/")
+        stream_response = stream_endpoint("/movies/Ready/", request)
+
+        self.assertEqual(json.loads(preview_response.body)["filename"], "movies/Ready.mkv")
+        self.assertEqual(stream_response.status_code, 206)
+        self.assertEqual(captured, [("movies/Ready", "bytes=0-99")])
+
     def test_folder_ai_tune_preview_does_not_block_event_loop(self) -> None:
         app = FastAPI()
         preview_started = threading.Event()
@@ -65,7 +122,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             app,
             folder_status_payload=lambda _prefix: {},
             folder_content_payload=lambda _prefix: ({}, 200),
-            download_review_compare_action=lambda _prefix: None,
+            download_review_compare_action=_empty_file_response,
             folder_ai_tune_action=slow_preview,
             folder_ai_tune_preview_action=slow_preview,
             folder_ai_tune_confirm_action=lambda _prefix, _proposal_id, _membership_token: {"ok": True},
@@ -124,7 +181,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             app,
             folder_status_payload=lambda _prefix: {},
             folder_content_payload=lambda _prefix: ({}, 200),
-            download_review_compare_action=lambda _prefix: None,
+            download_review_compare_action=_empty_file_response,
             folder_ai_tune_action=lambda *_args: {"ok": True},
             folder_ai_tune_preview_action=lambda *_args: {"ok": True},
             folder_ai_tune_confirm_action=lambda *_args: {"ok": True},
@@ -182,7 +239,7 @@ class WebRouteSecurityTests(unittest.TestCase):
             app,
             folder_status_payload=lambda _prefix: {},
             folder_content_payload=lambda _prefix: ({}, 200),
-            download_review_compare_action=lambda _prefix: None,
+            download_review_compare_action=_empty_file_response,
             folder_ai_tune_action=lambda *_args: {},
             folder_ai_tune_preview_action=lambda *_args: {},
             folder_ai_tune_confirm_action=lambda *_args: {},

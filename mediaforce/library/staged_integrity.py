@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 import json
 import os
@@ -12,7 +13,13 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
-from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.media_scopes import (
+    MediaScope,
+    media_group_scope_for_rel_path,
+    resolve_media_scope,
+    scope_rel_path_filter,
+)
+from mediaforce.library.movie_library import movie_promotion_conflicts
 
 IntegrityDisposition = Literal[
     "promotable",
@@ -31,7 +38,7 @@ MAX_INTEGRITY_RECORDS = 500
 MAX_DISCOVERY_ENTRIES = 500
 MAX_DETAIL_PAGE_SIZE = 100
 
-_BLOCKING_DISPOSITIONS = frozenset({
+_BLOCKING_DISPOSITION_VALUES: tuple[IntegrityDisposition, ...] = (
     "unvalidated",
     "validation_failed",
     "missing",
@@ -40,7 +47,8 @@ _BLOCKING_DISPOSITIONS = frozenset({
     "partial_or_temporary",
     "remote_only_or_unreachable",
     "not_started",
-})
+)
+_BLOCKING_DISPOSITIONS = frozenset(_BLOCKING_DISPOSITION_VALUES)
 _TEMPORARY_SUFFIXES = (".part", ".partial", ".tmp", ".temp", ".working")
 _TEMPORARY_MARKERS = (".partial.", ".part.", ".tmp.", ".temp.", ".working.")
 _IGNORED_DISCOVERY_NAMES = frozenset({".ds_store"})
@@ -122,6 +130,20 @@ class StagedIntegrityReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CheckedStagedOutput:
+    path: Path
+    size_bytes: int
+    mtime_ns: int
+
+
+class CheckedStagedOutputUnavailable(ValueError):
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
 def staged_integrity_report(
         connection: DBClient,
         config: MediaforceConfig,
@@ -177,6 +199,82 @@ def staged_integrity_report_for_scope(
     )
 
 
+def checked_staged_output(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> CheckedStagedOutput:
+    scope = resolve_media_scope(connection, prefix, library_types=config.library_type_map)
+    if scope.domain != "movie":
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_not_movie",
+            "Final checked-output preview is available only for movie scopes.",
+        )
+    rows = _load_scope_rows(connection, scope, limit=MAX_INTEGRITY_RECORDS + 1)
+    if len(rows) > MAX_INTEGRITY_RECORDS:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_scope_too_large",
+            "The movie scope is too large to select one checked output safely.",
+        )
+    conflict_rows = rows
+    if scope.domain == "movie" and scope.match == "exact_item" and rows:
+        conflict_scope = media_group_scope_for_rel_path(
+            str(rows[0]["rel_path"]),
+            library_types=config.library_type_map,
+        )
+        if conflict_scope is not None and conflict_scope.prefix != scope.prefix:
+            conflict_rows = _load_scope_rows(connection, conflict_scope, limit=MAX_INTEGRITY_RECORDS + 1)
+            if len(conflict_rows) > MAX_INTEGRITY_RECORDS:
+                raise CheckedStagedOutputUnavailable(
+                    "checked_output_scope_too_large",
+                    "The movie title is too large to check replacement conflicts safely.",
+                )
+    if movie_promotion_conflicts(config, [dict(row) for row in conflict_rows]):
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_destination_conflict",
+            "A replacement destination conflict must be resolved before previewing this output.",
+        )
+    staging_roots = _configured_staging_roots(config)
+    classified = [(row, _classify_row(row, staging_roots)) for row in rows]
+    promotable = [(row, record) for row, record in classified if record.disposition == "promotable"]
+    if not promotable:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_unavailable",
+            _checked_output_unavailable_detail(record for _row, record in classified),
+        )
+    if len(promotable) != 1:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_ambiguous",
+            "This movie scope has multiple checked outputs. Open one exact movie file to preview it safely.",
+        )
+    row, record = promotable[0]
+    expected_size = _optional_int(row["staging_size_bytes"])
+    expected_mtime = _optional_int(row["staging_mtime_ns"])
+    if expected_size is None or expected_size <= 0 or expected_mtime is None:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_identity_missing",
+            "The checked output is missing its recorded file identity. Run the final file check again.",
+        )
+    path = _normalized_path(record.staging_path)
+    try:
+        stat_result = path.stat()
+    except OSError as error:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_unavailable",
+            "The checked output is no longer reachable from this computer.",
+        ) from error
+    if not path.is_file() or stat_result.st_size != expected_size or stat_result.st_mtime_ns != expected_mtime:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_drifted",
+            "The checked output changed after validation. Run the final file check again before previewing it.",
+        )
+    return CheckedStagedOutput(
+        path=path,
+        size_bytes=expected_size,
+        mtime_ns=expected_mtime,
+    )
+
+
 def integrity_disposition_blocks_promotion(disposition: IntegrityDisposition) -> bool:
     return disposition in _BLOCKING_DISPOSITIONS
 
@@ -185,6 +283,7 @@ def _load_scope_rows(connection: DBClient, scope: MediaScope, *, limit: int) -> 
     query = (
         select(
             library_items.c.id.label("item_id"),
+            library_items.c.source_path,
             library_items.c.rel_path,
             library_items.c.status,
             staged_artifacts.c.library_item_id.label("staged_library_item_id"),
@@ -209,7 +308,24 @@ def _load_scope_rows(connection: DBClient, scope: MediaScope, *, limit: int) -> 
         .order_by(library_items.c.rel_path.asc())
         .limit(limit)
     )
-    return connection.execute(query).mappings().fetchall()
+    return list(connection.execute(query).mappings().fetchall())
+
+
+def _checked_output_unavailable_detail(records: Iterable[StagedIntegrityRecord]) -> str:
+    dispositions = {record.disposition for record in records}
+    if "drifted" in dispositions:
+        return "The checked output changed after validation. Run the final file check again before previewing it."
+    if "missing" in dispositions:
+        return "The checked output is missing from staging. Recreate or restore it before previewing."
+    if "remote_only_or_unreachable" in dispositions:
+        return "The checked output is not reachable from this computer. Restore staging access before previewing."
+    if "validation_failed" in dispositions:
+        return "The staged output failed its final file check and cannot be previewed as replacement-ready."
+    if "unvalidated" in dispositions:
+        return "The staged output has not passed its final file check yet."
+    if "tracked" in dispositions:
+        return "This checked output has already been installed in the movie library."
+    return "No checked staged output is ready to preview for this movie."
 
 
 def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> StagedIntegrityRecord:

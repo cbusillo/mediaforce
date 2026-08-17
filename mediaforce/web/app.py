@@ -78,7 +78,11 @@ from mediaforce.library.media_scopes import media_group_scope_for_rel_path, reso
     scope_rel_path_filter, series_context_for_prefix, tv_series_scope_for_rel_path
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
-from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
+from mediaforce.library.staged_integrity import (
+    CheckedStagedOutputUnavailable,
+    checked_staged_output,
+    staged_integrity_report_for_scope,
+)
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
 from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
@@ -130,6 +134,11 @@ from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, obje
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_operator_work_routes, register_queue_routes, \
     register_settings_routes
+from mediaforce.web.checked_output_preview import (
+    InvalidByteRange,
+    checked_output_media_type,
+    checked_output_stream_response,
+)
 from mediaforce.web.runtime.decision_evidence import cadence_safety_partition, older_season_cadence_payload
 from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_statuses, dashboard_folders_payload, \
     dashboard_library_payload, dashboard_summary_payload, default_sample_host_key, default_sample_host_key_from_statuses, \
@@ -2018,6 +2027,13 @@ def create_app(
         folder_status_payload=_folder_status_payload,
         folder_staged_integrity_payload=_folder_staged_integrity_payload,
         folder_content_payload=_folder_content_payload,
+        checked_output_preview_payload=lambda prefix: _checked_output_preview_payload(
+            config,
+            prefix,
+        ),
+        checked_output_preview_stream_action=lambda prefix, range_header: (
+            _checked_output_preview_stream_action(config, prefix, range_header)
+        ),
         download_review_compare_action=lambda prefix: _download_review_compare_action(
             config,
             prefix,
@@ -2124,6 +2140,53 @@ def _download_review_compare_action(config: MediaforceConfig, prefix: str) -> Fi
         media_type="video/quicktime",
         background=BackgroundTask(_remove_path_if_exists, bundle_path),
     )
+
+
+def _checked_output_preview_payload(config: MediaforceConfig, prefix: str) -> dict[str, Any]:
+    try:
+        with open_readonly_db(config.paths.db_path) as connection:
+            output = checked_staged_output(connection, config, prefix)
+    except CheckedStagedOutputUnavailable as error:
+        return {
+            "available": False,
+            "code": error.code,
+            "detail": error.detail,
+        }
+    return {
+        "available": True,
+        "code": "checked_output_ready",
+        "filename": output.path.name,
+        "size_bytes": output.size_bytes,
+        "media_type": checked_output_media_type(output.path),
+    }
+
+
+def _checked_output_preview_stream_action(
+        config: MediaforceConfig,
+        prefix: str,
+        range_header: str | None,
+) -> Response:
+    try:
+        with open_readonly_db(config.paths.db_path) as connection:
+            output = checked_staged_output(connection, config, prefix)
+    except CheckedStagedOutputUnavailable as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": error.code, "message": error.detail},
+        ) from error
+    try:
+        return checked_output_stream_response(output, range_header)
+    except InvalidByteRange as error:
+        raise HTTPException(
+            status_code=416,
+            detail={"code": "checked_output_range_invalid", "message": str(error)},
+            headers={"Content-Range": f"bytes */{output.size_bytes}"},
+        ) from error
+    except CheckedStagedOutputUnavailable as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": error.code, "message": error.detail},
+        ) from error
 
 
 def _build_review_compare_video(

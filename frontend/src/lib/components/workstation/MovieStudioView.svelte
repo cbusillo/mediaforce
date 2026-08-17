@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 
-	import { apiDownloadHref, postJson } from '$lib/api/client';
+	import { apiDownloadHref, fetchJson, postJson } from '$lib/api/client';
 	import type {
+		CheckedOutputPreviewPayload,
 		FolderBenchConfirmResponse,
 		FolderBenchPreviewResponse,
 		FolderPayload,
@@ -59,6 +60,12 @@
 	let noteHasNewerText = $state(false);
 	let hydratedFolderPrefix = $state('');
 	let hydratedProposalId = $state('');
+	let checkedPreviewOpen = $state(false);
+	let checkedPreviewPending = $state(false);
+	let checkedPreview = $state<CheckedOutputPreviewPayload | null>(null);
+	let checkedPreviewError = $state('');
+	let checkedPreviewVideoReady = $state(false);
+	let checkedPreviewRequestId = 0;
 
 	const context = $derived(folder.movie_context ?? null);
 	const title = $derived(
@@ -149,6 +156,11 @@
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
+	const checkedPreviewStreamHref = $derived(
+		apiDownloadHref(
+			`/api/folders/${folderRoutePrefix(folder.prefix)}/checked-output-preview/stream`
+		)
+	);
 	const exactScope = $derived(folder.media_scope.match === 'exact_item');
 	const parentTitlePrefix = $derived(asText(folder.media_scope.parent?.prefix));
 	const parentTitleHref = $derived(
@@ -206,12 +218,85 @@
 			hydratedProposalId = '';
 			note = '';
 			noteHasNewerText = false;
+			checkedPreviewOpen = false;
+			checkedPreviewPending = false;
+			checkedPreview = null;
+			checkedPreviewError = '';
+			checkedPreviewVideoReady = false;
+			checkedPreviewRequestId += 1;
 		}
 		const proposalId = asText(pendingProposal.proposal_id);
 		if (!proposalId || proposalId === hydratedProposalId) return;
 		hydratedProposalId = proposalId;
 		note = noteAfterProposalHydration(note, noteHasNewerText, pendingProposal);
 	});
+
+	async function toggleCheckedOutputPreview() {
+		if (checkedPreviewOpen) {
+			checkedPreviewOpen = false;
+			checkedPreviewPending = false;
+			checkedPreviewRequestId += 1;
+			return;
+		}
+		checkedPreviewOpen = true;
+		await loadCheckedOutputPreview();
+	}
+
+	async function loadCheckedOutputPreview() {
+		const requestId = ++checkedPreviewRequestId;
+		const requestPrefix = folder.prefix;
+		checkedPreviewPending = true;
+		checkedPreview = null;
+		checkedPreviewError = '';
+		checkedPreviewVideoReady = false;
+		try {
+			const response = await fetchJson<CheckedOutputPreviewPayload>(
+				`/api/folders/${folderRoutePrefix(requestPrefix)}/checked-output-preview`
+			);
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
+			checkedPreview = response;
+			if (!response.available) {
+				checkedPreviewError =
+					response.detail || 'The checked output is not available to preview right now.';
+			}
+		} catch (error) {
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
+			checkedPreviewError =
+				error instanceof Error
+					? error.message
+					: 'The checked output is not available to preview right now.';
+		} finally {
+			if (requestId === checkedPreviewRequestId && requestPrefix === folder.prefix) {
+				checkedPreviewPending = false;
+			}
+		}
+	}
+
+	async function handleCheckedPreviewMediaError() {
+		const requestId = ++checkedPreviewRequestId;
+		const requestPrefix = folder.prefix;
+		checkedPreviewVideoReady = false;
+		try {
+			const response = await fetchJson<CheckedOutputPreviewPayload>(
+				`/api/folders/${folderRoutePrefix(requestPrefix)}/checked-output-preview`
+			);
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
+			checkedPreview = response;
+			checkedPreviewError = response.available
+				? 'This browser could not play the checked output. Open the exact file separately instead.'
+				: response.detail || 'The checked output is no longer available to preview.';
+		} catch (error) {
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
+			checkedPreviewError =
+				error instanceof Error
+					? error.message
+					: 'The checked output is no longer available to preview.';
+		}
+	}
+
+	function openCheckedOutputSeparately() {
+		window.open(checkedPreviewStreamHref, '_blank', 'noopener,noreferrer');
+	}
 
 	async function prepareSample() {
 		if (isBrowseOnly || isBusy) return;
@@ -874,6 +959,16 @@
 									>
 								{:else if primaryAction() === 'promote'}
 									<button
+										class="secondary"
+										type="button"
+										aria-expanded={checkedPreviewOpen}
+										aria-controls={checkedPreviewOpen ? 'checked-output-preview' : undefined}
+										disabled={isBusy || conflicts.length > 0}
+										onclick={toggleCheckedOutputPreview}
+									>
+										{checkedPreviewOpen ? 'Hide checked output' : 'Preview checked output'}
+									</button>
+									<button
 										class="primary"
 										disabled={isBusy || conflicts.length > 0}
 										onclick={promoteOutputs}>Replace original now</button
@@ -889,6 +984,77 @@
 								{/if}
 							</div>
 						</div>
+						{#if primaryAction() === 'promote' && checkedPreviewOpen}
+							<section
+								id="checked-output-preview"
+								class="checked-output-preview"
+								aria-label="Checked replacement preview"
+							>
+								<div class="checked-output-preview__header">
+									<div>
+										<span>Optional final look</span>
+										<strong>Exact checked replacement</strong>
+									</div>
+									<small>This does not change approval or replacement state.</small>
+								</div>
+								{#if checkedPreviewPending}
+									<div class="checked-output-preview__status" role="status">
+										<strong>Loading checked output…</strong>
+										<span
+											>Mediaforce is confirming that the staged file still matches its final check.</span
+										>
+									</div>
+								{:else if checkedPreviewError}
+									<div
+										class="checked-output-preview__status checked-output-preview__status--error"
+										role="alert"
+									>
+										<strong>Preview unavailable</strong>
+										<span>{checkedPreviewError}</span>
+										<button class="secondary" type="button" onclick={loadCheckedOutputPreview}
+											>Try preview again</button
+										>
+										{#if checkedPreview?.available}
+											<button class="secondary" type="button" onclick={openCheckedOutputSeparately}
+												>Open checked file</button
+											>
+										{/if}
+									</div>
+								{:else if checkedPreview?.available}
+									<div class="checked-output-preview__facts">
+										<div><span>Checked file</span><strong>{checkedPreview.filename}</strong></div>
+										<div>
+											<span>File size</span><strong
+												>{formatMovieBytes(checkedPreview.size_bytes)}</strong
+											>
+										</div>
+									</div>
+									<div class="checked-output-preview__media">
+										<video
+											src={checkedPreviewStreamHref}
+											controls
+											muted
+											playsinline
+											preload="metadata"
+											aria-label="Exact checked replacement preview"
+											onloadedmetadata={() => (checkedPreviewVideoReady = true)}
+											oncanplay={() => (checkedPreviewVideoReady = true)}
+											onerror={handleCheckedPreviewMediaError}
+										></video>
+										{#if !checkedPreviewVideoReady}
+											<span class="checked-output-preview__loading" role="status"
+												>Preparing video controls…</span
+											>
+										{/if}
+									</div>
+									<button
+										class="secondary checked-output-preview__open"
+										type="button"
+										onclick={openCheckedOutputSeparately}>Open checked file separately</button
+									>
+								{/if}
+							</section>
+						{/if}
 						{#if !isComplete}
 							{@render goalContract(isBrowseOnly ? 'Goals in view' : 'Before you prepare', true)}
 						{/if}
@@ -1289,6 +1455,106 @@
 
 	.decision-actions .primary {
 		min-width: 150px;
+	}
+
+	.checked-output-preview {
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-5);
+		padding: var(--mf-space-5);
+	}
+
+	.checked-output-preview__header {
+		align-items: end;
+		display: flex;
+		gap: var(--mf-space-5);
+		justify-content: space-between;
+	}
+
+	.checked-output-preview__header div {
+		display: grid;
+		gap: var(--mf-space-3);
+	}
+
+	.checked-output-preview__header span,
+	.checked-output-preview__facts span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-bold);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.checked-output-preview__header small {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		text-align: right;
+	}
+
+	.checked-output-preview__facts {
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.checked-output-preview__facts div,
+	.checked-output-preview__status {
+		border-left: 2px solid var(--mf-active-line);
+		display: grid;
+		gap: var(--mf-space-3);
+		min-width: 0;
+		padding-left: var(--mf-space-4);
+	}
+
+	.checked-output-preview__facts strong {
+		overflow-wrap: anywhere;
+	}
+
+	.checked-output-preview__status span {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-sm);
+		line-height: var(--mf-leading-normal);
+	}
+
+	.checked-output-preview__status--error {
+		border-left-color: var(--mf-fail-fg);
+	}
+
+	.checked-output-preview__status .secondary {
+		justify-self: start;
+		margin-top: var(--mf-space-3);
+	}
+
+	.checked-output-preview__media {
+		aspect-ratio: 16 / 9;
+		background: #050607;
+		border: var(--mf-border);
+		min-height: 220px;
+		position: relative;
+	}
+
+	.checked-output-preview__media video {
+		display: block;
+		height: 100%;
+		object-fit: contain;
+		width: 100%;
+	}
+
+	.checked-output-preview__loading {
+		background: rgb(5 6 7 / 82%);
+		color: var(--mf-fg-secondary);
+		display: grid;
+		font-size: var(--mf-text-xs);
+		inset: 0;
+		place-items: center;
+		pointer-events: none;
+		position: absolute;
+	}
+
+	.checked-output-preview__open {
+		justify-self: start;
 	}
 
 	.goal-contract {
@@ -1851,6 +2117,27 @@
 		.current-work__actions {
 			align-items: stretch;
 			display: grid;
+		}
+
+		.checked-output-preview {
+			padding: var(--mf-space-4);
+		}
+
+		.checked-output-preview__header {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.checked-output-preview__header small {
+			text-align: left;
+		}
+
+		.checked-output-preview__facts {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.checked-output-preview__media {
+			min-height: 160px;
 		}
 
 		.sample-facts div,
