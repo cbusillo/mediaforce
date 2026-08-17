@@ -168,11 +168,11 @@ class AppServerEvents:
         elif method == "item/completed":
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
             item_type = str(item.get("type") or "unknown")
-            if item_type == "agentMessage":
+            if item_type in {"agentMessage", "agent_message"}:
                 text = item.get("text")
                 if isinstance(text, str):
                     self.agent_messages.append(text)
-            elif item_type not in {"userMessage", "reasoning"}:
+            elif item_type not in {"userMessage", "user_message", "reasoning"}:
                 self.tool_items.append(
                     {"type": item_type, "status": item.get("status")}
                 )

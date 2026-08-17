@@ -217,6 +217,30 @@ def test_app_server_snapshots_the_reported_codex_home(tmp_path: Path) -> None:
     assert result.artifact_delta.session_file_delta == 1
 
 
+def test_app_server_accepts_snake_case_agent_message(tmp_path: Path) -> None:
+    result = _run_scripted_app_server(
+        tmp_path,
+        [
+            {
+                "method": "item/completed",
+                "params": {
+                    "item": {
+                        "type": "agent_message",
+                        "text": json.dumps(_valid_seed_payload()),
+                    }
+                },
+            },
+            {
+                "method": "turn/completed",
+                "params": {"turn": {"id": "turn-1", "status": "completed"}},
+            },
+        ],
+    )
+
+    assert result.status == "success"
+    assert result.tool_items == []
+
+
 def test_app_server_reports_failed_turn_as_provider_error(tmp_path: Path) -> None:
     result = _run_scripted_app_server(
         tmp_path,
