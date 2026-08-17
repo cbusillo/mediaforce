@@ -127,7 +127,7 @@ def run_structured_llm_request(
     resolved_images = [str(Path(path).expanduser().resolve()) for path in images or []]
     route = resolved_routing.route_for(task)
     for route_index, model in enumerate(route.models):
-        attempt = _run_codex_lab_attempt(
+        attempt = run_codex_lab_attempt(
             project_root=project_root,
             developer=developer,
             message=message,
@@ -194,7 +194,7 @@ def run_multimodal_tune_request(
     )
 
 
-def _run_codex_lab_attempt(
+def run_codex_lab_attempt(
         *,
         project_root: Path,
         developer: str,
@@ -252,7 +252,7 @@ def _run_codex_lab_attempt(
             shutil.copyfile(source_image, copied_image)
             cmd.extend(["--image", str(copied_image)])
         cmd.extend(["--color", "never"])
-        cmd.extend(["-c", f"developer_instructions={json.dumps(_codex_lab_developer_instruction(developer))}"])
+        cmd.extend(["-c", f"developer_instructions={json.dumps(codex_lab_developer_instruction(developer))}"])
         cmd.append("-")
         try:
             result = subprocess_run(
@@ -347,7 +347,7 @@ def _attempt_result(
     )
 
 
-def _codex_lab_developer_instruction(developer: str) -> str:
+def codex_lab_developer_instruction(developer: str) -> str:
     return (
         "Do not use tools, inspect files, or infer facts outside the supplied user content. "
         f"{developer.strip()}"
