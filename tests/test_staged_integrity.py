@@ -9,7 +9,12 @@ from unittest.mock import Mock
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, library_items, staged_artifacts
-from mediaforce.library.staged_integrity import MAX_DETAIL_PAGE_SIZE, staged_integrity_report
+from mediaforce.library.staged_integrity import (
+    MAX_DETAIL_PAGE_SIZE,
+    CheckedStagedOutputUnavailable,
+    checked_staged_output,
+    staged_integrity_report,
+)
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
 
 
@@ -26,7 +31,7 @@ class StagedIntegrityTests(unittest.TestCase):
     def test_classifier_reports_every_disposition_without_mutating_rows(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             promotable = self._insert_item(connection, "tv/Show/Season 1/Promotable.mkv", status="validated")
-            tracked = self._insert_item(connection, "tv/Show/Season 1/Tracked.mkv", status="promoted")
+            self._insert_item(connection, "tv/Show/Season 1/Tracked.mkv", status="promoted")
             unvalidated = self._insert_item(connection, "tv/Show/Season 1/Unvalidated.mkv", status="encoded")
             validation_failed = self._insert_item(connection, "tv/Show/Season 1/Failed.mkv", status="encoded")
             missing = self._insert_item(connection, "tv/Show/Season 1/Missing.mkv", status="encoded")
@@ -155,6 +160,57 @@ class StagedIntegrityTests(unittest.TestCase):
             report = staged_integrity_report(connection, self.config, "tv/Show/Season 1", discover=False)
 
         self.assertEqual(report.records[0].disposition, "missing")
+
+    def test_checked_staged_output_returns_exact_validated_movie_identity(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "movies/Ready/Feature.mp4", status="validated")
+            stage = self._write_stage("movies/Ready/Feature.mkv", b"checked movie output")
+            self._insert_artifact(connection, item_id, stage, passed=True)
+
+            output = checked_staged_output(
+                connection,
+                self.config,
+                "movies/Ready/Feature.mp4",
+            )
+
+        self.assertEqual(output.item_id, item_id)
+        self.assertEqual(output.rel_path, "movies/Ready/Feature.mp4")
+        self.assertEqual(output.path, stage.resolve())
+        self.assertEqual(output.size_bytes, stage.stat().st_size)
+        self.assertEqual(output.mtime_ns, stage.stat().st_mtime_ns)
+
+    def test_checked_staged_output_fails_closed_for_drift_and_destination_conflict(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            drifted_id = self._insert_item(connection, "movies/Drifted/Feature.mp4", status="validated")
+            drifted_stage = self._write_stage("movies/Drifted/Feature.mkv", b"changed")
+            self._insert_artifact(connection, drifted_id, drifted_stage, passed=True, size_bytes=1)
+            with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "changed after validation"):
+                checked_staged_output(connection, self.config, "movies/Drifted/Feature.mp4")
+
+            conflict_id = self._insert_item(connection, "movies/Conflict/Feature.mp4", status="validated")
+            conflict_stage = self._write_stage("movies/Conflict/Feature.mkv", b"checked")
+            self._insert_artifact(connection, conflict_id, conflict_stage, passed=True)
+            conflict_destination = self.root / "source/movies/Conflict/Feature.mkv"
+            conflict_destination.write_bytes(b"existing destination")
+            with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "replacement destination"):
+                checked_staged_output(connection, self.config, "movies/Conflict/Feature.mp4")
+
+    def test_checked_staged_output_requires_one_promotable_movie(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for filename in ("Feature.mkv", "Director Cut.mkv"):
+                rel_path = f"movies/Editions/{filename}"
+                item_id = self._insert_item(connection, rel_path, status="validated")
+                stage = self._write_stage(rel_path, filename.encode())
+                self._insert_artifact(connection, item_id, stage, passed=True)
+
+            with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "multiple checked outputs"):
+                checked_staged_output(connection, self.config, "movies/Editions")
+
+            tv_id = self._insert_item(connection, "tv/Show/Season 1/Episode.mkv", status="validated")
+            tv_stage = self._write_stage("tv/Show/Season 1/Episode.mkv", b"episode")
+            self._insert_artifact(connection, tv_id, tv_stage, passed=True)
+            with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "only for movie scopes"):
+                checked_staged_output(connection, self.config, "tv/Show/Season 1/Episode.mkv")
 
     def test_remote_worker_on_shared_root_is_missing_not_unreachable(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -376,13 +432,13 @@ class StagedIntegrityTests(unittest.TestCase):
             self._insert_artifact(connection, movie_id, movie_stage, passed=True)
             self._insert_artifact(connection, other_id, other_stage, passed=True)
 
-        for prefix, stage in (("movies/Film.mkv", movie_stage), ("other/Loose.mkv", other_stage)):
+        for item_prefix, item_stage in (("movies/Film.mkv", movie_stage), ("other/Loose.mkv", other_stage)):
             promoted = Mock(return_value=[Path("promoted")])
             result = promote_folder_outputs_action(
                 self.config,
-                prefix,
-                load_folder_staged_items_fn=lambda *_args, stage=stage, prefix=prefix, **_kwargs: [
-                    self._manifest_item(stage, prefix),
+                item_prefix,
+                load_folder_staged_items_fn=lambda *_args, item_stage=item_stage, item_prefix=item_prefix, **_kwargs: [
+                    self._manifest_item(item_stage, item_prefix),
                 ],
                 promote_manifest_items_fn=promoted,
             )
@@ -444,8 +500,8 @@ class StagedIntegrityTests(unittest.TestCase):
         )
         return int(result.inserted_primary_key[0])
 
+    @staticmethod
     def _insert_artifact(
-            self,
             connection: DBClient,
             item_id: int,
             path: Path,
