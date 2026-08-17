@@ -133,6 +133,7 @@ class AppServerEvents:
     usage: dict[str, int] = field(default_factory=dict)
     turn_status: str | None = None
     turn_error: Any = None
+    turn_completions: dict[str, tuple[str, Any]] = field(default_factory=dict)
     artifact_home: Path | None = None
     artifact_before: ArtifactSnapshot | None = None
 
@@ -199,6 +200,12 @@ class AppServerEvents:
             turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
             self.turn_status = str(turn.get("status") or "unknown")
             self.turn_error = turn.get("error")
+            turn_id = turn.get("id")
+            if isinstance(turn_id, str) and turn_id:
+                self.turn_completions[turn_id] = (
+                    self.turn_status,
+                    self.turn_error,
+                )
 
 
 class AppServerClient:
@@ -232,17 +239,12 @@ class AppServerClient:
         self._send({"method": method, "params": params})
 
     def wait_for_turn(self, turn_id: str, *, deadline: float) -> None:
-        while True:
+        while turn_id not in self.events.turn_completions:
             message = self._receive(deadline=deadline)
             self._handle_message(message)
-            if message.get("method") != "turn/completed":
-                continue
-            params = (
-                message.get("params") if isinstance(message.get("params"), dict) else {}
-            )
-            turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
-            if turn.get("id") == turn_id:
-                return
+        self.events.turn_status, self.events.turn_error = self.events.turn_completions[
+            turn_id
+        ]
 
     def interrupt(self, thread_id: str, turn_id: str) -> None:
         self._send(

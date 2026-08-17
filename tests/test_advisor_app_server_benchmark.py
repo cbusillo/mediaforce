@@ -99,6 +99,37 @@ def test_wait_for_turn_ignores_completion_for_another_turn() -> None:
     assert websocket.received_count == 2
 
 
+def test_wait_for_turn_accepts_completion_received_during_start_request() -> None:
+    websocket = _FakeWebSocket(
+        [
+            {
+                "method": "turn/completed",
+                "params": {"turn": {"id": "expected", "status": "completed"}},
+            },
+            {
+                "method": "turn/completed",
+                "params": {
+                    "turn": {
+                        "id": "other",
+                        "status": "failed",
+                        "error": {"message": "unrelated"},
+                    }
+                },
+            },
+            {"id": 1, "result": {"turn": {"id": "expected"}}},
+        ]
+    )
+    client = AppServerClient(websocket)
+
+    result = client.request("turn/start", {}, deadline=float("inf"))
+    client.wait_for_turn("expected", deadline=float("inf"))
+
+    assert result == {"turn": {"id": "expected"}}
+    assert client.events.turn_status == "completed"
+    assert client.events.turn_error is None
+    assert websocket.received_count == 3
+
+
 def test_server_request_responses_use_valid_safe_protocol_payloads() -> None:
     assert _server_request_response(
         "item/permissions/requestApproval", {}
@@ -382,6 +413,8 @@ class _FakeWebSocket:
     def recv(self, *, timeout: float) -> str:
         del timeout
         self.received_count += 1
+        if not self._messages:
+            raise TimeoutError("synthetic timeout")
         return self._messages.pop(0)
 
 
