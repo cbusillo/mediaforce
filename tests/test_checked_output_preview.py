@@ -2,8 +2,12 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
+
+from fastapi import HTTPException
 
 from mediaforce.library.staged_integrity import CheckedStagedOutput, CheckedStagedOutputUnavailable
+from mediaforce.web.app import _checked_output_preview_stream_action
 from mediaforce.web.checked_output_preview import InvalidByteRange, checked_output_stream_response
 
 
@@ -14,8 +18,6 @@ class CheckedOutputPreviewTests(unittest.TestCase):
         self.path.write_bytes(b"0123456789")
         stat_result = self.path.stat()
         self.output = CheckedStagedOutput(
-            item_id=1,
-            rel_path="movies/Ready/Feature.mkv",
             path=self.path,
             size_bytes=stat_result.st_size,
             mtime_ns=stat_result.st_mtime_ns,
@@ -48,6 +50,45 @@ class CheckedOutputPreviewTests(unittest.TestCase):
 
         with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "changed after validation"):
             checked_output_stream_response(self.output, None)
+
+    def test_rechecks_identity_during_streaming(self) -> None:
+        response = checked_output_stream_response(self.output, None)
+        self.path.write_bytes(b"changed output")
+
+        with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "changed after validation"):
+            asyncio.run(self._body(response))
+
+    def test_app_maps_invalid_range_and_unavailable_output(self) -> None:
+        config = Mock(paths=Mock(db_path=Path("unused.sqlite3")))
+        readonly_context = MagicMock()
+        readonly_context.__enter__.return_value = object()
+        with (
+            patch("mediaforce.web.app.open_readonly_db", return_value=readonly_context),
+            patch("mediaforce.web.app.checked_staged_output", return_value=self.output),
+        ):
+            with self.assertRaises(HTTPException) as invalid_range:
+                _checked_output_preview_stream_action(config, "movies/Ready", "bytes=20-")
+
+        self.assertEqual(invalid_range.exception.status_code, 416)
+        self.assertEqual(invalid_range.exception.headers, {"Content-Range": "bytes */10"})
+
+        readonly_context = MagicMock()
+        readonly_context.__enter__.return_value = object()
+        with (
+            patch("mediaforce.web.app.open_readonly_db", return_value=readonly_context),
+            patch(
+                "mediaforce.web.app.checked_staged_output",
+                side_effect=CheckedStagedOutputUnavailable("checked_output_drifted", "Changed."),
+            ),
+        ):
+            with self.assertRaises(HTTPException) as unavailable:
+                _checked_output_preview_stream_action(config, "movies/Ready", None)
+
+        self.assertEqual(unavailable.exception.status_code, 409)
+        self.assertEqual(
+            unavailable.exception.detail,
+            {"code": "checked_output_drifted", "message": "Changed."},
+        )
 
     @staticmethod
     async def _body(response: object) -> bytes:

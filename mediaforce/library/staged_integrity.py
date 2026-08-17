@@ -14,6 +14,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.movie_library import movie_promotion_conflicts
 
 IntegrityDisposition = Literal[
     "promotable",
@@ -126,8 +127,6 @@ class StagedIntegrityReport:
 
 @dataclass(frozen=True, slots=True)
 class CheckedStagedOutput:
-    item_id: int
-    rel_path: str
     path: Path
     size_bytes: int
     mtime_ns: int
@@ -212,6 +211,11 @@ def checked_staged_output(
             "checked_output_scope_too_large",
             "The movie scope is too large to select one checked output safely.",
         )
+    if movie_promotion_conflicts(config, [dict(row) for row in rows]):
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_destination_conflict",
+            "A replacement destination conflict must be resolved before previewing this output.",
+        )
     staging_roots = _configured_staging_roots(config)
     classified = [(row, _classify_row(row, staging_roots)) for row in rows]
     promotable = [(row, record) for row, record in classified if record.disposition == "promotable"]
@@ -233,18 +237,6 @@ def checked_staged_output(
             "checked_output_identity_missing",
             "The checked output is missing its recorded file identity. Run the final file check again.",
         )
-    source_path = Path(str(row["source_path"] or "")).expanduser()
-    if not str(row["source_path"] or "").strip():
-        raise CheckedStagedOutputUnavailable(
-            "checked_output_source_missing",
-            "The checked output is not tied to a source movie path.",
-        )
-    destination_path = source_path.with_suffix(f".{config.output_container.lstrip('.')}")
-    if destination_path != source_path and destination_path.exists():
-        raise CheckedStagedOutputUnavailable(
-            "checked_output_destination_conflict",
-            "A file already exists at the replacement destination. Resolve the conflict before previewing this output.",
-        )
     path = _normalized_path(record.staging_path)
     try:
         stat_result = path.stat()
@@ -264,8 +256,6 @@ def checked_staged_output(
             "The checked output is not tied to a tracked movie item.",
         )
     return CheckedStagedOutput(
-        item_id=record.item_id,
-        rel_path=str(record.rel_path),
         path=path,
         size_bytes=expected_size,
         mtime_ns=expected_mtime,

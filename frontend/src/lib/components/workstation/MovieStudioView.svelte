@@ -65,6 +65,7 @@
 	let checkedPreview = $state<CheckedOutputPreviewPayload | null>(null);
 	let checkedPreviewError = $state('');
 	let checkedPreviewVideoReady = $state(false);
+	let checkedPreviewRequestId = 0;
 
 	const context = $derived(folder.movie_context ?? null);
 	const title = $derived(
@@ -222,6 +223,7 @@
 			checkedPreview = null;
 			checkedPreviewError = '';
 			checkedPreviewVideoReady = false;
+			checkedPreviewRequestId += 1;
 		}
 		const proposalId = asText(pendingProposal.proposal_id);
 		if (!proposalId || proposalId === hydratedProposalId) return;
@@ -232,6 +234,8 @@
 	async function toggleCheckedOutputPreview() {
 		if (checkedPreviewOpen) {
 			checkedPreviewOpen = false;
+			checkedPreviewPending = false;
+			checkedPreviewRequestId += 1;
 			return;
 		}
 		checkedPreviewOpen = true;
@@ -239,27 +243,59 @@
 	}
 
 	async function loadCheckedOutputPreview() {
+		const requestId = ++checkedPreviewRequestId;
+		const requestPrefix = folder.prefix;
 		checkedPreviewPending = true;
 		checkedPreview = null;
 		checkedPreviewError = '';
 		checkedPreviewVideoReady = false;
 		try {
 			const response = await fetchJson<CheckedOutputPreviewPayload>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/checked-output-preview`
+				`/api/folders/${folderRoutePrefix(requestPrefix)}/checked-output-preview`
 			);
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
 			checkedPreview = response;
 			if (!response.available) {
 				checkedPreviewError =
 					response.detail || 'The checked output is not available to preview right now.';
 			}
 		} catch (error) {
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
 			checkedPreviewError =
 				error instanceof Error
 					? error.message
 					: 'The checked output is not available to preview right now.';
 		} finally {
-			checkedPreviewPending = false;
+			if (requestId === checkedPreviewRequestId && requestPrefix === folder.prefix) {
+				checkedPreviewPending = false;
+			}
 		}
+	}
+
+	async function handleCheckedPreviewMediaError() {
+		const requestId = ++checkedPreviewRequestId;
+		const requestPrefix = folder.prefix;
+		checkedPreviewVideoReady = false;
+		try {
+			const response = await fetchJson<CheckedOutputPreviewPayload>(
+				`/api/folders/${folderRoutePrefix(requestPrefix)}/checked-output-preview`
+			);
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
+			checkedPreview = response;
+			checkedPreviewError = response.available
+				? 'This browser could not play the checked output. Open the exact file separately instead.'
+				: response.detail || 'The checked output is no longer available to preview.';
+		} catch (error) {
+			if (requestId !== checkedPreviewRequestId || requestPrefix !== folder.prefix) return;
+			checkedPreviewError =
+				error instanceof Error
+					? error.message
+					: 'The checked output is no longer available to preview.';
+		}
+	}
+
+	function openCheckedOutputSeparately() {
+		window.open(checkedPreviewStreamHref, '_blank', 'noopener,noreferrer');
 	}
 
 	async function prepareSample() {
@@ -926,7 +962,8 @@
 										class="secondary"
 										type="button"
 										aria-expanded={checkedPreviewOpen}
-										aria-controls="checked-output-preview"
+										aria-controls={checkedPreviewOpen ? 'checked-output-preview' : undefined}
+										disabled={isBusy || conflicts.length > 0}
 										onclick={toggleCheckedOutputPreview}
 									>
 										{checkedPreviewOpen ? 'Hide checked output' : 'Preview checked output'}
@@ -977,6 +1014,11 @@
 										<button class="secondary" type="button" onclick={loadCheckedOutputPreview}
 											>Try preview again</button
 										>
+										{#if checkedPreview?.available}
+											<button class="secondary" type="button" onclick={openCheckedOutputSeparately}
+												>Open checked file</button
+											>
+										{/if}
 									</div>
 								{:else if checkedPreview?.available}
 									<div class="checked-output-preview__facts">
@@ -997,10 +1039,7 @@
 											aria-label="Exact checked replacement preview"
 											onloadedmetadata={() => (checkedPreviewVideoReady = true)}
 											oncanplay={() => (checkedPreviewVideoReady = true)}
-											onerror={() => {
-												checkedPreviewError =
-													'This browser could not play the checked output. The replacement remains unchanged.';
-											}}
+											onerror={handleCheckedPreviewMediaError}
 										></video>
 										{#if !checkedPreviewVideoReady}
 											<span class="checked-output-preview__loading" role="status"
@@ -1008,6 +1047,11 @@
 											>
 										{/if}
 									</div>
+									<button
+										class="secondary checked-output-preview__open"
+										type="button"
+										onclick={openCheckedOutputSeparately}>Open checked file separately</button
+									>
 								{/if}
 							</section>
 						{/if}
@@ -1505,7 +1549,12 @@
 		font-size: var(--mf-text-xs);
 		inset: 0;
 		place-items: center;
+		pointer-events: none;
 		position: absolute;
+	}
+
+	.checked-output-preview__open {
+		justify-self: start;
 	}
 
 	.goal-contract {

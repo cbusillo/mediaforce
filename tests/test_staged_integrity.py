@@ -173,8 +173,6 @@ class StagedIntegrityTests(unittest.TestCase):
                 "movies/Ready/Feature.mp4",
             )
 
-        self.assertEqual(output.item_id, item_id)
-        self.assertEqual(output.rel_path, "movies/Ready/Feature.mp4")
         self.assertEqual(output.path, stage.resolve())
         self.assertEqual(output.size_bytes, stage.stat().st_size)
         self.assertEqual(output.mtime_ns, stage.stat().st_mtime_ns)
@@ -211,6 +209,17 @@ class StagedIntegrityTests(unittest.TestCase):
             self._insert_artifact(connection, tv_id, tv_stage, passed=True)
             with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "only for movie scopes"):
                 checked_staged_output(connection, self.config, "tv/Show/Season 1/Episode.mkv")
+
+    def test_checked_staged_output_blocks_duplicate_destination_conflict(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for suffix in ("mp4", "mov"):
+                rel_path = f"movies/Conflict/Feature.{suffix}"
+                item_id = self._insert_item(connection, rel_path, status="validated")
+                stage = self._write_stage(f"movies/Conflict/Feature-{suffix}.mkv", suffix.encode())
+                self._insert_artifact(connection, item_id, stage, passed=True)
+
+            with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "destination conflict"):
+                checked_staged_output(connection, self.config, "movies/Conflict")
 
     def test_remote_worker_on_shared_root_is_missing_not_unreachable(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

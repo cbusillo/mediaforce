@@ -2169,6 +2169,12 @@ def _checked_output_preview_stream_action(
     try:
         with open_readonly_db(config.paths.db_path) as connection:
             output = checked_staged_output(connection, config, prefix)
+    except CheckedStagedOutputUnavailable as error:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": error.code, "message": error.detail},
+        ) from error
+    try:
         return checked_output_stream_response(output, range_header)
     except InvalidByteRange as error:
         raise HTTPException(
