@@ -220,6 +220,8 @@ class StagedIntegrityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "destination conflict"):
                 checked_staged_output(connection, self.config, "movies/Conflict")
+            with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "destination conflict"):
+                checked_staged_output(connection, self.config, "movies/Conflict/Feature.mp4")
 
     def test_remote_worker_on_shared_root_is_missing_not_unreachable(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

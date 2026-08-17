@@ -2179,7 +2179,7 @@ def _checked_output_preview_stream_action(
     except InvalidByteRange as error:
         raise HTTPException(
             status_code=416,
-            detail=str(error),
+            detail={"code": "checked_output_range_invalid", "message": str(error)},
             headers={"Content-Range": f"bytes */{output.size_bytes}"},
         ) from error
     except CheckedStagedOutputUnavailable as error:

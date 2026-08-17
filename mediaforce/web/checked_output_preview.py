@@ -111,6 +111,7 @@ def _stream_checked_file(
                     "checked_output_drifted",
                     "The checked output changed while it was being previewed.",
                 )
+            _assert_file_identity(file_handle, output)
             remaining -= len(chunk)
             yield chunk
     finally:
@@ -118,8 +119,22 @@ def _stream_checked_file(
 
 
 def _assert_file_identity(file_handle: BinaryIO, output: CheckedStagedOutput) -> None:
-    stat_result = os.fstat(file_handle.fileno())
-    if stat_result.st_size != output.size_bytes or stat_result.st_mtime_ns != output.mtime_ns:
+    open_stat = os.fstat(file_handle.fileno())
+    try:
+        path_stat = output.path.stat()
+    except OSError as error:
+        raise CheckedStagedOutputUnavailable(
+            "checked_output_drifted",
+            "The checked output changed after validation. Run the final file check again before previewing it.",
+        ) from error
+    if (
+            open_stat.st_size != output.size_bytes
+            or open_stat.st_mtime_ns != output.mtime_ns
+            or path_stat.st_size != output.size_bytes
+            or path_stat.st_mtime_ns != output.mtime_ns
+            or open_stat.st_dev != path_stat.st_dev
+            or open_stat.st_ino != path_stat.st_ino
+    ):
         raise CheckedStagedOutputUnavailable(
             "checked_output_drifted",
             "The checked output changed after validation. Run the final file check again before previewing it.",

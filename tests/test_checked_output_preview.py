@@ -1,4 +1,5 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,6 +72,13 @@ class CheckedOutputPreviewTests(unittest.TestCase):
 
         self.assertEqual(invalid_range.exception.status_code, 416)
         self.assertEqual(invalid_range.exception.headers, {"Content-Range": "bytes */10"})
+        self.assertEqual(
+            invalid_range.exception.detail,
+            {
+                "code": "checked_output_range_invalid",
+                "message": "The requested HTTP bytes range is not satisfiable.",
+            },
+        )
 
         readonly_context = MagicMock()
         readonly_context.__enter__.return_value = object()
@@ -89,6 +97,16 @@ class CheckedOutputPreviewTests(unittest.TestCase):
             unavailable.exception.detail,
             {"code": "checked_output_drifted", "message": "Changed."},
         )
+
+    def test_detects_atomic_replacement_during_streaming(self) -> None:
+        response = checked_output_stream_response(self.output, None)
+        replacement = self.path.with_name("replacement.mkv")
+        replacement.write_bytes(b"abcdefghij")
+        os.utime(replacement, ns=(self.output.mtime_ns, self.output.mtime_ns))
+        os.replace(replacement, self.path)
+
+        with self.assertRaisesRegex(CheckedStagedOutputUnavailable, "changed after validation"):
+            asyncio.run(self._body(response))
 
     @staticmethod
     async def _body(response: object) -> bytes:

@@ -13,7 +13,12 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
-from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_rel_path_filter
+from mediaforce.library.media_scopes import (
+    MediaScope,
+    media_group_scope_for_rel_path,
+    resolve_media_scope,
+    scope_rel_path_filter,
+)
 from mediaforce.library.movie_library import movie_promotion_conflicts
 
 IntegrityDisposition = Literal[
@@ -211,7 +216,20 @@ def checked_staged_output(
             "checked_output_scope_too_large",
             "The movie scope is too large to select one checked output safely.",
         )
-    if movie_promotion_conflicts(config, [dict(row) for row in rows]):
+    conflict_rows = rows
+    if scope.domain == "movie" and scope.match == "exact_item" and rows:
+        conflict_scope = media_group_scope_for_rel_path(
+            str(rows[0]["rel_path"]),
+            library_types=config.library_type_map,
+        )
+        if conflict_scope is not None and conflict_scope.prefix != scope.prefix:
+            conflict_rows = _load_scope_rows(connection, conflict_scope, limit=MAX_INTEGRITY_RECORDS + 1)
+            if len(conflict_rows) > MAX_INTEGRITY_RECORDS:
+                raise CheckedStagedOutputUnavailable(
+                    "checked_output_scope_too_large",
+                    "The movie title is too large to check replacement conflicts safely.",
+                )
+    if movie_promotion_conflicts(config, [dict(row) for row in conflict_rows]):
         raise CheckedStagedOutputUnavailable(
             "checked_output_destination_conflict",
             "A replacement destination conflict must be resolved before previewing this output.",
@@ -249,11 +267,6 @@ def checked_staged_output(
         raise CheckedStagedOutputUnavailable(
             "checked_output_drifted",
             "The checked output changed after validation. Run the final file check again before previewing it.",
-        )
-    if record.item_id is None or record.rel_path is None:
-        raise CheckedStagedOutputUnavailable(
-            "checked_output_untracked",
-            "The checked output is not tied to a tracked movie item.",
         )
     return CheckedStagedOutput(
         path=path,
