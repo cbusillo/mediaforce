@@ -23,12 +23,12 @@ failure. It never accepts unvalidated text as an executable policy.
 
 ## Default routes
 
-| Task | Primary | Bounded fallback | Notes |
-| --- | --- | --- | --- |
-| Operator-note parse | `gpt-5.6-luna` | `gpt-5.6-terra` | Used only after deterministic extraction cannot classify the note. This low-risk route cannot reach Sol. |
-| Seed policy | `gpt-5.6-terra` | `gpt-5.6-sol` | Sol is recorded escalation for a failed Terra attempt, not the default. |
-| Note tuning | `gpt-5.6-terra` | `gpt-5.6-sol` | Deterministic policy normalization and review gates remain authoritative. |
-| Review-artifact critique | `gpt-5.6-terra` | `gpt-5.6-sol` | Receives only bounded review artifacts and supplied metadata. |
+| Task                     | Primary         | Bounded fallback | Notes                                                                                                    |
+| ------------------------ | --------------- | ---------------- | -------------------------------------------------------------------------------------------------------- |
+| Operator-note parse      | `gpt-5.6-luna`  | `gpt-5.6-terra`  | Used only after deterministic extraction cannot classify the note. This low-risk route cannot reach Sol. |
+| Seed policy              | `gpt-5.6-terra` | `gpt-5.6-sol`    | Sol is recorded escalation for a failed Terra attempt, not the default.                                  |
+| Note tuning              | `gpt-5.6-terra` | `gpt-5.6-sol`    | Deterministic policy normalization and review gates remain authoritative.                                |
+| Review-artifact critique | `gpt-5.6-terra` | `gpt-5.6-sol`    | Receives only bounded review artifacts and supplied metadata.                                            |
 
 Routes live under `[advisor.routes]` in `config/defaults.toml`. A local config
 may replace model identifiers or the Codex Lab command without changing code:
@@ -82,6 +82,37 @@ background.
 When that command lands, Mediaforce should replace only this adapter and verify
 the token and latency improvement; routing policy and advisor contracts should
 not change.
+
+## App-server benchmark
+
+The repository includes a non-production benchmark for evaluating an already
+running Codex Lab app server before requesting another upstream transport:
+
+```bash
+uv run --with websockets python scripts/benchmark_advisor_app_server.py \
+  --case terra-seed-size-first \
+  --output /tmp/mediaforce-advisor-app-server.json
+```
+
+The default run sends the same synthetic seed-policy prompt and strict schema
+through the current `codex-lab exec` adapter and `ws://127.0.0.1:4766`. It uses
+an ephemeral read-only app-server thread, disables turn environments and client
+dynamic tools, rejects approval requests, and records latency, token usage,
+MCP startup status counts, tool attempts, schema/evaluation checks, and durable
+session-artifact deltas. It does not read media or write Mediaforce runtime
+state. Output is written only when `--output` is supplied.
+
+Combined runs execute the app-server candidate before the current `exec`
+baseline. The app-server measurement uses the exact `codexHome` returned by
+`initialize` rather than assuming it matches the benchmark process environment.
+Because both transports may share that home, combined reports intentionally omit
+the later `exec` artifact delta instead of claiming an isolated baseline. Use
+`--transport exec` when an independent `exec` artifact measurement is required.
+
+The WebSocket app-server transport is experimental. A successful benchmark is
+evidence for transport selection, not authorization to replace the production
+adapter. Production adoption still requires deterministic lifecycle and failure
+handling plus proof that agent/tool context overhead is acceptably bounded.
 
 ## Privacy and retention
 
@@ -138,11 +169,11 @@ The recommended suite was last verified at `2026-07-12T03:52:19Z` using Codex
 Lab and the checked-in routes. All 11 cases passed, including both deterministic
 cases, and no case required fallback.
 
-| Primary model | Cases | Observed latency | Input tokens | Output tokens |
-| --- | ---: | ---: | ---: | ---: |
-| `gpt-5.6-luna` | 2 | 12.4–13.3 s | 28,446 | 323 |
-| `gpt-5.6-terra` | 5 | 13.4–30.3 s | 85,351 | 2,963 |
-| `gpt-5.6-sol` | 2 | 18.1–23.8 s | 31,965 | 1,008 |
+| Primary model   | Cases | Observed latency | Input tokens | Output tokens |
+| --------------- | ----: | ---------------: | -----------: | ------------: |
+| `gpt-5.6-luna`  |     2 |      12.4–13.3 s |       28,446 |           323 |
+| `gpt-5.6-terra` |     5 |      13.4–30.3 s |       85,351 |         2,963 |
+| `gpt-5.6-sol`   |     2 |      18.1–23.8 s |       31,965 |         1,008 |
 
 No model pricing was configured, so the report correctly left estimated USD
 cost unset. The roughly 14,000–18,000 input tokens per model-backed case include

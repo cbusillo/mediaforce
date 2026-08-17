@@ -375,9 +375,9 @@ def _run_eval_case(
             }
         else:
             raise ValueError(f"Unsupported deterministic eval task: {case.task}")
-        public_response = _public_response(response)
+        public_response = public_advisor_response(response)
         telemetry = _load_telemetry(telemetry_path)
-    checks = _score_case(case, public_response, telemetry)
+    checks = score_advisor_eval_case(case, public_response, telemetry)
     return {
         "case_id": case.case_id,
         "task": case.task.value if isinstance(case.task, AdvisorTask) else case.task,
@@ -407,7 +407,7 @@ def _run_model_case(
     raise ValueError(f"Unsupported eval task: {task.value}")
 
 
-def _public_response(response: Any) -> dict[str, Any]:
+def public_advisor_response(response: Any) -> dict[str, Any]:
     if response is None:
         return {}
     if isinstance(response, dict):
@@ -419,7 +419,7 @@ def _public_response(response: Any) -> dict[str, Any]:
     return {}
 
 
-def _score_case(
+def score_advisor_eval_case(
         case: AdvisorEvalCase,
         response: dict[str, Any],
         telemetry: list[dict[str, Any]],
