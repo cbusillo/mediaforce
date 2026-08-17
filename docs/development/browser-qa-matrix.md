@@ -44,7 +44,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   title directory with two independently reachable editions, an excluded
   featurette, an uncertain nested file, active processing, completed titles,
   validation-ready work, two replacement-ready titles with different measured
-  savings, and a preflight promotion conflict. Unmeasured titles show
+  savings and playable checked-output previews, and a preflight promotion
+  conflict. Unmeasured titles show
   `No estimate` rather than inheriting TV codec-history savings.
 - Movie Studio: `/folders/movies/Loose%20Feature.mkv`,
   `/folders/movies/Editions%20Showcase`,
@@ -281,7 +282,11 @@ queue position, assignment and worker availability, progress, blockers, and the
 exact condition that allows work to continue. Activity remains a secondary
 diagnostics route and must not be required to understand this movie. A ready
 replacement must state that it runs immediately, preserves a backup of the
-original, and must not be triggered during browser QA. After replacement
+original, and must not be triggered during browser QA. In that ready state,
+`Preview checked output` must remain secondary to replacement, open the exact
+staged file that still matches its final check, never autoplay, and fail closed
+when the file is missing, drifted, ambiguous, remote-only, or blocked by a
+destination conflict. After replacement
 completes, Movie Studio must show `Finished`, explain that the original remains
 in Completed, replace planning projections with only known completed facts,
 hide all sample and processing actions, and offer only a safe route back to

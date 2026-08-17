@@ -1582,6 +1582,15 @@ export interface StagedIntegrityPayload {
 	};
 }
 
+export interface CheckedOutputPreviewPayload {
+	available: boolean;
+	code: string;
+	detail?: string;
+	filename?: string;
+	size_bytes?: number;
+	media_type?: string;
+}
+
 export interface FolderBenchPreviewResponse {
 	ok: boolean;
 	message?: string;
