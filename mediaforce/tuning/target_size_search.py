@@ -38,6 +38,8 @@ TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
 MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
 MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
+CRF_PER_BITRATE_HALVING = 6.0
+MAX_DIRECTIONAL_PROBE_CRF_STEP = 6.0
 FINAL_RETRY_SKIP_REASONS = frozenset({
     "final_retry_skipped_all_candidates_over_source_cap",
     "final_retry_skipped_calibration_factor_out_of_bounds",
@@ -646,9 +648,6 @@ def retry_quality_result_for_final_miss(
         )
         return None
 
-    if object_dict(trace.get("curve")).get("shape") == "non_monotonic":
-        return skip_retry("final_retry_skipped_non_monotonic_curve")
-
     selected_crf = float_value(selected.get("crf"))
     selected_metric = str(selected.get("metric") or quality.metric).strip()
     selected_metric_score = float_value(selected.get("metric_score"))
@@ -805,12 +804,18 @@ def retry_quality_result_for_final_miss(
             if not eligible
             else "final_retry_skipped_no_calibrated_bracket"
         )
+        if object_dict(trace.get("curve")).get("shape") == "non_monotonic":
+            return skip_retry(
+                "final_retry_skipped_non_monotonic_curve",
+                probe_reason=missing_bracket_reason,
+            )
         probe = _bounded_directional_probe(
             verification_status=verification.status,
             selected=selected,
             selected_actual_video_bytes=actual_video_bytes,
-            calibrated_candidates=calibrated_safe,
+            calibrated_candidates=calibrated,
             target_video_bytes=target_size_bytes - non_video_bytes,
+            source_cap_video_bytes=source_cap_video_bytes,
             crf_bounds=object_dict(trace.get("crf_bounds")),
             measured_crfs=_measured_integer_crfs(candidates),
         )
@@ -1119,6 +1124,7 @@ def _refresh_retry_curve(trace: dict[str, Any]) -> None:
     retry_measurement_count = sum(candidate.get("role") == "final_retry_measurement" for candidate in candidates)
     trace["curve"] = {
         **curve,
+        "shape": _payload_curve_shape(candidates),
         "search_candidate_count": int_value(curve.get("candidate_count")),
         "candidate_count": len(candidates),
         "final_retry_measurement_count": retry_measurement_count,
@@ -1149,6 +1155,8 @@ def _final_retry_calibration_payload(
             candidate.get("calibrated_predicted_whole_episode_bytes")
         ),
     }
+    payload["bracket_crf"] = None
+    payload["probe_from_crf"] = None
     reference_key = "probe_from_crf" if strategy == "bounded_directional_probe" else "bracket_crf"
     payload[reference_key] = float_value(bracket_candidate.get("crf"))
     return payload
@@ -1169,6 +1177,7 @@ def _bounded_directional_probe(
         selected_actual_video_bytes: int,
         calibrated_candidates: list[tuple[dict[str, Any], int, int]],
         target_video_bytes: int,
+        source_cap_video_bytes: int | None,
         crf_bounds: dict[str, Any],
         measured_crfs: set[int],
 ) -> tuple[float, dict[str, Any]] | None:
@@ -1188,15 +1197,19 @@ def _bounded_directional_probe(
     ):
         return None
 
-    if calibrated_candidates:
+    calibrated_safe_candidates = [
+        entry for entry in calibrated_candidates
+        if source_cap_video_bytes is None or entry[1] <= source_cap_video_bytes
+    ]
+    if calibrated_safe_candidates:
         if verification_status == "over_target":
             probe_from, probe_from_video_bytes, _ = max(
-                calibrated_candidates,
+                calibrated_safe_candidates,
                 key=lambda entry: float_value(entry[0].get("crf")),
             )
         else:
             probe_from, probe_from_video_bytes, _ = min(
-                calibrated_candidates,
+                calibrated_safe_candidates,
                 key=lambda entry: float_value(entry[0].get("crf")),
             )
     else:
@@ -1216,17 +1229,29 @@ def _bounded_directional_probe(
             math.log(target_video_bytes) - math.log(probe_from_video_bytes)
         ) / slope
     else:
-        estimated_crf = selected_crf + 6.0 * math.log2(
+        estimated_crf = selected_crf + CRF_PER_BITRATE_HALVING * math.log2(
             selected_actual_video_bytes / target_video_bytes
         )
     if not math.isfinite(estimated_crf):
         return None
+    estimated_crf = max(
+        probe_from_crf - MAX_DIRECTIONAL_PROBE_CRF_STEP,
+        min(probe_from_crf + MAX_DIRECTIONAL_PROBE_CRF_STEP, estimated_crf),
+    )
 
     if verification_status == "over_target":
         directional_min = math.floor(probe_from_crf) + 1
         directional_max = max_crf
     else:
-        directional_min = min_crf
+        cap_violating_crfs = [
+            float_value(entry[0].get("crf"))
+            for entry in calibrated_candidates
+            if source_cap_video_bytes is not None and entry[1] > source_cap_video_bytes
+        ]
+        directional_min = max(
+            min_crf,
+            math.floor(max(cap_violating_crfs)) + 1 if cap_violating_crfs else min_crf,
+        )
         directional_max = math.ceil(probe_from_crf) - 1
     if directional_min > directional_max:
         return None
@@ -1792,6 +1817,23 @@ def _curve_shape(candidates: list[TargetSizeCandidate]) -> CurveShape:
     previous = measured[0].predicted_whole_episode_bytes or 0
     for candidate in measured[1:]:
         current = candidate.predicted_whole_episode_bytes or 0
+        if current > previous:
+            return "non_monotonic"
+        previous = current
+    return "monotonic"
+
+
+def _payload_curve_shape(candidates: list[dict[str, Any]]) -> CurveShape:
+    measured = [
+        candidate
+        for candidate in sorted(candidates, key=lambda item: float_value(item.get("crf")))
+        if candidate.get("predicted_whole_episode_bytes") is not None
+    ]
+    if len(measured) <= 1:
+        return "single_point"
+    previous = int_value(measured[0].get("predicted_whole_episode_bytes"))
+    for candidate in measured[1:]:
+        current = int_value(candidate.get("predicted_whole_episode_bytes"))
         if current > previous:
             return "non_monotonic"
         previous = current
