@@ -418,8 +418,10 @@ Specials and Season 0 never identify the current season. A protected current
 season releases when a higher numbered season appears or after 365 days without
 a newly added or replaced episode. Independently, every season waits 30 days
 after its newest addition or replacement before automatic encoding. A manual
-override applies only to the exact season the operator confirms, and the
-resulting manifest records both the hold reasons and the override.
+override applies only to the exact season the operator confirms. An explicitly
+selected episode may use that same parent-season override while its manifest
+remains bounded to that one file. The resulting manifest records both the hold
+reasons and the override.
 
 Eligible media is ranked by Plex `addedAt`, oldest first. When Plex age is not
 available, Mediaforce records and uses its own discovery timestamp, then the

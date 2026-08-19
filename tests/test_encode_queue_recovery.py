@@ -19794,6 +19794,66 @@ raise SystemExit(0)
         self.assertEqual(raised.exception.status_code, 400)
         self.assertIn("one season at a time", str(raised.exception.detail))
 
+    def test_lifecycle_override_queues_only_the_exact_tv_episode(self) -> None:
+        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+            complete_raw = copy.deepcopy(tomllib.load(handle))
+        complete_raw["media"].update(self.config.raw["media"])
+        complete_raw["remote_hosts"] = []
+        complete_raw["encode_queue"] = self.config.raw["encode_queue"]
+        queue_config = MediaforceConfig(raw=complete_raw, paths=self.config.paths)
+        exact_rel_path = "tv/show/Season 1/Episode 1.mkv"
+        sibling_rel_path = "tv/show/Season 1/Episode 2.mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            exact_id = self._insert_library_item(
+                connection,
+                self._create_source_file("exact-episode.mkv"),
+                status="discovered",
+                rel_path=exact_rel_path,
+            )
+            sibling_id = self._insert_library_item(
+                connection,
+                self._create_source_file("sibling-episode.mkv"),
+                status="discovered",
+                rel_path=sibling_rel_path,
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                exact_rel_path,
+                "Approved one exact protected episode.",
+                False,
+                True,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=self._accepted_calibration_state,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["policy_holds_overridden"])
+        parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        self.assertEqual(
+            [item["library_item_id"] for item in queued_manifest["items"]],
+            [exact_id],
+        )
+        self.assertNotIn(
+            sibling_id,
+            [item["library_item_id"] for item in queued_manifest["items"]],
+        )
+        self.assertTrue(queued_manifest["items"][0]["selection_provenance"]["manual_override"])
+        self.assertEqual(
+            queued_manifest["items"][0]["selection_provenance"]["season_prefix"],
+            "tv/show/Season 1",
+        )
+
     def test_older_season_override_rejects_non_series_scope(self) -> None:
         source = self._create_source_file("older-season-scope.mkv")
         with open_db(self.config.paths.db_path) as connection:

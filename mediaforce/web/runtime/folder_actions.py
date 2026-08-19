@@ -20,7 +20,7 @@ from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.staging import partial_output_path
-from mediaforce.library.media_scopes import MediaScope, path_matches_scope, resolve_media_scope, \
+from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
 from mediaforce.library.staged_integrity import StagedIntegrityReport, integrity_disposition_blocks_promotion, \
@@ -287,10 +287,27 @@ def queue_folder_encode_action(
             normalized_prefix,
             library_types=config.library_type_map,
         )
+        manual_override_prefix: str | None = None
         if override_policy_holds and override_older_seasons:
             raise HTTPException(status_code=400, detail="Choose one lifecycle override mode.")
-        if override_policy_holds and scope.kind != "tv_season":
-            raise HTTPException(status_code=400, detail="Lifecycle holds can only be overridden for one season at a time.")
+        if override_policy_holds:
+            if scope.kind == "tv_season":
+                manual_override_prefix = normalized_prefix
+            elif (
+                    scope.domain == "tv"
+                    and scope.kind == "media_file"
+                    and scope.parent_prefix is not None
+                    and is_tv_season_prefix(scope.parent_prefix, library_types=config.library_type_map)
+            ):
+                manual_override_prefix = scope.parent_prefix
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Lifecycle holds can only be overridden for one season at a time, "
+                        "either by selecting that season or one exact episode."
+                    ),
+                )
         if override_older_seasons and scope.kind != "tv_series":
             raise HTTPException(
                 status_code=400,
@@ -483,8 +500,8 @@ def queue_folder_encode_action(
         manifest_kwargs: dict[str, Any] = {"prefix": normalized_prefix}
         older_season_selection = None
         older_season_cadence_partition: CadenceSafetyPartition | None = None
-        if override_policy_holds:
-            manifest_kwargs["manual_override_prefix"] = normalized_prefix
+        if manual_override_prefix is not None:
+            manifest_kwargs["manual_override_prefix"] = manual_override_prefix
         elif override_older_seasons:
             older_season_decisions = project_candidates(
                 connection,
