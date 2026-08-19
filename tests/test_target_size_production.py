@@ -670,6 +670,55 @@ class TargetSizeProductionTests(unittest.TestCase):
                 "final_retry_measurement",
             )
 
+    def test_encode_measures_bounded_directional_probe_before_second_full_encode(self) -> None:
+        source_path = self._source_file("episode-target-directional-probe.mkv")
+        staging_path = self._staging_path("episode-target-directional-probe.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            trace = self._trace(item, selected_crf=34.0)
+            trace["crf_bounds"] = {"min_crf": 18, "max_crf": 38}
+            quality = QualitySearchResult(
+                crf=34.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=trace,
+            )
+            retry_sample = SampleEncodeResult(
+                metric="VMAF",
+                score=84.5,
+                predicted_encode_percent=20.0,
+                predicted_encode_seconds=30.0,
+                predicted_encode_size_bytes=714_000,
+                stdout="bounded directional probe",
+            )
+
+            build_calls, measure_calls = self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_400_000, 5_100_000],
+                retry_sample=retry_sample,
+            )
+
+            artifact = self._staged_artifact(
+                connection,
+                item_id,
+                staged_artifacts.c.chosen_crf,
+                staged_artifacts.c.validation_json,
+            )
+            assert artifact is not None
+            validation = json.loads(cast(str, artifact["validation_json"]))
+            retry_trace = validation["target_size_trace"]
+            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 37.0])
+            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [37.0])
+            self.assertEqual(artifact["chosen_crf"], 37.0)
+            self.assertEqual(retry_trace["final_retry_calibration"]["strategy"], "bounded_directional_probe")
+            self.assertEqual(retry_trace["final_retry_calibration"]["probe_from_crf"], 34.0)
+
     def test_encode_surfaces_needs_review_when_final_miss_has_no_measured_retry(self) -> None:
         source_path = self._source_file("episode-target-review.mkv")
         staging_path = self._staging_path("episode-target-review.mkv")

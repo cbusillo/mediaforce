@@ -94,6 +94,17 @@ terminal observation projects the stable `needs_review` status and
 `final_retry_skipped_*` selection reason, so analysis can classify the decline
 without replaying the planner while keeping the observation payload bounded.
 
+Final-size retry planning uses the completed output as a measured calibration
+anchor. It first prefers an already-measured directional candidate or an
+interpolated candidate inside an existing calibrated bracket. When neither is
+available, it may measure exactly one additional directional sample chosen
+deterministically from the calibrated size ratio and the explicit CRF bounds.
+That sample authorizes the single full-output retry only when its real quality
+score still meets the floor and its calibrated projection remains inside the
+unchanged final-size band and source cap. Missing bounds, invalid or
+non-monotonic evidence, exhausted bounds, quality failure, or another projected
+miss all remain fail-closed needs-review outcomes.
+
 The log stores typed identity, signature, selected-result, timing, and output
 fields alongside bounded JSON for context, bounds, candidates, outcome, and
 provenance. Candidate JSON contains parsed measurements only; raw tool stdout is
