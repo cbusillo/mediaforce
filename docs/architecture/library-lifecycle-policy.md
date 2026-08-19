@@ -88,13 +88,15 @@ tie breakers; they do not make an ineligible item runnable.
 ## Manual override
 
 An exact season prefix may bypass lifecycle holds from the season surface after
-the operator confirms the bypass. A separate show-level action may also process
-older numbered seasons with one approved setup. That action always excludes the
-highest numbered season, Specials, ambiguous season identities, and unsafe
-items; it does not change the show policy. Both override paths bypass only
-current-season and acquisition timing holds. Missing sources, active processing,
-staged-output consistency, validation, promotion, and other workflow safety
-rules still apply.
+the operator confirms the bypass. An exact TV episode may also borrow its
+parent-season override; candidate selection still uses the season hold context,
+but the exact-item scope keeps the manifest bounded to that one episode. A
+separate show-level action may process older numbered seasons with one approved
+setup. That action always excludes the highest numbered season, Specials,
+ambiguous season identities, and unsafe items; it does not change the show
+policy. All override paths bypass only current-season and acquisition timing
+holds. Missing sources, active processing, staged-output consistency,
+validation, promotion, and other workflow safety rules still apply.
 
 ## Manifest provenance
 
