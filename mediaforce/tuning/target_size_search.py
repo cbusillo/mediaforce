@@ -36,6 +36,7 @@ TARGET_SIZE_TRANSFORM_PLAN_SCHEMA_VERSION = 1
 MAX_TARGET_SIZE_CANDIDATES = 6
 TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
+MAX_FINAL_RETRY_MEASUREMENTS = 2
 MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
 MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
 CRF_PER_BITRATE_HALVING = 6.0
@@ -869,6 +870,70 @@ def retry_quality_result_for_final_miss(
             selected_metric_score=selected_metric_score,
             minimum_quality_score=minimum_quality_score,
         )
+        measured_candidates = [candidate]
+        measurements = [
+            _final_retry_measurement_evidence(
+                candidate,
+                lower_bound_bytes=lower_bound_bytes,
+                upper_bound_bytes=upper_bound_bytes,
+                rejection_reason=rejection_reason,
+            )
+        ]
+        first_probe_size_status = _calibrated_candidate_size_status(
+            candidate,
+            lower_bound_bytes=lower_bound_bytes,
+            upper_bound_bytes=upper_bound_bytes,
+        )
+        probe_candidates = [
+            *[dict(existing) for existing in candidates],
+            candidate,
+        ]
+        if (
+                rejection_reason == "final_retry_measurement_outside_final_band"
+                and first_probe_size_status == verification.status
+                and MAX_FINAL_RETRY_MEASUREMENTS > 1
+                and _payload_curve_shape(probe_candidates) != "non_monotonic"
+        ):
+            second_probe_crf = _adjacent_directional_probe_crf(
+                verification_status=verification.status,
+                first_probe_crf=probe_crf,
+                probe_from_candidate=probe_from_candidate,
+                crf_bounds=object_dict(trace.get("crf_bounds")),
+                measured_crfs=_measured_integer_crfs(probe_candidates),
+                cap_violating_crfs=cap_violating_crfs,
+            )
+            if second_probe_crf is not None:
+                second_sample, second_candidate = _measure_calibrated_retry_candidate(
+                    measure_candidate,
+                    trace=_trace_with_retry_candidates(trace, measured_candidates),
+                    crf=second_probe_crf,
+                    calibration_factor=calibration_factor,
+                    non_video_bytes=non_video_bytes,
+                    target_size_bytes=target_size_bytes,
+                    source_cap_video_bytes=source_cap_video_bytes,
+                    lower_bound_bytes=lower_bound_bytes,
+                    upper_bound_bytes=upper_bound_bytes,
+                )
+                second_rejection_reason = _final_retry_candidate_rejection_reason(
+                    second_sample,
+                    second_candidate,
+                    verification_status=verification.status,
+                    selected_metric=selected_metric,
+                    selected_metric_score=selected_metric_score,
+                    minimum_quality_score=minimum_quality_score,
+                )
+                measured_candidates.append(second_candidate)
+                measurements.append(
+                    _final_retry_measurement_evidence(
+                        second_candidate,
+                        lower_bound_bytes=lower_bound_bytes,
+                        upper_bound_bytes=upper_bound_bytes,
+                        rejection_reason=second_rejection_reason,
+                    )
+                )
+                candidate = second_candidate
+                sample = second_sample
+                rejection_reason = second_rejection_reason
         if rejection_reason is not None:
             quality.target_size_trace = _final_retry_rejection_trace(
                 trace,
@@ -880,13 +945,11 @@ def retry_quality_result_for_final_miss(
                 bracket_candidate=probe_from_candidate,
                 rejection_reason=rejection_reason,
                 strategy="bounded_directional_probe",
+                measured_candidates=measured_candidates,
+                measurements=measurements,
             )
             return None
-        retry_trace = dict(trace)
-        retry_trace["candidates"] = [dict(existing) for existing in candidates]
-        retry_trace["candidates"].append(candidate)
-        _increment_retry_candidate_count(trace, retry_trace)
-        _refresh_retry_curve(retry_trace)
+        retry_trace = _trace_with_retry_candidates(trace, measured_candidates)
         return _final_retry_quality_result(
             quality,
             retry_trace,
@@ -897,6 +960,7 @@ def retry_quality_result_for_final_miss(
             non_video_bytes=non_video_bytes,
             bracket_candidate=probe_from_candidate,
             strategy="bounded_directional_probe",
+            measurements=measurements,
             stdout=sample.stdout,
         )
     if measure_candidate is None:
@@ -1020,6 +1084,7 @@ def _final_retry_quality_result(
         non_video_bytes: int,
         bracket_candidate: dict[str, Any],
         strategy: str = "calibrated_bracket",
+        measurements: list[dict[str, Any]] | None = None,
         stdout: str | None = None,
 ) -> QualitySearchResult:
     retry_trace = dict(trace)
@@ -1027,7 +1092,7 @@ def _final_retry_quality_result(
     retry_trace["status"] = "selected"
     retry_trace["selection_reason"] = "calibrated_final_size_retry_candidate"
     retry_trace["final_retry_from_candidate"] = selected
-    retry_trace["final_retry_calibration"] = {
+    calibration_payload = {
         **_final_retry_calibration_payload(
             selected,
             candidate,
@@ -1039,6 +1104,10 @@ def _final_retry_quality_result(
         ),
         "status": "selected",
     }
+    if measurements is not None:
+        calibration_payload["measurement_count"] = len(measurements)
+        calibration_payload["measurements"] = measurements
+    retry_trace["final_retry_calibration"] = calibration_payload
     return QualitySearchResult(
         crf=float_value(candidate.get("crf")),
         metric=str(candidate.get("metric") or quality.metric),
@@ -1084,18 +1153,21 @@ def _final_retry_rejection_trace(
         bracket_candidate: dict[str, Any],
         rejection_reason: str,
         strategy: str = "calibrated_bracket",
+        measured_candidates: list[dict[str, Any]] | None = None,
+        measurements: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    additional_candidates = measured_candidates or [candidate]
     retry_trace = dict(trace)
     retry_trace["candidates"] = [
         *[dict(existing) for existing in trace.get("candidates", []) if isinstance(existing, dict)],
-        candidate,
+        *additional_candidates,
     ]
-    _increment_retry_candidate_count(trace, retry_trace)
+    _increment_retry_candidate_count(trace, retry_trace, added_count=len(additional_candidates))
     _refresh_retry_curve(retry_trace)
     retry_trace["status"] = "needs_review"
     retry_trace["selection_reason"] = rejection_reason
     retry_trace["final_retry_from_candidate"] = selected
-    retry_trace["final_retry_calibration"] = {
+    calibration_payload = {
         **_final_retry_calibration_payload(
             selected,
             candidate,
@@ -1108,24 +1180,49 @@ def _final_retry_rejection_trace(
         "status": "rejected",
         "rejection_reason": rejection_reason,
     }
+    if measurements is not None:
+        calibration_payload["measurement_count"] = len(measurements)
+        calibration_payload["measurements"] = measurements
+    retry_trace["final_retry_calibration"] = calibration_payload
     return retry_trace
 
 
-def _increment_retry_candidate_count(previous_trace: dict[str, Any], retry_trace: dict[str, Any]) -> None:
+def _increment_retry_candidate_count(
+        previous_trace: dict[str, Any],
+        retry_trace: dict[str, Any],
+        *,
+        added_count: int = 1,
+) -> None:
     previous_candidates = [
         candidate for candidate in previous_trace.get("candidates", []) if isinstance(candidate, dict)
     ]
     retry_trace["candidate_count"] = max(
         int_value(previous_trace.get("candidate_count")),
         len(previous_candidates),
-    ) + 1
+    ) + added_count
     warm_start = object_dict(previous_trace.get("warm_start"))
     if not warm_start:
         return
     warm_payload = dict(warm_start)
-    warm_payload["baseline_candidate_count"] = int_value(warm_payload.get("baseline_candidate_count")) + 1
-    warm_payload["total_candidate_count"] = int_value(warm_payload.get("total_candidate_count")) + 1
+    warm_payload["baseline_candidate_count"] = (
+        int_value(warm_payload.get("baseline_candidate_count")) + added_count
+    )
+    warm_payload["total_candidate_count"] = int_value(warm_payload.get("total_candidate_count")) + added_count
     retry_trace["warm_start"] = warm_payload
+
+
+def _trace_with_retry_candidates(
+        trace: dict[str, Any],
+        measured_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    retry_trace = dict(trace)
+    retry_trace["candidates"] = [
+        *[dict(existing) for existing in trace.get("candidates", []) if isinstance(existing, dict)],
+        *measured_candidates,
+    ]
+    _increment_retry_candidate_count(trace, retry_trace, added_count=len(measured_candidates))
+    _refresh_retry_curve(retry_trace)
+    return retry_trace
 
 
 def _refresh_retry_curve(trace: dict[str, Any]) -> None:
@@ -1297,6 +1394,92 @@ def _final_retry_candidate_rejection_reason(
     if not bool(candidate.get("within_calibrated_final_band")):
         return "final_retry_measurement_outside_final_band"
     return None
+
+
+def _calibrated_candidate_size_status(
+        candidate: dict[str, Any],
+        *,
+        lower_bound_bytes: int,
+        upper_bound_bytes: int,
+) -> FinalSizeStatus:
+    calibrated_total_bytes = int_value(candidate.get("calibrated_predicted_whole_episode_bytes"))
+    if calibrated_total_bytes < lower_bound_bytes:
+        return "under_target"
+    if calibrated_total_bytes > upper_bound_bytes:
+        return "over_target"
+    return "inside_target_band"
+
+
+def _final_retry_measurement_evidence(
+        candidate: dict[str, Any],
+        *,
+        lower_bound_bytes: int,
+        upper_bound_bytes: int,
+        rejection_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "crf": float_value(candidate.get("crf")),
+        "metric": str(candidate.get("metric") or ""),
+        "metric_score": float_value(candidate.get("metric_score")),
+        "calibrated_predicted_video_bytes": int_value(candidate.get("calibrated_predicted_video_bytes")),
+        "calibrated_predicted_whole_episode_bytes": int_value(
+            candidate.get("calibrated_predicted_whole_episode_bytes")
+        ),
+        "size_status": _calibrated_candidate_size_status(
+            candidate,
+            lower_bound_bytes=lower_bound_bytes,
+            upper_bound_bytes=upper_bound_bytes,
+        ),
+        "status": "rejected" if rejection_reason is not None else "selected",
+        "rejection_reason": rejection_reason,
+    }
+
+
+def _adjacent_directional_probe_crf(
+        *,
+        verification_status: FinalSizeStatus,
+        first_probe_crf: float,
+        probe_from_candidate: dict[str, Any],
+        crf_bounds: dict[str, Any],
+        measured_crfs: set[int],
+        cap_violating_crfs: list[float],
+) -> float | None:
+    if verification_status not in {"over_target", "under_target"}:
+        return None
+    if "min_crf" not in crf_bounds or "max_crf" not in crf_bounds:
+        return None
+    min_crf = int_value(crf_bounds.get("min_crf"))
+    max_crf = int_value(crf_bounds.get("max_crf"))
+    probe_from_crf = float_value(probe_from_candidate.get("crf"))
+    if min_crf < 0 or max_crf < min_crf or not math.isfinite(probe_from_crf):
+        return None
+    if verification_status == "over_target":
+        directional_min = math.floor(probe_from_crf) + 1
+        directional_max = max_crf
+        candidate_crf = round(first_probe_crf) + 1
+    else:
+        directional_min = max(
+            min_crf,
+            math.floor(max(cap_violating_crfs)) + 1 if cap_violating_crfs else min_crf,
+        )
+        directional_max = math.ceil(probe_from_crf) - 1
+        candidate_crf = round(first_probe_crf) - 1
+    directional_min = max(
+        directional_min,
+        math.ceil(probe_from_crf - MAX_DIRECTIONAL_PROBE_CRF_STEP),
+    )
+    directional_max = min(
+        directional_max,
+        math.floor(probe_from_crf + MAX_DIRECTIONAL_PROBE_CRF_STEP),
+    )
+    if (
+            directional_min > directional_max
+            or candidate_crf < directional_min
+            or candidate_crf > directional_max
+            or candidate_crf in measured_crfs
+    ):
+        return None
+    return float(candidate_crf)
 
 
 def _interpolated_retry_crf(

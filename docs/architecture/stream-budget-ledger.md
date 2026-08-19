@@ -97,11 +97,13 @@ from the same size goal, currently ±5% by default. A final miss can retry only
 once. The completed output calibrates the sample curve's video-byte projection;
 an already measured candidate may be reused when that corrected projection is
 inside the final band. Otherwise Mediaforce may interpolate one integer CRF
-between measured quality-safe candidates and run one targeted sample at that
-CRF. The replacement full encode starts only when the new sample supplies a real
-quality score that meets the configured floor, remains under the
-source-relative cap, and its calibrated total projection is inside the final
-band. If no bounded measured retry is available, or if the retry budget is
+between measured quality-safe candidates, or run up to two bounded directional
+samples. The second directional sample must be adjacent to the first and is
+allowed only when the first remains outside the final band on the same side as
+the completed output. The replacement full encode starts only when a new sample
+supplies a real quality score that meets the configured floor, remains under
+the source-relative cap, and its calibrated total projection is inside the
+final band. If no bounded measured retry is available, or if the retry budget is
 exhausted, the item enters a needs-review failure state rather than falling back
 to quality-first encoding or silently relaxing the approved constraint.
 When retry planning declines, the target-size trace keeps the item fail-closed
