@@ -13,6 +13,7 @@ permissions:
 jobs:
   acceptance:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out repo
         uses: actions/checkout@v6
@@ -46,9 +47,24 @@ jobs:
         run: npm --prefix frontend exec playwright install --with-deps chromium
 
       - name: Install media tools
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          if command -v ffmpeg >/dev/null 2>&1; then
+            ffmpeg -version | head -n 1
+            exit 0
+          fi
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            update
+          sudo apt-get \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=30 \
+            -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends ffmpeg
 
       - name: Run backend tests
         run: >-
