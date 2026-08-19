@@ -123,13 +123,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         preferred.parent.mkdir(parents=True)
         preferred.write_text("ok", encoding="utf-8")
 
-        with patch.dict(binaries._HOMEBREW_BINARIES, {"ffprobe": preferred}), patch(
+        with patch.dict(os.environ, {"DYLD_LIBRARY_PATH": "/opt/homebrew/lib"}), patch.dict(
+                binaries._HOMEBREW_BINARIES, {"ffprobe": preferred}
+        ), patch(
                 "mediaforce.core.binaries.shutil.which", return_value="/usr/bin/ffprobe"
         ), patch(
                 "mediaforce.core.binaries.subprocess.run",
                 return_value=subprocess.CompletedProcess([str(preferred), "-version"], 0),
-        ):
+        ) as run:
             self.assertEqual(binaries.ffprobe_binary(), str(preferred))
+
+        self.assertNotIn("DYLD_LIBRARY_PATH", run.call_args.kwargs["env"])
 
     @staticmethod
     def _noop_load_job_state(
@@ -11743,6 +11747,137 @@ raise SystemExit(0)
             self.assertEqual(library_row["fingerprint"], "promoted-fingerprint")
             self.assertEqual(staged_row["promoted_path"], str(destination_path))
             self.assertEqual(staged_row["archived_source_path"], str(archived_source))
+
+    def test_promote_one_item_restores_files_when_probe_fails(self) -> None:
+        source_path = self._create_source_file("episode-promote-probe-failure.mkv")
+        source_bytes = source_path.read_bytes()
+        staging_path = self._staging_path("episode-promote-probe-failure.mp4")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["media"]["output_container"] = "mp4"
+        archived_source = self.config.archive_root / Path("tv/show/episode-promote-probe-failure.mkv")
+        archived_source.parent.mkdir(parents=True, exist_ok=True)
+        archived_source.write_text("prior archive")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="validated")
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    staging_path=str(staging_path),
+                    validation_json=json.dumps({"passed": True}),
+                    updated_at=web_app._now_iso(),
+                )
+            )
+            connection.commit()
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "rel_path": "tv/show/episode-promote-probe-failure.mkv",
+                "media_root": "tv",
+            }
+
+            with patch("mediaforce.execution.probe_media", side_effect=RuntimeError("probe failed")):
+                with self.assertRaisesRegex(RuntimeError, "probe failed"):
+                    execution.promote_one_item(connection, self.config, item, force=False)
+
+            library_row = self._library_item_value(connection, item_id, library_items.c.status)
+            staged_row = self._staged_artifact_value(
+                connection,
+                item_id,
+                staged_artifacts.c.promoted_path,
+            )
+
+        self.assertEqual(source_path.read_bytes(), source_bytes)
+        self.assertEqual(staging_path.read_text(), "encoded")
+        self.assertFalse(source_path.with_suffix(".mp4").exists())
+        self.assertEqual(archived_source.read_text(), "prior archive")
+        self.assertEqual(library_row["status"], "validated")
+        self.assertIsNone(staged_row["promoted_path"])
+
+    def test_promote_one_item_restores_files_when_database_update_fails(self) -> None:
+        source_path = self._create_source_file("episode-promote-database-failure.mkv")
+        source_bytes = source_path.read_bytes()
+        staging_path = self._staging_path("episode-promote-database-failure.mp4")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+        self.config.raw["media"]["output_container"] = "mp4"
+        promoted_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="validated")
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    staging_path=str(staging_path),
+                    validation_json=json.dumps({"passed": True}),
+                    updated_at=web_app._now_iso(),
+                )
+            )
+            connection.commit()
+            item = {
+                "library_item_id": item_id,
+                "source_path": str(source_path),
+                "rel_path": "tv/show/episode-promote-database-failure.mkv",
+                "media_root": "tv",
+            }
+
+            class FailingUpdateConnection:
+                @staticmethod
+                def execute(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if getattr(statement, "table", None) is library_items:
+                        raise sqlite3.OperationalError("database is locked")
+                    return connection.execute(statement, *args, **kwargs)
+
+                @staticmethod
+                def commit() -> None:
+                    connection.commit()
+
+                @staticmethod
+                def rollback() -> None:
+                    connection.rollback()
+
+            with patch("mediaforce.execution.probe_media", return_value=promoted_probe), patch(
+                    "mediaforce.execution.file_fingerprint",
+                    return_value="promoted-fingerprint",
+            ):
+                with self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+                    execution.promote_one_item(
+                        cast(DBClient, FailingUpdateConnection()),
+                        self.config,
+                        item,
+                        force=False,
+                    )
+
+            library_row = self._library_item_value(connection, item_id, library_items.c.status)
+            staged_row = self._staged_artifact_value(
+                connection,
+                item_id,
+                staged_artifacts.c.promoted_path,
+            )
+
+        archived_source = self.config.archive_root / Path("tv/show/episode-promote-database-failure.mkv")
+        self.assertEqual(source_path.read_bytes(), source_bytes)
+        self.assertEqual(staging_path.read_text(), "encoded")
+        self.assertFalse(source_path.with_suffix(".mp4").exists())
+        self.assertFalse(archived_source.exists())
+        self.assertEqual(library_row["status"], "validated")
+        self.assertIsNone(staged_row["promoted_path"])
 
     def test_promote_one_item_preserves_custom_library_root_identity(self) -> None:
         physical_root = self.root / "source" / "Movies on Disk"

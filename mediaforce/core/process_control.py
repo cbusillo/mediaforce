@@ -38,6 +38,15 @@ _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
 _PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
 _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES = 1024 * 1024
 _TRUSTED_PROCESS_GROUP_CONTAINMENT_MODE = "trusted-process-group"
+_MEDIA_TOOL_NAMES = {"ffmpeg", "ffprobe"}
+
+
+def _command_environment(cmd: list[str], env: Mapping[str, str] | None) -> Mapping[str, str] | None:
+    if not cmd or os.path.basename(cmd[0]) not in _MEDIA_TOOL_NAMES:
+        return env
+    resolved_env = dict(os.environ if env is None else env)
+    resolved_env.pop("DYLD_LIBRARY_PATH", None)
+    return resolved_env
 
 
 def _process_deadline_helper_state(info: os.stat_result) -> tuple[int, ...]:
@@ -709,13 +718,14 @@ def run_command(
         check: bool = False,
         input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    resolved_env = _command_environment(cmd, env)
     if process_controller is None:
         return subprocess.run(
             cmd,
             capture_output=capture_output,
             text=text,
             cwd=cwd,
-            env=env,
+            env=resolved_env,
             timeout=timeout,
             check=check,
             input=input_text,
@@ -727,7 +737,7 @@ def run_command(
         capture_output=capture_output,
         text=text,
         cwd=cwd,
-        env=env,
+        env=resolved_env,
         timeout=timeout,
         check=check,
         input_text=input_text,
