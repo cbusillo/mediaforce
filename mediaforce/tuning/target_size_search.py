@@ -700,6 +700,17 @@ def retry_quality_result_for_final_miss(
             video_projection_factor=round(calibration_factor, 9),
         )
     candidates = [object_dict(candidate) for candidate in trace.get("candidates", []) if isinstance(candidate, dict)]
+    cap_violating_crfs = [
+        float_value(candidate.get("crf"))
+        for candidate in candidates
+        if candidate.get("crf") is not None
+        and math.isfinite(float_value(candidate.get("crf")))
+        and source_cap_video_bytes is not None
+        and (
+            bool(candidate.get("violates_source_cap"))
+            or _calibrated_video_bytes(candidate, calibration_factor) > source_cap_video_bytes
+        )
+    ]
     if verification.status == "over_target":
         directional_candidates = [
             candidate for candidate in candidates
@@ -816,6 +827,7 @@ def retry_quality_result_for_final_miss(
             calibrated_candidates=calibrated,
             target_video_bytes=target_size_bytes - non_video_bytes,
             source_cap_video_bytes=source_cap_video_bytes,
+            cap_violating_crfs=cap_violating_crfs,
             crf_bounds=object_dict(trace.get("crf_bounds")),
             measured_crfs=_measured_integer_crfs(candidates),
         )
@@ -1178,6 +1190,7 @@ def _bounded_directional_probe(
         calibrated_candidates: list[tuple[dict[str, Any], int, int]],
         target_video_bytes: int,
         source_cap_video_bytes: int | None,
+        cap_violating_crfs: list[float],
         crf_bounds: dict[str, Any],
         measured_crfs: set[int],
 ) -> tuple[float, dict[str, Any]] | None:
@@ -1234,25 +1247,23 @@ def _bounded_directional_probe(
         )
     if not math.isfinite(estimated_crf):
         return None
-    estimated_crf = max(
-        probe_from_crf - MAX_DIRECTIONAL_PROBE_CRF_STEP,
-        min(probe_from_crf + MAX_DIRECTIONAL_PROBE_CRF_STEP, estimated_crf),
-    )
-
     if verification_status == "over_target":
         directional_min = math.floor(probe_from_crf) + 1
         directional_max = max_crf
     else:
-        cap_violating_crfs = [
-            float_value(entry[0].get("crf"))
-            for entry in calibrated_candidates
-            if source_cap_video_bytes is not None and entry[1] > source_cap_video_bytes
-        ]
         directional_min = max(
             min_crf,
             math.floor(max(cap_violating_crfs)) + 1 if cap_violating_crfs else min_crf,
         )
         directional_max = math.ceil(probe_from_crf) - 1
+    directional_min = max(
+        directional_min,
+        math.ceil(probe_from_crf - MAX_DIRECTIONAL_PROBE_CRF_STEP),
+    )
+    directional_max = min(
+        directional_max,
+        math.floor(probe_from_crf + MAX_DIRECTIONAL_PROBE_CRF_STEP),
+    )
     if directional_min > directional_max:
         return None
     seed = _clamp_int(round(estimated_crf), directional_min, directional_max)

@@ -1116,7 +1116,7 @@ class TargetSizeSearchTests(unittest.TestCase):
             "crf": 24.0,
             "metric": "VMAF",
             "metric_target": 85.0,
-            "metric_score": 88.0,
+            "metric_score": 86.0,
             "quality_floor_met": True,
             "predicted_video_bytes": 1_400_000,
             "predicted_whole_episode_bytes": 5_400_000,
@@ -1170,6 +1170,83 @@ class TargetSizeSearchTests(unittest.TestCase):
         assert retry is not None
         self.assertEqual(measured_crfs, [25.0])
         self.assertEqual(retry.crf, 25.0)
+
+    def test_directional_probe_does_not_escape_exhausted_step_window(self) -> None:
+        selected = {
+            "crf": 30.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_400_000,
+            "predicted_whole_episode_bytes": 5_400_000,
+            "violates_source_cap": False,
+        }
+        near_flat = {
+            "crf": 32.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 85.5,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 1_397_000,
+            "predicted_whole_episode_bytes": 5_397_000,
+            "violates_source_cap": False,
+        }
+        incompatible_measured = [
+            {
+                "crf": float(crf),
+                "metric": "XPSNR",
+                "metric_target": 41.0,
+                "metric_score": 42.0,
+                "quality_floor_met": True,
+                "predicted_video_bytes": 1_397_000 - crf,
+                "predicted_whole_episode_bytes": 5_397_000 - crf,
+                "violates_source_cap": False,
+            }
+            for crf in range(33, 39)
+        ]
+        quality = QualitySearchResult(
+            crf=30.0,
+            metric="VMAF",
+            target=85.0,
+            score=86.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "status": "selected",
+                "selection_reason": "candidate_inside_sample_projection_band",
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": 10_000_000},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "crf_bounds": {"min_crf": 18, "max_crf": 63},
+                "curve": {"shape": "monotonic"},
+                "candidates": [selected, near_flat, *incompatible_measured],
+                "selected_candidate": selected,
+            },
+        )
+        verification = FinalSizeVerification(
+            status="over_target",
+            target_size_bytes=5_000_000,
+            lower_bound_bytes=4_750_000,
+            upper_bound_bytes=5_250_000,
+            actual_output_bytes=5_400_000,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason="A bounded measured retry is allowed for this final-size miss.",
+        )
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=lambda _crf: self.fail("Exhausted step windows must fail closed"),
+        )
+
+        self.assertIsNone(retry)
+        retry_trace = quality.target_size_trace or {}
+        self.assertEqual(retry_trace["selection_reason"], "final_retry_skipped_no_calibrated_bracket")
 
     def test_directional_probe_caps_near_flat_curve_extrapolation(self) -> None:
         selected = {
