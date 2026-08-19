@@ -29,11 +29,14 @@ def media_binary(name: str) -> str:
 
 
 def _binary_runs(path: Path) -> bool:
+    environment = dict(os.environ)
+    environment.pop("DYLD_LIBRARY_PATH", None)
     try:
         result = subprocess.run(
             [str(path), "-version"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=environment,
             timeout=3,
             check=False,
         )

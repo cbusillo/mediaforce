@@ -1,4 +1,6 @@
 import json
+import signal
+import subprocess
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -108,6 +110,34 @@ class CadenceTests(unittest.TestCase):
 
         self.assertIsNone(summary.cadence_summary_json)
         self.assertIsNone(summary.media_fingerprint_json)
+
+    def test_inventory_probe_retries_transient_sigabrt(self) -> None:
+        payload = {
+            "format": {"duration": "120.0"},
+            "streams": [{"index": 0, "codec_type": "video", "codec_name": "h264"}],
+        }
+        transient_error = subprocess.CalledProcessError(-signal.SIGABRT, ["ffprobe"])
+        with patch("mediaforce.library.probe.ffprobe_binary", return_value="ffprobe"), patch(
+            "mediaforce.library.probe.subprocess.run",
+            side_effect=[transient_error, Mock(stdout=json.dumps(payload))],
+        ) as run_probe, patch("mediaforce.library.probe.time.sleep") as sleep:
+            summary = probe_media(Path("/tmp/transient-probe.mkv"))
+
+        self.assertEqual(summary.video_codec, "h264")
+        self.assertEqual(run_probe.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_inventory_probe_does_not_retry_non_transient_failure(self) -> None:
+        probe_error = subprocess.CalledProcessError(1, ["ffprobe"])
+        with patch("mediaforce.library.probe.ffprobe_binary", return_value="ffprobe"), patch(
+            "mediaforce.library.probe.subprocess.run",
+            side_effect=probe_error,
+        ) as run_probe, patch("mediaforce.library.probe.time.sleep") as sleep:
+            with self.assertRaises(subprocess.CalledProcessError):
+                probe_media(Path("/tmp/invalid-probe.mkv"))
+
+        run_probe.assert_called_once()
+        sleep.assert_not_called()
 
     def test_probe_summary_persists_stream_bytes_and_attachments(self) -> None:
         payload = {

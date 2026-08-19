@@ -5,6 +5,7 @@ import shutil
 import time
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy import update
@@ -424,6 +425,34 @@ def _minimum_expected_duration(source_duration_seconds: float) -> float:
     return max(source_duration_seconds * 0.98, source_duration_seconds - 2.0)
 
 
+def _archive_backup_path(archive_path: Path) -> Path:
+    return archive_path.with_name(f".{archive_path.name}.promotion-backup-{uuid4().hex}")
+
+
+def _restore_failed_promotion(
+        *,
+        source_path: Path,
+        staging_path: Path,
+        destination_path: Path,
+        archive_path: Path,
+        archive_backup_path: Path | None,
+        source_archived: bool,
+        staged_promoted: bool,
+) -> None:
+    if staged_promoted:
+        if staging_path.exists():
+            raise FileExistsError(f"Cannot restore staged output because it already exists: {staging_path}")
+        shutil.move(str(destination_path), str(staging_path))
+    if source_archived:
+        if source_path.exists():
+            raise FileExistsError(f"Cannot restore source because it already exists: {source_path}")
+        shutil.move(str(archive_path), str(source_path))
+    if archive_backup_path is not None and archive_backup_path.exists():
+        if archive_path.exists():
+            raise FileExistsError(f"Cannot restore prior archive because it already exists: {archive_path}")
+        shutil.move(str(archive_backup_path), str(archive_path))
+
+
 def promote_one_item(
         connection: DBClient,
         config: MediaforceConfig,
@@ -454,70 +483,102 @@ def promote_one_item(
     if destination_path.exists() and destination_path != source_path:
         raise FileExistsError(f"Destination already exists: {destination_path}")
 
-    if source_path.exists():
-        if archive_path.exists():
-            archive_path.unlink()
-        shutil.move(str(source_path), str(archive_path))
-    shutil.move(str(staging_path), str(destination_path))
+    archive_backup_path: Path | None = None
+    source_archived = False
+    staged_promoted = False
+    try:
+        if source_path.exists():
+            if archive_path.exists():
+                archive_backup_path = _archive_backup_path(archive_path)
+                shutil.move(str(archive_path), str(archive_backup_path))
+            shutil.move(str(source_path), str(archive_path))
+            source_archived = True
+        shutil.move(str(staging_path), str(destination_path))
+        staged_promoted = True
 
-    promoted_stat = destination_path.stat()
-    promoted_probe = probe_media(destination_path)
-    promoted_fingerprint = file_fingerprint(destination_path, promoted_stat, promoted_probe.duration_seconds)
-    promoted_content_fingerprint = content_version_fingerprint(destination_path, promoted_stat)
-    now = timestamp()
-    logical_path = logical_library_rel_path(
-        str(item["media_root"]),
-        config.source_root_map[str(item["media_root"])],
-        destination_path,
-    )
-    rel_path = logical_path.as_posix()
-    parent_dir = logical_path.parent.as_posix()
+        promoted_stat = destination_path.stat()
+        promoted_probe = probe_media(destination_path)
+        promoted_fingerprint = file_fingerprint(destination_path, promoted_stat, promoted_probe.duration_seconds)
+        promoted_content_fingerprint = content_version_fingerprint(destination_path, promoted_stat)
+        now = timestamp()
+        logical_path = logical_library_rel_path(
+            str(item["media_root"]),
+            config.source_root_map[str(item["media_root"])],
+            destination_path,
+        )
+        rel_path = logical_path.as_posix()
+        parent_dir = logical_path.parent.as_posix()
 
-    connection.execute(
-        update(library_items)
-        .where(library_items.c.id == item["library_item_id"])
-        .values(
-            source_path=str(destination_path),
-            rel_path=rel_path,
-            parent_dir=parent_dir,
-            file_name=destination_path.name,
-            container=destination_path.suffix.lower(),
-            size_bytes=promoted_stat.st_size,
-            mtime_ns=promoted_stat.st_mtime_ns,
-            fingerprint=promoted_fingerprint,
-            duration_seconds=promoted_probe.duration_seconds,
-            video_codec=promoted_probe.video_codec,
-            video_bitrate=promoted_probe.video_bitrate,
-            width=promoted_probe.width,
-            height=promoted_probe.height,
-            pix_fmt=promoted_probe.pix_fmt,
-            audio_track_count=promoted_probe.audio_track_count,
-            subtitle_track_count=promoted_probe.subtitle_track_count,
-            english_audio_count=promoted_probe.english_audio_count,
-            english_subtitle_count=promoted_probe.english_subtitle_count,
-            default_audio_language=promoted_probe.default_audio_language,
-            default_subtitle_language=promoted_probe.default_subtitle_language,
-            audio_summary_json=promoted_probe.audio_summary_json,
-            subtitle_summary_json=promoted_probe.subtitle_summary_json,
-            attachment_summary_json=promoted_probe.attachment_summary_json,
-            content_version_changed_at=now,
-            content_version_fingerprint=promoted_content_fingerprint,
-            status="promoted",
-            updated_at=now,
-            last_seen_at=now,
+        connection.execute(
+            update(library_items)
+            .where(library_items.c.id == item["library_item_id"])
+            .values(
+                source_path=str(destination_path),
+                rel_path=rel_path,
+                parent_dir=parent_dir,
+                file_name=destination_path.name,
+                container=destination_path.suffix.lower(),
+                size_bytes=promoted_stat.st_size,
+                mtime_ns=promoted_stat.st_mtime_ns,
+                fingerprint=promoted_fingerprint,
+                duration_seconds=promoted_probe.duration_seconds,
+                video_codec=promoted_probe.video_codec,
+                video_bitrate=promoted_probe.video_bitrate,
+                width=promoted_probe.width,
+                height=promoted_probe.height,
+                pix_fmt=promoted_probe.pix_fmt,
+                audio_track_count=promoted_probe.audio_track_count,
+                subtitle_track_count=promoted_probe.subtitle_track_count,
+                english_audio_count=promoted_probe.english_audio_count,
+                english_subtitle_count=promoted_probe.english_subtitle_count,
+                default_audio_language=promoted_probe.default_audio_language,
+                default_subtitle_language=promoted_probe.default_subtitle_language,
+                audio_summary_json=promoted_probe.audio_summary_json,
+                subtitle_summary_json=promoted_probe.subtitle_summary_json,
+                attachment_summary_json=promoted_probe.attachment_summary_json,
+                content_version_changed_at=now,
+                content_version_fingerprint=promoted_content_fingerprint,
+                status="promoted",
+                updated_at=now,
+                last_seen_at=now,
+            )
         )
-    )
-    connection.execute(
-        update(staged_artifacts)
-        .where(staged_artifacts.c.library_item_id == item["library_item_id"])
-        .values(
-            promoted_at=now,
-            promoted_path=str(destination_path),
-            archived_source_path=str(archive_path),
-            updated_at=now,
+        connection.execute(
+            update(staged_artifacts)
+            .where(staged_artifacts.c.library_item_id == item["library_item_id"])
+            .values(
+                promoted_at=now,
+                promoted_path=str(destination_path),
+                archived_source_path=str(archive_path),
+                updated_at=now,
+            )
         )
-    )
-    connection.commit()
+        connection.commit()
+    except BaseException as promotion_error:
+        try:
+            connection.rollback()
+        except BaseException as rollback_error:
+            LOGGER.warning("Failed to roll back promotion database transaction: %s", rollback_error)
+        try:
+            _restore_failed_promotion(
+                source_path=source_path,
+                staging_path=staging_path,
+                destination_path=destination_path,
+                archive_path=archive_path,
+                archive_backup_path=archive_backup_path,
+                source_archived=source_archived,
+                staged_promoted=staged_promoted,
+            )
+        except BaseException as restore_error:
+            raise RuntimeError(
+                f"Promotion failed and filesystem rollback could not restore the original state: {restore_error}"
+            ) from promotion_error
+        raise
+    if archive_backup_path is not None:
+        try:
+            safe_unlink(archive_backup_path)
+        except OSError as cleanup_error:
+            LOGGER.warning("Failed to remove superseded promotion archive %s: %s", archive_backup_path, cleanup_error)
     try:
         record_event(
             connection,

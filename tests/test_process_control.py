@@ -66,6 +66,17 @@ def _write_ab_av1_script(root: Path, source: str) -> Path:
 
 
 class ProcessControlTests(TestCase):
+    def test_media_command_drops_dyld_library_path(self) -> None:
+        completed = subprocess.CompletedProcess(["ffmpeg", "-version"], 0, stdout="", stderr="")
+        with patch.dict(os.environ, {"DYLD_LIBRARY_PATH": "/opt/homebrew/lib"}), patch(
+            "mediaforce.core.process_control.subprocess.run",
+            return_value=completed,
+        ) as run:
+            result = run_command(["ffmpeg", "-version"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("DYLD_LIBRARY_PATH", run.call_args.kwargs["env"])
+
     def test_managed_command_accepts_stdin_text(self) -> None:
         result = run_command(
             [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],

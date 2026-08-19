@@ -1,5 +1,7 @@
 import json
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 from mediaforce.core.binaries import ffprobe_binary
@@ -23,6 +25,9 @@ TRACK_FIELDS = (
 )
 ATTACHMENT_FIELDS = ("index", "codec_name", "file_name", "mime_type", "size_bytes")
 PROBE_TIMEOUT_SECONDS = 60
+TRANSIENT_PROBE_RETRY_ATTEMPTS = 4
+TRANSIENT_PROBE_RETRY_DELAY_SECONDS = 0.25
+TRANSIENT_PROBE_RETURN_CODES = {-signal.SIGABRT, 128 + signal.SIGABRT}
 
 
 def _normalize_language(stream: dict[str, object]) -> str | None:
@@ -155,24 +160,33 @@ def _probe_payload(
         "-show_streams",
         str(path),
     ]
-    if process_controller is None:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-        )
-    else:
-        result = run_command(
-            cmd,
-            process_controller=process_controller,
-            capture_output=True,
-            text=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=True,
-        )
+    result = _run_probe_command(cmd, process_controller=process_controller)
     return object_dict(json.loads(result.stdout))
+
+
+def _run_probe_command(
+        cmd: list[str],
+        *,
+        process_controller: ManagedProcessController | None,
+) -> subprocess.CompletedProcess[str]:
+    for attempt in range(TRANSIENT_PROBE_RETRY_ATTEMPTS):
+        try:
+            return run_command(
+                cmd,
+                process_controller=process_controller,
+                capture_output=True,
+                text=True,
+                timeout=PROBE_TIMEOUT_SECONDS,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            if (
+                    exc.returncode not in TRANSIENT_PROBE_RETURN_CODES
+                    or attempt == TRANSIENT_PROBE_RETRY_ATTEMPTS - 1
+            ):
+                raise
+            time.sleep(TRANSIENT_PROBE_RETRY_DELAY_SECONDS)
+    raise RuntimeError("ffprobe retry loop ended without a result")
 
 
 def _stream_bit_rate(stream: dict[str, object]) -> int | None:
