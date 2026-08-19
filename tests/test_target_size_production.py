@@ -687,21 +687,31 @@ class TargetSizeProductionTests(unittest.TestCase):
                 stdout="target-size-search",
                 target_size_trace=trace,
             )
-            retry_sample = SampleEncodeResult(
-                metric="VMAF",
-                score=84.5,
-                predicted_encode_percent=20.0,
-                predicted_encode_seconds=30.0,
-                predicted_encode_size_bytes=714_000,
-                stdout="bounded directional probe",
-            )
+            retry_samples = [
+                SampleEncodeResult(
+                    metric="VMAF",
+                    score=84.5,
+                    predicted_encode_percent=20.0,
+                    predicted_encode_seconds=30.0,
+                    predicted_encode_size_bytes=900_000,
+                    stdout="first bounded directional probe",
+                ),
+                SampleEncodeResult(
+                    metric="VMAF",
+                    score=84.0,
+                    predicted_encode_percent=20.0,
+                    predicted_encode_seconds=30.0,
+                    predicted_encode_size_bytes=800_000,
+                    stdout="second bounded directional probe",
+                ),
+            ]
 
             build_calls, measure_calls = self._encode_with_output_sizes(
                 connection,
                 item,
                 quality,
                 [5_400_000, 5_100_000],
-                retry_sample=retry_sample,
+                retry_samples=retry_samples,
             )
 
             artifact = self._staged_artifact(
@@ -713,11 +723,12 @@ class TargetSizeProductionTests(unittest.TestCase):
             assert artifact is not None
             validation = json.loads(cast(str, artifact["validation_json"]))
             retry_trace = validation["target_size_trace"]
-            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 37.0])
-            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [37.0])
-            self.assertEqual(artifact["chosen_crf"], 37.0)
+            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 38.0])
+            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [37.0, 38.0])
+            self.assertEqual(artifact["chosen_crf"], 38.0)
             self.assertEqual(retry_trace["final_retry_calibration"]["strategy"], "bounded_directional_probe")
             self.assertEqual(retry_trace["final_retry_calibration"]["probe_from_crf"], 34.0)
+            self.assertEqual(retry_trace["final_retry_calibration"]["measurement_count"], 2)
 
     def test_encode_surfaces_needs_review_when_final_miss_has_no_measured_retry(self) -> None:
         source_path = self._source_file("episode-target-review.mkv")
@@ -1118,6 +1129,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             output_sizes: list[int],
             *,
             retry_sample: SampleEncodeResult | None = None,
+            retry_samples: list[SampleEncodeResult] | None = None,
             during_encode: Callable[[], None] | None = None,
             during_quality_search: Callable[[], None] | None = None,
             encode_command: list[str] | None = None,
@@ -1128,6 +1140,7 @@ class TargetSizeProductionTests(unittest.TestCase):
             search_call_kwargs: list[dict[str, Any]] | None = None,
     ) -> tuple[list[Any], list[Any]]:
         sizes = list(output_sizes)
+        queued_retry_samples = list(retry_samples or ([retry_sample] if retry_sample is not None else []))
         queued_quality_results: list[QualitySearchResult | Exception] = list(search_results or [quality])
 
         def run_encode_side_effect(*, temp_output: Path, **_: object) -> subprocess.CompletedProcess[str]:
@@ -1156,9 +1169,9 @@ class TargetSizeProductionTests(unittest.TestCase):
         )
 
         def measure_retry_side_effect(*_args: object, **_kwargs: object) -> SampleEncodeResult:
-            if retry_sample is None:
+            if not queued_retry_samples:
                 self.fail("Retry measurement was not expected")
-            return retry_sample
+            return queued_retry_samples.pop(0)
 
         def search_quality_side_effect(*_args: object, **kwargs: object) -> QualitySearchResult:
             if during_quality_search is not None:
