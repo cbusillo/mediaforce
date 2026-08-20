@@ -1,10 +1,12 @@
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 
 	import {
 		alignedScrollOffset,
 		comparisonKeyboardAction,
 		comparisonSideMuted,
+		followerCorrectionTime,
+		followerPlaybackRate,
 		formatPlaybackTime,
 		frameAspectRatio,
 		mediaElementReady,
@@ -57,7 +59,10 @@
 	let visibleSide = $state<ComparisonSide>('new');
 	let scale = $state<ComparisonScale>('fit');
 	let playing = $state(false);
+	let playbackRequested = $state(false);
 	let preparing = $state(false);
+	let scrubbing = $state(false);
+	let pairSeekPending = $state(false);
 	let playbackError = $state('');
 	let currentTime = $state(0);
 	let duration = $state(0);
@@ -72,6 +77,9 @@
 	let previousBodyOverflow = '';
 	let scrollSyncPending = false;
 	let mediaGeneration = 0;
+	let playbackSequence = 0;
+	let sourceCorrectionPending = false;
+	let sourceCorrectionCooldownUntil = 0;
 	let picturePositionX = 0.5;
 	let picturePositionY = 0.5;
 
@@ -96,7 +104,7 @@
 	$effect(() => {
 		if (!pairKey) return;
 		mediaGeneration += 1;
-		pauseBoth();
+		untrack(pauseBoth);
 		preparing = false;
 		currentTime = 0;
 		duration = currentPair?.preview.durationSeconds || currentPair?.source.durationSeconds || 0;
@@ -198,47 +206,138 @@
 	async function togglePlayback() {
 		if (!sourceVideo || !previewVideo) return;
 		playbackError = '';
-		if (!previewVideo.paused) {
+		if (playbackRequested || playing || preparing) {
 			pauseBoth();
 			return;
 		}
-		if (previewVideo.ended || previewVideo.currentTime >= previewVideo.duration) seekTo(0);
-		sourceVideo.currentTime = previewVideo.currentTime;
+		await startPlayback();
+	}
+
+	async function startPlayback() {
+		if (!sourceVideo || !previewVideo) return;
+		const sequence = ++playbackSequence;
+		playbackRequested = true;
+		playbackError = '';
+		sourceVideo.playbackRate = 1;
 		preparing = true;
+		if (previewVideo.ended || previewVideo.currentTime >= previewVideo.duration) {
+			pairSeekPending = true;
+			currentTime = 0;
+			await Promise.all([settleMediaTime(sourceVideo, 0), settleMediaTime(previewVideo, 0)]);
+			if (sequence !== playbackSequence) return;
+			pairSeekPending = false;
+			currentTime = previewVideo.currentTime;
+		} else if (Math.abs(sourceVideo.currentTime - previewVideo.currentTime) > 0.1) {
+			pairSeekPending = true;
+			await settleMediaTime(sourceVideo, previewVideo.currentTime);
+			if (sequence !== playbackSequence) return;
+			pairSeekPending = false;
+		}
 		try {
 			await Promise.all([sourceVideo.play(), previewVideo.play()]);
+			if (sequence !== playbackSequence || !playbackRequested) {
+				sourceVideo.pause();
+				previewVideo.pause();
+				return;
+			}
 			playing = true;
 		} catch {
+			if (sequence !== playbackSequence) return;
 			pauseBoth();
 			playbackError = 'The clips could not start together. Try again.';
 		} finally {
-			preparing = false;
+			if (sequence === playbackSequence) preparing = false;
 		}
 	}
 
 	function pauseBoth() {
+		playbackSequence += 1;
 		sourceVideo?.pause();
 		previewVideo?.pause();
+		if (sourceVideo) sourceVideo.playbackRate = 1;
+		playbackRequested = false;
 		playing = false;
+		preparing = false;
+		pairSeekPending = false;
+		scrubbing = false;
+		sourceCorrectionPending = false;
 	}
 
-	function seekTo(value: number) {
+	function settleMediaTime(video: HTMLVideoElement, value: number): Promise<void> {
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timeout);
+				video.removeEventListener('seeked', finish);
+				video.removeEventListener('error', finish);
+				resolve();
+			};
+			const timeout = window.setTimeout(finish, 1500);
+			video.addEventListener('seeked', finish, { once: true });
+			video.addEventListener('error', finish, { once: true });
+			video.currentTime = value;
+			if (!video.seeking && Math.abs(video.currentTime - value) < 0.025) {
+				queueMicrotask(finish);
+			}
+		});
+	}
+
+	async function seekTo(value: number) {
+		if (!sourceVideo || !previewVideo) return;
 		const next = Math.min(Math.max(value, 0), duration || value);
-		if (sourceVideo) sourceVideo.currentTime = next;
-		if (previewVideo) previewVideo.currentTime = next;
+		const resumeAfterSeek = playbackRequested;
+		const sequence = ++playbackSequence;
+		sourceVideo.pause();
+		previewVideo.pause();
+		playing = false;
+		preparing = true;
+		pairSeekPending = true;
+		scrubbing = false;
 		currentTime = next;
+		sourceCorrectionPending = false;
+		await Promise.all([settleMediaTime(sourceVideo, next), settleMediaTime(previewVideo, next)]);
+		if (sequence !== playbackSequence) return;
+		pairSeekPending = false;
+		preparing = false;
+		currentTime = previewVideo.currentTime;
+		if (resumeAfterSeek && playbackRequested) await startPlayback();
 	}
 
-	function handleTimeline(event: Event) {
-		seekTo(Number((event.currentTarget as HTMLInputElement).value));
+	function handleTimelinePreview(event: Event) {
+		scrubbing = true;
+		currentTime = Number((event.currentTarget as HTMLInputElement).value);
+	}
+
+	function handleTimelineCommit(event: Event) {
+		void seekTo(Number((event.currentTarget as HTMLInputElement).value));
 	}
 
 	function handleTimeUpdate() {
 		if (!previewVideo || !sourceVideo) return;
-		currentTime = previewVideo.currentTime;
-		if (Math.abs(previewVideo.currentTime - sourceVideo.currentTime) > 0.08) {
-			sourceVideo.currentTime = previewVideo.currentTime;
+		if (!scrubbing) currentTime = previewVideo.currentTime;
+		if (
+			!playbackRequested ||
+			pairSeekPending ||
+			sourceCorrectionPending ||
+			sourceVideo.seeking ||
+			previewVideo.seeking ||
+			performance.now() < sourceCorrectionCooldownUntil
+		)
+			return;
+		const correction = followerCorrectionTime(previewVideo.currentTime, sourceVideo.currentTime);
+		if (correction == null) {
+			sourceVideo.playbackRate = followerPlaybackRate(
+				previewVideo.currentTime,
+				sourceVideo.currentTime
+			);
+			return;
 		}
+		sourceVideo.playbackRate = 1;
+		sourceCorrectionPending = true;
+		sourceCorrectionCooldownUntil = performance.now() + 1000;
+		sourceVideo.currentTime = correction;
 	}
 
 	function handlePreviewMetadata() {
@@ -373,7 +472,7 @@
 		event.preventDefault();
 		if (action.kind === 'close') void closeWorkspace();
 		else if (action.kind === 'toggle_playback') void togglePlayback();
-		else if (action.kind === 'seek') seekTo(currentTime + action.seconds);
+		else if (action.kind === 'seek') void seekTo(currentTime + action.seconds);
 		else if (action.kind === 'show') showSide(action.side);
 		else if (action.kind === 'toggle_layout') {
 			chooseLayout(layout === 'side_by_side' ? 'one_at_a_time' : 'side_by_side');
@@ -521,6 +620,7 @@
 							}}
 							onloadeddata={(event) => handleMediaLoaded('original', event.currentTarget)}
 							oncanplay={(event) => handleMediaLoaded('original', event.currentTarget)}
+							onseeked={() => (sourceCorrectionPending = false)}
 							onerror={() => handleMediaError('original')}
 						></video>
 						{#if sourceError}
@@ -556,13 +656,20 @@
 								handleMediaLoaded('new', event.currentTarget);
 							}}
 							onloadeddata={(event) => handleMediaLoaded('new', event.currentTarget)}
-							oncanplay={(event) => handleMediaLoaded('new', event.currentTarget)}
+							oncanplay={(event) => {
+								handleMediaLoaded('new', event.currentTarget);
+								if (playbackRequested) preparing = false;
+							}}
 							onerror={() => handleMediaError('new')}
 							onplaying={() => {
-								playing = true;
-								preparing = false;
+								if (playbackRequested) {
+									playing = true;
+									preparing = false;
+								}
 							}}
-							onwaiting={() => (preparing = true)}
+							onwaiting={() => {
+								if (playbackRequested) preparing = true;
+							}}
 							onpause={() => (playing = false)}
 							ontimeupdate={handleTimeUpdate}
 							onended={handleEnded}
@@ -579,22 +686,25 @@
 			</div>
 
 			<footer class="workspace-controls" aria-label="Comparison playback controls">
-				<button
-					class="play-control"
-					type="button"
-					onclick={togglePlayback}
-					disabled={preparing || !sourceReady || !previewReady || sourceError || previewError}
-				>
-					{sourceError || previewError
-						? 'Unavailable'
-						: !sourceReady || !previewReady
-							? 'Loading…'
-							: preparing
-								? 'Preparing…'
-								: playing
+				<div class="playback-primary">
+					<button
+						class="play-control"
+						type="button"
+						onclick={togglePlayback}
+						disabled={!sourceReady || !previewReady || sourceError || previewError}
+					>
+						{sourceError || previewError
+							? 'Unavailable'
+							: !sourceReady || !previewReady
+								? 'Loading…'
+								: playbackRequested
 									? 'Pause'
 									: 'Play'}
-				</button>
+					</button>
+					{#if preparing && playbackRequested}
+						<span class="playback-status" aria-live="polite">Buffering…</span>
+					{/if}
+				</div>
 				<label class="timeline-control">
 					<span class="sr-only">Playback position</span>
 					<input
@@ -603,7 +713,8 @@
 						max={Math.max(duration, 0.01)}
 						step="0.01"
 						value={currentTime}
-						oninput={handleTimeline}
+						oninput={handleTimelinePreview}
+						onchange={handleTimelineCommit}
 						aria-valuetext={timeText}
 						disabled={!sourceReady || !previewReady || sourceError || previewError}
 					/>
@@ -929,6 +1040,12 @@
 		padding: 13px 2px 0;
 	}
 
+	.playback-primary {
+		align-items: center;
+		display: flex;
+		gap: 8px;
+	}
+
 	.play-control,
 	.entry-action button {
 		background: #dfece6;
@@ -944,8 +1061,14 @@
 	}
 
 	.play-control:disabled {
-		cursor: wait;
+		cursor: not-allowed;
 		opacity: 0.68;
+	}
+
+	.playback-status {
+		color: #c7d0cc;
+		font-size: 11px;
+		white-space: nowrap;
 	}
 
 	.timeline-control {

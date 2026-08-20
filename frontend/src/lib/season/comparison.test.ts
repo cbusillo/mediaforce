@@ -5,6 +5,8 @@ import {
 	clampMomentIndex,
 	comparisonSideMuted,
 	comparisonKeyboardAction,
+	followerCorrectionTime,
+	followerPlaybackRate,
 	formatPlaybackTime,
 	frameAspectRatio,
 	mediaElementReady,
@@ -62,7 +64,8 @@ describe('comparison workspace helpers', () => {
 
 	it('accepts only decoded data from the expected clip', () => {
 		expect(mediaElementReady(1)).toBe(false);
-		expect(mediaElementReady(2)).toBe(true);
+		expect(mediaElementReady(2)).toBe(false);
+		expect(mediaElementReady(3)).toBe(true);
 		expect(
 			mediaSourceMatches(
 				'http://localhost/review/moment-2.mp4',
@@ -85,6 +88,19 @@ describe('comparison workspace helpers', () => {
 		expect(formatPlaybackTime(68.9)).toBe('1:08');
 		expect(frameAspectRatio(1440, 1080)).toBeCloseTo(4 / 3);
 		expect(frameAspectRatio(0, 0)).toBeCloseTo(16 / 9);
+	});
+
+	it('ignores ordinary clock drift and only corrects a genuinely separated follower', () => {
+		expect(followerCorrectionTime(4.17, 4)).toBeNull();
+		expect(followerCorrectionTime(4.31, 4)).toBe(4.31);
+		expect(followerCorrectionTime(Number.NaN, 4)).toBeNull();
+	});
+
+	it('uses bounded rate adjustment for drift below the hard-correction threshold', () => {
+		expect(followerPlaybackRate(4.02, 4)).toBe(1);
+		expect(followerPlaybackRate(4.14, 4)).toBe(1.04);
+		expect(followerPlaybackRate(4, 4.14)).toBe(0.96);
+		expect(followerPlaybackRate(4.31, 4)).toBe(1);
 	});
 
 	it('keeps the same relative picture position across different frame sizes', () => {

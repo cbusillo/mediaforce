@@ -4,6 +4,10 @@ export type ComparisonLayout = 'side_by_side' | 'one_at_a_time';
 export type ComparisonSide = 'original' | 'new';
 export type ComparisonScale = 'fit' | 'actual';
 
+const SOFT_DRIFT_THRESHOLD_SECONDS = 0.06;
+const HARD_DRIFT_THRESHOLD_SECONDS = 0.3;
+const FOLLOWER_RATE_ADJUSTMENT = 0.04;
+
 export type ComparisonKeyboardAction =
 	| { kind: 'close' }
 	| { kind: 'toggle_playback' }
@@ -51,7 +55,7 @@ export function comparisonSideMuted(
 }
 
 export function mediaElementReady(readyState: number): boolean {
-	return readyState >= 2;
+	return readyState >= 3;
 }
 
 export function mediaSourceMatches(
@@ -77,6 +81,35 @@ export function formatPlaybackTime(value: number): string {
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
 	return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
+export function followerCorrectionTime(
+	masterTime: number,
+	followerTime: number,
+	thresholdSeconds = HARD_DRIFT_THRESHOLD_SECONDS
+): number | null {
+	if (
+		!Number.isFinite(masterTime) ||
+		!Number.isFinite(followerTime) ||
+		!Number.isFinite(thresholdSeconds) ||
+		thresholdSeconds <= 0
+	) {
+		return null;
+	}
+	return Math.abs(masterTime - followerTime) >= thresholdSeconds ? masterTime : null;
+}
+
+export function followerPlaybackRate(masterTime: number, followerTime: number): number {
+	if (!Number.isFinite(masterTime) || !Number.isFinite(followerTime)) return 1;
+	const driftSeconds = masterTime - followerTime;
+	const absoluteDrift = Math.abs(driftSeconds);
+	if (
+		absoluteDrift < SOFT_DRIFT_THRESHOLD_SECONDS ||
+		absoluteDrift >= HARD_DRIFT_THRESHOLD_SECONDS
+	) {
+		return 1;
+	}
+	return driftSeconds > 0 ? 1 + FOLLOWER_RATE_ADJUSTMENT : 1 - FOLLOWER_RATE_ADJUSTMENT;
 }
 
 export function frameAspectRatio(width: number, height: number): number {

@@ -227,6 +227,12 @@ silent clips must say they show picture only and offer a plain-language path to
 make a new test when the source has sound. The normal UI must not expose codec,
 quality-score, synchronization, or other implementation vocabulary.
 
+Playback uses the new clip as the comparison clock. Dragging the timeline may
+preview the requested position, but each committed seek must update both clips
+once; routine clock updates must not repeatedly hard-seek either clip. Verify in
+Safari that Play, Pause, committed seeking, and switching the audible side remain
+responsive without restarting playback.
+
 While the review assistant or a representative sample is active, the first
 Folder Studio viewport must show a prominent live-operation state with the
 current action, worker, and elapsed/status copy. Operators must not need to
