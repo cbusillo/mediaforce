@@ -8,7 +8,12 @@ from pathlib import Path
 from mediaforce.core.config import ConfigPaths, DEFAULT_CONFIG_PATH, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, series_metadata
-from mediaforce.library.candidate_selection import older_season_override_selection, project_candidates, season_identity
+from mediaforce.library.candidate_selection import (
+    older_season_override_selection,
+    project_candidates,
+    scope_lifecycle_payload,
+    season_identity,
+)
 from mediaforce.library.run_manifests import build_run_manifest, create_folder_manifest, select_encode_candidates
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_state, derive_item_workflow_state
 from mediaforce.web.routes.folders import _request_flag
@@ -71,6 +76,19 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertTrue(by_season[26].eligible)
         self.assertFalse(by_season[27].eligible)
         self.assertEqual([reason.code for reason in by_season[27].hold_reasons], ["current_season"])
+
+    def test_exact_episode_scope_can_override_parent_season_holds(self) -> None:
+        config = self._config()
+        rel_path = "tv/Show/Season 1/Episode 01.mkv"
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, rel_path, age_days=5)
+            self._insert_series_metadata(connection, "tv/Show", status="Returning Series", in_production=True)
+
+            lifecycle = scope_lifecycle_payload(connection, config, rel_path, now=NOW)
+
+        self.assertEqual(lifecycle["held_candidate_count"], 1)
+        self.assertTrue(lifecycle["can_override_holds"])
+        self.assertEqual(lifecycle["seasons"][0]["prefix"], "tv/Show/Season 1")
 
     def test_complete_legacy_config_inherits_lifecycle_defaults(self) -> None:
         config = self._config()

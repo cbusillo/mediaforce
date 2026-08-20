@@ -701,6 +701,14 @@ def scope_lifecycle_payload_from_decisions(
     seasons.sort(key=lambda value: (value.get("season_number") is None, value.get("season_number") or 0, value["prefix"]))
     representative = next((decision for decision in decisions if decision.season is not None), decisions[0])
     reason_counts = Counter(reason.code for decision in held for reason in decision.hold_reasons)
+    selected_season_scope = any(
+        decision.season is not None
+        and (
+            decision.season.season_prefix == normalized_prefix
+            or normalize_scope_prefix(str(decision.row["rel_path"] or "")) == normalized_prefix
+        )
+        for decision in decisions
+    )
     rank_age = min(
         (decision.season_rank_age.timestamp for decision in eligible if decision.season_rank_age.timestamp is not None),
         default=None,
@@ -728,10 +736,7 @@ def scope_lifecycle_payload_from_decisions(
         "ranking_added_at": rank_age.isoformat(timespec="seconds") if rank_age is not None else None,
         "can_override_holds": bool(
             held
-            and any(
-                decision.season is not None and decision.season.season_prefix == normalized_prefix
-                for decision in decisions
-            )
+            and selected_season_scope
             and all(all(reason.code in OVERRIDEABLE_HOLD_CODES for reason in decision.hold_reasons) for decision in held)
         ),
         "seasons": seasons,
