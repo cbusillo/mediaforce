@@ -40,9 +40,9 @@ worker`, `Needs sample`, `Safe to delete`.
   checking, finishing, and completed states. Do not reuse season-wide copy for
   a route that targets one episode.
 - Exact TV approval: use `Sample approved` for the settled review state and
-  `Make the full episode` for the next action. Name the episode and file, show
-  the expected size change, and state that making creates a separate copy;
-  checking and the explicit replace decision happen later.
+  `Compress the full episode` for the next action. Name the episode and file,
+  show the expected size change, and state that compression creates a separate
+  file; checking and the explicit replace decision happen later.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
 - Movie validation: use `Check compressed file` and `checked file` instead of

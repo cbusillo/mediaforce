@@ -180,7 +180,7 @@
 		isSeriesScope
 			? `Make ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
 			: isExactItemScope
-				? 'Make this episode'
+				? 'Compress this episode'
 				: heldEpisodeCount > 0
 					? canOverrideLifecycleHolds
 						? 'Override hold and make the season'
@@ -2015,15 +2015,15 @@
 				<div class="exact-approved__decision">
 					<div class="exact-approved__next">
 						<p class="exact-approved__label">Next step</p>
-						<h2>Make the full episode</h2>
+						<h2>Compress the full episode</h2>
 						<p id="exact-approved-action-description">
-							Mediaforce will create a separate full-episode copy using the settings you approved.
-							Your original file is not changed.
+							Mediaforce will compress the complete episode into a separate file using the settings
+							you approved. Your original file is not changed.
 						</p>
 					</div>
 
 					<ol class="exact-approved__steps" aria-label="What happens next">
-						<li><span>1</span><strong>Make the full episode</strong></li>
+						<li><span>1</span><strong>Compress the full episode</strong></li>
 						<li><span>2</span><strong>Check the compressed file</strong></li>
 						<li>
 							<span>3</span><strong>Choose whether to finish and replace the original</strong>
@@ -2038,7 +2038,7 @@
 							aria-describedby="exact-approved-action-description exact-approved-safety"
 							disabled={heldEpisodeCount > 0 && !canOverrideLifecycleHolds}
 						>
-							Make the full episode
+							Compress the full episode
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 						</button>
 						{#if reviewPairs.length}
@@ -2195,13 +2195,15 @@
 							: isSeriesScope
 								? `Making all ${seriesSeasonCount} ${seriesSeasonLabel}`
 								: isExactItemScope
-									? `Making ${exactEpisodeName}`
+									? `Compressing ${exactEpisodeName}`
 									: `Making ${identity.season}`}
 					</h1>
 					<p class="lede">
 						{encodeProgress.currentEpisode === 'A representative episode'
 							? `The ${scopeNoun} is waiting for its next available computer.`
-							: `${encodeProgress.currentEpisode} is being made now.`}
+							: isExactItemScope
+								? `${encodeProgress.currentEpisode} is being compressed now.`
+								: `${encodeProgress.currentEpisode} is being made now.`}
 					</p>
 					<div class="progress-facts">
 						<strong>{seasonProgressCompleted} of {encodeProgress.total}</strong>
@@ -2235,7 +2237,7 @@
 		{:else if humanState.key === 'ready_to_check'}
 			<section class="ready-room ready-room--check">
 				<div class="ready-symbol" aria-hidden="true"><span>···</span></div>
-				<p class="eyebrow">{isExactItemScope ? 'Episode made' : 'Episodes made'}</p>
+				<p class="eyebrow">{isExactItemScope ? 'Episode compressed' : 'Episodes made'}</p>
 				<h1>{isExactItemScope ? 'Let’s check this episode.' : 'Let’s check every new file.'}</h1>
 				<p class="lede">
 					{isExactItemScope
