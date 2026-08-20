@@ -66,6 +66,7 @@
 	let scale = $state<ComparisonScale>('fit');
 	let playing = $state(false);
 	let playbackRequested = $state(false);
+	let playbackCompleted = $state(false);
 	let preparing = $state(false);
 	let warming = $state(false);
 	let scrubbing = $state(false);
@@ -116,6 +117,7 @@
 		untrack(pauseBoth);
 		preparing = false;
 		warming = false;
+		playbackCompleted = false;
 		currentTime = 0;
 		duration = currentPair?.preview.durationSeconds || currentPair?.source.durationSeconds || 0;
 		sourceWidth = 0;
@@ -231,19 +233,13 @@
 		playbackError = '';
 		sourceVideo.playbackRate = 1;
 		preparing = true;
-		if (
-			previewVideo.ended ||
-			playbackBoundaryReached(
-				previewVideo.currentTime,
-				duration,
-				PLAYBACK_BOUNDARY_TOLERANCE_SECONDS
-			)
-		) {
+		if (playbackCompleted || previewVideo.ended) {
 			pairSeekPending = true;
 			currentTime = 0;
 			await Promise.all([settleMediaTime(sourceVideo, 0), settleMediaTime(previewVideo, 0)]);
 			if (sequence !== playbackSequence) return;
 			pairSeekPending = false;
+			playbackCompleted = false;
 			currentTime = previewVideo.currentTime;
 		} else if (Math.abs(sourceVideo.currentTime - previewVideo.currentTime) > 0.1) {
 			pairSeekPending = true;
@@ -332,6 +328,7 @@
 		if (sourceVideo) sourceVideo.playbackRate = 1;
 		playbackRequested = false;
 		playing = false;
+		playbackCompleted = false;
 		preparing = false;
 		warming = false;
 		pairSeekPending = false;
@@ -366,6 +363,7 @@
 					return;
 				}
 				pauseBoth();
+				playbackCompleted = true;
 				currentTime = duration;
 			},
 			Math.max(remainingSeconds * 1000, 100)
@@ -416,6 +414,7 @@
 		if (sequence !== playbackSequence) return;
 		pairSeekPending = false;
 		preparing = false;
+		playbackCompleted = next >= duration;
 		currentTime = previewVideo.currentTime;
 		if (resumeAfterSeek && playbackRequested) await startPlayback();
 	}
@@ -431,20 +430,12 @@
 
 	function handleTimeUpdate() {
 		if (!previewVideo || !sourceVideo) return;
-		if (
-			!playbackRequested &&
-			currentTime >= duration &&
-			playbackBoundaryReached(
-				previewVideo.currentTime,
-				duration,
-				PLAYBACK_BOUNDARY_TOLERANCE_SECONDS
-			)
-		)
-			return;
+		if (!playbackRequested && playbackCompleted) return;
 		if (!scrubbing)
 			currentTime = Math.min(previewVideo.currentTime, duration || previewVideo.currentTime);
 		if (playbackRequested && playbackBoundaryReached(previewVideo.currentTime, duration)) {
 			pauseBoth();
+			playbackCompleted = true;
 			currentTime = duration;
 			return;
 		}
@@ -527,6 +518,7 @@
 
 	function handleEnded() {
 		pauseBoth();
+		playbackCompleted = true;
 		currentTime = duration;
 	}
 
