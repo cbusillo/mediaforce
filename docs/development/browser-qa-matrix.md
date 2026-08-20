@@ -233,6 +233,11 @@ once; routine clock updates must not repeatedly hard-seek either clip. Verify in
 Safari that Play, Pause, committed seeking, and switching the audible side remain
 responsive without restarting playback.
 
+The comparison timeline must use the typed review-pair duration and stop at that
+boundary even when an auxiliary container stream reports a longer duration.
+Browser review proxies must exclude data streams and inherited chapters so a
+bounded review moment cannot appear to be the length of the source episode.
+
 While the review assistant or a representative sample is active, the first
 Folder Studio viewport must show a prominent live-operation state with the
 current action, worker, and elapsed/status copy. Operators must not need to

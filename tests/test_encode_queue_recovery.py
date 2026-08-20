@@ -13481,12 +13481,18 @@ raise SystemExit(0)
         self.assertIn("-hwaccel", production_cmd)
         self.assertIn("videotoolbox", production_cmd)
         self.assertIn("-svtav1-params", production_cmd)
+        self.assertIn("-dn", production_cmd)
+        self.assertEqual(production_cmd[production_cmd.index("-map_chapters") + 1], "-1")
+        self.assertEqual(production_cmd[production_cmd.index("-t", 9) + 1], "8.000")
         self.assertIn("tune=0:film-grain=0", production_cmd)
         self.assertIn("28.25", production_cmd)
         self.assertEqual(production_cmd[-1], "/tmp/.preview-production-preview.mp4")
         self.assertEqual(browser_cmd[browser_cmd.index("-c:v") + 1], "libx264")
         self.assertEqual(browser_cmd[browser_cmd.index("-pix_fmt") + 1], "yuv420p")
         self.assertEqual(browser_cmd[browser_cmd.index("-crf") + 1], "16")
+        self.assertIn("-dn", browser_cmd)
+        self.assertEqual(browser_cmd[browser_cmd.index("-map_chapters") + 1], "-1")
+        self.assertEqual(browser_cmd[browser_cmd.index("-t") + 1], "8.000")
         self.assertEqual(browser_cmd[-1], "/tmp/preview.mp4")
 
     def test_render_encoded_preview_clip_normalizes_copied_audio_for_browser_review(self) -> None:
@@ -13518,12 +13524,14 @@ raise SystemExit(0)
         production_cmd = run_mock.call_args_list[0].args[0]
         browser_cmd = run_mock.call_args_list[1].args[0]
         self.assertIn("0:2", production_cmd)
+        self.assertIn("-dn", production_cmd)
         self.assertEqual(production_cmd[production_cmd.index("-c:a") + 1], "aac")
         self.assertEqual(production_cmd[production_cmd.index("-b:a") + 1], "256k")
         self.assertEqual(production_cmd[production_cmd.index("-ar") + 1], "48000")
         self.assertEqual(production_cmd[production_cmd.index("-ac") + 1], "2")
         self.assertNotIn("-an", production_cmd)
         self.assertIn("0:a:0", browser_cmd)
+        self.assertIn("-dn", browser_cmd)
         self.assertEqual(browser_cmd[browser_cmd.index("-c:a") + 1], "copy")
 
     def test_render_encoded_preview_clip_applies_production_opus_before_browser_audio(self) -> None:
@@ -15062,6 +15070,9 @@ raise SystemExit(0)
         ])
         self.assertIn("-hwaccel", cmd)
         self.assertIn("videotoolbox", cmd)
+        self.assertIn("-dn", cmd)
+        self.assertEqual(cmd[cmd.index("-map_chapters") + 1], "-1")
+        self.assertEqual(cmd[cmd.index("-t", 9) + 1], "8.000")
 
     def test_render_source_review_clip_adds_truthful_browser_audio(self) -> None:
         with patch("mediaforce.review.ffmpeg_binary", return_value="/tmp/ffmpeg"), patch(
@@ -15088,6 +15099,7 @@ raise SystemExit(0)
         self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
         self.assertEqual(cmd[cmd.index("-ar") + 1], "48000")
         self.assertEqual(cmd[cmd.index("-ac") + 1], "2")
+        self.assertIn("-dn", cmd)
         self.assertNotIn("-an", cmd)
 
     def test_render_compare_clip_preserves_native_resolution(self) -> None:
