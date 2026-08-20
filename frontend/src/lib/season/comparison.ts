@@ -5,8 +5,11 @@ export type ComparisonSide = 'original' | 'new';
 export type ComparisonScale = 'fit' | 'actual';
 
 const SOFT_DRIFT_THRESHOLD_SECONDS = 0.06;
-const HARD_DRIFT_THRESHOLD_SECONDS = 0.3;
+const STRONG_DRIFT_THRESHOLD_SECONDS = 0.15;
+const HARD_DRIFT_THRESHOLD_SECONDS = 0.75;
 const FOLLOWER_RATE_ADJUSTMENT = 0.04;
+const STRONG_FOLLOWER_RATE_ADJUSTMENT = 0.12;
+const DEFERRED_HARD_RATE_ADJUSTMENT = 0.2;
 
 export type ComparisonKeyboardAction =
 	| { kind: 'close' }
@@ -83,6 +86,26 @@ export function formatPlaybackTime(value: number): string {
 	return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
+export function boundedReviewDuration(declaredDuration: number, mediaDuration: number): number {
+	const declared = Number.isFinite(declaredDuration) && declaredDuration > 0 ? declaredDuration : 0;
+	const media = Number.isFinite(mediaDuration) && mediaDuration > 0 ? mediaDuration : 0;
+	if (declared && media) {
+		if (media < declared * 0.75) return media;
+		return declared;
+	}
+	return declared || media;
+}
+
+export function playbackBoundaryReached(
+	currentTime: number,
+	duration: number,
+	toleranceSeconds = 0.05
+): boolean {
+	if (!Number.isFinite(currentTime) || !Number.isFinite(duration) || duration <= 0) return false;
+	const tolerance = Number.isFinite(toleranceSeconds) ? Math.max(toleranceSeconds, 0) : 0;
+	return currentTime >= Math.max(duration - tolerance, 0);
+}
+
 export function followerCorrectionTime(
 	masterTime: number,
 	followerTime: number,
@@ -99,17 +122,23 @@ export function followerCorrectionTime(
 	return Math.abs(masterTime - followerTime) >= thresholdSeconds ? masterTime : null;
 }
 
-export function followerPlaybackRate(masterTime: number, followerTime: number): number {
+export function followerPlaybackRate(
+	masterTime: number,
+	followerTime: number,
+	deferHardCorrection = false
+): number {
 	if (!Number.isFinite(masterTime) || !Number.isFinite(followerTime)) return 1;
 	const driftSeconds = masterTime - followerTime;
 	const absoluteDrift = Math.abs(driftSeconds);
-	if (
-		absoluteDrift < SOFT_DRIFT_THRESHOLD_SECONDS ||
+	if (absoluteDrift < SOFT_DRIFT_THRESHOLD_SECONDS) return 1;
+	if (absoluteDrift >= HARD_DRIFT_THRESHOLD_SECONDS && !deferHardCorrection) return 1;
+	const adjustment =
 		absoluteDrift >= HARD_DRIFT_THRESHOLD_SECONDS
-	) {
-		return 1;
-	}
-	return driftSeconds > 0 ? 1 + FOLLOWER_RATE_ADJUSTMENT : 1 - FOLLOWER_RATE_ADJUSTMENT;
+			? DEFERRED_HARD_RATE_ADJUSTMENT
+			: absoluteDrift >= STRONG_DRIFT_THRESHOLD_SECONDS
+				? STRONG_FOLLOWER_RATE_ADJUSTMENT
+				: FOLLOWER_RATE_ADJUSTMENT;
+	return driftSeconds > 0 ? 1 + adjustment : 1 - adjustment;
 }
 
 export function frameAspectRatio(width: number, height: number): number {

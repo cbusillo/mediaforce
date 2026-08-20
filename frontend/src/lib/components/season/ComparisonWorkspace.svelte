@@ -3,6 +3,7 @@
 
 	import {
 		alignedScrollOffset,
+		boundedReviewDuration,
 		comparisonKeyboardAction,
 		comparisonSideMuted,
 		followerCorrectionTime,
@@ -12,6 +13,7 @@
 		mediaElementReady,
 		mediaSourceMatches,
 		normalizedScrollPosition,
+		playbackBoundaryReached,
 		reviewPairHasSound,
 		scrollOffsetForPosition,
 		type ComparisonLayout,
@@ -80,6 +82,8 @@
 	let playbackSequence = 0;
 	let sourceCorrectionPending = false;
 	let sourceCorrectionCooldownUntil = 0;
+	let hardCorrectionAllowedAt = 0;
+	let playbackBoundaryTimer: number | null = null;
 	let picturePositionX = 0.5;
 	let picturePositionY = 0.5;
 
@@ -132,6 +136,7 @@
 		document.addEventListener('fullscreenchange', handleFullscreenChange);
 		return () => {
 			document.removeEventListener('fullscreenchange', handleFullscreenChange);
+			clearPlaybackBoundary();
 			document.body.style.overflow = previousBodyOverflow;
 		};
 	});
@@ -220,7 +225,7 @@
 		playbackError = '';
 		sourceVideo.playbackRate = 1;
 		preparing = true;
-		if (previewVideo.ended || previewVideo.currentTime >= previewVideo.duration) {
+		if (previewVideo.ended || playbackBoundaryReached(previewVideo.currentTime, duration)) {
 			pairSeekPending = true;
 			currentTime = 0;
 			await Promise.all([settleMediaTime(sourceVideo, 0), settleMediaTime(previewVideo, 0)]);
@@ -233,6 +238,7 @@
 			if (sequence !== playbackSequence) return;
 			pairSeekPending = false;
 		}
+		hardCorrectionAllowedAt = performance.now() + 1500;
 		try {
 			await Promise.all([sourceVideo.play(), previewVideo.play()]);
 			if (sequence !== playbackSequence || !playbackRequested) {
@@ -241,6 +247,7 @@
 				return;
 			}
 			playing = true;
+			schedulePlaybackBoundary(sequence);
 		} catch {
 			if (sequence !== playbackSequence) return;
 			pauseBoth();
@@ -252,6 +259,7 @@
 
 	function pauseBoth() {
 		playbackSequence += 1;
+		clearPlaybackBoundary();
 		sourceVideo?.pause();
 		previewVideo?.pause();
 		if (sourceVideo) sourceVideo.playbackRate = 1;
@@ -261,6 +269,33 @@
 		pairSeekPending = false;
 		scrubbing = false;
 		sourceCorrectionPending = false;
+		sourceCorrectionCooldownUntil = 0;
+		hardCorrectionAllowedAt = 0;
+	}
+
+	function clearPlaybackBoundary() {
+		if (playbackBoundaryTimer == null) return;
+		window.clearTimeout(playbackBoundaryTimer);
+		playbackBoundaryTimer = null;
+	}
+
+	function schedulePlaybackBoundary(sequence: number) {
+		clearPlaybackBoundary();
+		if (!previewVideo || duration <= 0) return;
+		const remainingSeconds = Math.max(duration - previewVideo.currentTime, 0);
+		playbackBoundaryTimer = window.setTimeout(
+			() => {
+				playbackBoundaryTimer = null;
+				if (sequence !== playbackSequence || !playbackRequested || !previewVideo) return;
+				if (!playbackBoundaryReached(previewVideo.currentTime, duration, 0.15)) {
+					schedulePlaybackBoundary(sequence);
+					return;
+				}
+				pauseBoth();
+				currentTime = duration;
+			},
+			Math.max(remainingSeconds * 1000, 100)
+		);
 	}
 
 	function settleMediaTime(video: HTMLVideoElement, value: number): Promise<void> {
@@ -291,6 +326,7 @@
 
 	async function seekTo(value: number) {
 		if (!sourceVideo || !previewVideo) return;
+		clearPlaybackBoundary();
 		const next = Math.min(Math.max(value, 0), duration || value);
 		const resumeAfterSeek = playbackRequested;
 		const sequence = ++playbackSequence;
@@ -321,7 +357,13 @@
 
 	function handleTimeUpdate() {
 		if (!previewVideo || !sourceVideo) return;
-		if (!scrubbing) currentTime = previewVideo.currentTime;
+		if (!scrubbing)
+			currentTime = Math.min(previewVideo.currentTime, duration || previewVideo.currentTime);
+		if (playbackRequested && playbackBoundaryReached(previewVideo.currentTime, duration)) {
+			pauseBoth();
+			currentTime = duration;
+			return;
+		}
 		if (
 			!playbackRequested ||
 			pairSeekPending ||
@@ -331,11 +373,13 @@
 			performance.now() < sourceCorrectionCooldownUntil
 		)
 			return;
+		const deferHardCorrection = performance.now() < hardCorrectionAllowedAt;
 		const correction = followerCorrectionTime(previewVideo.currentTime, sourceVideo.currentTime);
-		if (correction == null) {
+		if (correction == null || deferHardCorrection) {
 			sourceVideo.playbackRate = followerPlaybackRate(
 				previewVideo.currentTime,
-				sourceVideo.currentTime
+				sourceVideo.currentTime,
+				deferHardCorrection
 			);
 			return;
 		}
@@ -349,9 +393,10 @@
 		if (!previewVideo) return;
 		previewWidth = previewVideo.videoWidth;
 		previewHeight = previewVideo.videoHeight;
-		duration = Number.isFinite(previewVideo.duration)
-			? previewVideo.duration
-			: currentPair?.preview.durationSeconds || 0;
+		duration = boundedReviewDuration(
+			currentPair?.preview.durationSeconds || currentPair?.source.durationSeconds || 0,
+			previewVideo.duration
+		);
 		if (scale === 'actual') void tick().then(centerActualSize);
 	}
 
@@ -392,6 +437,7 @@
 		if (!sourceVideo) return;
 		sourceWidth = sourceVideo.videoWidth;
 		sourceHeight = sourceVideo.videoHeight;
+		duration = boundedReviewDuration(duration, sourceVideo.duration);
 	}
 
 	function handleEnded() {

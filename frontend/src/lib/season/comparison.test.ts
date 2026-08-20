@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	alignedScrollOffset,
+	boundedReviewDuration,
 	clampMomentIndex,
 	comparisonSideMuted,
 	comparisonKeyboardAction,
@@ -12,6 +13,7 @@ import {
 	mediaElementReady,
 	mediaSourceMatches,
 	normalizedScrollPosition,
+	playbackBoundaryReached,
 	reviewPairHasSound,
 	scrollOffsetForPosition
 } from './comparison';
@@ -90,17 +92,28 @@ describe('comparison workspace helpers', () => {
 		expect(frameAspectRatio(0, 0)).toBeCloseTo(16 / 9);
 	});
 
+	it('keeps playback bounded to the declared review clip instead of auxiliary media duration', () => {
+		expect(boundedReviewDuration(8, 2674.44)).toBe(8);
+		expect(boundedReviewDuration(8, 7.979)).toBe(8);
+		expect(boundedReviewDuration(8, 5)).toBe(5);
+		expect(boundedReviewDuration(8, Number.POSITIVE_INFINITY)).toBe(8);
+		expect(playbackBoundaryReached(7.96, 8)).toBe(true);
+		expect(playbackBoundaryReached(7.7, 8)).toBe(false);
+	});
+
 	it('ignores ordinary clock drift and only corrects a genuinely separated follower', () => {
 		expect(followerCorrectionTime(4.17, 4)).toBeNull();
-		expect(followerCorrectionTime(4.31, 4)).toBe(4.31);
+		expect(followerCorrectionTime(4.76, 4)).toBe(4.76);
 		expect(followerCorrectionTime(Number.NaN, 4)).toBeNull();
 	});
 
 	it('uses bounded rate adjustment for drift below the hard-correction threshold', () => {
 		expect(followerPlaybackRate(4.02, 4)).toBe(1);
 		expect(followerPlaybackRate(4.14, 4)).toBe(1.04);
-		expect(followerPlaybackRate(4, 4.14)).toBe(0.96);
-		expect(followerPlaybackRate(4.31, 4)).toBe(1);
+		expect(followerPlaybackRate(4.2, 4)).toBe(1.12);
+		expect(followerPlaybackRate(4, 4.2)).toBe(0.88);
+		expect(followerPlaybackRate(4.8, 4)).toBe(1);
+		expect(followerPlaybackRate(4.8, 4, true)).toBe(1.2);
 	});
 
 	it('keeps the same relative picture position across different frame sizes', () => {

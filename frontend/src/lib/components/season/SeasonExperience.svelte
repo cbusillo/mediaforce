@@ -5941,6 +5941,10 @@
 			border-top: 1px solid var(--mf-line-muted);
 		}
 
+		.review-contract dd {
+			white-space: normal;
+		}
+
 		.target-warning {
 			align-items: start;
 			grid-template-columns: 1fr;
