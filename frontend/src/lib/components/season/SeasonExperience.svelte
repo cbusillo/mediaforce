@@ -134,6 +134,7 @@
 	const isSeriesScope = $derived(isSeriesPrefix(folder.prefix));
 	const isExactItemScope = $derived(folder.media_scope?.match === 'exact_item');
 	const exactEpisodeName = $derived(episodeLabel(folder.prefix));
+	const exactFilename = $derived(folder.prefix.split('/').filter(Boolean).pop() ?? folder.prefix);
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
 	const seriesSeasonLabel = $derived(seriesSeasonCount === 1 ? 'season' : 'seasons');
 	const lifecycle = $derived(folder.lifecycle ?? null);
@@ -257,6 +258,26 @@
 	const targetConstraint = $derived(targetConstraintSummary(folder, status));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
+	const exactExpectedSavingsBytes = $derived(
+		Math.max(0, originalSeasonSize - expectedEpisodeBytes)
+	);
+	const exactApprovedRangeLabel = $derived(
+		targetSummary
+			? `${formatDecimalFileSize(targetSummary.finalLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.finalUpperBoundBytes)}`
+			: sizeTarget.lowerBoundBytes > 0 && sizeTarget.upperBoundBytes > 0
+				? `${formatDecimalFileSize(sizeTarget.lowerBoundBytes)}–${formatDecimalFileSize(sizeTarget.upperBoundBytes)}`
+				: ''
+	);
+	const exactExpectedInsideApprovedRange = $derived(
+		expectedEpisodeBytes > 0 &&
+			((targetSummary !== null &&
+				expectedEpisodeBytes >= targetSummary.finalLowerBoundBytes &&
+				expectedEpisodeBytes <= targetSummary.finalUpperBoundBytes) ||
+				(targetSummary === null &&
+					sizeTarget.lowerBoundBytes > 0 &&
+					expectedEpisodeBytes >= sizeTarget.lowerBoundBytes &&
+					expectedEpisodeBytes <= sizeTarget.upperBoundBytes))
+	);
 	const exactCalibrationJob = $derived(
 		status.exact_calibration_job !== undefined
 			? status.exact_calibration_job
@@ -1959,6 +1980,92 @@
 					</div>
 				</div>
 			</section>
+		{:else if humanState.key === 'ready_to_make' && isExactItemScope}
+			<section class="exact-approved" aria-labelledby="exact-approved-title">
+				<div class="exact-approved__summary">
+					<header class="exact-approved__header">
+						<p class="exact-approved__status">
+							<span aria-hidden="true">✓</span> Sample approved
+						</p>
+						<h1 id="exact-approved-title">{scopeTitle}</h1>
+						<p class="exact-approved__filename">{exactFilename}</p>
+					</header>
+
+					<div class="exact-approved__outcome" aria-label="Expected size result">
+						<p>
+							<strong>{formatDecimalFileSize(originalSeasonSize)}</strong>
+							<span aria-hidden="true">→</span>
+							<strong>about {formatDecimalFileSize(expectedEpisodeBytes)}</strong>
+						</p>
+						<span>Saves about {formatDecimalFileSize(exactExpectedSavingsBytes)}</span>
+					</div>
+
+					<div class="exact-approved__target">
+						<strong>Size goal {sizeTargetLabel}</strong>
+						{#if exactApprovedRangeLabel}
+							<span>
+								{exactExpectedInsideApprovedRange
+									? `Expected result is inside the approved ${exactApprovedRangeLabel} range.`
+									: `Approved final range: ${exactApprovedRangeLabel}.`}
+							</span>
+						{/if}
+					</div>
+				</div>
+
+				<div class="exact-approved__decision">
+					<div class="exact-approved__next">
+						<p class="exact-approved__label">Next step</p>
+						<h2>Make the full episode</h2>
+						<p id="exact-approved-action-description">
+							Mediaforce will create a separate full-episode copy using the settings you approved.
+							Your original file is not changed.
+						</p>
+					</div>
+
+					<ol class="exact-approved__steps" aria-label="What happens next">
+						<li><span>1</span><strong>Make the full episode</strong></li>
+						<li><span>2</span><strong>Check the compressed file</strong></li>
+						<li>
+							<span>3</span><strong>Choose whether to finish and replace the original</strong>
+						</li>
+					</ol>
+
+					<div class="exact-approved__actions">
+						<button
+							class="primary-button"
+							type="button"
+							onclick={requestQueueSeason}
+							aria-describedby="exact-approved-action-description exact-approved-safety"
+							disabled={heldEpisodeCount > 0 && !canOverrideLifecycleHolds}
+						>
+							Make the full episode
+							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+						</button>
+						{#if reviewPairs.length}
+							<button class="secondary-button" type="button" onclick={downloadComparison}>
+								Download approved comparison
+							</button>
+						{/if}
+					</div>
+					<p class="exact-approved__safety" id="exact-approved-safety">
+						Nothing is queued yet. Nothing is replaced automatically.
+					</p>
+				</div>
+
+				<details class="exact-approved__estimate">
+					<summary>
+						<span>Estimate details</span>
+						<small>How the approved sample informs the full episode</small>
+					</summary>
+					<div>
+						<p>
+							The approved test predicts about {formatDecimalFileSize(expectedEpisodeBytes)} for this
+							episode. The finished size can vary within the approved range as Mediaforce preserves the
+							picture and sound rules you reviewed.
+						</p>
+					</div>
+				</details>
+			</section>
 		{:else if humanState.key === 'ready_to_make'}
 			<section class="ready-room">
 				<div class="ready-symbol" aria-hidden="true"><span>✓</span></div>
@@ -2335,6 +2442,9 @@
 		{/if}
 
 		<section
+			hidden={isExactItemScope &&
+				humanState.key === 'ready_to_make' &&
+				qualityMemory.state === 'empty'}
 			class="quality-memory"
 			class:quality-memory--empty={qualityMemory.state === 'empty'}
 			class:quality-memory--attention={qualityMemory.tone === 'attention'}
@@ -2388,7 +2498,11 @@
 
 		<details class="details-drawer">
 			<summary>
-				<span>Details</span>
+				<span
+					>{isExactItemScope && humanState.key === 'ready_to_make'
+						? 'Technical details'
+						: 'Details'}</span
+				>
 				<small>For computers, formats, and exact settings</small>
 				<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7.5 5 5 5-5" /></svg>
 			</summary>
@@ -4141,6 +4255,7 @@
 	.active-room h1,
 	.compare-room h1,
 	.ready-room h1,
+	.exact-approved h1,
 	.season-progress-room h1,
 	.finished-room h1,
 	.help-room h1,
@@ -4269,6 +4384,7 @@
 	.active-room,
 	.compare-room,
 	.ready-room,
+	.exact-approved,
 	.season-progress-room,
 	.finished-room,
 	.help-room {
@@ -5053,6 +5169,227 @@
 		color: var(--mf-fg-primary);
 		font-family: var(--mf-font-sans);
 		font-size: 15px;
+	}
+
+	.exact-approved {
+		padding: 0;
+		overflow: hidden;
+	}
+
+	.exact-approved__summary {
+		display: grid;
+		gap: 14px 24px;
+		grid-template-columns: minmax(0, 1fr) minmax(260px, 0.46fr);
+		padding: 22px 24px;
+	}
+
+	.exact-approved__header {
+		display: grid;
+		gap: 7px;
+		grid-row: 1 / span 2;
+		min-width: 0;
+	}
+
+	.exact-approved__status {
+		align-items: center;
+		color: var(--mf-ready-fg);
+		display: flex;
+		font-size: 12px;
+		font-weight: 700;
+		gap: 7px;
+		margin: 0;
+	}
+
+	.exact-approved__status span {
+		align-items: center;
+		background: var(--mf-ready-bg);
+		border: 1px solid var(--mf-ready-line);
+		border-radius: 50%;
+		display: inline-flex;
+		height: 24px;
+		justify-content: center;
+		width: 24px;
+	}
+
+	.exact-approved__header h1 {
+		font-size: clamp(21px, 2.4vw, 27px);
+		overflow-wrap: anywhere;
+	}
+
+	.exact-approved__filename {
+		color: var(--mf-fg-tertiary);
+		font-family: var(--mf-font-mono), monospace;
+		font-size: 11px;
+		line-height: 1.45;
+		margin: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.exact-approved__outcome,
+	.exact-approved__target {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		display: grid;
+		gap: 3px;
+		padding: 11px 13px;
+	}
+
+	.exact-approved__outcome p {
+		align-items: baseline;
+		color: var(--mf-fg-primary);
+		display: flex;
+		font-size: 17px;
+		gap: 8px;
+		margin: 0;
+	}
+
+	.exact-approved__outcome p span {
+		color: var(--mf-fg-quaternary);
+	}
+
+	.exact-approved__outcome > span,
+	.exact-approved__target span {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+		line-height: 1.4;
+	}
+
+	.exact-approved__target strong {
+		color: var(--mf-fg-primary);
+		font-size: 12px;
+	}
+
+	.exact-approved__decision {
+		border-top: 1px solid var(--mf-line-muted);
+		display: grid;
+		gap: 14px;
+		padding: 20px 24px 18px;
+	}
+
+	.exact-approved__next {
+		display: grid;
+		gap: 4px;
+		max-width: 760px;
+	}
+
+	.exact-approved__label {
+		color: var(--mf-active-fg);
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+		margin: 0;
+		text-transform: uppercase;
+	}
+
+	.exact-approved__next h2 {
+		font-size: 18px;
+		margin: 0;
+	}
+
+	.exact-approved__next p:last-child {
+		font-size: 13px;
+		margin: 0;
+	}
+
+	.exact-approved__steps {
+		display: grid;
+		gap: 1px;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		list-style: none;
+		margin: 0;
+		overflow: hidden;
+		padding: 0;
+	}
+
+	.exact-approved__steps li {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		display: grid;
+		gap: 9px;
+		grid-template-columns: 24px minmax(0, 1fr);
+		min-height: 54px;
+		padding: 9px 11px;
+	}
+
+	.exact-approved__steps li:first-child {
+		border-radius: var(--mf-radius-2) 0 0 var(--mf-radius-2);
+	}
+
+	.exact-approved__steps li:last-child {
+		border-radius: 0 var(--mf-radius-2) var(--mf-radius-2) 0;
+	}
+
+	.exact-approved__steps span {
+		align-items: center;
+		background: var(--mf-active-bg);
+		border-radius: 50%;
+		color: var(--mf-active-fg);
+		display: flex;
+		font-size: 11px;
+		font-weight: 700;
+		height: 24px;
+		justify-content: center;
+	}
+
+	.exact-approved__steps strong {
+		color: var(--mf-fg-primary);
+		font-size: 11px;
+		line-height: 1.35;
+	}
+
+	.exact-approved__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+
+	.exact-approved__safety {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+		margin: -4px 0 0;
+	}
+
+	.exact-approved__estimate {
+		border-top: 1px solid var(--mf-line-muted);
+	}
+
+	.exact-approved__estimate summary {
+		align-items: center;
+		cursor: pointer;
+		display: flex;
+		gap: 10px;
+		justify-content: space-between;
+		list-style: none;
+		min-height: 44px;
+		padding: 0 24px;
+	}
+
+	.exact-approved__estimate summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.exact-approved__estimate summary span {
+		color: var(--mf-fg-primary);
+		font-size: 12px;
+		font-weight: 650;
+	}
+
+	.exact-approved__estimate summary small,
+	.exact-approved__estimate > div p {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+	}
+
+	.exact-approved__estimate > div {
+		border-top: 1px solid var(--mf-line-muted);
+		padding: 12px 24px 14px;
+	}
+
+	.exact-approved__estimate > div p {
+		margin: 0;
+		max-width: 740px;
 	}
 
 	.season-progress-room {
@@ -5887,6 +6224,26 @@
 			grid-template-columns: 1fr;
 		}
 
+		.exact-approved__summary {
+			grid-template-columns: 1fr;
+		}
+
+		.exact-approved__header {
+			grid-row: auto;
+		}
+
+		.exact-approved__steps {
+			grid-template-columns: 1fr;
+		}
+
+		.exact-approved__steps li:first-child {
+			border-radius: var(--mf-radius-2) var(--mf-radius-2) 0 0;
+		}
+
+		.exact-approved__steps li:last-child {
+			border-radius: 0 0 var(--mf-radius-2) var(--mf-radius-2);
+		}
+
 		.older-season-option {
 			align-items: stretch;
 			flex-direction: column;
@@ -5982,6 +6339,46 @@
 		.finished-room,
 		.help-room {
 			padding: 18px;
+		}
+
+		.exact-approved__summary,
+		.exact-approved__decision {
+			padding: 16px;
+		}
+
+		.exact-approved__summary {
+			gap: 10px;
+		}
+
+		.exact-approved__decision {
+			gap: 11px;
+		}
+
+		.exact-approved__steps li {
+			min-height: 42px;
+			padding-block: 7px;
+		}
+
+		.exact-approved__actions {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.exact-approved__actions .primary-button,
+		.exact-approved__actions .secondary-button {
+			width: 100%;
+		}
+
+		.exact-approved__estimate summary {
+			align-items: flex-start;
+			flex-direction: column;
+			gap: 2px;
+			justify-content: center;
+			padding: 8px 16px;
+		}
+
+		.exact-approved__estimate > div {
+			padding-inline: 16px;
 		}
 
 		.comparison-ledger,

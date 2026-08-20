@@ -39,6 +39,10 @@ worker`, `Needs sample`, `Safe to delete`.
 - Exact TV item: use singular `episode` language through recovery, processing,
   checking, finishing, and completed states. Do not reuse season-wide copy for
   a route that targets one episode.
+- Exact TV approval: use `Sample approved` for the settled review state and
+  `Make the full episode` for the next action. Name the episode and file, show
+  the expected size change, and state that making creates a separate copy;
+  checking and the explicit replace decision happen later.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
 - Movie validation: use `Check compressed file` and `checked file` instead of
@@ -183,8 +187,9 @@ remain unchanged` while memory is observation-only.
   Show main-feature runtime, current size, expected output, and expected
   savings when known, and state honestly when an estimate is unavailable. Movie
   Studio should use
-  `Current size`, `Expected output`, `Expected savings`, `Why it has not started`, `What happens next`,
-  `checked file`, and `Replace original now` rather than backend workflow nouns.
+  `Current size`, `Expected output`, `Expected savings`,
+  `Why it has not started`, `What happens next`, `checked file`, and
+  `Replace original now` rather than backend workflow nouns.
 - Ops may expose more technical detail, but first-level headings should still
   use `workers`, `sample queue`, `processing queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete archived
