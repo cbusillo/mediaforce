@@ -27,6 +27,7 @@ import {
 	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
+	expectedSizeChange,
 	folderSizeTargetAnalysis,
 	formatDecimalFileSize,
 	formatFileSize,
@@ -1866,6 +1867,21 @@ describe('season experience translation', () => {
 
 	it('formats operator-facing target totals with decimal units', () => {
 		expect(formatDecimalFileSize(586_667_000 * 39)).toBe('22.9 GB');
+	});
+
+	it('preserves whether an approved output is smaller or larger than the original', () => {
+		expect(expectedSizeChange(7_040_000_000, 581_200_000)).toEqual({
+			direction: 'smaller',
+			bytes: 6_458_800_000
+		});
+		expect(expectedSizeChange(500_000_000, 620_000_000)).toEqual({
+			direction: 'larger',
+			bytes: 120_000_000
+		});
+		expect(expectedSizeChange(500_000_000, 500_000_000)).toEqual({
+			direction: 'unchanged',
+			bytes: 0
+		});
 	});
 
 	it('turns backend approval gates into explicit human confirmations', () => {

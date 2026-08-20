@@ -267,6 +267,11 @@ export interface SizeTargetAnalysis {
 	predictedToBudgetRatio: number;
 }
 
+export interface ExpectedSizeChange {
+	direction: 'smaller' | 'larger' | 'unchanged';
+	bytes: number;
+}
+
 export interface ReviewClip {
 	path: string;
 	timestampSeconds: number;
@@ -739,6 +744,16 @@ export function formatDecimalFileSize(bytes: number | null | undefined): string 
 		}
 	}
 	return `${Math.round(value / 1_000)} KB`;
+}
+
+export function expectedSizeChange(
+	currentBytes: number | null | undefined,
+	expectedBytes: number | null | undefined
+): ExpectedSizeChange {
+	const deltaBytes = numberValue(currentBytes) - numberValue(expectedBytes);
+	if (deltaBytes > 0) return { direction: 'smaller', bytes: deltaBytes };
+	if (deltaBytes < 0) return { direction: 'larger', bytes: Math.abs(deltaBytes) };
+	return { direction: 'unchanged', bytes: 0 };
 }
 
 function formatQualityMemoryNumber(value: number | null | undefined): string {

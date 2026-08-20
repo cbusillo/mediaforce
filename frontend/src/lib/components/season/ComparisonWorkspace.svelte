@@ -233,7 +233,7 @@
 		playbackError = '';
 		sourceVideo.playbackRate = 1;
 		preparing = true;
-		if (playbackCompleted || previewVideo.ended) {
+		if (playbackCompleted) {
 			pairSeekPending = true;
 			currentTime = 0;
 			await Promise.all([settleMediaTime(sourceVideo, 0), settleMediaTime(previewVideo, 0)]);
@@ -414,7 +414,7 @@
 		if (sequence !== playbackSequence) return;
 		pairSeekPending = false;
 		preparing = false;
-		playbackCompleted = next >= duration;
+		playbackCompleted = false;
 		currentTime = previewVideo.currentTime;
 		if (resumeAfterSeek && playbackRequested) await startPlayback();
 	}
