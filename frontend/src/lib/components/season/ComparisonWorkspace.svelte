@@ -22,6 +22,10 @@
 	} from '$lib/season/comparison';
 	import type { ReviewPair } from '$lib/season/experience';
 
+	const DECODER_WARMUP_MS = 350;
+	const MEDIA_PLAYING_TIMEOUT_MS = 1200;
+	const PLAYBACK_BOUNDARY_TOLERANCE_SECONDS = 0.15;
+
 	let {
 		pairs,
 		selectedMoment,
@@ -63,6 +67,7 @@
 	let playing = $state(false);
 	let playbackRequested = $state(false);
 	let preparing = $state(false);
+	let warming = $state(false);
 	let scrubbing = $state(false);
 	let pairSeekPending = $state(false);
 	let playbackError = $state('');
@@ -110,6 +115,7 @@
 		mediaGeneration += 1;
 		untrack(pauseBoth);
 		preparing = false;
+		warming = false;
 		currentTime = 0;
 		duration = currentPair?.preview.durationSeconds || currentPair?.source.durationSeconds || 0;
 		sourceWidth = 0;
@@ -225,7 +231,14 @@
 		playbackError = '';
 		sourceVideo.playbackRate = 1;
 		preparing = true;
-		if (previewVideo.ended || playbackBoundaryReached(previewVideo.currentTime, duration)) {
+		if (
+			previewVideo.ended ||
+			playbackBoundaryReached(
+				previewVideo.currentTime,
+				duration,
+				PLAYBACK_BOUNDARY_TOLERANCE_SECONDS
+			)
+		) {
 			pairSeekPending = true;
 			currentTime = 0;
 			await Promise.all([settleMediaTime(sourceVideo, 0), settleMediaTime(previewVideo, 0)]);
@@ -238,9 +251,10 @@
 			if (sequence !== playbackSequence) return;
 			pairSeekPending = false;
 		}
-		hardCorrectionAllowedAt = performance.now() + 1500;
 		try {
-			await Promise.all([sourceVideo.play(), previewVideo.play()]);
+			const warmed = await warmComparisonPair(sequence, previewVideo.currentTime);
+			if (!warmed) return;
+			hardCorrectionAllowedAt = performance.now() + 1500;
 			if (sequence !== playbackSequence || !playbackRequested) {
 				sourceVideo.pause();
 				previewVideo.pause();
@@ -257,6 +271,59 @@
 		}
 	}
 
+	async function warmComparisonPair(sequence: number, startTime: number): Promise<boolean> {
+		if (!sourceVideo || !previewVideo) return false;
+		warming = true;
+		playing = false;
+		sourceVideo.playbackRate = 1;
+		previewVideo.playbackRate = 1;
+		try {
+			await tick();
+			if (sequence !== playbackSequence || !playbackRequested) return false;
+			const sourcePlaying = waitForMediaPlaying(sourceVideo);
+			const previewPlaying = waitForMediaPlaying(previewVideo);
+			await Promise.all([sourceVideo.play(), previewVideo.play()]);
+			await Promise.all([sourcePlaying, previewPlaying]);
+			await waitForDecoderWarmup();
+			if (sequence !== playbackSequence || !playbackRequested) return false;
+			pairSeekPending = true;
+			await Promise.all([
+				settleMediaTime(sourceVideo, startTime),
+				settleMediaTime(previewVideo, startTime)
+			]);
+			if (sequence !== playbackSequence || !playbackRequested) return false;
+			pairSeekPending = false;
+			currentTime = Math.min(previewVideo.currentTime, duration || previewVideo.currentTime);
+			return true;
+		} finally {
+			if (sequence === playbackSequence) {
+				warming = false;
+				await tick();
+			}
+		}
+	}
+
+	function waitForDecoderWarmup(): Promise<void> {
+		return new Promise((resolve) => window.setTimeout(resolve, DECODER_WARMUP_MS));
+	}
+
+	function waitForMediaPlaying(video: HTMLVideoElement): Promise<void> {
+		return new Promise((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) return;
+				settled = true;
+				window.clearTimeout(timeout);
+				video.removeEventListener('playing', finish);
+				video.removeEventListener('error', finish);
+				resolve();
+			};
+			const timeout = window.setTimeout(finish, MEDIA_PLAYING_TIMEOUT_MS);
+			video.addEventListener('playing', finish, { once: true });
+			video.addEventListener('error', finish, { once: true });
+		});
+	}
+
 	function pauseBoth() {
 		playbackSequence += 1;
 		clearPlaybackBoundary();
@@ -266,6 +333,7 @@
 		playbackRequested = false;
 		playing = false;
 		preparing = false;
+		warming = false;
 		pairSeekPending = false;
 		scrubbing = false;
 		sourceCorrectionPending = false;
@@ -287,7 +355,13 @@
 			() => {
 				playbackBoundaryTimer = null;
 				if (sequence !== playbackSequence || !playbackRequested || !previewVideo) return;
-				if (!playbackBoundaryReached(previewVideo.currentTime, duration, 0.15)) {
+				if (
+					!playbackBoundaryReached(
+						previewVideo.currentTime,
+						duration,
+						PLAYBACK_BOUNDARY_TOLERANCE_SECONDS
+					)
+				) {
 					schedulePlaybackBoundary(sequence);
 					return;
 				}
@@ -357,6 +431,16 @@
 
 	function handleTimeUpdate() {
 		if (!previewVideo || !sourceVideo) return;
+		if (
+			!playbackRequested &&
+			currentTime >= duration &&
+			playbackBoundaryReached(
+				previewVideo.currentTime,
+				duration,
+				PLAYBACK_BOUNDARY_TOLERANCE_SECONDS
+			)
+		)
+			return;
 		if (!scrubbing)
 			currentTime = Math.min(previewVideo.currentTime, duration || previewVideo.currentTime);
 		if (playbackRequested && playbackBoundaryReached(previewVideo.currentTime, duration)) {
@@ -366,6 +450,7 @@
 		}
 		if (
 			!playbackRequested ||
+			warming ||
 			pairSeekPending ||
 			sourceCorrectionPending ||
 			sourceVideo.seeking ||
@@ -660,7 +745,7 @@
 						<video
 							bind:this={sourceVideo}
 							src={currentPair.source.path}
-							muted={comparisonSideMuted('original', audioChoice, hasSound)}
+							muted={warming || comparisonSideMuted('original', audioChoice, hasSound)}
 							playsinline
 							preload="auto"
 							aria-label="Original test moment"
@@ -674,7 +759,11 @@
 							onseeked={() => (sourceCorrectionPending = false)}
 							onerror={() => handleMediaError('original')}
 						></video>
-						{#if sourceError}
+						{#if warming}
+							<span class="media-loading media-loading--sync" aria-hidden="true"
+								>Starting playback…</span
+							>
+						{:else if sourceError}
 							<span class="media-loading media-loading--error" role="alert"
 								>Original clip could not load.</span
 							>
@@ -697,7 +786,7 @@
 						<video
 							bind:this={previewVideo}
 							src={currentPair.preview.path}
-							muted={comparisonSideMuted('new', audioChoice, hasSound)}
+							muted={warming || comparisonSideMuted('new', audioChoice, hasSound)}
 							playsinline
 							preload="auto"
 							aria-label="New test moment"
@@ -707,25 +796,26 @@
 								handleMediaLoaded('new', event.currentTarget);
 							}}
 							onloadeddata={(event) => handleMediaLoaded('new', event.currentTarget)}
-							oncanplay={(event) => {
-								handleMediaLoaded('new', event.currentTarget);
-								if (playbackRequested) preparing = false;
-							}}
+							oncanplay={(event) => handleMediaLoaded('new', event.currentTarget)}
 							onerror={() => handleMediaError('new')}
 							onplaying={() => {
-								if (playbackRequested) {
+								if (playbackRequested && !warming) {
 									playing = true;
 									preparing = false;
 								}
 							}}
 							onwaiting={() => {
-								if (playbackRequested) preparing = true;
+								if (playbackRequested && !warming) preparing = true;
 							}}
 							onpause={() => (playing = false)}
 							ontimeupdate={handleTimeUpdate}
 							onended={handleEnded}
 						></video>
-						{#if previewError}
+						{#if warming}
+							<span class="media-loading media-loading--sync" aria-hidden="true"
+								>Starting playback…</span
+							>
+						{:else if previewError}
 							<span class="media-loading media-loading--error" role="alert"
 								>New clip could not load.</span
 							>
@@ -753,7 +843,9 @@
 									: 'Play'}
 					</button>
 					{#if preparing && playbackRequested}
-						<span class="playback-status" aria-live="polite">Buffering…</span>
+						<span class="playback-status" aria-live="polite"
+							>{warming || pairSeekPending ? 'Starting playback…' : 'Buffering…'}</span
+						>
 					{/if}
 				</div>
 				<label class="timeline-control">
@@ -767,7 +859,7 @@
 						oninput={handleTimelinePreview}
 						onchange={handleTimelineCommit}
 						aria-valuetext={timeText}
-						disabled={!sourceReady || !previewReady || sourceError || previewError}
+						disabled={warming || !sourceReady || !previewReady || sourceError || previewError}
 					/>
 				</label>
 				<output class="time-display">{timeText}</output>
@@ -1034,6 +1126,16 @@
 	.media-loading--error {
 		background: rgb(52 20 18 / 90%);
 		color: #ffd1c8;
+	}
+
+	.media-loading--sync {
+		background: rgb(5 6 7 / 94%);
+		display: grid;
+		inset: 0;
+		place-content: center;
+		position: absolute;
+		text-align: center;
+		z-index: 1;
 	}
 
 	.is-open {
