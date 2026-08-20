@@ -422,6 +422,10 @@
 	const actionPending = $derived(actionPhase !== 'idle');
 
 	$effect(() => {
+		if (selectedMoment !== displayedMoment) selectedMoment = displayedMoment;
+	});
+
+	$effect(() => {
 		const availableHosts = hostOptions;
 		if (!availableHosts.length) {
 			selectedHostKey = '';
