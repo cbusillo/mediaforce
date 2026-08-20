@@ -13,7 +13,7 @@
 		QualityRiskTag
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { reviewPairHasSound } from '$lib/season/comparison';
+	import { clampMomentIndex, reviewPairHasSound } from '$lib/season/comparison';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
@@ -31,11 +31,13 @@
 		episodeLabel,
 		folderSizeTargetAnalysis,
 		formatDecimalFileSize,
+		formatDuration,
 		goalRequest,
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
 		measuredFollowupRequest,
 		normalizeReviewPairs,
+		normalizedSizePaceBytes,
 		overlappingCalibrationActivity,
 		plainFailureMessage,
 		predictedEpisodeSize,
@@ -221,7 +223,8 @@
 	);
 	const sampleEpisode = $derived(episodeLabel(asText(sampleItem.rel_path)));
 	const reviewPairs = $derived(normalizeReviewPairs(folder));
-	const currentPair = $derived(reviewPairs[Math.min(selectedMoment, reviewPairs.length - 1)]);
+	const displayedMoment = $derived(clampMomentIndex(selectedMoment, reviewPairs.length));
+	const currentPair = $derived(reviewPairs[displayedMoment]);
 	const reviewHasSound = $derived(reviewPairHasSound(currentPair));
 	const reviewSubject = $derived(reviewHasSound ? 'picture and sound' : 'picture');
 	const calibration = $derived(asRecord(folder.calibration));
@@ -243,6 +246,14 @@
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
 	const sizeTarget = $derived(folderSizeTargetAnalysis(folder));
 	const targetSummary = $derived(resolvedTargetSummary(folder));
+	const normalizedPaceBytes = $derived(
+		targetSummary?.mode === 'normalized'
+			? normalizedSizePaceBytes(
+					targetSummary.referenceSizeBytes,
+					targetSummary.referenceRuntimeMinutes
+				)
+			: 0
+	);
 	const targetConstraint = $derived(targetConstraintSummary(folder, status));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
@@ -409,10 +420,6 @@
 	);
 	const showGoalScreen = $derived(humanState.key === 'needs_test' || retryMode);
 	const actionPending = $derived(actionPhase !== 'idle');
-
-	$effect(() => {
-		if (selectedMoment >= reviewPairs.length) selectedMoment = 0;
-	});
 
 	$effect(() => {
 		const availableHosts = hostOptions;
@@ -1542,6 +1549,45 @@
 					</div>
 				</div>
 
+				{#if targetSummary}
+					<section class="review-contract" aria-label="Resolved review size contract">
+						<header>
+							<span>Review contract</span>
+							<small>
+								{targetSummary.mode === 'normalized' && targetSummary.referenceRuntimeMinutes > 0
+									? `Configured as ${formatDecimalFileSize(targetSummary.referenceSizeBytes)} / ${targetSummary.referenceRuntimeMinutes} min`
+									: 'Configured as a fixed episode target'}
+							</small>
+						</header>
+						<dl>
+							<div>
+								<dt>Runtime</dt>
+								<dd>{formatDuration(targetSummary.itemRuntimeSeconds) || 'Not reported'}</dd>
+							</div>
+							<div>
+								<dt>Size pace</dt>
+								<dd>
+									{normalizedPaceBytes
+										? `${formatDecimalFileSize(normalizedPaceBytes)} / 30 min`
+										: 'Per episode'}
+								</dd>
+							</div>
+							<div>
+								<dt>Episode target</dt>
+								<dd>{formatDecimalFileSize(targetSummary.targetBytes)}</dd>
+							</div>
+							<div>
+								<dt>Final band</dt>
+								<dd>
+									{formatDecimalFileSize(
+										targetSummary.finalLowerBoundBytes
+									)}–{formatDecimalFileSize(targetSummary.finalUpperBoundBytes)}
+								</dd>
+							</div>
+						</dl>
+					</section>
+				{/if}
+
 				{#if targetConstraint}
 					<div class="target-warning target-warning--constraint" role="status">
 						<div>
@@ -1608,7 +1654,7 @@
 				{#if currentPair}
 					<ComparisonWorkspace
 						pairs={reviewPairs}
-						{selectedMoment}
+						selectedMoment={displayedMoment}
 						{audioChoice}
 						episodeLabel={sampleEpisode}
 						originalSizeLabel={`${formatDecimalFileSize(asNumber(sampleItem.source_size_bytes))} per episode`}
@@ -4731,6 +4777,65 @@
 		color: var(--mf-fg-secondary);
 	}
 
+	.review-contract {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line);
+		display: grid;
+		grid-template-columns: minmax(170px, 0.72fr) minmax(0, 3.28fr);
+		overflow: hidden;
+	}
+
+	.review-contract header {
+		align-content: center;
+		border-right: 1px solid var(--mf-line);
+		display: grid;
+		gap: 4px;
+		padding: 11px 14px;
+	}
+
+	.review-contract header span,
+	.review-contract dt {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 750;
+		letter-spacing: 0.055em;
+		text-transform: uppercase;
+	}
+
+	.review-contract header small {
+		color: var(--mf-fg-secondary);
+		font-size: 10px;
+		line-height: 1.35;
+	}
+
+	.review-contract dl {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		margin: 0;
+	}
+
+	.review-contract dl > div {
+		display: grid;
+		gap: 4px;
+		min-width: 0;
+		padding: 11px 14px;
+	}
+
+	.review-contract dl > div + div {
+		border-left: 1px solid var(--mf-line-muted);
+	}
+
+	.review-contract dd {
+		color: var(--mf-fg-primary);
+		font-family: var(--mf-font-mono);
+		font-size: 15px;
+		font-variant-numeric: tabular-nums;
+		font-weight: 720;
+		line-height: 1.2;
+		margin: 0;
+		white-space: nowrap;
+	}
+
 	.target-warning {
 		align-items: center;
 		background: var(--mf-fail-bg);
@@ -5726,6 +5831,17 @@
 		}
 	}
 
+	@media (max-width: 1100px) {
+		.review-contract {
+			grid-template-columns: 1fr;
+		}
+
+		.review-contract header {
+			border-bottom: 1px solid var(--mf-line);
+			border-right: 0;
+		}
+	}
+
 	@media (max-width: 760px) {
 		.experience-header {
 			padding: 15px 16px 0;
@@ -5806,6 +5922,19 @@
 		.goal-action {
 			align-items: stretch;
 			flex-direction: column;
+		}
+
+		.review-contract dl {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.review-contract dl > div:nth-child(3) {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-muted);
+		}
+
+		.review-contract dl > div:nth-child(4) {
+			border-top: 1px solid var(--mf-line-muted);
 		}
 
 		.target-warning {
