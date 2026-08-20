@@ -277,7 +277,12 @@
 			const timeout = window.setTimeout(finish, 1500);
 			video.addEventListener('seeked', finish, { once: true });
 			video.addEventListener('error', finish, { once: true });
-			video.currentTime = value;
+			try {
+				video.currentTime = value;
+			} catch {
+				finish();
+				return;
+			}
 			if (!video.seeking && Math.abs(video.currentTime - value) < 0.025) {
 				queueMicrotask(finish);
 			}
