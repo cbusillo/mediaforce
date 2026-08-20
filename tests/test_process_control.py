@@ -77,6 +77,27 @@ class ProcessControlTests(TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("DYLD_LIBRARY_PATH", run.call_args.kwargs["env"])
 
+    def test_custom_named_media_override_drops_dyld_library_path(self) -> None:
+        overrides = {
+            "MEDIAFORCE_FFMPEG": "/opt/mediaforce/tools/custom-transcoder",
+            "MEDIAFORCE_FFPROBE": "/opt/mediaforce/tools/custom-prober",
+        }
+        for key, executable in overrides.items():
+            with self.subTest(key=key), patch.dict(
+                os.environ,
+                {
+                    "DYLD_LIBRARY_PATH": "/opt/homebrew/lib",
+                    key: executable,
+                },
+            ), patch(
+                "mediaforce.core.process_control.subprocess.run",
+                return_value=subprocess.CompletedProcess([executable, "-version"], 0, stdout="", stderr=""),
+            ) as run:
+                result = run_command([executable, "-version"])
+
+            self.assertEqual(result.returncode, 0)
+            self.assertNotIn("DYLD_LIBRARY_PATH", run.call_args.kwargs["env"])
+
     def test_managed_command_accepts_stdin_text(self) -> None:
         result = run_command(
             [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"],
