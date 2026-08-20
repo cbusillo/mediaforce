@@ -36,6 +36,7 @@ import {
 	measuredFollowupRequest,
 	librarySeasonState,
 	normalizeReviewPairs,
+	normalizedSizePaceBytes,
 	overlappingCalibrationActivity,
 	plainFailureMessage,
 	qualityMemoryView,
@@ -1466,8 +1467,13 @@ describe('season experience translation', () => {
 			finalLowerBoundBytes: 557_333_650,
 			finalUpperBoundBytes: 616_000_350,
 			itemRuntimeSeconds: 5280,
+			referenceSizeBytes: 300_000_000,
+			referenceRuntimeMinutes: 45,
 			mode: 'normalized'
 		});
+		expect(
+			normalizedSizePaceBytes(target?.referenceSizeBytes, target?.referenceRuntimeMinutes)
+		).toBe(200_000_000);
 	});
 
 	it('distinguishes arithmetic infeasibility from a quality-floor conflict', () => {

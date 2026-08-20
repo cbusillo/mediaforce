@@ -1220,6 +1220,19 @@ export function formatDuration(seconds: number | null | undefined): string {
 	return remaining ? `${hours} hr ${remaining} min` : `${hours} hr`;
 }
 
+export function normalizedSizePaceBytes(
+	referenceSizeBytes: number | null | undefined,
+	referenceRuntimeMinutes: number | null | undefined,
+	paceMinutes = 30
+): number {
+	const sizeBytes = numberValue(referenceSizeBytes);
+	const runtimeMinutes = numberValue(referenceRuntimeMinutes);
+	if (sizeBytes <= 0 || runtimeMinutes <= 0 || !Number.isFinite(paceMinutes) || paceMinutes <= 0) {
+		return 0;
+	}
+	return Math.round((sizeBytes * paceMinutes) / runtimeMinutes);
+}
+
 export function sizeGoals(folder: FolderPayload): SizeGoal[] {
 	const options = folder.size_goal_options ?? [];
 	return options.flatMap((option) => {
