@@ -233,6 +233,13 @@ once; routine clock updates must not repeatedly hard-seek either clip. Verify in
 Safari that Play, Pause, committed seeking, and switching the audible side remain
 responsive without restarting playback.
 
+Every Play or resume must start both comparison decoders together behind the
+opaque `Starting playback…` cover, reset both clips to the requested position
+while they continue running, and reveal them without a second play launch.
+Verify in Safari that first play, replay, and pause/resume stay at normal speed
+without visible rate correction or a hard seek. Pausing during startup must
+cancel the launch, remove the cover, and leave both clips stopped.
+
 The comparison timeline must use the typed review-pair duration and stop at that
 boundary even when an auxiliary container stream reports a longer duration.
 Browser review proxies must exclude data streams and inherited chapters so a
