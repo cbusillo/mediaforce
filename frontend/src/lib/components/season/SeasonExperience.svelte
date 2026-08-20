@@ -29,6 +29,7 @@
 		currentOperatorIntent,
 		detailSeasonState,
 		episodeLabel,
+		expectedSizeChange,
 		folderSizeTargetAnalysis,
 		formatDecimalFileSize,
 		formatDuration,
@@ -258,8 +259,8 @@
 	const targetConstraint = $derived(targetConstraintSummary(folder, status));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
-	const exactExpectedSavingsBytes = $derived(
-		Math.max(0, originalSeasonSize - expectedEpisodeBytes)
+	const exactExpectedSizeChange = $derived(
+		expectedSizeChange(originalSeasonSize, expectedEpisodeBytes)
 	);
 	const exactApprovedRangeLabel = $derived(
 		targetSummary
@@ -1997,7 +1998,13 @@
 							<span aria-hidden="true">→</span>
 							<strong>about {formatDecimalFileSize(expectedEpisodeBytes)}</strong>
 						</p>
-						<span>Saves about {formatDecimalFileSize(exactExpectedSavingsBytes)}</span>
+						{#if exactExpectedSizeChange.direction === 'smaller'}
+							<span>Saves about {formatDecimalFileSize(exactExpectedSizeChange.bytes)}</span>
+						{:else if exactExpectedSizeChange.direction === 'larger'}
+							<span>Grows by about {formatDecimalFileSize(exactExpectedSizeChange.bytes)}</span>
+						{:else}
+							<span>Expected to stay about the same size</span>
+						{/if}
 					</div>
 
 					<div class="exact-approved__target">
