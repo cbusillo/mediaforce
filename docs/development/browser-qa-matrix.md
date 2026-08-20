@@ -239,6 +239,9 @@ while they continue running, and reveal them without a second play launch.
 Verify in Safari that first play, replay, and pause/resume stay at normal speed
 without visible rate correction or a hard seek. Pausing during startup must
 cancel the launch, remove the cover, and leave both clips stopped.
+Pausing manually within the final boundary tolerance and pressing Play must
+resume from that position; only natural boundary completion or an ended media
+element may restart the moment from zero.
 
 The comparison timeline must use the typed review-pair duration and stop at that
 boundary even when an auxiliary container stream reports a longer duration.
