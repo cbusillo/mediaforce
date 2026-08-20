@@ -5530,6 +5530,10 @@
 		padding: 16px;
 	}
 
+	.quality-memory[hidden] {
+		display: none;
+	}
+
 	.quality-memory--empty {
 		border-left-color: var(--mf-idle-fg);
 		gap: 8px;
