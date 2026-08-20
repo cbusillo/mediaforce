@@ -127,6 +127,7 @@ def render_encoded_preview_clip(
         browser_cmd = _browser_preview_proxy_command(
             source_path=production_preview_path,
             output_path=output_path,
+            duration_seconds=duration_seconds,
             include_audio=audio_plan is not None,
             ffmpeg_binary=ffmpeg_binary,
         )
@@ -202,6 +203,7 @@ def render_encoded_preview_clip_remote(
         browser_cmd = _browser_preview_proxy_command(
             source_path=production_preview_path,
             output_path=remote_output_path,
+            duration_seconds=duration_seconds,
             include_audio=audio_plan is not None,
             ffmpeg_binary=ffmpeg_binary,
         )
@@ -260,7 +262,10 @@ def _preview_render_command(
     cmd.extend([
         "-map",
         "0:v:0",
+        "-map_chapters",
+        "-1",
         "-sn",
+        "-dn",
         "-c:v",
         encoder,
         "-pix_fmt",
@@ -295,6 +300,7 @@ def _preview_render_command(
         cmd.extend(["-svtav1-params", ":".join(svt_params)])
     if video_filter:
         cmd.extend(["-vf", video_filter])
+    cmd.extend(["-t", f"{duration_seconds:.3f}"])
     cmd.append(str(output_path))
     return cmd
 
@@ -303,6 +309,7 @@ def _browser_preview_proxy_command(
         *,
         source_path: Path,
         output_path: Path,
+        duration_seconds: float,
         include_audio: bool,
         ffmpeg_binary: Callable[[], str],
 ) -> list[str]:
@@ -317,7 +324,10 @@ def _browser_preview_proxy_command(
         str(source_path),
         "-map",
         "0:v:0",
+        "-map_chapters",
+        "-1",
         "-sn",
+        "-dn",
         "-c:v",
         "libx264",
         "-pix_fmt",
@@ -328,6 +338,8 @@ def _browser_preview_proxy_command(
         BROWSER_REVIEW_VIDEO_CRF,
         "-movflags",
         "+faststart",
+        "-t",
+        f"{duration_seconds:.3f}",
     ]
     if include_audio:
         cmd.extend(["-map", "0:a:0", "-c:a", "copy", "-shortest"])
@@ -459,7 +471,10 @@ def _source_review_clip_command(
         str(source_path),
         "-map",
         "0:v:0",
+        "-map_chapters",
+        "-1",
         "-sn",
+        "-dn",
         "-c:v",
         "libx264",
         "-crf",
@@ -487,6 +502,7 @@ def _source_review_clip_command(
                 "-shortest",
             ]
         )
+    cmd.extend(["-t", f"{duration_seconds:.3f}"])
     cmd.append(str(output_path))
     return cmd
 
@@ -528,6 +544,7 @@ def _production_audio_render_command(
         f"0:{_audio_stream_index(audio_plan)}",
         "-vn",
         "-sn",
+        "-dn",
         "-c:a",
         "libopus",
         "-b:a",
