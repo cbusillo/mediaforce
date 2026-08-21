@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	alignedScrollOffset,
@@ -12,10 +12,12 @@ import {
 	frameAspectRatio,
 	mediaElementReady,
 	mediaSourceMatches,
+	mediaStartFailureMessage,
 	normalizedScrollPosition,
 	playbackBoundaryReached,
 	reviewPairHasSound,
-	scrollOffsetForPosition
+	scrollOffsetForPosition,
+	waitForMediaPlaying
 } from './comparison';
 import type { ReviewPair } from './experience';
 
@@ -37,6 +39,15 @@ function pair(sound: boolean): ReviewPair {
 		},
 		comparePath: ''
 	};
+}
+
+class FakeVideoElement extends EventTarget {
+	error: MediaError | null = null;
+}
+
+function fakeVideo(): { target: FakeVideoElement; video: HTMLVideoElement } {
+	const target = new FakeVideoElement();
+	return { target, video: target as unknown as HTMLVideoElement };
 }
 
 describe('comparison workspace helpers', () => {
@@ -82,6 +93,61 @@ describe('comparison workspace helpers', () => {
 				'http://localhost/folders/show'
 			)
 		).toBe(false);
+	});
+
+	it('rejects a comparison clip that reports a playback error', async () => {
+		vi.useFakeTimers();
+		try {
+			const { target, video } = fakeVideo();
+			const removeListener = vi.spyOn(target, 'removeEventListener');
+			const started = waitForMediaPlaying(video, 'new', 1200);
+
+			target.dispatchEvent(new Event('error'));
+
+			await expect(started).rejects.toMatchObject({ name: 'MediaStartError', side: 'new' });
+			expect(mediaStartFailureMessage('new')).toBe(
+				'The new clip could not be decoded in this browser.'
+			);
+			expect(removeListener).toHaveBeenCalledTimes(2);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('resolves a playing comparison clip and removes both startup listeners', async () => {
+		const { target, video } = fakeVideo();
+		const removeListener = vi.spyOn(target, 'removeEventListener');
+		const started = waitForMediaPlaying(video, 'original', 1200);
+
+		target.dispatchEvent(new Event('playing'));
+
+		await expect(started).resolves.toBeUndefined();
+		expect(removeListener).toHaveBeenCalledTimes(2);
+	});
+
+	it('rejects a comparison clip with an already-latched media error', async () => {
+		const { target, video } = fakeVideo();
+		target.error = {} as MediaError;
+
+		await expect(waitForMediaPlaying(video, 'original', 1200)).rejects.toMatchObject({
+			name: 'MediaStartError',
+			side: 'original'
+		});
+	});
+
+	it('keeps the tolerant startup timeout for browsers that omit playing events', async () => {
+		vi.useFakeTimers();
+		try {
+			const { video } = fakeVideo();
+			const started = waitForMediaPlaying(video, 'original', 1200);
+
+			await vi.advanceTimersByTimeAsync(1200);
+
+			await expect(started).resolves.toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('keeps moments, time, and frame shape bounded and readable', () => {
