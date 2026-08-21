@@ -10,12 +10,15 @@
 		followerPlaybackRate,
 		formatPlaybackTime,
 		frameAspectRatio,
+		MediaStartError,
 		mediaElementReady,
 		mediaSourceMatches,
+		mediaStartFailureMessage,
 		normalizedScrollPosition,
 		playbackBoundaryReached,
 		reviewPairHasSound,
 		scrollOffsetForPosition,
+		waitForMediaPlaying,
 		type ComparisonLayout,
 		type ComparisonScale,
 		type ComparisonSide
@@ -258,10 +261,20 @@
 			}
 			playing = true;
 			schedulePlaybackBoundary(sequence);
-		} catch {
+		} catch (error) {
 			if (sequence !== playbackSequence) return;
+			const failedSide =
+				error instanceof MediaStartError
+					? error.side
+					: sourceVideo?.error || sourceError
+						? 'original'
+						: previewVideo?.error || previewError
+							? 'new'
+							: null;
 			pauseBoth();
-			playbackError = 'The clips could not start together. Try again.';
+			playbackError = failedSide
+				? mediaStartFailureMessage(failedSide)
+				: 'The clips could not start together. Try again.';
 		} finally {
 			if (sequence === playbackSequence) preparing = false;
 		}
@@ -276,10 +289,13 @@
 		try {
 			await tick();
 			if (sequence !== playbackSequence || !playbackRequested) return false;
-			const sourcePlaying = waitForMediaPlaying(sourceVideo);
-			const previewPlaying = waitForMediaPlaying(previewVideo);
+			const pairPlaying = Promise.all([
+				waitForMediaPlaying(sourceVideo, 'original', MEDIA_PLAYING_TIMEOUT_MS),
+				waitForMediaPlaying(previewVideo, 'new', MEDIA_PLAYING_TIMEOUT_MS)
+			]);
+			void pairPlaying.catch(() => undefined);
 			await Promise.all([sourceVideo.play(), previewVideo.play()]);
-			await Promise.all([sourcePlaying, previewPlaying]);
+			await pairPlaying;
 			await waitForDecoderWarmup();
 			if (sequence !== playbackSequence || !playbackRequested) return false;
 			pairSeekPending = true;
@@ -288,6 +304,8 @@
 				settleMediaTime(previewVideo, startTime)
 			]);
 			if (sequence !== playbackSequence || !playbackRequested) return false;
+			if (sourceVideo.error || sourceError) throw new MediaStartError('original');
+			if (previewVideo.error || previewError) throw new MediaStartError('new');
 			pairSeekPending = false;
 			currentTime = Math.min(previewVideo.currentTime, duration || previewVideo.currentTime);
 			return true;
@@ -301,23 +319,6 @@
 
 	function waitForDecoderWarmup(): Promise<void> {
 		return new Promise((resolve) => window.setTimeout(resolve, DECODER_WARMUP_MS));
-	}
-
-	function waitForMediaPlaying(video: HTMLVideoElement): Promise<void> {
-		return new Promise((resolve) => {
-			let settled = false;
-			const finish = () => {
-				if (settled) return;
-				settled = true;
-				window.clearTimeout(timeout);
-				video.removeEventListener('playing', finish);
-				video.removeEventListener('error', finish);
-				resolve();
-			};
-			const timeout = window.setTimeout(finish, MEDIA_PLAYING_TIMEOUT_MS);
-			video.addEventListener('playing', finish, { once: true });
-			video.addEventListener('error', finish, { once: true });
-		});
 	}
 
 	function pauseBoth() {
@@ -484,7 +485,7 @@
 			previewReady = false;
 			previewError = true;
 		}
-		playbackError = `${side === 'original' ? 'The original' : 'The new'} clip could not be decoded in this browser.`;
+		playbackError = mediaStartFailureMessage(side);
 	}
 
 	function handleMediaLoaded(side: ComparisonSide, video: HTMLVideoElement) {

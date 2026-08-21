@@ -4,6 +4,13 @@ export type ComparisonLayout = 'side_by_side' | 'one_at_a_time';
 export type ComparisonSide = 'original' | 'new';
 export type ComparisonScale = 'fit' | 'actual';
 
+export class MediaStartError extends Error {
+	constructor(readonly side: ComparisonSide) {
+		super(`${side} comparison clip failed to start`);
+		this.name = 'MediaStartError';
+	}
+}
+
 const SOFT_DRIFT_THRESHOLD_SECONDS = 0.06;
 const STRONG_DRIFT_THRESHOLD_SECONDS = 0.15;
 const HARD_DRIFT_THRESHOLD_SECONDS = 0.75;
@@ -72,6 +79,38 @@ export function mediaSourceMatches(
 	} catch {
 		return false;
 	}
+}
+
+export function mediaStartFailureMessage(side: ComparisonSide): string {
+	return `${side === 'original' ? 'The original' : 'The new'} clip could not be decoded in this browser.`;
+}
+
+export function waitForMediaPlaying(
+	video: HTMLVideoElement,
+	side: ComparisonSide,
+	timeoutMs: number
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => {
+			globalThis.clearTimeout(timeout);
+			video.removeEventListener('playing', succeed);
+			video.removeEventListener('error', fail);
+		};
+		const settle = (finish: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			finish();
+		};
+		const succeed = () => settle(resolve);
+		const fail = () => settle(() => reject(new MediaStartError(side)));
+
+		const timeout = globalThis.setTimeout(succeed, timeoutMs);
+		video.addEventListener('playing', succeed, { once: true });
+		video.addEventListener('error', fail, { once: true });
+		if (video.error) fail();
+	});
 }
 
 export function clampMomentIndex(index: number, momentCount: number): number {

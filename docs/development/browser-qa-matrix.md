@@ -239,6 +239,9 @@ while they continue running, and reveal them without a second play launch.
 Verify in Safari that first play, replay, and pause/resume stay at normal speed
 without visible rate correction or a hard seek. Pausing during startup must
 cancel the launch, remove the cover, and leave both clips stopped.
+If either clip reports a load or decode error during startup, playback must stay
+stopped, the healthy clip must also stop, and the comparison must identify the
+unavailable side instead of switching the controls to a playing state.
 Pausing manually within the final boundary tolerance and pressing Play must
 resume from that position; only natural boundary completion or an ended media
 element may restart the moment from zero.
