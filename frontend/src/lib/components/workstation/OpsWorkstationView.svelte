@@ -146,6 +146,9 @@
 		}
 	]);
 	const availableGlobalCommands = $derived(globalCommands.filter((command) => command.enabled));
+	const workControlCommands = $derived(
+		availableGlobalCommands.filter((command) => command.id !== 'retry-failed-encode')
+	);
 	const unavailableGlobalCommands = $derived(
 		globalCommands.filter((command) => !command.enabled && actionPending === null)
 	);
@@ -335,9 +338,7 @@
 		<section class="ops__main" aria-label="Mediaforce activity">
 			<header class="ops-header">
 				<div>
-					<span class="mf-eyebrow">Activity</span>
-					<h1>What’s happening</h1>
-					<p>{readiness.detail}</p>
+					<h1>Activity</h1>
 					<button
 						type="button"
 						class="control control--compact ops-header__mobile-refresh"
@@ -349,10 +350,6 @@
 				</div>
 				<div class="ops-header__status ops-header__status--{readiness.tone}">
 					<StateBadge tone={readiness.tone} label={readiness.title} />
-					<div>
-						<span>{readiness.metricLabel}</span>
-						<strong>{readiness.metricValue}</strong>
-					</div>
 					<button
 						type="button"
 						class="control control--compact"
@@ -364,11 +361,9 @@
 				</div>
 			</header>
 
-			<OperatorWorkConsole work={operatorWork} onRefresh={onOperatorRefresh} />
-
 			<WorkstationPanel eyebrow="Attention" title="Needs your attention">
 				<div class="blocker-list">
-					{#each blockers.slice(0, 6) as blocker (blocker.key)}
+					{#each blockers as blocker (blocker.key)}
 						<div class="blocker-row blocker-row--{blocker.tone}">
 							<StateBadge
 								tone={blocker.tone}
@@ -403,86 +398,90 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Controls" title="Work controls">
-				<div class="scheduler-console">
-					<div class="scheduler-console__state">
-						<StateBadge
-							tone={encodeQueue?.state.stop_requested
-								? 'fail'
-								: encodeQueue?.state.is_paused
-									? 'wait'
-									: 'ready'}
-							label={encodeQueue?.state.stop_requested
-								? 'Stopping'
-								: encodeQueue?.state.is_paused
-									? 'Paused'
-									: 'Ready'}
-						/>
-						<div>
-							<strong>{encodeQueue?.state.scheduler_summary ?? 'Work schedule unavailable'}</strong>
+			{#if workControlCommands.length > 0 || actionPending || actionMessage || actionError}
+				<WorkstationPanel eyebrow="Controls" title="Work controls">
+					<div class="scheduler-console">
+						<div class="scheduler-console__state">
+							<StateBadge
+								tone={encodeQueue?.state.stop_requested
+									? 'fail'
+									: encodeQueue?.state.is_paused
+										? 'wait'
+										: 'ready'}
+								label={encodeQueue?.state.stop_requested
+									? 'Stopping'
+									: encodeQueue?.state.is_paused
+										? 'Paused'
+										: 'Ready'}
+							/>
+							<div>
+								<strong
+									>{encodeQueue?.state.scheduler_summary ?? 'Work schedule unavailable'}</strong
+								>
+								<span
+									>{(encodeQueue?.queued_count ?? 0).toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
+										'en-US'
+									)}
+									need attention</span
+								>
+							</div>
+						</div>
+						<div class="scheduler-console__scope">
+							<strong>Pause or restart work</strong>
 							<span
-								>{(encodeQueue?.queued_count ?? 0).toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
-									'en-US'
-								)}
-								need attention</span
+								>{workControlCommands.length > 0
+									? 'Only actions that make sense right now are shown.'
+									: 'No action is needed in the current state.'}</span
 							>
 						</div>
+						<div class="scheduler-console__actions" aria-label="Work controls">
+							{#each workControlCommands as command (command.id)}
+								<button
+									type="button"
+									class="control"
+									class:control--ready={command.tone === 'ready'}
+									class:control--warn={command.tone === 'warn'}
+									class:control--danger={command.tone === 'danger'}
+									class:control--armed={confirmationAction === command.id}
+									title={actionTitle(command.id)}
+									onclick={() => runAction(command.id)}>{queueActionLabel(command.id)}</button
+								>
+							{:else}
+								<div class="command-standby">
+									<StateBadge compact tone="ready" label="No command" />
+									<span>Mediaforce does not need a command right now.</span>
+								</div>
+							{/each}
+						</div>
+						{#if unavailableGlobalCommands.length > 0}
+							<details class="command-details">
+								<summary>{unavailableGlobalCommands.length} unavailable controls</summary>
+								<ul>
+									{#each unavailableGlobalCommands as command (command.id)}
+										<li>
+											<strong>{queueActionLabel(command.id)}</strong>
+											<span>{command.unavailable}</span>
+										</li>
+									{/each}
+								</ul>
+							</details>
+						{/if}
+						{#if actionMessage}
+							<p class="action-message">{actionMessage}</p>
+						{/if}
+						{#if actionError}
+							<p class="action-error">{actionError}</p>
+						{/if}
+						<p class="refresh-note" class:refresh-note--error={Boolean(refreshError)}>
+							{refreshError || refreshCopy()}
+						</p>
 					</div>
-					<div class="scheduler-console__scope">
-						<strong>Pause or restart work</strong>
-						<span
-							>{availableGlobalCommands.length > 0
-								? 'Only actions that make sense right now are shown.'
-								: 'No action is needed in the current state.'}</span
-						>
-					</div>
-					<div class="scheduler-console__actions" aria-label="Work controls">
-						{#each availableGlobalCommands as command (command.id)}
-							<button
-								type="button"
-								class="control"
-								class:control--ready={command.tone === 'ready'}
-								class:control--warn={command.tone === 'warn'}
-								class:control--danger={command.tone === 'danger'}
-								class:control--armed={confirmationAction === command.id}
-								title={actionTitle(command.id)}
-								onclick={() => runAction(command.id)}>{queueActionLabel(command.id)}</button
-							>
-						{:else}
-							<div class="command-standby">
-								<StateBadge compact tone="ready" label="No command" />
-								<span>Mediaforce does not need a command right now.</span>
-							</div>
-						{/each}
-					</div>
-					{#if unavailableGlobalCommands.length > 0}
-						<details class="command-details">
-							<summary>{unavailableGlobalCommands.length} unavailable controls</summary>
-							<ul>
-								{#each unavailableGlobalCommands as command (command.id)}
-									<li>
-										<strong>{queueActionLabel(command.id)}</strong>
-										<span>{command.unavailable}</span>
-									</li>
-								{/each}
-							</ul>
-						</details>
-					{/if}
-					{#if actionMessage}
-						<p class="action-message">{actionMessage}</p>
-					{/if}
-					{#if actionError}
-						<p class="action-error">{actionError}</p>
-					{/if}
-					<p class="refresh-note" class:refresh-note--error={Boolean(refreshError)}>
-						{refreshError || refreshCopy()}
-					</p>
-				</div>
-			</WorkstationPanel>
+				</WorkstationPanel>
+			{/if}
 
 			<WorkstationPanel
 				eyebrow="Current work"
-				title="Media in progress"
+				title="Working now"
 				meta={queueRows.length ? `${queueRows.length.toLocaleString('en-US')} current` : undefined}
 			>
 				{#if queueRows.length > 0}
@@ -557,8 +556,8 @@
 					<div class="current-standby">
 						<StateBadge tone="ready" label="No current work" />
 						<div>
-							<strong>Nothing is running right now.</strong>
-							<span>Tests and media work will appear here when work begins.</span>
+							<strong>Nothing is running.</strong>
+							<span>New work will appear here when it starts.</span>
 						</div>
 					</div>
 				{/if}
@@ -567,13 +566,13 @@
 			{#if historyRows.length > 0}
 				<WorkstationPanel
 					eyebrow="History"
-					title="Recent sample and review history"
-					meta={`${historyRows.length.toLocaleString('en-US')} visible`}
+					title="Recently finished"
+					meta={`${historyRows.length.toLocaleString('en-US')} recent`}
 				>
 					<details class="history-disclosure">
 						<summary>
 							<StateBadge compact tone="idle" label="History" />
-							<span>Past sample/review issues are not blocking current processing.</span>
+							<span>Show recent sample and review results.</span>
 						</summary>
 						<div class="table-wrap table-wrap--history">
 							<table class="ops-table ops-table--history">
@@ -619,115 +618,135 @@
 					</details>
 				</WorkstationPanel>
 			{/if}
+
+			<OperatorWorkConsole work={operatorWork} onRefresh={onOperatorRefresh} />
 		</section>
 
 		<aside class="ops__rail" aria-label="Computer readiness">
-			<WorkstationPanel
-				eyebrow="Computers"
-				title="Available computers"
-				meta={`${readyHosts.toLocaleString('en-US')}/${hosts?.hosts.length ?? 0}`}
-			>
-				<div class="host-list">
-					{#each hosts?.hosts ?? [] as host (host.key)}
-						{@const schedule = hostSchedulePresentation(host, encodeQueue)}
-						<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity, dashboard)}">
-							<div class="host-row__head">
-								<StateBadge
-									compact
-									tone={hostTone(host, fleetHasReadyCapacity, dashboard)}
-									label={hostStateCopy(host, dashboard)}
-								/>
-								<strong>{host.label}</strong>
-							</div>
-							<dl>
-								<dt>Window</dt>
-								<dd title={host.schedule_detail}>
-									{schedule?.detail || host.schedule_profile_label || 'Always available'}
-								</dd>
-								<dt>Now</dt>
-								<dd>
-									{host.active_encode_count > 0
-										? `${host.active_encode_count.toLocaleString('en-US')} processing ${host.active_encode_count === 1 ? 'task' : 'tasks'}`
-										: 'Idle'}
-								</dd>
-								<dt>Can make</dt>
-								<dd>{workerCapabilitiesSummary(host.capabilities)}</dd>
-							</dl>
-							{#if host.setup_requires_password && host.setup_supported}
-								<label class="host-password">
-									<span>Prepare password</span>
-									<input
-										type="password"
-										autocomplete="current-password"
-										value={hostPasswords[host.key] ?? ''}
-										placeholder="Required for setup"
-										oninput={(event) => handleHostPasswordInput(host, event)}
-									/>
-								</label>
-							{/if}
-							{#if hostHasVisibleActions(host)}
-								<div class="host-row__actions" aria-label={`${host.label} controls`}>
-									{#if !hostActionDisabled('start-host', host)}
-										<button
-											type="button"
-											class="control control--compact"
-											title={actionTitle('start-host')}
-											onclick={() => runAction('start-host', host)}>Start</button
-										>
-									{/if}
-									{#if !hostActionDisabled('prepare-host', host) || (host.setup_supported && host.setup_requires_password)}
-										<button
-											type="button"
-											class="control control--compact"
-											disabled={hostActionDisabled('prepare-host', host)}
-											title={hostPrepareTitle(host)}
-											onclick={() => runAction('prepare-host', host)}>Prepare</button
-										>
-									{/if}
-									{#if !hostActionDisabled('reset-host-trust', host)}
-										<button
-											type="button"
-											class="control control--compact"
-											title={actionTitle('reset-host-trust')}
-											onclick={() => runAction('reset-host-trust', host)}>Reset trust</button
-										>
-									{/if}
-								</div>
-							{/if}
-							<p class="host-row__reason">{hostWorkReason(host, hosts, dashboard)}</p>
-						</div>
-					{:else}
-						<div class="empty-note">Computer status is unavailable.</div>
-					{/each}
-				</div>
-			</WorkstationPanel>
-
-			<WorkstationPanel eyebrow="Schedule" title="When work may run">
-				<div class="schedule-list">
-					<div class="scope-row scope-row--active">
-						<span>Current schedule</span>
-						<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
-						<small
-							>{queuedWaitingCount.toLocaleString('en-US')}
-							{queuedWaitingCount === 1 ? 'item' : 'items'} waiting for the next work window</small
-						>
-						<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
+			<details class="system-details">
+				<summary class="system-details__summary">
+					<div>
+						<span class="mf-eyebrow">System details</span>
+						<strong>Computers and schedule</strong>
 					</div>
-					{#each notableScheduleHosts as entry (entry.host.key)}
-						<div class="scope-row scope-row--wait">
-							<span>{entry.host.label}</span>
-							<strong>{entry.schedule?.label}</strong>
-							<small>{entry.schedule?.detail}</small>
+					<div class="system-details__state">
+						<StateBadge
+							compact
+							tone={readyHosts > 0 ? 'ready' : 'wait'}
+							label={`${readyHosts.toLocaleString('en-US')} ready`}
+						/>
+						<span>Open</span>
+					</div>
+				</summary>
+				<div class="system-details__content">
+					<WorkstationPanel
+						eyebrow="Computers"
+						title="Available computers"
+						meta={`${readyHosts.toLocaleString('en-US')}/${hosts?.hosts.length ?? 0}`}
+					>
+						<div class="host-list">
+							{#each hosts?.hosts ?? [] as host (host.key)}
+								{@const schedule = hostSchedulePresentation(host, encodeQueue)}
+								<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity, dashboard)}">
+									<div class="host-row__head">
+										<StateBadge
+											compact
+											tone={hostTone(host, fleetHasReadyCapacity, dashboard)}
+											label={hostStateCopy(host, dashboard)}
+										/>
+										<strong>{host.label}</strong>
+									</div>
+									<dl>
+										<dt>Window</dt>
+										<dd title={host.schedule_detail}>
+											{schedule?.detail || host.schedule_profile_label || 'Always available'}
+										</dd>
+										<dt>Now</dt>
+										<dd>
+											{host.active_encode_count > 0
+												? `${host.active_encode_count.toLocaleString('en-US')} processing ${host.active_encode_count === 1 ? 'task' : 'tasks'}`
+												: 'Idle'}
+										</dd>
+										<dt>Can make</dt>
+										<dd>{workerCapabilitiesSummary(host.capabilities)}</dd>
+									</dl>
+									{#if host.setup_requires_password && host.setup_supported}
+										<label class="host-password">
+											<span>Prepare password</span>
+											<input
+												type="password"
+												autocomplete="current-password"
+												value={hostPasswords[host.key] ?? ''}
+												placeholder="Required for setup"
+												oninput={(event) => handleHostPasswordInput(host, event)}
+											/>
+										</label>
+									{/if}
+									{#if hostHasVisibleActions(host)}
+										<div class="host-row__actions" aria-label={`${host.label} controls`}>
+											{#if !hostActionDisabled('start-host', host)}
+												<button
+													type="button"
+													class="control control--compact"
+													title={actionTitle('start-host')}
+													onclick={() => runAction('start-host', host)}>Start</button
+												>
+											{/if}
+											{#if !hostActionDisabled('prepare-host', host) || (host.setup_supported && host.setup_requires_password)}
+												<button
+													type="button"
+													class="control control--compact"
+													disabled={hostActionDisabled('prepare-host', host)}
+													title={hostPrepareTitle(host)}
+													onclick={() => runAction('prepare-host', host)}>Prepare</button
+												>
+											{/if}
+											{#if !hostActionDisabled('reset-host-trust', host)}
+												<button
+													type="button"
+													class="control control--compact"
+													title={actionTitle('reset-host-trust')}
+													onclick={() => runAction('reset-host-trust', host)}>Reset trust</button
+												>
+											{/if}
+										</div>
+									{/if}
+									<p class="host-row__reason">{hostWorkReason(host, hosts, dashboard)}</p>
+								</div>
+							{:else}
+								<div class="empty-note">Computer status is unavailable.</div>
+							{/each}
 						</div>
-					{:else}
-						<div class="scope-row">
-							<span>Computer schedules</span>
-							<strong>Available now or not reported</strong>
-							<small>No computer is currently scheduled off</small>
+					</WorkstationPanel>
+
+					<WorkstationPanel eyebrow="Schedule" title="When work may run">
+						<div class="schedule-list">
+							<div class="scope-row scope-row--active">
+								<span>Current schedule</span>
+								<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
+								<small
+									>{queuedWaitingCount.toLocaleString('en-US')}
+									{queuedWaitingCount === 1 ? 'item' : 'items'} waiting for the next work window</small
+								>
+								<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
+							</div>
+							{#each notableScheduleHosts as entry (entry.host.key)}
+								<div class="scope-row scope-row--wait">
+									<span>{entry.host.label}</span>
+									<strong>{entry.schedule?.label}</strong>
+									<small>{entry.schedule?.detail}</small>
+								</div>
+							{:else}
+								<div class="scope-row">
+									<span>Computer schedules</span>
+									<strong>Available now or not reported</strong>
+									<small>No computer is currently scheduled off</small>
+								</div>
+							{/each}
 						</div>
-					{/each}
+					</WorkstationPanel>
 				</div>
-			</WorkstationPanel>
+			</details>
 		</aside>
 	</main>
 </OperatorShell>
@@ -1483,27 +1502,62 @@
 		padding: 0;
 	}
 
-	:global(.ops__main > .panel:nth-of-type(1)) {
-		order: 1;
-	}
-
-	:global(.ops__main > .panel:nth-of-type(2)) {
-		order: 3;
-	}
-
-	:global(.ops__main > .panel:nth-of-type(3)) {
-		order: 2;
-	}
-
-	:global(.ops__main > .panel:nth-of-type(n + 4)) {
-		order: 4;
-	}
-
 	.ops__rail {
 		background: transparent;
 		border: 0;
 		gap: 16px;
 		padding: 0;
+	}
+
+	.system-details {
+		min-width: 0;
+		width: 100%;
+	}
+
+	.system-details__summary {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		cursor: pointer;
+		display: flex;
+		gap: 12px;
+		justify-content: space-between;
+		list-style: none;
+		padding: 12px;
+	}
+
+	.system-details__summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.system-details__summary > div:first-child {
+		display: grid;
+		gap: 7px;
+		min-width: 0;
+	}
+
+	.system-details__summary strong {
+		color: var(--mf-fg-primary);
+		font-size: 14px;
+	}
+
+	.system-details__state {
+		align-items: flex-end;
+		display: grid;
+		gap: 5px;
+		justify-items: end;
+	}
+
+	.system-details__state > span {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
+	}
+
+	.system-details__content {
+		display: grid;
+		gap: 16px;
+		padding-top: 12px;
 	}
 
 	.ops-header {
@@ -1788,9 +1842,7 @@
 		}
 
 		.ops__rail {
-			align-items: start;
-			display: grid;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+			display: block;
 		}
 	}
 
@@ -1817,10 +1869,6 @@
 
 		.ops-header__mobile-refresh {
 			display: inline-flex;
-		}
-
-		.ops__rail {
-			grid-template-columns: 1fr;
 		}
 
 		.blocker-row {

@@ -362,24 +362,32 @@ def summarize_encode_queue(
         job_kinds=DISPLAY_ENCODE_JOB_KINDS,
         newest_first=True,
     )
-    for job in [*queued, *running, *recent]:
-        job["media_scope"] = resolve_media_scope(
-            connection,
-            str(job.get("prefix") or ""),
-            library_types=library_types,
-        ).to_payload()
     counts = {
         "queued": _count_jobs(connection, statuses=QUEUED_ENCODE_JOB_STATUSES, job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "running": _count_jobs(connection, statuses=("running",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "retry_backoff": _count_jobs(connection, statuses=("retry_backoff",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
         "needs_attention": _count_jobs(connection, statuses=("needs_attention",), job_kinds=DISPLAY_ENCODE_JOB_KINDS),
     }
+    needs_attention = list_encode_jobs(
+        connection,
+        statuses=("needs_attention",),
+        limit=counts["needs_attention"],
+        job_kinds=DISPLAY_ENCODE_JOB_KINDS,
+        newest_first=True,
+    )
+    for job in [*queued, *running, *recent, *needs_attention]:
+        job["media_scope"] = resolve_media_scope(
+            connection,
+            str(job.get("prefix") or ""),
+            library_types=library_types,
+        ).to_payload()
     state = load_queue_state(connection)
     return {
         "state": state,
         "queued": queued,
         "running": running,
         "recent": recent,
+        "needs_attention": needs_attention,
         "queued_count": counts["queued"],
         "running_count": counts["running"],
         "retry_backoff_count": counts["retry_backoff"],

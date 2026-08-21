@@ -598,6 +598,10 @@ def decorate_encode_queue_for_scheduler(
         decorate_encode_job_for_scheduler(config, job, deps) or job
         for job in object_list(encode_queue.get("recent"))
     ]
+    decorated["needs_attention"] = [
+        decorate_encode_job_for_scheduler(config, job, deps) or job
+        for job in object_list(encode_queue.get("needs_attention"))
+    ]
     decorated["queued_waiting_count"] = sum(
         1
         for job in decorated["queued"]

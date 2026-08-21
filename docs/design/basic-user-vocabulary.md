@@ -96,6 +96,15 @@ remain unchanged` while memory is observation-only.
 
 ### Ops
 
+- Activity answers three questions in order: what needs the operator, what is
+  working now, and what finished recently. Catalog, analysis, worker, and
+  schedule maintenance stay behind explicit disclosures.
+- Every attention count maps to one visible review row and an exact owning
+  route. Do not summarize several unresolved items behind a global retry or a
+  destination that cannot show them.
+- Attention copy describes the human outcome and safety state. Do not expose
+  exception names, internal status values, raw byte bounds, or policy markers
+  in the first-level Activity view.
 - Worker available: `Ready`. This worker can accept work now.
 - Worker schedule closed: `Off schedule`. This is normal and not a failure if
   other workers are ready.
