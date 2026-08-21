@@ -156,15 +156,32 @@ def reconcile_encode_jobs(
         if retry_not_before is not None and retry_not_before > now:
             continue
         manifest_path = str(payload.get("manifest_path") or "").strip()
+        cleanup_succeeded = True
         if manifest_path:
             connection.commit()
-            _cleanup_encode_retry_artifacts(
+            cleanup_succeeded = _cleanup_encode_retry_artifacts(
                 connection,
                 manifest_path=Path(manifest_path),
                 indexes=payload.get("manifest_indexes"),
                 host=object_dict(payload.get("host")),
                 deps=deps,
             )
+        if not cleanup_succeeded:
+            retry_delay = _encode_job_retry_delay_seconds(
+                min(int_value(payload.get("attempt_count")), deps.encode_job_max_attempts),
+                deps,
+            )
+            retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
+            payload.update(
+                {
+                    "retry_not_before": retry_not_before,
+                    "waiting_reason": f"waiting to clean interrupted output before retry at {retry_not_before}",
+                    "updated_at": deps.now_iso(),
+                }
+            )
+            save_encode_job(connection, payload)
+            sync_encode_job_parent(connection, payload, deps)
+            continue
         payload.update(
             {
                 "status": "queued",
@@ -2633,6 +2650,7 @@ def _encode_failure_is_ssh_transport(error_message: str, host_payload: dict[str,
         "operation timed out",
         "broken pipe",
         "connection closed by",
+        "closed by remote host",
     )
     ssh_context_markers = ("remote host", "port 22", "ssh connection")
     return any(marker in lowered for marker in transport_markers) and any(
@@ -2742,12 +2760,13 @@ def _cleanup_encode_retry_artifacts(
         host: dict[str, Any] | None = None,
         commit_between_items: bool = True,
         deps: EncodeQueueRuntimeDeps,
-) -> None:
+) -> bool:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return
+        return False
     now_iso = deps.now_iso()
+    cleanup_succeeded_for_all = True
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
     selected_indexes = indexes if isinstance(indexes, list) else list(range(len(manifest_items)))
     for index in selected_indexes:
@@ -2798,6 +2817,7 @@ def _cleanup_encode_retry_artifacts(
                     prefer_remote=False,
                 ) and partial_cleanup_succeeded
             if not partial_cleanup_succeeded:
+                cleanup_succeeded_for_all = False
                 deps.logger.warning(
                     "Preserving partial staged artifact for item %s because its encoded host is unreachable.",
                     library_item_id,
@@ -2812,6 +2832,7 @@ def _cleanup_encode_retry_artifacts(
                 prefer_remote=False,
             )
         if not cleanup_succeeded:
+            cleanup_succeeded_for_all = False
             deps.logger.warning(
                 "Preserving staged artifact for item %s because its encoded host is unreachable.",
                 library_item_id,
@@ -2828,6 +2849,7 @@ def _cleanup_encode_retry_artifacts(
             )
         if commit_between_items:
             connection.commit()
+    return cleanup_succeeded_for_all
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
