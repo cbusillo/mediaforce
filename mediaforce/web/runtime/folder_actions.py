@@ -580,11 +580,27 @@ def queue_folder_encode_action(
                 connection,
                 preflight_config,
                 prepare_only=True,
+                target_provenance_config=config,
                 **manifest_kwargs,
             )
         finally:
             if preview_transaction is not None:
                 preview_transaction.rollback()
+        target_provenance_blocker = next(
+            (
+                object_dict(object_dict(item.get("target_size_provenance")).get("blocker"))
+                for item in manifest["items"]
+                if object_dict(object_dict(item.get("target_size_provenance")).get("blocker"))
+            ),
+            None,
+        )
+        if target_provenance_blocker is not None:
+            return {
+                "ok": False,
+                "code": target_provenance_blocker["code"],
+                "message": target_provenance_blocker["message"],
+                "target_size_provenance_blocker": target_provenance_blocker,
+            }
         if not manifest["items"]:
             if older_season_selection is not None:
                 raise HTTPException(

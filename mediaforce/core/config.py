@@ -275,11 +275,20 @@ class MediaforceConfig:
         return list(self.raw.get("remote_hosts", []))
 
     def resolve_policy(self, rel_path: str) -> dict[str, Any]:
+        policy, _ = self.resolve_policy_with_target_provenance(rel_path)
+        return policy
+
+    def resolve_policy_with_target_provenance(self, rel_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
         policy = {
             "video": copy.deepcopy(self.video),
             "audio": copy.deepcopy(self.audio),
             "subtitle": copy.deepcopy(self.subtitle),
             "planning": copy.deepcopy(self.planning),
+        }
+        target_provenance: dict[str, Any] = {
+            "schema_version": 1,
+            "source": "config_default",
+            "override_prefix": None,
         }
 
         normalized_rel_path = rel_path.strip("/")
@@ -307,14 +316,25 @@ class MediaforceConfig:
             matching_overrides.append((len(prefix), index, override))
 
         for _, _, override in sorted(matching_overrides):
+            prefix = str(override.get("path_prefix", "")).strip("/")
             for section in ("video", "audio", "subtitle", "planning"):
                 values = override.get(section)
                 if isinstance(values, dict):
                     normalized_values = copy.deepcopy(values)
                     if section == "video":
                         _migrate_legacy_video_override(self.video, normalized_values)
+                        if _video_override_sets_size_goal(normalized_values):
+                            target_provenance = {
+                                "schema_version": 1,
+                                "source": (
+                                    "exact_override"
+                                    if prefix == normalized_rel_path
+                                    else "ancestor_override"
+                                ),
+                                "override_prefix": prefix,
+                            }
                     policy[section].update(normalized_values)
-        return policy
+        return policy, target_provenance
 
 
 def _migrate_legacy_video_override(base_video: dict[str, Any], override_video: dict[str, Any]) -> None:
@@ -347,6 +367,22 @@ def _migrate_legacy_video_override(base_video: dict[str, Any], override_video: d
         max_height = _positive_number(override_video.get("max_height"))
         override_video["resolution_intent_mode"] = "max_height" if max_height is not None else "source"
         override_video["resolution_intent_source"] = "legacy_inferred_override"
+
+
+def _video_override_sets_size_goal(video: dict[str, Any]) -> bool:
+    return bool(
+        {
+            "target_size_mb",
+            "target_size_bytes",
+            "target_runtime_minutes",
+            "size_goal_schema_version",
+            "size_goal_mode",
+            "size_goal_source",
+            "sample_projection_tolerance_percent",
+            "final_output_tolerance_percent",
+        }
+        & video.keys()
+    )
 
 
 def _positive_number(value: Any) -> float | None:

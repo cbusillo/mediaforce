@@ -14,7 +14,8 @@ import type {
 	QualityRiskTag,
 	SizeGoalMode,
 	StagedIntegrityDisposition,
-	StagedIntegrityRecord
+	StagedIntegrityRecord,
+	TargetSizeProvenance
 } from '$lib/api/types';
 
 export type HumanSeasonStateKey =
@@ -1311,6 +1312,20 @@ export function resolvedTargetSummary(folder: FolderPayload): ResolvedTargetSumm
 		referenceSizeBytes: numberValue(resolved?.reference_size_mb) * 1_000_000,
 		referenceRuntimeMinutes: numberValue(resolved?.reference_runtime_minutes)
 	};
+}
+
+export function targetProvenanceSummary(
+	provenance: TargetSizeProvenance | null | undefined
+): string | null {
+	if (!provenance) return null;
+	const source =
+		provenance.source === 'exact_override'
+			? 'Exact-item override'
+			: provenance.source === 'ancestor_override'
+				? 'Inherited folder override'
+				: 'Configured default';
+	const prefix = provenance.override_prefix ? ` (${provenance.override_prefix})` : '';
+	return `${source}${prefix}`;
 }
 
 export function targetConstraintSummary(

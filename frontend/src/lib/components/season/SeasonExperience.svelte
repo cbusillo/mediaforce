@@ -54,6 +54,7 @@
 		shouldPrioritizeScopeActivity,
 		sizeGoals,
 		targetConstraintSummary,
+		targetProvenanceSummary,
 		technicalVideoPolicy,
 		testRequestWithInstructions,
 		withCompressionIntent,
@@ -258,6 +259,7 @@
 			: 0
 	);
 	const targetConstraint = $derived(targetConstraintSummary(folder, status));
+	const targetProvenance = $derived(targetProvenanceSummary(folder.target_size_provenance));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
 	const exactExpectedSizeChange = $derived(
@@ -1419,6 +1421,12 @@
 						<div class="goal-contract__truth">
 							<strong>Size is the target.</strong>
 							<span>Picture and sound decide whether that size is worth keeping.</span>
+							{#if isExactItemScope && targetProvenance}
+								<small>Target source: {targetProvenance}</small>
+								{#if folder.target_size_provenance?.blocker}
+									<small>{folder.target_size_provenance.blocker.message}</small>
+								{/if}
+							{/if}
 						</div>
 					</div>
 				{/if}

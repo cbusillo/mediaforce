@@ -21732,7 +21732,9 @@ raise SystemExit(0)
                 *,
                 prefix: str,
                 prepare_only: bool = False,
+                target_provenance_config: MediaforceConfig | None = None,
         ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
+            _ = target_provenance_config
             self.assertTrue(prepare_only)
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
@@ -21842,7 +21844,9 @@ raise SystemExit(0)
                 *,
                 prefix: str,
                 prepare_only: bool = False,
+                target_provenance_config: MediaforceConfig | None = None,
         ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
+            _ = target_provenance_config
             self.assertTrue(prepare_only)
             self.assertEqual(prefix, "tv/show")
             pending_ids = {

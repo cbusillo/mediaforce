@@ -176,6 +176,25 @@ cannot silently qualify a broader scope. Scope-less fallback rows remain inside
 the already-selected media scope as fail-closed safety context, but never count
 as recommendation-bearing accuracy or savings evidence.
 
+## Exact-Item Target Containment
+
+Each production manifest records a schema-versioned target provenance payload for
+every item. It identifies whether the resolved target came from an exact-item
+override, an ancestor override, or the configured default, without changing the
+resolved target or its quality floor.
+
+For an exact item, Mediaforce may use current quality observations only when the
+observation has the identical source path and source fingerprint. A quality-safe
+minimum is the smallest measured whole-episode candidate that met the recorded
+quality floor and did not violate the source cap. Sibling, season, series, and
+stale-fingerprint observations cannot authorize the item.
+
+When an inherited ancestor/default target is below that compatible exact-item
+minimum, production returns the typed
+`exact_item_target_below_quality_safe_minimum` blocker. It does not widen the
+target, rewrite an ancestor override, or relax the quality floor. If no compatible
+measured minimum exists, the provenance remains visible but no minimum is invented.
+
 `qsh2` supersedes `qsh1` evidence for current readiness. Historical `qsh1` rows
 remain available for audit and safety reporting, but they cannot satisfy current
 recommendation, benchmark, distinct-item, or cluster-readiness thresholds. A

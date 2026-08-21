@@ -23,6 +23,7 @@ from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection,
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.planner import build_manifest_item, recommend_item
 from mediaforce.library.scanner import scan_library
+from mediaforce.tuning.target_provenance import ExactItemTargetProvenanceBlocked, exact_item_target_provenance_blocker
 
 
 def _selection_recommendation(
@@ -174,12 +175,21 @@ def select_encode_candidates(
     )
 
 
-def build_run_manifest(rows: list[dict[str, Any]], config: MediaforceConfig) -> dict[str, Any]:
+def build_run_manifest(
+        rows: list[dict[str, Any]],
+        config: MediaforceConfig,
+        *,
+        target_provenance_config: MediaforceConfig | None = None,
+) -> dict[str, Any]:
     now = datetime.now(tz=UTC).isoformat(timespec="seconds")
     run_id = uuid.uuid4().hex[:12]
     items: list[dict[str, Any]] = []
     for row in rows:
-        item = build_manifest_item(row, config)
+        item = build_manifest_item(
+            row,
+            config,
+            target_provenance_config=target_provenance_config,
+        )
         provenance = row.get("selection_provenance")
         if isinstance(provenance, dict):
             item["selection_provenance"] = provenance
@@ -266,6 +276,7 @@ def build_folder_manifest(
         manual_override_prefix: str | None = None,
         older_season_override: OlderSeasonOverrideSelection | None = None,
         include_library_item_ids: Collection[int] | None = None,
+        target_provenance_config: MediaforceConfig | None = None,
 ) -> dict[str, Any]:
     if manual_override_prefix and older_season_override is not None:
         raise ValueError("Exact-season and older-season lifecycle overrides cannot be combined")
@@ -290,7 +301,16 @@ def build_folder_manifest(
         ),
         include_library_item_ids=include_library_item_ids,
     )
-    manifest = build_run_manifest(rows, config)
+    manifest = build_run_manifest(
+        rows,
+        config,
+        target_provenance_config=target_provenance_config,
+    )
+    if scope.match == "exact_item":
+        for item in manifest["items"]:
+            blocker = exact_item_target_provenance_blocker(connection, item)
+            if blocker is not None:
+                item["target_size_provenance"]["blocker"] = blocker.to_payload()
     manifest["selection"]["media_scope"] = scope.to_payload()
     if older_season_override is not None:
         manifest["selection"]["lifecycle_override"] = older_season_override.to_payload()
@@ -307,6 +327,7 @@ def create_folder_manifest(
         manual_override_prefix: str | None = None,
         older_season_override: OlderSeasonOverrideSelection | None = None,
         include_library_item_ids: Collection[int] | None = None,
+        target_provenance_config: MediaforceConfig | None = None,
         prepare_only: bool = False,
 ) -> tuple[dict[str, Any], Path | None]:
     manifest = build_folder_manifest(
@@ -318,8 +339,14 @@ def create_folder_manifest(
         manual_override_prefix=manual_override_prefix,
         older_season_override=older_season_override,
         include_library_item_ids=include_library_item_ids,
+        target_provenance_config=target_provenance_config,
     )
     if prepare_only:
         return manifest, None
+    for item in manifest["items"]:
+        if object_dict(object_dict(item.get("target_size_provenance")).get("blocker")):
+            blocker = exact_item_target_provenance_blocker(connection, item)
+            if blocker is not None:
+                raise ExactItemTargetProvenanceBlocked(blocker)
     manifest_path = write_manifest(connection, config, manifest)
     return manifest, manifest_path

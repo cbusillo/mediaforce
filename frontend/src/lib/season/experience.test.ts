@@ -52,6 +52,7 @@ import {
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
 	targetConstraintSummary,
+	targetProvenanceSummary,
 	testRequestWithInstructions,
 	technicalVideoPolicy,
 	withCompressionIntent
@@ -893,6 +894,21 @@ describe('season experience translation', () => {
 			predictedBytes: 1_089_842_509,
 			predictedToBudgetRatio: 4.619
 		});
+	});
+
+	it('formats concise exact-item target provenance for the operator surface', () => {
+		expect(
+			targetProvenanceSummary({
+				schema_version: 1,
+				source: 'ancestor_override',
+				override_prefix: 'tv/Big Brother (US)',
+				requested_target_bytes: 225_000_000,
+				status: 'resolved',
+				size_goal_mode: 'absolute',
+				policy_hash: 'policy-hash'
+			})
+		).toBe('Inherited folder override (tv/Big Brother (US))');
+		expect(targetProvenanceSummary(null)).toBeNull();
 	});
 
 	it('describes preview moments as a ratio while retaining their measured duration', () => {
