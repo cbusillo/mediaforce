@@ -116,7 +116,8 @@ function dashboardFixture(): DashboardSummaryPayload {
 				recent_failed_count: 0
 			},
 			active_count: 1,
-			recent_failed_count: 1
+			recent_failed_count: 1,
+			review_ready: []
 		},
 		encode_queue: {
 			running_count: 1,
@@ -352,6 +353,55 @@ describe('Ops workstation mapping', () => {
 			tone: 'wait',
 			href: '/folders/tv/show/season%203',
 			linkLabel: 'Review item'
+		});
+	});
+
+	it('surfaces review-ready samples before stopped processing work', () => {
+		const dashboard = dashboardFixture();
+		dashboard.calibration_queue.review_ready = [
+			{
+				job_id: 'sample-review-1',
+				prefix: 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+				media_scope: {
+					...mediaScope(
+						'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+						'tv',
+						'media_file',
+						'exact_item'
+					),
+					parent: {
+						prefix: 'tv/Bluey (2018)/Season 3',
+						title: 'Season 3'
+					}
+				}
+			}
+		];
+		dashboard.calibration_queue.review_ready_count = 1;
+
+		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
+
+		expect(blockers.map((blocker) => blocker.key)).toEqual([
+			'review-ready:sample-review-1',
+			'needs-attention:encode-3'
+		]);
+		expect(blockers[0]).toMatchObject({
+			tone: 'ready',
+			title: 'Bluey · Season 3 · Episode 49 is ready for your review',
+			detail: 'Compare the sample and decide whether to approve it.',
+			href: '/folders/tv/Bluey%20(2018)/Season%203/Bluey.2018.S03E49.1080p.mkv',
+			linkLabel: 'Review sample'
+		});
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
+			tone: 'ready',
+			title: 'Bluey · Season 3 · Episode 49 is ready for review',
+			detail: 'Compare the sample and decide whether to approve it.',
+			metricLabel: 'Needs you',
+			metricValue: '1'
+		});
+		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[2]).toMatchObject({
+			label: 'Sample checks',
+			detail: '1 waiting for review',
+			tone: 'ready'
 		});
 	});
 

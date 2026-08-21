@@ -2,7 +2,8 @@ import type {
 	DashboardSummaryPayload,
 	EncodeQueueJob,
 	HostRuntime,
-	HostsPayload
+	HostsPayload,
+	ReviewReadySample
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
 import { hostSchedulePresentation, jobSchedulePresentation } from '$lib/hosts/schedule';
@@ -131,6 +132,18 @@ function encodeJobLabel(job: EncodeQueueJob): string {
 		return [segments[1], scope.parent?.title ?? segments[2], episode].filter(Boolean).join(' · ');
 	}
 	return compactText(job.media_scope?.title) || opsWorkLabel(job.prefix ?? '');
+}
+
+function reviewReadySampleLabel(sample: ReviewReadySample): string {
+	const scope = sample.media_scope;
+	if (scope?.domain === 'tv' && scope.match === 'exact_item') {
+		const segments = sample.prefix.split('/').filter(Boolean);
+		const series = String(segments[1] ?? '').replace(/\s*\(\d{4}\)\s*$/, '');
+		const episodeMatch = sample.prefix.match(/S\d{1,3}E(\d{1,3})/i);
+		const episode = episodeMatch ? `Episode ${Number.parseInt(episodeMatch[1], 10)}` : '';
+		return [series, scope.parent?.title ?? segments[2], episode].filter(Boolean).join(' · ');
+	}
+	return compactText(scope?.title) || opsWorkLabel(sample.prefix);
 }
 
 function encodeWorkLabel(jobs: EncodeQueueJob[], totalCount = jobs.length): string {
@@ -636,6 +649,16 @@ export function buildOpsBlockers(
 			detail: loadError
 		});
 	}
+	for (const sample of dashboard?.calibration_queue.review_ready ?? []) {
+		blockers.push({
+			key: `review-ready:${sample.job_id}`,
+			tone: 'ready',
+			title: `${reviewReadySampleLabel(sample)} is ready for your review`,
+			detail: 'Compare the sample and decide whether to approve it.',
+			href: folderRoutePath(sample.prefix),
+			linkLabel: 'Review sample'
+		});
+	}
 	if (queue?.state.stop_requested) {
 		blockers.push({
 			key: 'stop-requested',
@@ -756,6 +779,8 @@ export function buildOpsReadinessSummary(
 	const attentionJobs = (queue?.recent ?? []).filter((job) =>
 		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
 	);
+	const reviewReadySamples = calibration?.review_ready ?? [];
+	const reviewReadyCount = reviewReadySamples.length;
 	const activeChecks = calibration?.active_count ?? 0;
 	const queuedWork = runningCount + queuedCount;
 	const impossibleWindowJobs = (queue?.queued ?? []).filter(
@@ -801,6 +826,21 @@ export function buildOpsReadinessSummary(
 				'Widen a compatible worker window or intentionally bypass the schedule.',
 			metricLabel: 'Blocked',
 			metricValue: String(impossibleWindowJobs.length)
+		};
+	}
+	if (reviewReadyCount > 0) {
+		return {
+			tone: 'ready',
+			title:
+				reviewReadyCount === 1
+					? `${reviewReadySampleLabel(reviewReadySamples[0])} is ready for review`
+					: `${reviewReadyCount} samples are ready for review`,
+			detail:
+				reviewReadyCount === 1
+					? 'Compare the sample and decide whether to approve it.'
+					: 'Compare each sample and decide whether to approve it.',
+			metricLabel: 'Needs you',
+			metricValue: String(reviewReadyCount)
 		};
 	}
 	if (runningCount > 0) {
@@ -938,6 +978,7 @@ export function buildOpsStatusTiles(
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
 	const capacity = hostCapacityCounts(hosts, encode);
+	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
 	return [
 		{
 			label: 'Work schedule',
@@ -973,8 +1014,9 @@ export function buildOpsStatusTiles(
 		{
 			label: 'Sample checks',
 			value: `${calibration?.sample.running_count ?? 0} running · ${calibration?.sample.queued_count ?? 0} queued`,
-			detail: `${calibration?.sample.pending_review_count ?? 0} waiting for review`,
-			tone: (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
+			detail: `${reviewReadyCount} waiting for review`,
+			tone:
+				reviewReadyCount > 0 ? 'ready' : (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
 		},
 		{
 			label: 'Workers',
@@ -1003,6 +1045,8 @@ export function buildOpsFooterSignals(
 ): FooterSignal[] {
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
+	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
+	const attentionCount = (encode?.needs_attention_count ?? 0) + reviewReadyCount;
 	return [
 		{
 			label: 'Processing',
@@ -1016,8 +1060,8 @@ export function buildOpsFooterSignals(
 		},
 		{
 			label: 'Attention',
-			value: String(encode?.needs_attention_count ?? 0),
-			tone: (encode?.needs_attention_count ?? 0) > 0 ? 'wait' : 'idle'
+			value: String(attentionCount),
+			tone: reviewReadyCount > 0 ? 'ready' : attentionCount > 0 ? 'wait' : 'idle'
 		},
 		{
 			label: 'Checks',
