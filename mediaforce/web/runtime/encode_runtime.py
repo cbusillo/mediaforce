@@ -10,6 +10,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,12 @@ from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKE
     SCHEDULE_CLOSE_WAITING_REASON
 from mediaforce.web.runtime.host_runtime import host_config_for_key
 from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
+
+
+class _EncodeRetryArtifactCleanupOutcome(StrEnum):
+    CLEANED = "cleaned"
+    CLEANUP_DEFERRED = "cleanup_deferred"
+    MANIFEST_UNREADABLE = "manifest_unreadable"
 
 
 @dataclass(slots=True)
@@ -156,17 +163,31 @@ def reconcile_encode_jobs(
         if retry_not_before is not None and retry_not_before > now:
             continue
         manifest_path = str(payload.get("manifest_path") or "").strip()
-        cleanup_succeeded = True
         if manifest_path:
             connection.commit()
-            cleanup_succeeded = _cleanup_encode_retry_artifacts(
+            cleanup_outcome = _cleanup_encode_retry_artifacts(
                 connection,
                 manifest_path=Path(manifest_path),
                 indexes=payload.get("manifest_indexes"),
                 host=object_dict(payload.get("host")),
                 deps=deps,
             )
-        if not cleanup_succeeded:
+        else:
+            cleanup_outcome = _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
+        if cleanup_outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE:
+            transition_encode_job_failure(
+                connection,
+                config,
+                payload,
+                deps,
+                failure_kind="manifest_unreadable",
+                error_message=(
+                    "Encode retry manifest is missing, unreadable, or invalid. "
+                    "Retry the item to create a fresh manifest."
+                ),
+            )
+            continue
+        if cleanup_outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
             retry_delay = _encode_job_retry_delay_seconds(
                 min(int_value(payload.get("attempt_count")), deps.encode_job_max_attempts),
                 deps,
@@ -2760,11 +2781,11 @@ def _cleanup_encode_retry_artifacts(
         host: dict[str, Any] | None = None,
         commit_between_items: bool = True,
         deps: EncodeQueueRuntimeDeps,
-) -> bool:
+) -> _EncodeRetryArtifactCleanupOutcome:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return False
+        return _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -2849,7 +2870,11 @@ def _cleanup_encode_retry_artifacts(
             )
         if commit_between_items:
             connection.commit()
-    return cleanup_succeeded_for_all
+    return (
+        _EncodeRetryArtifactCleanupOutcome.CLEANED
+        if cleanup_succeeded_for_all
+        else _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
+    )
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
