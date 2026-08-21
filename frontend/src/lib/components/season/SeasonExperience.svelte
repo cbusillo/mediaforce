@@ -29,6 +29,7 @@
 		currentOperatorIntent,
 		detailSeasonState,
 		episodeLabel,
+		exactItemFilename,
 		expectedSizeChange,
 		folderSizeTargetAnalysis,
 		formatDecimalFileSize,
@@ -135,7 +136,7 @@
 	const isSeriesScope = $derived(isSeriesPrefix(folder.prefix));
 	const isExactItemScope = $derived(folder.media_scope?.match === 'exact_item');
 	const exactEpisodeName = $derived(episodeLabel(folder.prefix));
-	const exactFilename = $derived(folder.prefix.split('/').filter(Boolean).pop() ?? folder.prefix);
+	const exactFilename = $derived(exactItemFilename(folder));
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
 	const seriesSeasonLabel = $derived(seriesSeasonCount === 1 ? 'season' : 'seasons');
 	const lifecycle = $derived(folder.lifecycle ?? null);

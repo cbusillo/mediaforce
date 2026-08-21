@@ -27,6 +27,7 @@ import {
 	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
+	exactItemFilename,
 	expectedSizeChange,
 	folderSizeTargetAnalysis,
 	formatDecimalFileSize,
@@ -1862,6 +1863,14 @@ describe('season experience translation', () => {
 
 	it('formats filenames and sizes for people', () => {
 		expect(episodeLabel('tv/Show/Season 2/Show.S02E07.mkv')).toBe('Episode 7');
+		expect(
+			exactItemFilename({
+				prefix: 'tv/Show/Season 2',
+				media_scope: {
+					prefix: 'tv/Show/Season 2/Show.S02E07.mkv'
+				}
+			} as FolderPayload)
+		).toBe('Show.S02E07.mkv');
 		expect(formatFileSize(1_073_741_824)).toBe('1.0 GB');
 	});
 
