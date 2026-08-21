@@ -35,6 +35,7 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
+from mediaforce.encoding.free_space import encode_reserve_preflight, large_job_requires_serialization
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import partial_output_path, safe_unlink
@@ -91,6 +92,7 @@ class EncodeQueueRuntimeDeps:
     encode_manifest_items: Any
     dispatch_encode_job: Any
     active_encode_process_controllers: Any
+    encode_reserve_preflight: Any
     logger: Any
     encode_queue_poll_seconds: float
     encode_job_lease_seconds: int
@@ -1862,6 +1864,83 @@ def _encode_job_estimate_items(
     ]
 
 
+def _encode_reserve_items(
+        connection: DBClient,
+        config: MediaforceConfig,
+        items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    item_ids = {
+        int_value(item.get("library_item_id"))
+        for item in items
+        if int_value(item.get("library_item_id")) > 0
+    }
+    rows_by_id: dict[int, Mapping[str, Any]] = {}
+    if item_ids:
+        rows = connection.execute(
+            select(
+                library_items.c.id,
+                library_items.c.source_path,
+                library_items.c.rel_path,
+                library_items.c.media_root,
+                library_items.c.size_bytes,
+            ).where(library_items.c.id.in_(item_ids))
+        ).mappings().fetchall()
+        rows_by_id = {int(row["id"]): row for row in rows}
+
+    enriched_items: list[dict[str, Any]] = []
+    for item in items:
+        payload = dict(item)
+        row = rows_by_id.get(int_value(item.get("library_item_id")))
+        if row is not None:
+            for key in ("source_path", "rel_path", "media_root", "size_bytes"):
+                if not payload.get(key) and row[key] is not None:
+                    payload[key] = row[key]
+        enriched_items.append(payload)
+    return enriched_items
+
+
+def _encode_items_support_reserve(items: list[dict[str, Any]]) -> bool:
+    return bool(items) and all(
+        str(item.get("source_path") or "").strip()
+        and str(item.get("staging_path") or "").strip()
+        and str(item.get("rel_path") or "").strip()
+        for item in items
+    )
+
+
+def _large_job_serialization_waiting_reason(
+        connection: DBClient,
+        config: MediaforceConfig,
+        candidate_job: dict[str, Any],
+        candidate_items: list[dict[str, Any]],
+        *,
+        manifest_items_cache: dict[Path, list[dict[str, Any]] | None],
+) -> str | None:
+    running_rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_id != str(candidate_job["job_id"]))
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+    ).mappings().fetchall()
+    if not running_rows:
+        return None
+    candidate_is_large = large_job_requires_serialization(config, candidate_items)
+    for row in running_rows:
+        running_job = load_encode_job(connection, str(row["job_id"]))
+        if running_job is None:
+            continue
+        running_items = _encode_reserve_items(
+            connection,
+            config,
+            _encode_job_estimate_items(running_job, manifest_items_cache=manifest_items_cache),
+        )
+        if not _encode_items_support_reserve(running_items):
+            continue
+        if candidate_is_large or large_job_requires_serialization(config, running_items):
+            return "Waiting for the active large encode job to release its free-space reserve."
+    return None
+
+
 @lru_cache(maxsize=256)
 def _cached_encode_estimate_manifest_items(
         manifest_path: str,
@@ -2336,6 +2415,40 @@ def load_next_runnable_encode_job(
                 save_encode_job(connection, job)
                 defer_parent_sync(job)
             continue
+        reserve_items = _encode_reserve_items(
+            connection,
+            config,
+            _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
+        )
+        serialization_wait = (
+            _large_job_serialization_waiting_reason(
+                connection,
+                config,
+                job,
+                reserve_items,
+                manifest_items_cache=manifest_items_cache,
+            )
+            if _encode_items_support_reserve(reserve_items)
+            else None
+        )
+        if serialization_wait is not None:
+            if str(job.get("waiting_reason") or "") != serialization_wait:
+                job.update({"waiting_reason": serialization_wait, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
+        reserve = (
+            deps.encode_reserve_preflight(config, reserve_items, host=host_payload)
+            if _encode_items_support_reserve(reserve_items)
+            else None
+        )
+        if reserve is not None and not reserve.allowed:
+            waiting_reason = str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+            if str(job.get("waiting_reason") or "") != waiting_reason:
+                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
         estimate = (
             estimate_for_host(host_payload)
             if estimate_items and not bool(job.get("bypass_schedule"))
@@ -2361,6 +2474,36 @@ def load_next_runnable_encode_job(
             )
         )
     for _score, job, host_payload, estimate in sorted(best_fit_candidates, key=lambda candidate: candidate[0]):
+        reserve_items = _encode_reserve_items(
+            connection,
+            config,
+            _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
+        )
+        serialization_wait = _large_job_serialization_waiting_reason(
+            connection,
+            config,
+            job,
+            reserve_items,
+            manifest_items_cache=manifest_items_cache,
+        )
+        reserve = (
+            deps.encode_reserve_preflight(config, reserve_items, host=host_payload)
+            if _encode_items_support_reserve(reserve_items)
+            else None
+        )
+        waiting_reason = (
+            serialization_wait or (
+                str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+                if reserve is not None and not reserve.allowed
+                else None
+            )
+        )
+        if waiting_reason is not None:
+            if str(job.get("waiting_reason") or "") != waiting_reason:
+                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
         selected_job = prepare_selected_job(job, host_payload, estimate)
         if selected_job is not None:
             sync_deferred_parents()

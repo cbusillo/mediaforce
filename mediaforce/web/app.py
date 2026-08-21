@@ -96,6 +96,7 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
     DEFAULT_HOST_CAPABILITIES,
@@ -3662,6 +3663,7 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
         encode_manifest_items=encode_manifest_items,
         dispatch_encode_job=_dispatch_encode_job,
         active_encode_process_controllers=_active_encode_process_controllers,
+        encode_reserve_preflight=encode_reserve_preflight,
         logger=LOGGER,
         encode_queue_poll_seconds=ENCODE_QUEUE_POLL_SECONDS,
         encode_job_lease_seconds=ENCODE_JOB_LEASE_SECONDS,

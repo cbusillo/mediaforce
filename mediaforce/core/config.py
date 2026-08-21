@@ -63,6 +63,11 @@ def _default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = _default_config_path()
 FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
 BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
+_FREE_SPACE_RESERVE_DEFAULTS = {
+    "operating_headroom_gib": 16,
+    "staged_output_overhead_percent": 10,
+    "large_job_gib": 16,
+}
 
 _LEGACY_SQLITE_INTENT_SCHEMA = "mediaforce.legacy_sqlite_migration_intent"
 _LEGACY_SQLITE_INTENT_VERSION = 5
@@ -254,6 +259,10 @@ class MediaforceConfig:
         return self.archive_root
 
     @property
+    def free_space_reserve(self) -> dict[str, Any]:
+        return self.media["free_space_reserve"]
+
+    @property
     def output_container(self) -> str:
         return str(self.media["output_container"])
 
@@ -348,6 +357,14 @@ def _positive_number(value: Any) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def _nonnegative_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _same_number(left: float | None, right: float | None) -> bool:
     return left is not None and right is not None and abs(left - right) <= 0.001
 
@@ -369,6 +386,7 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
     runtime_settings = load_runtime_settings(runtime_settings_path)
     raw = _merge_runtime_settings(raw, runtime_settings)
     _merge_local_folder_policy_overrides(raw, runtime_settings)
+    _validate_free_space_reserve(raw)
 
     state = raw["state"]
     web_state_dir = _resolve_path(project_root, state.get("web_state_dir", "state/web"))
@@ -389,6 +407,27 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
         runtime_reservation_dir=runtime_reservation_dir,
     )
     return MediaforceConfig(raw=raw, paths=paths)
+
+
+def _validate_free_space_reserve(raw: dict[str, Any]) -> None:
+    media = raw.get("media")
+    if not isinstance(media, dict):
+        raise ValueError("Config [media] must be a table")
+    reserve = media.get("free_space_reserve")
+    if reserve is None:
+        reserve = dict(_FREE_SPACE_RESERVE_DEFAULTS)
+        media["free_space_reserve"] = reserve
+    if not isinstance(reserve, dict):
+        raise ValueError("Config [media.free_space_reserve] must be a table")
+    for key in ("operating_headroom_gib", "large_job_gib"):
+        value = _positive_number(reserve.get(key))
+        if value is None:
+            raise ValueError(f"Config media.free_space_reserve.{key} must be greater than zero")
+    overhead = _nonnegative_number(reserve.get("staged_output_overhead_percent"))
+    if overhead is None:
+        raise ValueError(
+            "Config media.free_space_reserve.staged_output_overhead_percent must be zero or greater"
+        )
 
 
 def migrate_config_state(config: MediaforceConfig) -> None:

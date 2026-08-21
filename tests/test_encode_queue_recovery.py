@@ -18228,7 +18228,7 @@ raise SystemExit(0)
             self.assertEqual(deps.host_runtime_rows.call_args.args, (connection, self.config))
             self.assertIn("now", deps.host_runtime_rows.call_args.kwargs)
             self.assertEqual(sync_parent.call_count, 1)
-            self.assertEqual(len(manifest_reads), 1)
+            self.assertEqual(len(manifest_reads), 2)
 
     def test_encode_estimate_manifest_cache_reuses_unchanged_manifest(self) -> None:
         manifest_path = self._write_manifest(

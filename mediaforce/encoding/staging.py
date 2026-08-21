@@ -22,6 +22,7 @@ from mediaforce.core.type_defs import int_value
 from mediaforce.core.type_defs import object_dict
 from mediaforce.core.type_defs import object_list
 from mediaforce.core.utils import content_version_fingerprint
+from mediaforce.encoding.free_space import ReservePreflight, promotion_reserve_preflight
 from mediaforce.library.media_scopes import logical_library_rel_path
 from mediaforce.tuning.compression_intent import compression_intent_from_item
 
@@ -463,6 +464,7 @@ def promote_one_item(
         file_fingerprint: Callable[[Path, Any, float | None], str],
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
+        reserve_preflight: Callable[..., ReservePreflight] = promotion_reserve_preflight,
 ) -> Path:
     stage_row = connection.execute(
         select(staged_artifacts).where(staged_artifacts.c.library_item_id == item["library_item_id"])
@@ -477,11 +479,23 @@ def promote_one_item(
     staging_path = Path(stage_row["staging_path"])
     destination_path = source_path.with_suffix(f".{config.output_container}")
     archive_path = config.archive_root / Path(item["rel_path"])
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     if destination_path.exists() and destination_path != source_path:
         raise FileExistsError(f"Destination already exists: {destination_path}")
+
+    reserve = reserve_preflight(
+        config,
+        item,
+        source_path=source_path,
+        staging_path=staging_path,
+        destination_path=destination_path,
+        archive_path=archive_path,
+    )
+    if not reserve.allowed:
+        raise RuntimeError(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
 
     archive_backup_path: Path | None = None
     source_archived = False

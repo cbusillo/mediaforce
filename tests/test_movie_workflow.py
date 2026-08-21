@@ -13,6 +13,7 @@ from mediaforce.cli import main as cli_main
 from mediaforce.core.config import ConfigPaths, MediaforceConfig, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
+from mediaforce.encoding.free_space import ReservePreflight
 from mediaforce.library.candidate_selection import candidate_rank_key, project_candidates, workflow_eligibility
 from mediaforce.library.media_scopes import ScopeDomain, media_group_scope_for_rel_path, resolve_media_scope
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
@@ -831,6 +832,7 @@ class MovieWorkflowTests(unittest.TestCase):
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
                 prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None,
                 save_encode_job=lambda *_args: queued.append(_args[-1]),
+                reserve_preflight=lambda *_args: ReservePreflight(True, None, {}),
             )
 
         self.assertTrue(result["ok"])
