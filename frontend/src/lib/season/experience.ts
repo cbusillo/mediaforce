@@ -704,6 +704,11 @@ export function episodeLabel(path: string | null | undefined): string {
 	return fileName?.trim() || 'A representative episode';
 }
 
+export function exactItemFilename(folder: FolderPayload): string {
+	const prefix = folder.media_scope?.prefix || folder.prefix;
+	return prefix.split('/').filter(Boolean).at(-1) ?? prefix;
+}
+
 export function folderHref(prefix: string): `/folders/${string}` {
 	return `/folders/${prefix
 		.split('/')
