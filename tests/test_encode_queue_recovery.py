@@ -422,6 +422,114 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert item_status_row is not None
         self.assertEqual(item_status_row["status"], "planned")
 
+    def test_retry_backoff_terminalizes_missing_manifest(self) -> None:
+        manifest_path = self.root / "runs" / "manifest-missing.json"
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-missing-manifest",
+                manifest_name=manifest_path.name,
+                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            self.assertFalse(manifest_path.exists())
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-missing-manifest")
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "manifest_unreadable")
+        self.assertEqual(job["last_failure_kind"], "manifest_unreadable")
+        self.assertIn("create a fresh manifest", str(job["error"]))
+        self.assertIsNone(job["retry_not_before"])
+        self.assertIsNone(job["waiting_reason"])
+
+    def test_retry_backoff_terminalizes_corrupt_manifest(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            manifest_path = self._write_manifest("manifest-corrupt.json", [])
+            manifest_path.write_text("{not valid json")
+            self._save_job(
+                connection,
+                job_id="job-corrupt-manifest",
+                manifest_name=manifest_path.name,
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-corrupt-manifest")
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "manifest_unreadable")
+        self.assertEqual(job["last_failure_kind"], "manifest_unreadable")
+        self.assertIsNone(job["retry_not_before"])
+        self.assertIsNone(job["waiting_reason"])
+
+    def test_retry_backoff_preserves_transient_remote_cleanup_failure(self) -> None:
+        source_path = self._create_source_file("episode-remote-cleanup.mkv")
+        staging_path = self.root / "remote-staging" / "tv" / "show" / "episode-remote-cleanup.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_host_key="remote",
+                    encode_host_mode="ssh",
+                    encode_media_access="mounted",
+                )
+            )
+            manifest_path = self._write_manifest(
+                "manifest-remote-cleanup.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-remote-cleanup",
+                manifest_name=manifest_path.name,
+                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            with patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                side_effect=OSError("remote unavailable"),
+            ), patch(
+                "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
+                return_value=0,
+            ):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-remote-cleanup")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertIsNotNone(job["retry_not_before"])
+        self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
+        self.assertIsNone(job["terminal_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
     def test_recover_encode_queue_sweeps_processes_for_interrupted_prefixes(self) -> None:
         source_path = self._create_source_file("episode-restart-sweep.mkv")
         staging_path = self._staging_path("episode-restart-sweep.mkv")

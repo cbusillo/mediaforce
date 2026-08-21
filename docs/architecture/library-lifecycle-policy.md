@@ -11,6 +11,9 @@ ranking, and queue execution so each layer remains explainable and recoverable.
 - Existing queued work remains FIFO; lifecycle policy does not reorder jobs.
 - A run manifest freezes selected membership and per-item decision provenance.
 - Retry and recovery reuse manifest membership instead of selecting again.
+- Retry recovery sends missing, unreadable, or invalid manifests to operator
+  attention instead of leaving the job in `retry_backoff`; only transient
+  artifact cleanup failures wait for another backoff interval.
 - Specials and Season 0 never identify a series' current season.
 - Provider failures preserve the last successful metadata.
 
