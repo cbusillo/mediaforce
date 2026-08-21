@@ -572,6 +572,14 @@ restart expectation, while an explicit bypass is labeled `Bypassing schedule`
 and a job that cannot fit any configured window links to the work-window
 settings that need attention.
 
+Transient SSH transport failures, including a remote host reboot or an OpenSSH
+`closed by remote host` disconnect, enter bounded retry backoff instead of
+requiring a new encode request. Mediaforce preserves unverified remote artifacts
+while the host is unreachable, removes the interrupted partial output once the
+host is available again, and then requeues the same episode from the beginning.
+It does not resume a partial media stream or promote interrupted output.
+Deterministic encode and policy failures continue to stop for operator review.
+
 For a blank remote Mac, first turn on Remote Login so SSH answers. Once that is
 reachable, the runtime settings UI can finish setup from the web surface: if
 the host only needs first-time trust, enter the remote account password once so

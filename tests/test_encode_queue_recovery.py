@@ -2212,6 +2212,100 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
 
+    def test_remote_host_reboot_cleans_partial_and_enters_retry_backoff(self) -> None:
+        source_path = self._create_source_file("episode-host-reboot.mkv")
+        staging_path = self._staging_path("episode-host-reboot.mkv")
+        partial_path = staging_path.with_name(f"{staging_path.stem}.partial{staging_path.suffix}")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        partial_path.write_text("partial")
+
+        unavailable = OSError("remote unavailable")
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.encode_runtime.run_remote_command",
+            side_effect=unavailable,
+        ):
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-host-reboot.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-host-reboot",
+                manifest_name="manifest-host-reboot.json",
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+            )
+
+            job = load_encode_job(connection, "job-host-reboot")
+            assert job is not None
+            error_message = "Connection to remote-a closed by remote host."
+            failure_kind = encode_runtime._classify_encode_failure(RuntimeError(error_message), job)
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind=failure_kind,
+                error_message=error_message,
+            )
+
+            updated = load_encode_job(connection, "job-host-reboot")
+            item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+
+            assert updated is not None
+            updated["retry_not_before"] = "2000-01-01T00:00:00+00:00"
+            save_encode_job(connection, updated)
+
+        self.assertEqual(failure_kind, "ssh_transport")
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertEqual(updated["last_failure_kind"], "ssh_transport")
+        self.assertIn("SSH transport failure", str(updated["waiting_reason"]))
+        self.assertIsNotNone(updated["retry_not_before"])
+        self.assertIsNotNone(updated["host_cooldown_until"])
+        self.assertFalse(partial_path.exists())
+        assert item_status_row is not None
+        self.assertEqual(item_status_row["status"], "encoding")
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.encode_runtime.run_remote_command",
+            side_effect=unavailable,
+        ):
+            web_app._reconcile_encode_jobs(connection, self.config)
+            still_waiting = load_encode_job(connection, "job-host-reboot")
+            still_waiting_item_status = self._library_item_value(connection, item_id, library_items.c.status)
+
+        self.assertIsNotNone(still_waiting)
+        assert still_waiting is not None
+        self.assertEqual(still_waiting["status"], "retry_backoff")
+        self.assertIn("waiting to clean interrupted output", str(still_waiting["waiting_reason"]))
+        self.assertIsNotNone(still_waiting["retry_not_before"])
+        assert still_waiting_item_status is not None
+        self.assertEqual(still_waiting_item_status["status"], "planned")
+
+        with open_db(self.config.paths.db_path) as connection:
+            still_waiting["retry_not_before"] = "2000-01-01T00:00:00+00:00"
+            save_encode_job(connection, still_waiting)
+
+        cleanup_result = subprocess.CompletedProcess(["ssh", "remote-a"], 0, "", "")
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.runtime.encode_runtime.run_remote_command",
+            return_value=cleanup_result,
+        ):
+            web_app._reconcile_encode_jobs(connection, self.config)
+            recovered = load_encode_job(connection, "job-host-reboot")
+            recovered_item_status = self._library_item_value(connection, item_id, library_items.c.status)
+
+        self.assertIsNotNone(recovered)
+        assert recovered is not None
+        self.assertEqual(recovered["status"], "queued")
+        self.assertIsNone(recovered["retry_not_before"])
+        self.assertIsNone(recovered["waiting_reason"])
+        assert recovered_item_status is not None
+        self.assertEqual(recovered_item_status["status"], "planned")
+
     def test_controller_mount_timeout_is_not_classified_as_ssh_transport(self) -> None:
         job = {
             "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
