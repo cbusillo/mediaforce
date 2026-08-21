@@ -141,9 +141,36 @@ function reviewReadySampleLabel(sample: ReviewReadySample): string {
 		const series = String(segments[1] ?? '').replace(/\s*\(\d{4}\)\s*$/, '');
 		const episodeMatch = sample.prefix.match(/S\d{1,3}E(\d{1,3})/i);
 		const episode = episodeMatch ? `Episode ${Number.parseInt(episodeMatch[1], 10)}` : '';
-		return [series, scope.parent?.title ?? segments[2], episode].filter(Boolean).join(' · ');
+		const parts = [series, scope.parent?.title ?? segments[2], episode]
+			.map(compactText)
+			.filter(Boolean);
+		return parts
+			.filter(
+				(part, index) =>
+					parts.findIndex(
+						(candidate) =>
+							candidate.replace(/\s*\(\d{4}\)\s*$/, '').toLowerCase() ===
+							part.replace(/\s*\(\d{4}\)\s*$/, '').toLowerCase()
+					) === index
+			)
+			.join(' · ');
 	}
 	return compactText(scope?.title) || opsWorkLabel(sample.prefix);
+}
+
+function encodeAttentionJobs(
+	queue: DashboardSummaryPayload['encode_queue'] | null | undefined
+): EncodeQueueJob[] {
+	const recentTerminalJobs = (queue?.recent ?? []).filter((job) =>
+		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
+	);
+	const seenJobs = new Set<string>();
+	return [...(queue?.needs_attention ?? []), ...recentTerminalJobs].filter((job) => {
+		const key = compactText(job.job_id) || `${compactText(job.prefix)}:${String(job.status ?? '')}`;
+		if (seenJobs.has(key)) return false;
+		seenJobs.add(key);
+		return true;
+	});
 }
 
 function encodeWorkLabel(jobs: EncodeQueueJob[], totalCount = jobs.length): string {
@@ -626,12 +653,8 @@ export function buildOpsBlockers(
 ): OpsBlocker[] {
 	const blockers: OpsBlocker[] = [];
 	const queue = dashboard?.encode_queue;
-	const attentionCount = queue?.needs_attention_count ?? 0;
-	const attentionJobs =
-		queue?.needs_attention ??
-		(queue?.recent ?? []).filter((job) =>
-			['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
-		);
+	const attentionJobs = encodeAttentionJobs(queue);
+	const attentionCount = Math.max(queue?.needs_attention_count ?? 0, attentionJobs.length);
 	const impossibleWindowJobs = (queue?.queued ?? []).filter(
 		(job) => job.schedule_state === 'draining_impossible'
 	);
@@ -773,12 +796,10 @@ export function buildOpsReadinessSummary(
 	const runningCount = queue?.running_count ?? 0;
 	const queuedCount = queue?.queued_count ?? 0;
 	const queuedWaiting = queue?.queued_waiting_count ?? 0;
-	const needsAttention = queue?.needs_attention_count ?? 0;
 	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
 	const activeJobs = [...(queue?.running ?? []), ...(queue?.queued ?? [])];
-	const attentionJobs = (queue?.recent ?? []).filter((job) =>
-		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
-	);
+	const attentionJobs = encodeAttentionJobs(queue);
+	const needsAttention = Math.max(queue?.needs_attention_count ?? 0, attentionJobs.length);
 	const reviewReadySamples = calibration?.review_ready ?? [];
 	const reviewReadyCount = reviewReadySamples.length;
 	const activeChecks = calibration?.active_count ?? 0;
@@ -1046,7 +1067,7 @@ export function buildOpsFooterSignals(
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
 	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
-	const attentionCount = (encode?.needs_attention_count ?? 0) + reviewReadyCount;
+	const attentionCount = encodeAttentionJobs(encode).length + reviewReadyCount;
 	return [
 		{
 			label: 'Processing',

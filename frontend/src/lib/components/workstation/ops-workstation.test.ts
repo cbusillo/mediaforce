@@ -356,6 +356,35 @@ describe('Ops workstation mapping', () => {
 		});
 	});
 
+	it('keeps terminal recent jobs visible when the explicit attention list is empty', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.needs_attention = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'stopped-encode',
+				prefix: 'tv/Futurama/Season 8',
+				media_scope: {
+					...mediaScope('tv/Futurama/Season 8', 'tv', 'tv_season'),
+					title: 'Futurama · Season 8'
+				},
+				status: 'stopped',
+				error: 'Processing was stopped before completion.'
+			}
+		];
+
+		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0]).toMatchObject({
+			key: 'needs-attention:stopped-encode',
+			title: 'Futurama · Season 8 needs review',
+			href: '/folders/tv/Futurama/Season%208',
+			linkLabel: 'Review item'
+		});
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
+			tone: 'active',
+			detail: expect.stringContaining('A season needs attention')
+		});
+	});
+
 	it('surfaces review-ready samples before stopped processing work', () => {
 		const dashboard = dashboardFixture();
 		dashboard.calibration_queue.review_ready = [
@@ -403,6 +432,32 @@ describe('Ops workstation mapping', () => {
 			detail: '1 waiting for review',
 			tone: 'ready'
 		});
+	});
+
+	it('does not repeat the series name when an exact TV item has no season folder', () => {
+		const dashboard = dashboardFixture();
+		dashboard.calibration_queue.review_ready = [
+			{
+				job_id: 'sample-review-flat-tv',
+				prefix: 'tv/Bluey (2018)/Bluey.2018.S03E49.1080p.mkv',
+				media_scope: {
+					...mediaScope(
+						'tv/Bluey (2018)/Bluey.2018.S03E49.1080p.mkv',
+						'tv',
+						'media_file',
+						'exact_item'
+					),
+					parent: {
+						prefix: 'tv/Bluey (2018)',
+						title: 'Bluey (2018)'
+					}
+				}
+			}
+		];
+
+		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].title).toBe(
+			'Bluey · Episode 49 is ready for your review'
+		);
 	});
 
 	it('hides target-band internals from the attention summary', () => {
