@@ -35,6 +35,7 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
+from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import partial_output_path, safe_unlink
@@ -54,7 +55,26 @@ from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 class _EncodeRetryArtifactCleanupOutcome(StrEnum):
     CLEANED = "cleaned"
     CLEANUP_DEFERRED = "cleanup_deferred"
+    CLEANUP_FAILED = "cleanup_failed"
     MANIFEST_UNREADABLE = "manifest_unreadable"
+
+
+class _StagingPathCleanupOutcome(StrEnum):
+    CLEANED = "cleaned"
+    CLEANUP_DEFERRED = "cleanup_deferred"
+    CLEANUP_FAILED = "cleanup_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class _StagingPathCleanupResult:
+    outcome: _StagingPathCleanupOutcome
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodeRetryArtifactCleanupResult:
+    outcome: _EncodeRetryArtifactCleanupOutcome
+    detail: str | None = None
 
 
 @dataclass(slots=True)
@@ -72,6 +92,7 @@ class EncodeQueueRuntimeDeps:
     encode_manifest_items: Any
     dispatch_encode_job: Any
     active_encode_process_controllers: Any
+    encode_reserve_preflight: Any
     logger: Any
     encode_queue_poll_seconds: float
     encode_job_lease_seconds: int
@@ -173,8 +194,10 @@ def reconcile_encode_jobs(
                 deps=deps,
             )
         else:
-            cleanup_outcome = _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
-        if cleanup_outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE:
+            cleanup_outcome = _EncodeRetryArtifactCleanupResult(
+                _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE,
+            )
+        if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE:
             transition_encode_job_failure(
                 connection,
                 config,
@@ -187,7 +210,7 @@ def reconcile_encode_jobs(
                 ),
             )
             continue
-        if cleanup_outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
+        if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
             retry_delay = _encode_job_retry_delay_seconds(
                 min(int_value(payload.get("attempt_count")), deps.encode_job_max_attempts),
                 deps,
@@ -202,6 +225,19 @@ def reconcile_encode_jobs(
             )
             save_encode_job(connection, payload)
             sync_encode_job_parent(connection, payload, deps)
+            continue
+        if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED:
+            transition_encode_job_failure(
+                connection,
+                config,
+                payload,
+                deps,
+                failure_kind="deterministic",
+                error_message=_encode_retry_artifact_cleanup_error_message(
+                    payload,
+                    cleanup_outcome.detail,
+                ),
+            )
             continue
         payload.update(
             {
@@ -260,6 +296,7 @@ def clear_stale_encoding_items_when_idle(
             staged_artifacts.c.promoted_at,
             staged_artifacts.c.encode_completed_at,
             staged_artifacts.c.staging_fingerprint,
+            staged_artifacts.c.encode_job_id,
             staged_artifacts.c.encode_host_key,
             staged_artifacts.c.encode_host_label,
         )
@@ -280,6 +317,13 @@ def clear_stale_encoding_items_when_idle(
         item_id = int(row["id"])
         if _active_standalone_cli_encode(connection, item_id):
             continue
+        encode_job_id = str(row["encode_job_id"] or "").strip()
+        if encode_job_id:
+            encode_job_status = connection.execute(
+                select(encode_jobs.c.status).where(encode_jobs.c.job_id == encode_job_id)
+            ).scalar_one_or_none()
+            if str(encode_job_status or "") in {"queued", "retry_backoff", "running", "needs_attention"}:
+                continue
         if row["promoted_at"] is not None or _staged_output_is_complete(row):
             if (
                     str(row["status"] or "") == "encoding"
@@ -296,14 +340,16 @@ def clear_stale_encoding_items_when_idle(
             continue
         cleanup_succeeded = True
         for staging_path, host in _candidate_stale_staging_targets(config, row):
-            cleanup_succeeded = _remove_stale_staging_path(staging_path, host=host) and cleanup_succeeded
-            cleanup_succeeded = _remove_stale_staging_path(
+            cleanup_result = _remove_stale_staging_path(staging_path, host=host)
+            cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
+            cleanup_result = _remove_stale_staging_path(
                 partial_output_path(staging_path),
                 host=host,
-            ) and cleanup_succeeded
+            )
+            cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
         if not cleanup_succeeded:
             deps.logger.warning(
-                "Preserving stale staged artifact for item %s because its encoded host is unreachable.",
+                "Preserving stale staged artifact for item %s because cleanup could not reach the target.",
                 item_id,
             )
             continue
@@ -385,7 +431,7 @@ def _remove_stale_staging_path(
         *,
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
-) -> bool:
+) -> _StagingPathCleanupResult:
     host_payload = object_dict(host)
     remote_mounted_host = (
         bool(host_payload)
@@ -395,14 +441,14 @@ def _remove_stale_staging_path(
     if remote_mounted_host and prefer_remote:
         return _remove_remote_stale_staging_path(path, host_payload)
     if path.exists():
-        _remove_path(path)
+        result = _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
-        return not path.exists()
+        return result
     if remote_mounted_host:
         return _remove_remote_stale_staging_path(path, host_payload)
-    _remove_path(path)
+    result = _remove_path(path)
     _prune_empty_quality_temp_dir(path.parent)
-    return not path.exists()
+    return result
 
 
 def remove_stale_staging_path(
@@ -411,7 +457,10 @@ def remove_stale_staging_path(
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
 ) -> bool:
-    return _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote)
+    return (
+        _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote).outcome
+        is _StagingPathCleanupOutcome.CLEANED
+    )
 
 
 def _prune_empty_quality_temp_dir(path: Path) -> None:
@@ -422,7 +471,7 @@ def _prune_empty_quality_temp_dir(path: Path) -> None:
             return
 
 
-def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> bool:
+def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> _StagingPathCleanupResult:
     quoted_path = shlex.quote(str(path))
     script = f"rm -f {quoted_path}"
     if path.parent.name.startswith(".mediaforce-ab-av1-") or path.parent.name.startswith(".ab-av1-"):
@@ -434,9 +483,23 @@ def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> bool:
         )
     try:
         result = run_remote_command(host, ["sh", "-lc", script], timeout=10)
-    except Exception:
-        return False
-    return result.returncode == 0
+    except Exception as exc:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail=f"{path}: {exc}",
+        )
+    if result.returncode == 0:
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
+    detail = (result.stderr or result.stdout or f"remote cleanup exited with status {result.returncode}").strip()
+    if result.returncode == 255:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail=f"{path}: {detail}",
+        )
+    return _StagingPathCleanupResult(
+        _StagingPathCleanupOutcome.CLEANUP_FAILED,
+        detail=f"{path}: {detail}",
+    )
 
 
 def running_encode_job_count(connection: DBClient) -> int:
@@ -1801,6 +1864,125 @@ def _encode_job_estimate_items(
     ]
 
 
+def _encode_reserve_items(
+        connection: DBClient,
+        config: MediaforceConfig,
+        items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    item_ids = {
+        int_value(item.get("library_item_id"))
+        for item in items
+        if int_value(item.get("library_item_id")) > 0
+    }
+    rows_by_id: dict[int, Mapping[str, Any]] = {}
+    if item_ids:
+        rows = connection.execute(
+            select(
+                library_items.c.id,
+                library_items.c.source_path,
+                library_items.c.rel_path,
+                library_items.c.media_root,
+                library_items.c.size_bytes,
+            ).where(library_items.c.id.in_(item_ids))
+        ).mappings().fetchall()
+        rows_by_id = {int(row["id"]): row for row in rows}
+
+    enriched_items: list[dict[str, Any]] = []
+    for item in items:
+        payload = dict(item)
+        row = rows_by_id.get(int_value(item.get("library_item_id")))
+        if row is not None:
+            for key in ("source_path", "rel_path", "media_root", "size_bytes"):
+                if not payload.get(key) and row[key] is not None:
+                    payload[key] = row[key]
+        enriched_items.append(payload)
+    return enriched_items
+
+
+@dataclass(frozen=True, slots=True)
+class _RunningEncodeReserveState:
+    has_running_work: bool
+    has_large_or_unmeasurable_work: bool
+    reserve_unmeasurable: bool
+    reserved_by_volume: dict[str, int]
+
+
+def _running_encode_reserve_state(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        manifest_items_cache: dict[Path, list[dict[str, Any]] | None],
+        reserve_preflight: Any,
+        capacity_cache: CapacityCache,
+) -> _RunningEncodeReserveState:
+    running_rows = connection.execute(
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
+    ).mappings().fetchall()
+    if not running_rows:
+        return _RunningEncodeReserveState(False, False, False, {})
+    has_large_or_unmeasurable_work = False
+    reserve_unmeasurable = False
+    reserved_by_volume: dict[str, int] = {}
+    for row in running_rows:
+        running_job = load_encode_job(connection, str(row["job_id"]))
+        if running_job is None:
+            reserve_unmeasurable = True
+            has_large_or_unmeasurable_work = True
+            continue
+        running_items = _encode_reserve_items(
+            connection,
+            config,
+            _encode_job_estimate_items(running_job, manifest_items_cache=manifest_items_cache),
+        )
+        try:
+            if not running_items or large_job_requires_serialization(config, running_items):
+                has_large_or_unmeasurable_work = True
+        except (OSError, ValueError):
+            has_large_or_unmeasurable_work = True
+        running_reserve = reserve_preflight(
+            config,
+            running_items,
+            host=object_dict(running_job.get("host")),
+            capacity_cache=capacity_cache,
+        )
+        requirements = getattr(running_reserve, "required_by_volume", {})
+        if isinstance(requirements, dict):
+            for volume_key, required_bytes in requirements.items():
+                reserved_by_volume[str(volume_key)] = (
+                    reserved_by_volume.get(str(volume_key), 0) + max(int_value(required_bytes), 0)
+                )
+        if not bool(getattr(running_reserve, "measurable", True)):
+            reserve_unmeasurable = True
+            has_large_or_unmeasurable_work = True
+    return _RunningEncodeReserveState(
+        True,
+        has_large_or_unmeasurable_work,
+        reserve_unmeasurable,
+        reserved_by_volume,
+    )
+
+
+def _large_job_serialization_waiting_reason(
+        config: MediaforceConfig,
+        candidate_items: list[dict[str, Any]],
+        running_state: _RunningEncodeReserveState,
+) -> str | None:
+    if not running_state.has_running_work:
+        return None
+    try:
+        candidate_is_large = large_job_requires_serialization(config, candidate_items)
+    except (OSError, ValueError) as exc:
+        return (
+            "Waiting for complete free-space reserve inputs. Rebuild the production plan or rescan "
+            f"the library, then retry. ({exc})"
+        )
+    if candidate_is_large or running_state.has_large_or_unmeasurable_work:
+        return "Waiting for the active large encode job to release its free-space reserve."
+    return None
+
+
 @lru_cache(maxsize=256)
 def _cached_encode_estimate_manifest_items(
         manifest_path: str,
@@ -2007,6 +2189,7 @@ def encode_queue_worker_loop(
 def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
     config = deps.load_config(config_path)
     claimed_jobs: list[dict[str, Any]] = []
+    capacity_cache: CapacityCache = {}
     with open_db(config.paths.db_path) as connection:
         ensure_queue_state(connection, updated_at=deps.now_iso())
         connection.commit()
@@ -2022,7 +2205,12 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
         if state.get("is_paused"):
             return
         while True:
-            next_job = claim_next_runnable_encode_job(connection, config, deps)
+            next_job = claim_next_runnable_encode_job(
+                connection,
+                config,
+                deps,
+                capacity_cache=capacity_cache,
+            )
             if next_job is None:
                 break
             claimed_jobs.append(next_job)
@@ -2031,15 +2219,46 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
             save_queue_state(connection, state)
 
     for job in claimed_jobs:
-        deps.dispatch_encode_job(config_path=config_path, job_id=str(job["job_id"]))
+        try:
+            deps.dispatch_encode_job(config_path=config_path, job_id=str(job["job_id"]))
+        except Exception as exc:
+            deps.logger.exception("Encode job dispatch failed for %s", job["job_id"])
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    failed_job = load_encode_job(connection, str(job["job_id"]))
+                    if failed_job is None:
+                        continue
+                    error_message = f"Encode dispatch failed: {exc}"
+                    failure_kind = (
+                        "ssh_transport"
+                        if _encode_failure_is_ssh_transport(error_message, object_dict(failed_job.get("host")))
+                        else "host_unavailable"
+                    )
+                    transition_encode_job_failure(
+                        connection,
+                        config,
+                        failed_job,
+                        deps,
+                        failure_kind=failure_kind,
+                        error_message=error_message,
+                    )
+            except Exception:
+                deps.logger.exception("Encode dispatch failure recovery failed for %s", job["job_id"])
 
 
 def claim_next_runnable_encode_job(
         connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
+        *,
+        capacity_cache: CapacityCache | None = None,
 ) -> dict[str, Any] | None:
-    next_job = load_next_runnable_encode_job(connection, config, deps)
+    next_job = load_next_runnable_encode_job(
+        connection,
+        config,
+        deps,
+        capacity_cache=capacity_cache,
+    )
     if next_job is None:
         return None
     worker_id = _encode_job_worker_id()
@@ -2089,6 +2308,8 @@ def load_next_runnable_encode_job(
         connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
+        *,
+        capacity_cache: CapacityCache | None = None,
 ) -> dict[str, Any] | None:
     parent_sync_jobs: dict[str, dict[str, Any]] = {}
 
@@ -2118,6 +2339,14 @@ def load_next_runnable_encode_job(
     duration_samples = load_encode_duration_samples(connection) if duration_estimation_relevant else ()
     globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now) if rows else {}
     manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
+    shared_capacity_cache = capacity_cache if capacity_cache is not None else {}
+    running_reserve_state = _running_encode_reserve_state(
+        connection,
+        config,
+        manifest_items_cache=manifest_items_cache,
+        reserve_preflight=deps.encode_reserve_preflight,
+        capacity_cache=shared_capacity_cache,
+    )
     host_selection_cache: dict[
         tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None],
         tuple[dict[str, Any] | None, str | None],
@@ -2164,6 +2393,30 @@ def load_next_runnable_encode_job(
             save_encode_job(connection, job)
             defer_parent_sync(job)
         return job
+
+    def reserve_waiting_reason(
+            reserve_items: list[dict[str, Any]],
+            host_payload: dict[str, Any],
+    ) -> str | None:
+        if running_reserve_state.reserve_unmeasurable:
+            return (
+                "Waiting for the active encode work's free-space reserve to become measurable. "
+                "Mount or repair its storage, then retry."
+            )
+        reserve = deps.encode_reserve_preflight(
+            config,
+            reserve_items,
+            host=host_payload,
+            capacity_cache=shared_capacity_cache,
+            reserved_by_volume=running_reserve_state.reserved_by_volume,
+        )
+        if not reserve.allowed:
+            return str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+        return _large_job_serialization_waiting_reason(
+            config,
+            reserve_items,
+            running_reserve_state,
+        )
 
     for queue_position, row in enumerate(rows):
         job = load_encode_job(connection, str(row["job_id"]))
@@ -2275,6 +2528,18 @@ def load_next_runnable_encode_job(
                 save_encode_job(connection, job)
                 defer_parent_sync(job)
             continue
+        reserve_items = _encode_reserve_items(
+            connection,
+            config,
+            _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
+        )
+        waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
+        if waiting_reason is not None:
+            if str(job.get("waiting_reason") or "") != waiting_reason:
+                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
         estimate = (
             estimate_for_host(host_payload)
             if estimate_items and not bool(job.get("bypass_schedule"))
@@ -2300,6 +2565,18 @@ def load_next_runnable_encode_job(
             )
         )
     for _score, job, host_payload, estimate in sorted(best_fit_candidates, key=lambda candidate: candidate[0]):
+        reserve_items = _encode_reserve_items(
+            connection,
+            config,
+            _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
+        )
+        waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
+        if waiting_reason is not None:
+            if str(job.get("waiting_reason") or "") != waiting_reason:
+                job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
+                save_encode_job(connection, job)
+                defer_parent_sync(job)
+            continue
         selected_job = prepare_selected_job(job, host_payload, estimate)
         if selected_job is not None:
             sync_deferred_parents()
@@ -2781,11 +3058,11 @@ def _cleanup_encode_retry_artifacts(
         host: dict[str, Any] | None = None,
         commit_between_items: bool = True,
         deps: EncodeQueueRuntimeDeps,
-) -> _EncodeRetryArtifactCleanupOutcome:
+) -> _EncodeRetryArtifactCleanupResult:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
+        return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE)
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -2824,7 +3101,7 @@ def _cleanup_encode_retry_artifacts(
                 and _staged_output_is_complete({**dict(stage_row), "status": library_status})
             )
         )
-        partial_cleanup_succeeded = True
+        partial_cleanup_deferred = False
         partial_paths = {
             partial_output_path(Path(str(value)))
             for value in (staging_value, manifest_staging_value)
@@ -2832,30 +3109,44 @@ def _cleanup_encode_retry_artifacts(
         }
         if not promoted:
             for partial_path in partial_paths:
-                partial_cleanup_succeeded = _remove_stale_staging_path(
+                partial_cleanup_result = _remove_stale_staging_path(
                     partial_path,
                     host=host,
                     prefer_remote=False,
-                ) and partial_cleanup_succeeded
-            if not partial_cleanup_succeeded:
+                )
+                if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_FAILED:
+                    return _EncodeRetryArtifactCleanupResult(
+                        _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED,
+                        detail=partial_cleanup_result.detail,
+                    )
+                if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
+                    partial_cleanup_deferred = True
+            if partial_cleanup_deferred:
                 cleanup_succeeded_for_all = False
                 deps.logger.warning(
-                    "Preserving partial staged artifact for item %s because its encoded host is unreachable.",
+                    "Preserving partial staged artifact for item %s because cleanup could not reach the target.",
                     library_item_id,
                 )
         if library_item_id is None or promoted or complete:
             continue
-        cleanup_succeeded = partial_cleanup_succeeded
+        cleanup_succeeded = not partial_cleanup_deferred
         if staging_path is not None:
-            cleanup_succeeded = _remove_stale_staging_path(
+            cleanup_result = _remove_stale_staging_path(
                 staging_path,
                 host=host,
                 prefer_remote=False,
             )
+            if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_FAILED:
+                return _EncodeRetryArtifactCleanupResult(
+                    _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED,
+                    detail=cleanup_result.detail,
+                )
+            if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
+                cleanup_succeeded = False
         if not cleanup_succeeded:
             cleanup_succeeded_for_all = False
             deps.logger.warning(
-                "Preserving staged artifact for item %s because its encoded host is unreachable.",
+                "Preserving staged artifact for item %s because cleanup could not reach the target.",
                 library_item_id,
             )
             continue
@@ -2871,10 +3162,25 @@ def _cleanup_encode_retry_artifacts(
         if commit_between_items:
             connection.commit()
     return (
-        _EncodeRetryArtifactCleanupOutcome.CLEANED
+        _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
         if cleanup_succeeded_for_all
-        else _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
+        else _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED)
     )
+
+
+def _encode_retry_artifact_cleanup_error_message(
+        job: dict[str, Any],
+        detail: str | None,
+) -> str:
+    host_mode = str(object_dict(job.get("host")).get("mode") or "").strip()
+    if host_mode == "ssh":
+        prefix = "Remote cleanup rejected the interrupted encode output removal."
+    else:
+        prefix = "Local or controller cleanup failed while removing interrupted encode output."
+    guidance = " Fix the stale path or filesystem permissions, then retry the job."
+    if detail:
+        return f"{prefix} Details: {detail}.{guidance}"
+    return f"{prefix}{guidance}"
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
@@ -2907,12 +3213,19 @@ def _encode_failure_is_quality_policy_failure(message: str) -> bool:
     )
 
 
-def _remove_path(path: Path | None) -> None:
+def _remove_path(path: Path | None) -> _StagingPathCleanupResult:
     if path is None or not path.exists():
-        return
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
     if path.is_dir():
-        return
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_FAILED,
+            detail=f"expected a file but found a directory: {path}",
+        )
     try:
         safe_unlink(path)
-    except OSError:
-        return
+    except OSError as exc:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_FAILED,
+            detail=f"{path}: {exc}",
+        )
+    return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)

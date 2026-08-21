@@ -19,6 +19,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
+from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
@@ -272,6 +273,7 @@ def queue_folder_encode_action(
         load_advice_state: LoadAdviceStateFn | None = None,
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
         validate_scope_action: ValidateScopeActionFn | None = None,
+        reserve_preflight: Callable[..., Any] = encode_reserve_preflight,
 ) -> ActionPayload:
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
@@ -578,11 +580,27 @@ def queue_folder_encode_action(
                 connection,
                 preflight_config,
                 prepare_only=True,
+                target_provenance_config=config,
                 **manifest_kwargs,
             )
         finally:
             if preview_transaction is not None:
                 preview_transaction.rollback()
+        target_provenance_blocker = next(
+            (
+                object_dict(object_dict(item.get("target_size_provenance")).get("blocker"))
+                for item in manifest["items"]
+                if object_dict(object_dict(item.get("target_size_provenance")).get("blocker"))
+            ),
+            None,
+        )
+        if target_provenance_blocker is not None:
+            return {
+                "ok": False,
+                "code": target_provenance_blocker["code"],
+                "message": target_provenance_blocker["message"],
+                "target_size_provenance_blocker": target_provenance_blocker,
+            }
         if not manifest["items"]:
             if older_season_selection is not None:
                 raise HTTPException(
@@ -669,6 +687,14 @@ def queue_folder_encode_action(
         )
         if cadence_blocker is not None:
             return cadence_blocker
+        reserve = reserve_preflight(preflight_config, manifest["items"])
+        if not reserve.allowed:
+            return {
+                "ok": False,
+                "code": "free_space_reserve",
+                "message": str(reserve.waiting_reason or "Waiting for a measurable free-space reserve."),
+                "queued_count": 0,
+            }
         if terminal_job_needs_requeue and latest_encode_job is not None:
             prepare_terminal_encode_job_for_requeue_fn(connection, latest_encode_job)
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)

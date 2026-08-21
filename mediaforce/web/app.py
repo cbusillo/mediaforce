@@ -96,6 +96,7 @@ from mediaforce.library.candidate_selection import CandidateDecision, encode_can
 from mediaforce.hosts.types import HostSetupResult
 from mediaforce.hosts.config import configured_remote_host_execution_mode
 from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.quality import quality_toolchain_identity, run_sample_encode, select_quality_metric
 from mediaforce.remote import (
     DEFAULT_HOST_CAPABILITIES,
@@ -130,6 +131,7 @@ from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_
     target_size_search_public_view
 from mediaforce.tuning.compression_intent import compression_intent_options
 from mediaforce.tuning.size_goals import guided_size_goal_options, operator_intent_from_policy
+from mediaforce.tuning.target_provenance import exact_item_target_provenance_blocker, target_size_provenance
 from mediaforce.core.type_defs import JSONValue, float_value, mapping_dict, object_dict, object_list
 from mediaforce.web.routes import register_completed_routes, register_dashboard_routes, register_folder_routes, \
     register_frontend_routes, register_host_routes, register_operator_work_routes, register_queue_routes, \
@@ -1425,7 +1427,18 @@ def create_app(
             **sample_item,
             "resolved_policy": policy,
             "output_container": config.output_container,
+            "target_size_provenance": target_size_provenance(
+                source_config=config,
+                rel_path=str(sample_item.get("rel_path") or normalized_prefix),
+                effective_policy=policy,
+                duration_seconds=item_runtime_seconds,
+            ),
         }
+        if media_scope.match == "exact_item":
+            with open_db(config.paths.db_path) as connection:
+                target_provenance_blocker = exact_item_target_provenance_blocker(connection, budget_item)
+            if target_provenance_blocker is not None:
+                budget_item["target_size_provenance"]["blocker"] = target_provenance_blocker.to_payload()
         stream_budget = resolve_stream_budget_ledger(
             budget_item,
             default_video_policy=config.video,
@@ -1493,6 +1506,7 @@ def create_app(
                 "advice": advice_state,
                 "size_target_analysis": size_target_analysis or None,
                 "resolved_operator_intent": resolved_operator_intent,
+                "target_size_provenance": budget_item["target_size_provenance"],
                 "compression_intent_options": compression_intent_options(operator_intent.compression_intent),
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
@@ -3662,6 +3676,7 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
         encode_manifest_items=encode_manifest_items,
         dispatch_encode_job=_dispatch_encode_job,
         active_encode_process_controllers=_active_encode_process_controllers,
+        encode_reserve_preflight=encode_reserve_preflight,
         logger=LOGGER,
         encode_queue_poll_seconds=ENCODE_QUEUE_POLL_SECONDS,
         encode_job_lease_seconds=ENCODE_JOB_LEASE_SECONDS,

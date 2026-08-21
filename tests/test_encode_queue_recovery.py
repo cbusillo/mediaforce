@@ -53,6 +53,7 @@ from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
+from mediaforce.encoding.free_space import VolumeCapacity
 from mediaforce.encoding.cadence import analyze_cadence
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
@@ -489,6 +490,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 update(staged_artifacts)
                 .where(staged_artifacts.c.library_item_id == item_id)
                 .values(
+                    encode_job_id="job-remote-cleanup",
                     encode_host_key="remote",
                     encode_host_mode="ssh",
                     encode_media_access="mounted",
@@ -527,6 +529,157 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(job["retry_not_before"])
         self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
         self.assertIsNone(job["terminal_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_retry_backoff_terminalizes_local_cleanup_failure(self) -> None:
+        source_path = self._create_source_file("episode-local-cleanup.mkv")
+        staging_path = self._staging_path("episode-local-cleanup.mkv")
+        staging_path.mkdir(parents=True, exist_ok=True)
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(encode_job_id="job-local-cleanup")
+            )
+            manifest_path = self._write_manifest(
+                "manifest-local-cleanup.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-local-cleanup",
+                manifest_name=manifest_path.name,
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-local-cleanup")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "deterministic")
+        self.assertEqual(job["last_failure_kind"], "deterministic")
+        self.assertIn("Local or controller cleanup failed", str(job["error"]))
+        self.assertIn("directory", str(job["error"]))
+        self.assertIsNone(job["retry_not_before"])
+        self.assertIsNone(job["waiting_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_retry_backoff_keeps_remote_transport_failure_in_backoff(self) -> None:
+        source_path = self._create_source_file("episode-remote-transport.mkv")
+        staging_path = self.root / "remote-staging" / "episode-remote-transport.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_job_id="job-remote-transport",
+                    encode_host_key="remote",
+                    encode_host_mode="ssh",
+                    encode_media_access="mounted",
+                )
+            )
+            manifest_path = self._write_manifest(
+                "manifest-remote-transport.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-remote-transport",
+                manifest_name=manifest_path.name,
+                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            with patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                side_effect=OSError("remote unavailable"),
+            ), patch(
+                "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
+                return_value=0,
+            ):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-remote-transport")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertIsNotNone(job["retry_not_before"])
+        self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
+        self.assertIsNone(job["terminal_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_retry_backoff_terminalizes_remote_rm_rejection(self) -> None:
+        source_path = self._create_source_file("episode-remote-rm-rejection.mkv")
+        staging_path = self.root / "remote-staging" / "episode-remote-rm-rejection.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_job_id="job-remote-rm-rejection",
+                    encode_host_key="remote",
+                    encode_host_mode="ssh",
+                    encode_media_access="mounted",
+                )
+            )
+            manifest_path = self._write_manifest(
+                "manifest-remote-rm-rejection.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-remote-rm-rejection",
+                manifest_name=manifest_path.name,
+                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            with patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                return_value=subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="permission denied"),
+            ):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-remote-rm-rejection")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "deterministic")
+        self.assertEqual(job["last_failure_kind"], "deterministic")
+        self.assertIn("Remote cleanup rejected", str(job["error"]))
+        self.assertIn("permission denied", str(job["error"]))
+        self.assertIsNone(job["retry_not_before"])
+        self.assertIsNone(job["waiting_reason"])
         assert staged_row is not None
         self.assertEqual(staged_row["staging_path"], str(staging_path))
 
@@ -589,6 +742,74 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
         self.assertFalse(staging_path.exists())
         self.assertFalse(partial_path.exists())
+
+    def test_reconcile_encode_jobs_reaps_failed_and_stopped_job_artifacts(self) -> None:
+        for terminal_status in ("failed", "stopped"):
+            with self.subTest(status=terminal_status):
+                source_path = self._create_source_file(f"episode-{terminal_status}-reap.mkv")
+                staging_path = self._staging_path(f"episode-{terminal_status}-reap.mkv")
+                staging_path.parent.mkdir(parents=True, exist_ok=True)
+                staging_path.write_text("staged")
+
+                with open_db(self.config.paths.db_path) as connection:
+                    item_id = self._insert_library_item(connection, source_path, status="encoding")
+                    self._insert_staged_artifact(connection, item_id, staging_path)
+                    job_id = f"job-{terminal_status}-reap"
+                    connection.execute(
+                        update(staged_artifacts)
+                        .where(staged_artifacts.c.library_item_id == item_id)
+                        .values(encode_job_id=job_id)
+                    )
+                    self._save_job(
+                        connection,
+                        job_id=job_id,
+                        manifest_name=f"manifest-{terminal_status}-reap.json",
+                        host={"key": "local", "label": "Local", "mode": "local"},
+                        status=terminal_status,
+                        attempt_count=1,
+                    )
+
+                    cleared_count = encode_runtime.clear_stale_encoding_items_when_idle(
+                        connection,
+                        self.config,
+                        web_app._encode_queue_runtime_deps(),
+                    )
+
+                    item_status_row = self._library_item_value(connection, item_id, library_items.c.status)
+                    assert item_status_row is not None
+                    self.assertEqual(cleared_count, 1)
+                    self.assertEqual(item_status_row["status"], "planned")
+                    self.assertIsNone(
+                        self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+                    )
+                self.assertFalse(staging_path.exists())
+
+    def test_scheduler_waits_when_reserve_inputs_are_incomplete(self) -> None:
+        manifest_path = self._write_manifest(
+            "manifest-incomplete-reserve.json",
+            [{"library_item_id": 999}],
+        )
+        host_row = self._encode_host_row("worker", schedule_closes_at=None)
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="job-incomplete-reserve",
+                manifest_name=manifest_path.name,
+                host={},
+                status="queued",
+                attempt_count=0,
+            )
+            connection.commit()
+            deps = web_app._encode_queue_runtime_deps()
+            deps.host_runtime_rows = Mock(return_value=[host_row])
+
+            selected = encode_runtime.load_next_runnable_encode_job(connection, self.config, deps)
+            job = load_encode_job(connection, "job-incomplete-reserve")
+
+        self.assertIsNone(selected)
+        assert job is not None
+        self.assertIn("complete free-space reserve inputs", str(job["waiting_reason"]))
 
     def test_reconcile_encode_jobs_preserves_active_standalone_cli_encode(self) -> None:
         source_path = self._create_source_file("episode-active-cli.mkv")
@@ -11950,6 +12171,48 @@ raise SystemExit(0)
             self.assertEqual(staged_row["promoted_path"], str(destination_path))
             self.assertEqual(staged_row["archived_source_path"], str(archived_source))
 
+    def test_promote_one_item_waits_for_other_active_encode_reserves(self) -> None:
+        source_path = self._create_source_file("episode-promotion-reserve.mkv")
+        staging_path = self._staging_path("episode-promotion-reserve.mkv")
+        staging_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path.write_text("encoded")
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="validated")
+            connection.execute(
+                staged_artifacts.insert().values(
+                    library_item_id=item_id,
+                    staging_path=str(staging_path),
+                    validation_json=json.dumps({"passed": True}),
+                    encode_job_id="completed-item-job",
+                    updated_at=web_app._now_iso(),
+                )
+            )
+            self._save_job(
+                connection,
+                job_id="other-active-encode",
+                manifest_name="manifest-other-active.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=1,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "active encode work"):
+                execution.promote_one_item(
+                    connection,
+                    self.config,
+                    {
+                        "library_item_id": item_id,
+                        "source_path": str(source_path),
+                        "rel_path": "tv/show/episode-promotion-reserve.mkv",
+                        "media_root": "tv",
+                    },
+                    force=False,
+                )
+
+        self.assertTrue(source_path.exists())
+        self.assertTrue(staging_path.exists())
+
     def test_promote_one_item_restores_files_when_probe_fails(self) -> None:
         source_path = self._create_source_file("episode-promote-probe-failure.mkv")
         source_bytes = source_path.read_bytes()
@@ -17052,6 +17315,9 @@ raise SystemExit(0)
             connection.commit()
             deps = web_app._encode_queue_runtime_deps()
             deps.host_runtime_rows = Mock(return_value=[host_row])
+            deps.encode_reserve_preflight = Mock(
+                return_value=SimpleNamespace(allowed=True, waiting_reason=None)
+            )
             deps.max_encode_schedule_window_seconds = Mock(return_value=7_200.0)
 
             with patch(
@@ -17227,6 +17493,9 @@ raise SystemExit(0)
             connection.commit()
             deps = web_app._encode_queue_runtime_deps()
             deps.host_runtime_rows = Mock(return_value=[host_row])
+            deps.encode_reserve_preflight = Mock(
+                return_value=SimpleNamespace(allowed=True, waiting_reason=None)
+            )
 
             with patch(
                     "mediaforce.web.runtime.encode_runtime.load_encode_duration_samples",
@@ -18076,7 +18345,7 @@ raise SystemExit(0)
             self.assertEqual(deps.host_runtime_rows.call_args.args, (connection, self.config))
             self.assertIn("now", deps.host_runtime_rows.call_args.kwargs)
             self.assertEqual(sync_parent.call_count, 1)
-            self.assertEqual(len(manifest_reads), 1)
+            self.assertEqual(len(manifest_reads), 2)
 
     def test_encode_estimate_manifest_cache_reuses_unchanged_manifest(self) -> None:
         manifest_path = self._write_manifest(
@@ -18111,9 +18380,9 @@ raise SystemExit(0)
             "manifest-fanout.json",
             [
                 {"library_item_id": 1, "staging_path": str(self._staging_path("fanout-1.mkv")),
-                 "duration_seconds": 90.0},
+                 "source_size_bytes": 1024, "duration_seconds": 90.0},
                 {"library_item_id": 2, "staging_path": str(self._staging_path("fanout-2.mkv")),
-                 "duration_seconds": 120.0},
+                 "source_size_bytes": 1024, "duration_seconds": 120.0},
             ],
         )
         deps = web_app._encode_queue_runtime_deps()
@@ -18141,6 +18410,9 @@ raise SystemExit(0)
             },
         ]
         deps.host_runtime_rows = Mock(return_value=host_rows)
+        deps.encode_reserve_preflight = Mock(
+            return_value=SimpleNamespace(allowed=True, waiting_reason=None)
+        )
 
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(
@@ -18235,6 +18507,132 @@ raise SystemExit(0)
         self.assertEqual(shard_a["status"], "running")
         self.assertEqual(shard_b["status"], "running")
         self.assertEqual(parent["status"], "running")
+
+    def test_process_encode_queue_once_aggregates_active_reserves(self) -> None:
+        gib = 1024 ** 3
+        staging_root = self.root / "shared-reserve" / "staging"
+        source_root = self.root / "shared-reserve" / "source"
+        manifests = []
+        for index in (1, 2):
+            manifests.append(
+                self._write_manifest(
+                    f"manifest-reserve-{index}.json",
+                    [{
+                        "source_path": str(source_root / f"episode-{index}.mkv"),
+                        "staging_path": str(staging_root / f"episode-{index}.mkv"),
+                        "rel_path": f"tv/show/episode-{index}.mkv",
+                        "source_size_bytes": 10 * gib,
+                        "resolved_policy": {"video": {"max_encoded_percent": 80}},
+                    }],
+                )
+            )
+        reserve_raw = copy.deepcopy(self.config.raw)
+        reserve_raw["media"]["free_space_reserve"]["operating_headroom_gib"] = 16
+        reserve_config = MediaforceConfig(raw=reserve_raw, paths=self.config.paths)
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=reserve_config)
+        deps.dispatch_encode_job = Mock()
+        deps.active_encode_process_controllers = Mock(return_value=[])
+        deps.host_runtime_rows = Mock(return_value=[self._encode_host_row("local", schedule_closes_at=None)])
+        probe_calls: list[Path] = []
+
+        def volume_probe(path: Path) -> VolumeCapacity:
+            probe_calls.append(path)
+            return VolumeCapacity("shared", path, 30 * gib)
+
+        def reserve_preflight(
+                config: MediaforceConfig,
+                items: list[dict[str, Any]],
+                **kwargs: Any,
+        ) -> Any:
+            return encode_runtime.encode_reserve_preflight(
+                config,
+                items,
+                host=object_dict(kwargs.get("host")),
+                volume_probe=volume_probe,
+                volume_probe_key="test-shared-volume",
+                capacity_cache=kwargs.get("capacity_cache"),
+                reserved_by_volume=kwargs.get("reserved_by_volume"),
+            )
+
+        deps.encode_reserve_preflight = reserve_preflight
+        with open_db(self.config.paths.db_path) as connection:
+            for index, manifest_path in enumerate(manifests, start=1):
+                self._save_job(
+                    connection,
+                    job_id=f"reserve-job-{index}",
+                    manifest_name=manifest_path.name,
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+
+        with patch(
+                "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                side_effect=[
+                    ({"key": "local", "label": "Local", "mode": "local"}, None),
+                    ({"key": "local", "label": "Local", "mode": "local"}, None),
+                ],
+        ):
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+        dispatched_ids = [call.kwargs["job_id"] for call in deps.dispatch_encode_job.mock_calls]
+        self.assertEqual(dispatched_ids, ["reserve-job-1"])
+        with open_db(self.config.paths.db_path) as connection:
+            waiting_job = load_encode_job(connection, "reserve-job-2")
+        assert waiting_job is not None
+        self.assertIn("already reserved by active work", str(waiting_job["waiting_reason"]))
+        self.assertEqual(probe_calls.count(staging_root), 1)
+
+    def test_process_encode_queue_once_continues_after_dispatch_failure(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        deps.load_config = Mock(return_value=self.config)
+        deps.dispatch_encode_job = Mock(side_effect=[OSError("spawn failed"), None])
+        deps.active_encode_process_controllers = Mock(return_value=[])
+        deps.host_runtime_rows = Mock(return_value=[self._encode_host_row("local", schedule_closes_at=None)])
+        deps.encode_reserve_preflight = Mock(
+            return_value=SimpleNamespace(
+                allowed=True,
+                waiting_reason=None,
+                required_by_volume={},
+                measurable=True,
+            )
+        )
+        for index in (1, 2):
+            manifest_path = self._write_manifest(
+                f"manifest-dispatch-{index}.json",
+                [self._estimate_manifest_item(60.0)],
+            )
+            with open_db(self.config.paths.db_path) as connection:
+                self._save_job(
+                    connection,
+                    job_id=f"dispatch-job-{index}",
+                    manifest_name=manifest_path.name,
+                    host={},
+                    status="queued",
+                    attempt_count=0,
+                )
+
+        with patch(
+                "mediaforce.web.runtime.encode_runtime.select_encode_host",
+                side_effect=[
+                    ({"key": "local", "label": "Local", "mode": "local"}, None),
+                    ({"key": "local", "label": "Local", "mode": "local"}, None),
+                ],
+        ), patch(
+                "mediaforce.web.runtime.encode_runtime.transition_encode_job_failure",
+                side_effect=OSError("database locked during recovery"),
+        ):
+            encode_runtime.process_encode_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+        dispatched_ids = [call.kwargs["job_id"] for call in deps.dispatch_encode_job.mock_calls]
+        self.assertEqual(dispatched_ids, ["dispatch-job-1", "dispatch-job-2"])
+        with open_db(self.config.paths.db_path) as connection:
+            first_job = load_encode_job(connection, "dispatch-job-1")
+            second_job = load_encode_job(connection, "dispatch-job-2")
+        assert first_job is not None and second_job is not None
+        self.assertEqual(first_job["status"], "running")
+        self.assertEqual(second_job["status"], "running")
 
     def test_resolve_encode_job_for_display_aggregates_shards(self) -> None:
         manifest_path = self._write_manifest(
@@ -19243,6 +19641,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertFalse(result["ok"])
@@ -19281,6 +19680,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertEqual(raised.exception.status_code, 400)
@@ -21275,6 +21675,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertTrue(result["ok"])
@@ -21580,7 +21981,9 @@ raise SystemExit(0)
                 *,
                 prefix: str,
                 prepare_only: bool = False,
+                target_provenance_config: MediaforceConfig | None = None,
         ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
+            _ = target_provenance_config
             self.assertTrue(prepare_only)
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
@@ -21615,6 +22018,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertTrue(result["ok"])
@@ -21690,7 +22094,9 @@ raise SystemExit(0)
                 *,
                 prefix: str,
                 prepare_only: bool = False,
+                target_provenance_config: MediaforceConfig | None = None,
         ) -> tuple[folder_actions_runtime.ManifestPayload, Path]:
+            _ = target_provenance_config
             self.assertTrue(prepare_only)
             self.assertEqual(prefix, "tv/show")
             pending_ids = {
@@ -21725,6 +22131,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertTrue(result["ok"])
@@ -21822,6 +22229,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertTrue(result["ok"])
@@ -21947,6 +22355,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertFalse(result["ok"])
@@ -22040,6 +22449,7 @@ raise SystemExit(0)
                 clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
                 prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
                 save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
             )
 
         self.assertTrue(result["ok"])
@@ -22497,7 +22907,7 @@ raise SystemExit(0)
         remove_path = encode_runtime._remove_path
         writer_ran = False
 
-        def remove_with_concurrent_writer(path: Path) -> None:
+        def remove_with_concurrent_writer(path: Path) -> object:
             nonlocal writer_ran
             if path == staging_b and not writer_ran:
                 writer_ran = True
@@ -22511,7 +22921,7 @@ raise SystemExit(0)
                             details_json="{}",
                         )
                     )
-            remove_path(path)
+            return remove_path(path)
 
         with open_db(self.config.paths.db_path) as connection, patch(
             "mediaforce.web.runtime.encode_runtime._remove_path",
@@ -23162,6 +23572,11 @@ raise SystemExit(0)
                 },
                 "staging_root": str(self.root / "staging"),
                 "archive_root": str(self.root / "archive"),
+                "free_space_reserve": {
+                    "operating_headroom_gib": 0.001,
+                    "staged_output_overhead_percent": 10,
+                    "large_job_gib": 16,
+                },
             },
             "remote_hosts": [],
             "encode_queue": {
@@ -23214,6 +23629,10 @@ raise SystemExit(0)
     @staticmethod
     def _estimate_manifest_item(duration_seconds: float) -> dict[str, object]:
         return {
+            "source_path": "/tmp/mediaforce-estimate-source.mkv",
+            "staging_path": "/tmp/mediaforce-estimate-staging.mkv",
+            "rel_path": "tv/show/mediaforce-estimate-source.mkv",
+            "source_size_bytes": 1024,
             "duration_seconds": duration_seconds,
             "resolved_policy": {
                 "video": {

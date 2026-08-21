@@ -63,6 +63,11 @@ def _default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = _default_config_path()
 FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
 BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
+_FREE_SPACE_RESERVE_DEFAULTS = {
+    "operating_headroom_gib": 16,
+    "staged_output_overhead_percent": 10,
+    "large_job_gib": 16,
+}
 
 _LEGACY_SQLITE_INTENT_SCHEMA = "mediaforce.legacy_sqlite_migration_intent"
 _LEGACY_SQLITE_INTENT_VERSION = 5
@@ -254,6 +259,14 @@ class MediaforceConfig:
         return self.archive_root
 
     @property
+    def free_space_reserve(self) -> dict[str, Any]:
+        configured = self.media.get("free_space_reserve")
+        return {
+            **_FREE_SPACE_RESERVE_DEFAULTS,
+            **(configured if isinstance(configured, dict) else {}),
+        }
+
+    @property
     def output_container(self) -> str:
         return str(self.media["output_container"])
 
@@ -266,11 +279,20 @@ class MediaforceConfig:
         return list(self.raw.get("remote_hosts", []))
 
     def resolve_policy(self, rel_path: str) -> dict[str, Any]:
+        policy, _ = self.resolve_policy_with_target_provenance(rel_path)
+        return policy
+
+    def resolve_policy_with_target_provenance(self, rel_path: str) -> tuple[dict[str, Any], dict[str, Any]]:
         policy = {
             "video": copy.deepcopy(self.video),
             "audio": copy.deepcopy(self.audio),
             "subtitle": copy.deepcopy(self.subtitle),
             "planning": copy.deepcopy(self.planning),
+        }
+        target_provenance: dict[str, Any] = {
+            "schema_version": 1,
+            "source": "config_default",
+            "override_prefix": None,
         }
 
         normalized_rel_path = rel_path.strip("/")
@@ -298,14 +320,25 @@ class MediaforceConfig:
             matching_overrides.append((len(prefix), index, override))
 
         for _, _, override in sorted(matching_overrides):
+            prefix = str(override.get("path_prefix", "")).strip("/")
             for section in ("video", "audio", "subtitle", "planning"):
                 values = override.get(section)
                 if isinstance(values, dict):
                     normalized_values = copy.deepcopy(values)
                     if section == "video":
                         _migrate_legacy_video_override(self.video, normalized_values)
+                        if _video_override_sets_size_goal(normalized_values):
+                            target_provenance = {
+                                "schema_version": 1,
+                                "source": (
+                                    "exact_override"
+                                    if prefix == normalized_rel_path
+                                    else "ancestor_override"
+                                ),
+                                "override_prefix": prefix,
+                            }
                     policy[section].update(normalized_values)
-        return policy
+        return policy, target_provenance
 
 
 def _migrate_legacy_video_override(base_video: dict[str, Any], override_video: dict[str, Any]) -> None:
@@ -340,12 +373,31 @@ def _migrate_legacy_video_override(base_video: dict[str, Any], override_video: d
         override_video["resolution_intent_source"] = "legacy_inferred_override"
 
 
+def _video_override_sets_size_goal(video: dict[str, Any]) -> bool:
+    return bool(
+        {
+            "target_size_mb",
+            "target_size_bytes",
+            "target_runtime_minutes",
+        }
+        & video.keys()
+    )
+
+
 def _positive_number(value: Any) -> float | None:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _nonnegative_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _same_number(left: float | None, right: float | None) -> bool:
@@ -369,6 +421,7 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
     runtime_settings = load_runtime_settings(runtime_settings_path)
     raw = _merge_runtime_settings(raw, runtime_settings)
     _merge_local_folder_policy_overrides(raw, runtime_settings)
+    _validate_free_space_reserve(raw)
 
     state = raw["state"]
     web_state_dir = _resolve_path(project_root, state.get("web_state_dir", "state/web"))
@@ -389,6 +442,29 @@ def load_config(config_path: Path | None = None) -> MediaforceConfig:
         runtime_reservation_dir=runtime_reservation_dir,
     )
     return MediaforceConfig(raw=raw, paths=paths)
+
+
+def _validate_free_space_reserve(raw: dict[str, Any]) -> None:
+    media = raw.get("media")
+    if not isinstance(media, dict):
+        raise ValueError("Config [media] must be a table")
+    reserve = media.get("free_space_reserve")
+    if reserve is None:
+        reserve = dict(_FREE_SPACE_RESERVE_DEFAULTS)
+        media["free_space_reserve"] = reserve
+    if not isinstance(reserve, dict):
+        raise ValueError("Config [media.free_space_reserve] must be a table")
+    for key, default_value in _FREE_SPACE_RESERVE_DEFAULTS.items():
+        reserve.setdefault(key, default_value)
+    for key in ("operating_headroom_gib", "large_job_gib"):
+        value = _positive_number(reserve.get(key))
+        if value is None:
+            raise ValueError(f"Config media.free_space_reserve.{key} must be greater than zero")
+    overhead = _nonnegative_number(reserve.get("staged_output_overhead_percent"))
+    if overhead is None:
+        raise ValueError(
+            "Config media.free_space_reserve.staged_output_overhead_percent must be zero or greater"
+        )
 
 
 def migrate_config_state(config: MediaforceConfig) -> None:

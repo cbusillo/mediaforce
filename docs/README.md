@@ -69,5 +69,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   and narrow-layout validation matrix
 - `docs/development/catalog-refresh-benchmark.md`: generated catalog-scale
   inventory benchmark and subprocess/resource metrics
+- `docs/development/free-space-reserve.md`: production queue and promotion
+  reserve contract, defaults, and fail-closed capacity behavior
 - `docs/development/macos-login-item.md`: install, operate, and verify the
   local `mediaforce-web` LaunchAgent

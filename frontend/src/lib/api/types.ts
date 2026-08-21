@@ -1485,6 +1485,30 @@ export interface RepresentativeSampleItemPayload {
 	};
 }
 
+export type TargetSizeProvenanceSource = 'exact_override' | 'ancestor_override' | 'config_default';
+
+export interface TargetSizeProvenanceBlocker {
+	schema_version: number;
+	code: 'exact_item_target_below_quality_safe_minimum';
+	message: string;
+	requested_target_bytes: number;
+	quality_safe_minimum_bytes: number;
+	target_source: TargetSizeProvenanceSource;
+	override_prefix?: string | null;
+	evidence_observation_id: string;
+}
+
+export interface TargetSizeProvenance {
+	schema_version: number;
+	source: TargetSizeProvenanceSource;
+	override_prefix?: string | null;
+	requested_target_bytes?: number | null;
+	status: string;
+	size_goal_mode: string;
+	policy_hash: string;
+	blocker?: TargetSizeProvenanceBlocker | null;
+}
+
 export interface FolderPayload {
 	prefix: string;
 	media_scope: MediaScopePayload;
@@ -1498,6 +1522,7 @@ export interface FolderPayload {
 	advice?: Record<string, unknown> | null;
 	size_target_analysis?: Record<string, unknown> | null;
 	resolved_operator_intent?: ResolvedOperatorIntentPayload;
+	target_size_provenance?: TargetSizeProvenance | null;
 	compression_intent_options?: CompressionIntentOptionPayload[];
 	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];

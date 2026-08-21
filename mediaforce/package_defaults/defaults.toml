@@ -18,6 +18,11 @@ staging_root = "~/Library/Application Support/mediaforce/staging"
 archive_root = "~/Library/Application Support/mediaforce/archive"
 output_container = "mkv"
 
+[media.free_space_reserve]
+operating_headroom_gib = 16
+staged_output_overhead_percent = 10
+large_job_gib = 16
+
 [media.source_roots]
 
 [video]
