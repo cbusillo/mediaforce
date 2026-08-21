@@ -58,7 +58,7 @@ const routeChecks = [
   ["Movies Library", "/movies", "MOVIE LIBRARY"],
   ["Other Library", "/other", "Other Library"],
   ["Folders compatibility", "/folders", "Your library"],
-  ["Activity", "/ops", "Remembered media state"],
+  ["Activity", "/ops", "Needs your attention"],
   ["Settings", "/settings", "Library and working space"],
   ["Finished", "/completed", "Finished media"],
 ];
@@ -813,7 +813,7 @@ async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
     ["Empty Library", "/", "Point Mediaforce at your TV folder"],
     ["Empty Folders", "/folders", "Point Mediaforce at your TV folder"],
     ["Empty Other Library", "/other", "No Other media is indexed"],
-    ["Empty Activity", "/ops", "Nothing is running right now"],
+    ["Empty Activity", "/ops", "Nothing is running."],
     ["Empty Finished", "/completed", "No finished media match this search"],
   ];
   await checkRoutes(baseUrl, emptyRouteChecks, timeoutMs);

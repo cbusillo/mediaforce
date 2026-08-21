@@ -4,6 +4,7 @@ import type {
 	HostRuntime,
 	HostsPayload
 } from '$lib/api/types';
+import { folderRoutePath } from '$lib/folder-display';
 import { hostSchedulePresentation, jobSchedulePresentation } from '$lib/hosts/schedule';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
@@ -45,7 +46,7 @@ export type OpsBlocker = {
 	title: string;
 	detail: string;
 	action?: OpsActionId;
-	href?: '/settings';
+	href?: '/settings' | `/folders/${string}`;
 	linkLabel?: string;
 };
 
@@ -115,6 +116,21 @@ function encodeJobMediaKind(job: EncodeQueueJob): EncodeMediaKind {
 	if (scope.kind === 'tv_series') return 'show';
 	if (scope.kind === 'tv_season') return 'season';
 	return 'media item';
+}
+
+function encodeJobLabel(job: EncodeQueueJob): string {
+	const scope = job.media_scope;
+	if (scope?.domain === 'tv' && scope.match === 'exact_item') {
+		const segments = String(job.prefix ?? '')
+			.split('/')
+			.filter(Boolean);
+		const episodeMatch = String(job.prefix ?? '').match(/S\d{1,3}E(\d{1,3})/i);
+		const episode = episodeMatch
+			? `Episode ${Number.parseInt(episodeMatch[1], 10)}`
+			: scope.scope_label;
+		return [segments[1], scope.parent?.title ?? segments[2], episode].filter(Boolean).join(' · ');
+	}
+	return compactText(job.media_scope?.title) || opsWorkLabel(job.prefix ?? '');
 }
 
 function encodeWorkLabel(jobs: EncodeQueueJob[], totalCount = jobs.length): string {
@@ -215,6 +231,16 @@ function operatorErrorCopy(value: unknown): string {
 	const missingPath = detail.match(/no such file or directory:\s*['"]([^'"]+)['"]/i)?.[1];
 	if (missingPath) {
 		return `Mediaforce cannot find ${missingPath} on this computer. Mount the storage, then retry.`;
+	}
+	if (/final output size missed the approved target band/i.test(detail)) {
+		return 'The finished file was outside the approved size range. Your original media is safe; review the item before retrying.';
+	}
+	if (
+		/target_band_violates_quality_floor|target size conflicts with the configured quality floor/i.test(
+			detail
+		)
+	) {
+		return 'The saved size goal is too small to preserve the required quality. Choose a new size goal before retrying.';
 	}
 	return detail;
 }
@@ -433,10 +459,7 @@ export function buildEncodeRows(
 	const queue = dashboard?.encode_queue;
 	if (!queue) return [];
 	const prefixRetryStatuses = new Set(['failed', 'needs_attention', 'stopped']);
-	const recentAttention = (queue.recent ?? []).filter((job) =>
-		prefixRetryStatuses.has(String(job.status ?? '').toLowerCase())
-	);
-	const displayJobs = [...queue.running, ...queue.queued, ...recentAttention];
+	const displayJobs = [...queue.running, ...queue.queued];
 	const retryableJobIds = retryableEncodeJobIds(displayJobs);
 	return displayJobs.map((job) => {
 		const status = String(job.status ?? '').toLowerCase();
@@ -591,10 +614,11 @@ export function buildOpsBlockers(
 	const blockers: OpsBlocker[] = [];
 	const queue = dashboard?.encode_queue;
 	const attentionCount = queue?.needs_attention_count ?? 0;
-	const attentionJobs = (queue?.recent ?? []).filter((job) =>
-		['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
-	);
-	const attentionJob = attentionJobs[0];
+	const attentionJobs =
+		queue?.needs_attention ??
+		(queue?.recent ?? []).filter((job) =>
+			['failed', 'needs_attention', 'stopped'].includes(String(job.status ?? '').toLowerCase())
+		);
 	const impossibleWindowJobs = (queue?.queued ?? []).filter(
 		(job) => job.schedule_state === 'draining_impossible'
 	);
@@ -631,18 +655,25 @@ export function buildOpsBlockers(
 		});
 	}
 	if (attentionCount > 0) {
-		blockers.push({
-			key: 'needs-attention',
-			tone: 'wait',
-			title:
-				attentionCount === 1 && attentionJob?.prefix
-					? `${opsWorkLabel(attentionJob.prefix)} needs attention`
-					: `${encodeCountLabel(attentionJobs, attentionCount)} ${attentionCount === 1 ? 'needs' : 'need'} attention`,
-			detail: attentionJob
-				? operatorErrorCopy(encodeJobRawDetail(attentionJob))
-				: 'Review what happened, then retry the unfinished work.',
-			action: 'retry-failed-encode'
-		});
+		if (attentionJobs.length > 0) {
+			for (const job of attentionJobs) {
+				blockers.push({
+					key: `needs-attention:${job.job_id}`,
+					tone: 'wait',
+					title: `${encodeJobLabel(job)} needs review`,
+					detail: operatorErrorCopy(encodeJobRawDetail(job)),
+					href: job.prefix ? folderRoutePath(job.prefix) : undefined,
+					linkLabel: job.prefix ? 'Review item' : undefined
+				});
+			}
+		} else {
+			blockers.push({
+				key: 'needs-attention',
+				tone: 'wait',
+				title: `${encodeCountLabel(attentionJobs, attentionCount)} need review`,
+				detail: 'Nothing was replaced. Open the affected folders to see what each one needs.'
+			});
+		}
 	}
 	if (impossibleWindowJobs.length > 0) {
 		const firstJob = impossibleWindowJobs[0];

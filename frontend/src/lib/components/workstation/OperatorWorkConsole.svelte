@@ -48,6 +48,24 @@
 	const overallTone = $derived(
 		backgroundPaused ? 'wait' : work?.refresh.mode === 'active' ? 'active' : 'idle'
 	);
+	const maintenanceTone = $derived(
+		catalogView.tone === 'fail' || evidenceView.tone === 'fail'
+			? 'fail'
+			: catalogView.tone === 'active' || evidenceView.tone === 'active'
+				? 'active'
+				: backgroundPaused
+					? 'wait'
+					: 'idle'
+	);
+	const maintenanceLabel = $derived(
+		maintenanceTone === 'fail'
+			? 'Needs attention'
+			: maintenanceTone === 'active'
+				? 'Working'
+				: backgroundPaused
+					? 'Paused'
+					: 'Available'
+	);
 
 	let actionPending = $state('');
 	let actionMessage = $state('');
@@ -101,7 +119,7 @@
 			return;
 		}
 		if (!evidenceKinds.length) {
-			actionError = 'Choose at least one kind of evidence.';
+			actionError = 'Choose at least one analysis type.';
 			return;
 		}
 		await runAction('prepare', '/api/evidence-work/prepare', {
@@ -120,7 +138,7 @@
 		if (!work?.evidence.can_prepare) return;
 		prepareScope = row.parent_dir || row.rel_path;
 		prepareOpen = true;
-		actionMessage = `Scope set to ${prepareScope}. Review the batch options before preparing it.`;
+		actionMessage = `${row.file_name} is ready in the analysis form. Review the options before preparing it.`;
 		actionError = '';
 	}
 
@@ -130,7 +148,7 @@
 		if (work?.catalog.status === 'running') {
 			return seen ? `${formatCount(seen)} files checked so far` : 'Starting the library walk';
 		}
-		return `Last safe refresh ${formatTimestamp(work?.catalog.last_completed_at)}`;
+		return `Last refreshed ${formatTimestamp(work?.catalog.last_completed_at)}`;
 	}
 
 	function analysisMetric(): string {
@@ -138,383 +156,442 @@
 		if (queue?.batch_id && progress?.total_count) {
 			return `${formatCount(progress.done_count)} of ${formatCount(progress.total_count)} updates complete`;
 		}
-		return `${formatCount(work.evidence.inventory.backlog_total)} need analysis`;
+		return `${formatCount(work.evidence.inventory.backlog_total)} available`;
 	}
 </script>
 
-<WorkstationPanel eyebrow="Catalog & analysis" title="Remembered media state">
-	<div class="work-console">
-		<div class="work-console__lead">
-			<div class="work-console__lead-copy">
-				<StateBadge tone={overallTone} label={overallLabel} />
-				<div>
-					<strong>Heavy media reads happen only when you ask.</strong>
-					<p>
-						Mediaforce keeps catalog facts and analysis results, then updates only the scope you
-						prepare. Browsing this page never starts FFmpeg.
-					</p>
-				</div>
-			</div>
-			<button
-				type="button"
-				class="work-button work-button--quiet"
-				disabled={Boolean(actionPending)}
-				onclick={() =>
-					runAction(
-						'background',
-						backgroundPaused ? '/api/background-work/resume' : '/api/background-work/pause'
-					)}
-			>
-				{actionPending === 'background'
-					? 'Working…'
-					: backgroundPaused
-						? 'Resume background work'
-						: 'Pause new background work'}
-			</button>
+<details class="maintenance-disclosure">
+	<summary class="maintenance-summary">
+		<div class="maintenance-summary__identity">
+			<span class="work-lane__eyebrow">Maintenance</span>
+			<strong>Library maintenance</strong>
+			<small>{catalogView.label} · {evidenceView.label}</small>
 		</div>
+		<div class="maintenance-summary__state">
+			<StateBadge compact tone={maintenanceTone} label={maintenanceLabel} />
+			<span class="maintenance-summary__action">Details</span>
+		</div>
+	</summary>
 
-		<div class="work-lanes">
-			<section class="work-lane work-lane--catalog" aria-labelledby="catalog-work-title">
-				<header class="work-lane__header">
+	<WorkstationPanel eyebrow="Maintenance" title="Catalog and analysis">
+		<div class="work-console">
+			<div class="work-console__lead">
+				<div class="work-console__lead-copy">
+					<StateBadge tone={overallTone} label={overallLabel} />
 					<div>
-						<span class="work-lane__eyebrow">Catalog inventory</span>
-						<h4 id="catalog-work-title">
-							{formatCount(work?.catalog.item_count ?? 0)} remembered files
-						</h4>
+						<strong>Maintenance runs only when you start it.</strong>
+						<p>Refresh the catalog or prepare analysis for a specific folder when needed.</p>
 					</div>
-					<StateBadge tone={catalogView.tone} label={catalogView.label} />
-				</header>
-				<p class="work-lane__detail">{catalogView.detail}</p>
-				<div class="work-lane__metric">
-					<strong>{catalogProgressCopy()}</strong>
-					<span>
-						{work?.catalog.source_roots
-							.map((root) => `${root.label} ${formatCount(root.item_count)}`)
-							.join(' · ') || 'No production libraries configured'}
-					</span>
 				</div>
-				{#if work?.catalog.warnings.length}
-					<div class="source-warnings" aria-label="Catalog source warnings">
-						{#each work.catalog.warnings as warning (warning.library_key + warning.code)}
-							<div class="source-warning">
-								<strong>{warning.label} stayed remembered</strong>
-								<span>{warning.message}</span>
-							</div>
-						{/each}
-					</div>
-				{/if}
-				<div class="work-lane__actions">
-					<button
-						type="button"
-						class="work-button"
-						disabled={!work?.catalog.can_refresh || Boolean(actionPending)}
-						title={backgroundPaused
-							? 'Resume background work before refreshing the catalog.'
-							: work?.catalog.status === 'running' || work?.catalog.status === 'queued'
-								? 'A catalog refresh is already active.'
-								: 'Read library folders and update changed file facts.'}
-						onclick={() => runAction('catalog', '/api/catalog/refresh')}
-					>
-						{actionPending === 'catalog' ? 'Starting…' : 'Refresh catalog'}
-					</button>
-					<span>No cadence or fingerprint analysis starts here.</span>
-				</div>
-			</section>
+				<button
+					type="button"
+					class="work-button work-button--quiet"
+					disabled={Boolean(actionPending)}
+					onclick={() =>
+						runAction(
+							'background',
+							backgroundPaused ? '/api/background-work/resume' : '/api/background-work/pause'
+						)}
+				>
+					{actionPending === 'background'
+						? 'Working…'
+						: backgroundPaused
+							? 'Resume background work'
+							: 'Pause new background work'}
+				</button>
+			</div>
 
-			<section class="work-lane work-lane--evidence" aria-labelledby="evidence-work-title">
-				<header class="work-lane__header">
-					<div>
-						<span class="work-lane__eyebrow">Evidence analysis</span>
-						<h4 id="evidence-work-title">{analysisMetric()}</h4>
+			<div class="work-lanes">
+				<section class="work-lane work-lane--catalog" aria-labelledby="catalog-work-title">
+					<header class="work-lane__header">
+						<div>
+							<span class="work-lane__eyebrow">Catalog</span>
+							<h4 id="catalog-work-title">
+								{formatCount(work?.catalog.item_count ?? 0)} files
+							</h4>
+						</div>
+						<StateBadge tone={catalogView.tone} label={catalogView.label} />
+					</header>
+					<p class="work-lane__detail">{catalogView.detail}</p>
+					<div class="work-lane__metric">
+						<strong>{catalogProgressCopy()}</strong>
+						<span>
+							{work?.catalog.source_roots
+								.map((root) => `${root.label} ${formatCount(root.item_count)}`)
+								.join(' · ') || 'No production libraries configured'}
+						</span>
 					</div>
-					<StateBadge tone={evidenceView.tone} label={evidenceView.label} />
-				</header>
-				<p class="work-lane__detail">{evidenceView.detail}</p>
-				<div class="work-lane__metric">
-					<strong>{scopeLabel(work?.evidence)}</strong>
-					<span>
-						{currentItem
-							? `${evidenceKindLabel(currentItem.evidence_kind)} · ${currentItem.rel_path}`
-							: queue?.batch_id
-								? `${formatCount(progress?.remaining_count ?? 0)} remaining · updated ${formatTimestamp(queue.updated_at)}`
-								: 'Prepare a bounded folder or library scope when evidence needs an update.'}
-					</span>
-				</div>
-				{#if currentWorkReason}
-					<div class="active-reason" aria-label="Why this analysis is running">
-						<strong>{currentWorkReason.label}</strong>
-						<span>{currentWorkReason.detail}</span>
-					</div>
-				{/if}
-				{#if progress?.total_count}
-					<div class="progress-track" aria-label={`${progress.percent ?? 0}% complete`}>
-						<span style={`width: ${progress.percent ?? 0}%`}></span>
-					</div>
-				{/if}
-				<div class="work-lane__actions work-lane__actions--cluster">
-					{#if work?.evidence.can_pause}
+					{#if work?.catalog.warnings.length}
+						<div class="source-warnings" aria-label="Catalog source warnings">
+							{#each work.catalog.warnings as warning (warning.library_key + warning.code)}
+								<div class="source-warning">
+									<strong>{warning.label} stayed remembered</strong>
+									<span>{warning.message}</span>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					<div class="work-lane__actions">
 						<button
 							type="button"
 							class="work-button"
-							disabled={Boolean(actionPending)}
-							onclick={() => runAction('pause-evidence', '/api/evidence-work/pause')}
+							disabled={!work?.catalog.can_refresh || Boolean(actionPending)}
+							title={backgroundPaused
+								? 'Resume background work before refreshing the catalog.'
+								: work?.catalog.status === 'running' || work?.catalog.status === 'queued'
+									? 'A catalog refresh is already active.'
+									: 'Read library folders and update changed file facts.'}
+							onclick={() => runAction('catalog', '/api/catalog/refresh')}
 						>
-							{actionPending === 'pause-evidence' ? 'Pausing…' : 'Pause after this item'}
+							{actionPending === 'catalog' ? 'Starting…' : 'Refresh catalog'}
 						</button>
-					{:else if work?.evidence.can_resume}
-						<button
-							type="button"
-							class="work-button work-button--primary"
-							disabled={Boolean(actionPending)}
-							onclick={() => runAction('resume-evidence', '/api/evidence-work/resume')}
-						>
-							{actionPending === 'resume-evidence'
-								? 'Starting…'
-								: evidenceView.label === 'Prepared'
-									? 'Start analysis'
-									: 'Resume analysis'}
-						</button>
-					{/if}
-					{#if work?.evidence.can_cancel}
-						<button
-							type="button"
-							class="work-button work-button--danger"
-							class:work-button--armed={cancelArmed}
-							disabled={Boolean(actionPending)}
-							onclick={() =>
-								cancelArmed
-									? runAction('cancel-evidence', '/api/evidence-work/cancel')
-									: (cancelArmed = true)}
-						>
-							{actionPending === 'cancel-evidence'
-								? 'Cancelling…'
-								: cancelArmed
-									? 'Confirm cancel batch'
-									: 'Cancel batch'}
-						</button>
-					{:else if work?.evidence.can_prepare}
-						<button
-							type="button"
-							class="work-button work-button--primary"
-							disabled={Boolean(actionPending) || backgroundPaused}
-							onclick={() => (prepareOpen = !prepareOpen)}
-						>
-							{prepareOpen ? 'Close preparation' : 'Prepare analysis'}
-						</button>
-					{/if}
-				</div>
-			</section>
-		</div>
+					</div>
+				</section>
 
-		{#if prepareOpen}
-			<form
-				class="prepare-form"
-				onsubmit={(event) => (event.preventDefault(), void prepareAnalysis())}
-			>
-				<div class="prepare-form__intro">
-					<span class="work-lane__eyebrow">Prepare, then run</span>
-					<strong>Create a small paused batch</strong>
-					<p>This step only chooses work. FFmpeg does not start until you press Start analysis.</p>
-				</div>
-				<label class="field field--scope">
-					<span>Library, folder, or file scope</span>
-					<input bind:value={prepareScope} placeholder="tv/Show/Season 1" autocomplete="off" />
-				</label>
-				<fieldset class="kind-picker">
-					<legend>Evidence to update</legend>
-					<label><input type="checkbox" bind:checked={prepareCadence} /> Motion pattern</label>
-					<label
-						><input type="checkbox" bind:checked={prepareFingerprint} /> Media fingerprint</label
-					>
-				</fieldset>
-				<label class="field">
-					<span>Maximum updates</span>
-					<select bind:value={prepareLimit}>
-						<option value="1">1 update</option>
-						<option value="5">5 updates</option>
-						<option value="10">10 updates</option>
-						<option value="25">25 updates</option>
-					</select>
-				</label>
-				<button
-					type="submit"
-					class="work-button work-button--primary"
-					disabled={Boolean(actionPending) || !work?.evidence.can_prepare}
-					title={work?.evidence.can_prepare
-						? 'Prepare this bounded evidence batch.'
-						: 'Finish or cancel the active batch before preparing another scope.'}
+				<section class="work-lane work-lane--evidence" aria-labelledby="evidence-work-title">
+					<header class="work-lane__header">
+						<div>
+							<span class="work-lane__eyebrow">Analysis</span>
+							<h4 id="evidence-work-title">{analysisMetric()}</h4>
+						</div>
+						<StateBadge tone={evidenceView.tone} label={evidenceView.label} />
+					</header>
+					<p class="work-lane__detail">{evidenceView.detail}</p>
+					<div class="work-lane__metric">
+						<strong>{scopeLabel(work?.evidence)}</strong>
+						<span>
+							{currentItem
+								? `${evidenceKindLabel(currentItem.evidence_kind)} · ${currentItem.rel_path}`
+								: queue?.batch_id
+									? `${formatCount(progress?.remaining_count ?? 0)} remaining · updated ${formatTimestamp(queue.updated_at)}`
+									: 'Choose a folder or library when you want to update analysis.'}
+						</span>
+					</div>
+					{#if currentWorkReason}
+						<div class="active-reason" aria-label="Why this analysis is running">
+							<strong>{currentWorkReason.label}</strong>
+							<span>{currentWorkReason.detail}</span>
+						</div>
+					{/if}
+					{#if progress?.total_count}
+						<div class="progress-track" aria-label={`${progress.percent ?? 0}% complete`}>
+							<span style={`width: ${progress.percent ?? 0}%`}></span>
+						</div>
+					{/if}
+					<div class="work-lane__actions work-lane__actions--cluster">
+						{#if work?.evidence.can_pause}
+							<button
+								type="button"
+								class="work-button"
+								disabled={Boolean(actionPending)}
+								onclick={() => runAction('pause-evidence', '/api/evidence-work/pause')}
+							>
+								{actionPending === 'pause-evidence' ? 'Pausing…' : 'Pause after this item'}
+							</button>
+						{:else if work?.evidence.can_resume}
+							<button
+								type="button"
+								class="work-button work-button--primary"
+								disabled={Boolean(actionPending)}
+								onclick={() => runAction('resume-evidence', '/api/evidence-work/resume')}
+							>
+								{actionPending === 'resume-evidence'
+									? 'Starting…'
+									: evidenceView.label === 'Prepared'
+										? 'Start analysis'
+										: 'Resume analysis'}
+							</button>
+						{/if}
+						{#if work?.evidence.can_cancel}
+							<button
+								type="button"
+								class="work-button work-button--danger"
+								class:work-button--armed={cancelArmed}
+								disabled={Boolean(actionPending)}
+								onclick={() =>
+									cancelArmed
+										? runAction('cancel-evidence', '/api/evidence-work/cancel')
+										: (cancelArmed = true)}
+							>
+								{actionPending === 'cancel-evidence'
+									? 'Cancelling…'
+									: cancelArmed
+										? 'Confirm cancel batch'
+										: 'Cancel batch'}
+							</button>
+						{:else if work?.evidence.can_prepare}
+							<button
+								type="button"
+								class="work-button work-button--primary"
+								disabled={Boolean(actionPending) || backgroundPaused}
+								onclick={() => (prepareOpen = !prepareOpen)}
+							>
+								{prepareOpen ? 'Close' : 'Prepare analysis'}
+							</button>
+						{/if}
+					</div>
+				</section>
+			</div>
+
+			{#if prepareOpen}
+				<form
+					class="prepare-form"
+					onsubmit={(event) => (event.preventDefault(), void prepareAnalysis())}
 				>
-					{actionPending === 'prepare' ? 'Preparing…' : 'Prepare paused batch'}
-				</button>
-			</form>
-		{/if}
+					<div class="prepare-form__intro">
+						<span class="work-lane__eyebrow">Prepare analysis</span>
+						<strong>Choose what to check</strong>
+						<p>Nothing starts until you press Start analysis.</p>
+					</div>
+					<label class="field field--scope">
+						<span>Library, folder, or file</span>
+						<input bind:value={prepareScope} placeholder="tv/Show/Season 1" autocomplete="off" />
+					</label>
+					<fieldset class="kind-picker">
+						<legend>Analysis to update</legend>
+						<label><input type="checkbox" bind:checked={prepareCadence} /> Motion pattern</label>
+						<label
+							><input type="checkbox" bind:checked={prepareFingerprint} /> Media fingerprint</label
+						>
+					</fieldset>
+					<label class="field">
+						<span>Maximum updates</span>
+						<select bind:value={prepareLimit}>
+							<option value="1">1 update</option>
+							<option value="5">5 updates</option>
+							<option value="10">10 updates</option>
+							<option value="25">25 updates</option>
+						</select>
+					</label>
+					<button
+						type="submit"
+						class="work-button work-button--primary"
+						disabled={Boolean(actionPending) || !work?.evidence.can_prepare}
+						title={work?.evidence.can_prepare
+							? 'Prepare this bounded evidence batch.'
+							: 'Finish or cancel the active batch before preparing another scope.'}
+					>
+						{actionPending === 'prepare' ? 'Preparing…' : 'Prepare'}
+					</button>
+				</form>
+			{/if}
 
-		{#if actionMessage || actionError}
-			<div class="action-note" class:action-note--error={Boolean(actionError)} aria-live="polite">
-				{actionError || actionMessage}
-			</div>
-		{/if}
-
-		<section class="backlog" aria-labelledby="evidence-backlog-title">
-			<header class="backlog__header">
-				<div>
-					<span class="work-lane__eyebrow">Reachable backlog</span>
-					<h4 id="evidence-backlog-title">Evidence that needs an update</h4>
+			{#if actionMessage || actionError}
+				<div class="action-note" class:action-note--error={Boolean(actionError)} aria-live="polite">
+					{actionError || actionMessage}
 				</div>
-				<strong>
-					{backlog?.total
-						? `${formatCount(backlog.range_start)}–${formatCount(backlog.range_end)} of ${formatCount(backlog.total)}`
-						: 'No matching items'}
-				</strong>
-			</header>
+			{/if}
 
-			<div class="backlog-filters">
-				<label>
-					<span>Evidence</span>
-					<select bind:value={evidenceKindFilter} onchange={() => void applyFilters()}>
-						<option value="">All evidence</option>
-						<option value="cadence_analysis">Motion pattern</option>
-						<option value="media_fingerprint">Media fingerprint</option>
-					</select>
-				</label>
-				<label>
-					<span>Reason</span>
-					<select bind:value={evidenceStateFilter} onchange={() => void applyFilters()}>
-						<option value="">All reasons</option>
-						<option value="analysis_required">Needs analysis</option>
-						<option value="classification_required">Needs update only</option>
-					</select>
-				</label>
-				<label>
-					<span>Library</span>
-					<select bind:value={mediaRootFilter} onchange={() => void applyFilters()}>
-						<option value="">All libraries</option>
-						{#each work?.catalog.source_roots ?? [] as root (root.key)}
-							<option value={root.key}>{root.label}</option>
-						{/each}
-					</select>
-				</label>
-				<label>
-					<span>Batch state</span>
-					<select bind:value={workStatusFilter} onchange={() => void applyFilters()}>
-						<option value="">All batch states</option>
-						<option value="not_prepared">Not prepared</option>
-						<option value="queued">Prepared</option>
-						<option value="running">Running</option>
-						<option value="retry_wait">Retry scheduled</option>
-						<option value="waiting_source">Source unavailable</option>
-						<option value="failed">Failed</option>
-						<option value="cancelled">Cancelled</option>
-					</select>
-				</label>
-			</div>
+			<details class="backlog backlog-disclosure">
+				<summary class="backlog__header">
+					<div>
+						<span class="work-lane__eyebrow">Maintenance queue</span>
+						<h4 id="evidence-backlog-title">Files available for analysis</h4>
+					</div>
+					<strong>
+						{backlog?.total
+							? `${formatCount(backlog.range_start)}–${formatCount(backlog.range_end)} of ${formatCount(backlog.total)}`
+							: 'No matching items'}
+					</strong>
+				</summary>
 
-			<div class="backlog-table-wrap">
-				<table class="backlog-table">
-					<thead>
-						<tr>
-							<th>Media</th>
-							<th>Evidence</th>
-							<th>Why</th>
-							<th>Batch</th>
-							<th>Attempts</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each backlog?.rows ?? [] as row (row.library_item_id + ':' + row.evidence_kind)}
-							{@const workState = evidenceWorkStatusView(row)}
-							{@const workReason = evidenceWorkReasonView(row.work_reason)}
+				<div class="backlog-filters">
+					<label>
+						<span>Analysis</span>
+						<select bind:value={evidenceKindFilter} onchange={() => void applyFilters()}>
+							<option value="">All analysis</option>
+							<option value="cadence_analysis">Motion pattern</option>
+							<option value="media_fingerprint">Media fingerprint</option>
+						</select>
+					</label>
+					<label>
+						<span>Status</span>
+						<select bind:value={evidenceStateFilter} onchange={() => void applyFilters()}>
+							<option value="">All statuses</option>
+							<option value="analysis_required">Needs analysis</option>
+							<option value="classification_required">Needs update only</option>
+						</select>
+					</label>
+					<label>
+						<span>Library</span>
+						<select bind:value={mediaRootFilter} onchange={() => void applyFilters()}>
+							<option value="">All libraries</option>
+							{#each work?.catalog.source_roots ?? [] as root (root.key)}
+								<option value={root.key}>{root.label}</option>
+							{/each}
+						</select>
+					</label>
+					<label>
+						<span>Preparation</span>
+						<select bind:value={workStatusFilter} onchange={() => void applyFilters()}>
+							<option value="">All preparation states</option>
+							<option value="not_prepared">Not selected</option>
+							<option value="queued">Ready</option>
+							<option value="running">Running</option>
+							<option value="retry_wait">Retry scheduled</option>
+							<option value="waiting_source">Source unavailable</option>
+							<option value="failed">Failed</option>
+							<option value="cancelled">Stopped</option>
+						</select>
+					</label>
+				</div>
+
+				<div class="backlog-table-wrap">
+					<table class="backlog-table">
+						<thead>
 							<tr>
-								<td data-label="Media">
-									<strong>{row.file_name}</strong>
-									<span class="path-copy">{row.parent_dir}</span>
-									<button
-										type="button"
-										class="text-action"
-										disabled={!work?.evidence.can_prepare}
-										title={work?.evidence.can_prepare
-											? 'Use this folder as the next bounded analysis scope.'
-											: 'Finish or cancel the active batch before preparing another scope.'}
-										onclick={() => useRowScope(row)}
-									>
-										Use this folder
-									</button>
-								</td>
-								<td data-label="Evidence">
-									<strong>{evidenceKindLabel(row.evidence_kind)}</strong>
-									<StateBadge
-										compact
-										tone={evidenceStateTone(row.state, row.decision_status)}
-										label={evidenceStateLabel(row.state, row.decision_status)}
-									/>
-								</td>
-								<td data-label="Why">
-									<span class="reason-copy">
-										<strong>Needs update because</strong>
-										{evidenceReasonCopy(row.reason, row.state, row.decision_status)}
-									</span>
-									{#if workReason}
-										<span class="reason-copy reason-copy--priority">
-											<strong>{workReason.label}</strong>
-											{workReason.detail}
+								<th>Media</th>
+								<th>Analysis</th>
+								<th>Status</th>
+								<th>Preparation</th>
+								<th>Attempts</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each backlog?.rows ?? [] as row (row.library_item_id + ':' + row.evidence_kind)}
+								{@const workState = evidenceWorkStatusView(row)}
+								{@const workReason = evidenceWorkReasonView(row.work_reason)}
+								<tr>
+									<td data-label="Media">
+										<strong>{row.file_name}</strong>
+										<span class="path-copy">{row.parent_dir}</span>
+										<button
+											type="button"
+											class="text-action"
+											disabled={!work?.evidence.can_prepare}
+											title={work?.evidence.can_prepare
+												? 'Use this folder as the next bounded analysis scope.'
+												: 'Finish or cancel the active batch before preparing another scope.'}
+											onclick={() => useRowScope(row)}
+										>
+											Prepare this folder
+										</button>
+									</td>
+									<td data-label="Analysis">
+										<strong>{evidenceKindLabel(row.evidence_kind)}</strong>
+									</td>
+									<td data-label="Status">
+										<StateBadge
+											compact
+											tone={evidenceStateTone(row.state, row.decision_status)}
+											label={evidenceStateLabel(row.state, row.decision_status)}
+										/>
+										<span class="reason-copy"
+											>{evidenceReasonCopy(row.reason, row.state, row.decision_status)}</span
+										>
+										{#if workReason}
+											<span class="reason-copy reason-copy--priority">
+												<strong>{workReason.label}</strong>
+												{workReason.detail}
+											</span>
+										{/if}
+									</td>
+									<td data-label="Preparation">
+										<StateBadge compact tone={workState.tone} label={workState.label} />
+										<span>{workState.detail}</span>
+									</td>
+									<td data-label="Attempts">
+										<strong>{row.attempt_count}</strong>
+										<span>
+											{row.retry_not_before
+												? `Next ${formatTimestamp(row.retry_not_before)}`
+												: `Updated ${formatTimestamp(row.updated_at)}`}
 										</span>
-									{/if}
-								</td>
-								<td data-label="Batch">
-									<StateBadge compact tone={workState.tone} label={workState.label} />
-									<span>{row.last_error || workState.detail}</span>
-								</td>
-								<td data-label="Attempts">
-									<strong>{row.attempt_count}</strong>
-									<span>
-										{row.retry_not_before
-											? `Next ${formatTimestamp(row.retry_not_before)}`
-											: `Updated ${formatTimestamp(row.updated_at)}`}
-									</span>
-								</td>
-							</tr>
-						{:else}
-							<tr>
-								<td colspan="5" class="backlog-empty">
-									<strong>No evidence matches these filters.</strong>
-									<span>Change a filter or refresh the catalog to update remembered state.</span>
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-
-			<footer class="backlog__footer">
-				<span>Every number above is reachable here; pages never start analysis.</span>
-				<div>
-					<button
-						type="button"
-						class="work-button work-button--quiet"
-						disabled={!backlog?.has_previous || Boolean(actionPending)}
-						onclick={() =>
-							void onRefresh(
-								currentQuery(Math.max(0, (backlog?.offset ?? 0) - (backlog?.limit ?? 25)))
-							)}
-					>
-						Previous
-					</button>
-					<button
-						type="button"
-						class="work-button work-button--quiet"
-						disabled={!backlog?.has_next || Boolean(actionPending)}
-						onclick={() =>
-							void onRefresh(currentQuery((backlog?.offset ?? 0) + (backlog?.limit ?? 25)))}
-					>
-						Next
-					</button>
+									</td>
+								</tr>
+							{:else}
+								<tr>
+									<td colspan="5" class="backlog-empty">
+										<strong>No evidence matches these filters.</strong>
+										<span>Change a filter or refresh the catalog to update remembered state.</span>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
 				</div>
-			</footer>
-		</section>
-	</div>
-</WorkstationPanel>
+
+				<footer class="backlog__footer">
+					<span>{formatCount(backlog?.total ?? 0)} matching items</span>
+					<div>
+						<button
+							type="button"
+							class="work-button work-button--quiet"
+							disabled={!backlog?.has_previous || Boolean(actionPending)}
+							onclick={() =>
+								void onRefresh(
+									currentQuery(Math.max(0, (backlog?.offset ?? 0) - (backlog?.limit ?? 25)))
+								)}
+						>
+							Previous
+						</button>
+						<button
+							type="button"
+							class="work-button work-button--quiet"
+							disabled={!backlog?.has_next || Boolean(actionPending)}
+							onclick={() =>
+								void onRefresh(currentQuery((backlog?.offset ?? 0) + (backlog?.limit ?? 25)))}
+						>
+							Next
+						</button>
+					</div>
+				</footer>
+			</details>
+		</div>
+	</WorkstationPanel>
+</details>
 
 <style>
+	.maintenance-disclosure {
+		min-width: 0;
+		width: 100%;
+	}
+
+	.maintenance-summary {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		cursor: pointer;
+		display: flex;
+		gap: var(--mf-space-5);
+		justify-content: space-between;
+		list-style: none;
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
+	.maintenance-summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.maintenance-summary__identity {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+	}
+
+	.maintenance-summary__identity strong {
+		color: var(--mf-fg-primary);
+		font-size: var(--mf-text-sm);
+	}
+
+	.maintenance-summary__identity small,
+	.maintenance-summary__action {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.maintenance-summary__state {
+		align-items: flex-end;
+		display: grid;
+		gap: 4px;
+		justify-items: end;
+	}
+
+	:global(.maintenance-disclosure > .panel) {
+		margin-top: var(--mf-space-3);
+	}
+
 	.work-console {
 		color: var(--mf-fg-primary);
 	}
@@ -627,7 +704,6 @@
 	}
 
 	.work-lane__metric span,
-	.work-lane__actions span,
 	.source-warning span,
 	.backlog__footer > span {
 		color: var(--mf-fg-tertiary);
@@ -861,6 +937,15 @@
 		gap: var(--mf-space-5);
 		justify-content: space-between;
 		padding: var(--mf-space-5) var(--mf-space-6);
+	}
+
+	.backlog__header {
+		cursor: pointer;
+		list-style: none;
+	}
+
+	.backlog__header::-webkit-details-marker {
+		display: none;
 	}
 
 	.backlog__header strong {

@@ -46,7 +46,10 @@ export function catalogStateView(
 		return {
 			label: 'Refresh failed',
 			tone: 'fail',
-			detail: catalog.job?.error || 'The last catalog refresh did not finish.'
+			detail: friendlyFailureCopy(
+				catalog.job?.error,
+				'The catalog refresh stopped before it finished.'
+			)
 		};
 	}
 	if (catalog.status === 'paused') {
@@ -120,7 +123,7 @@ export function evidenceStateView(
 		return {
 			label: 'Needs attention',
 			tone: 'fail',
-			detail: 'The bounded batch finished, but one or more items could not be updated.'
+			detail: 'Some analysis could not be completed.'
 		};
 	}
 	if (queue.status === 'cancelled') {
@@ -179,18 +182,17 @@ export function evidenceReasonCopy(
 	decisionStatus: string | null = null
 ): string {
 	if (state === 'current' && decisionStatus && !['resolved', 'measured'].includes(decisionStatus)) {
-		return 'The measured motion pattern needs an operator decision before conversion.';
+		return 'Needs your review before conversion.';
 	}
-	if (!reason) return 'Evidence is not current.';
-	if (reason === 'missing') return 'No saved measurement exists yet.';
-	if (reason === 'malformed') return 'The saved measurement could not be read.';
-	if (reason === 'retry_required') return 'A previous measurement asked for another pass.';
-	if (reason === 'schema_changed') return 'The measurement format changed.';
-	if (reason === 'tool_changed') return 'The analyzer changed.';
+	if (!reason) return 'Status could not be confirmed.';
+	if (reason === 'missing') return 'No saved result.';
+	if (reason === 'malformed') return 'Saved result could not be read.';
+	if (reason === 'retry_required') return 'Analysis should be tried again.';
+	if (reason === 'schema_changed') return 'Saved result uses an older format.';
+	if (reason === 'tool_changed') return 'Analysis tools changed.';
 	if (reason === 'source_changed') return 'The media file changed.';
-	if (reason === 'policy_changed')
-		return 'The interpretation policy changed; stored measurements can be reused.';
-	return 'Mediaforce cannot prove this evidence is current.';
+	if (reason === 'policy_changed') return 'Saved results need a new decision.';
+	return 'Status could not be confirmed.';
 }
 
 export interface EvidenceWorkReasonView {
@@ -201,12 +203,12 @@ export interface EvidenceWorkReasonView {
 export function evidenceWorkReasonView(reason: string | null): EvidenceWorkReasonView | null {
 	if (!reason) return null;
 	if (reason === 'sample_safety') {
-		return { label: 'Blocks sample', detail: 'Required before the selected sample can run.' };
+		return { label: 'Needed for sample', detail: 'Complete this before starting the sample.' };
 	}
 	if (reason === 'encode_safety') {
 		return {
-			label: 'Blocks production',
-			detail: 'Required before the selected production work can start.'
+			label: 'Needed for production',
+			detail: 'Complete this before starting production work.'
 		};
 	}
 	if (reason === 'policy_reclassification') {
@@ -262,7 +264,7 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 		return {
 			label: 'Failed',
 			tone: 'fail',
-			detail: row.last_error || 'Analysis could not finish.'
+			detail: friendlyFailureCopy(row.last_error, 'Analysis could not finish.')
 		};
 	}
 	if (status === 'cancelled') {
@@ -304,4 +306,17 @@ export function formatTimestamp(value: string | null | undefined): string {
 
 function humanize(value: string): string {
 	return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function friendlyFailureCopy(value: string | null | undefined, fallback: string): string {
+	const detail = value?.trim();
+	if (!detail) return fallback;
+	if (/cancel(?:led|ed)|processcancellederror/i.test(detail)) {
+		return 'The operation was stopped before it finished.';
+	}
+	if (/non-current result:\s*unknown/i.test(detail)) {
+		return 'Analysis did not produce a usable result.';
+	}
+	if (/^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):/.test(detail)) return fallback;
+	return detail;
 }

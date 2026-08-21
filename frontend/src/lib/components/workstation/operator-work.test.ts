@@ -98,6 +98,18 @@ describe('operator work copy', () => {
 				can_refresh: true
 			}).detail
 		).toBe('Source offline');
+		expect(
+			catalogStateView({
+				status: 'failed',
+				freshness: 'unknown',
+				item_count: 20,
+				last_completed_at: null,
+				job: { error: 'ProcessCancelledError: Operation was cancelled.' } as never,
+				source_roots: [],
+				warnings: [],
+				can_refresh: true
+			}).detail
+		).toBe('The operation was stopped before it finished.');
 	});
 
 	it('uses prepared, running, and terminal analysis language', () => {
@@ -117,14 +129,21 @@ describe('operator work copy', () => {
 		expect(evidenceWorkStatusView({ ...row, work_status: 'waiting_source' }).label).toBe(
 			'Source unavailable'
 		);
+		expect(
+			evidenceWorkStatusView({
+				...row,
+				work_status: 'failed',
+				last_error: 'Evidence analysis completed with non-current result: unknown.'
+			}).detail
+		).toBe('Analysis did not produce a usable result.');
 	});
 
 	it('explains decision-priority work in operator language', () => {
 		expect(evidenceWorkReasonView('sample_safety')).toEqual({
-			label: 'Blocks sample',
-			detail: 'Required before the selected sample can run.'
+			label: 'Needed for sample',
+			detail: 'Complete this before starting the sample.'
 		});
-		expect(evidenceWorkReasonView('encode_safety')?.label).toBe('Blocks production');
+		expect(evidenceWorkReasonView('encode_safety')?.label).toBe('Needed for production');
 		expect(evidenceWorkReasonView('policy_reclassification')?.label).toBe('No media read');
 		expect(evidenceWorkReasonView('representative_technical_coverage')?.detail).toContain(
 			'codec, resolution, cadence, audio layout, and runtime'

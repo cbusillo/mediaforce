@@ -214,13 +214,12 @@ function hostsFixture(): HostsPayload {
 }
 
 describe('Ops workstation mapping', () => {
-	it('prioritizes current running, queued, retryable encode, and sample rows', () => {
+	it('prioritizes current running, queued, and sample rows', () => {
 		const rows = buildOpsQueueRows(dashboardFixture());
 
 		expect(rows.map((row) => row.key)).toEqual([
 			'encode:encode-1',
 			'encode:encode-2',
-			'encode:encode-3',
 			'sample:sample-1'
 		]);
 		expect(rows[1]).toMatchObject({
@@ -232,18 +231,9 @@ describe('Ops workstation mapping', () => {
 			detail: 'transient worker fault'
 		});
 		expect(rows[0]).toMatchObject({ scopeLabel: 'Movie' });
-		expect(rows[2]).toMatchObject({
-			tone: 'wait',
-			action: 'retry-encode-prefix',
-			actionScope: 'row',
-			host: 'Unassigned',
-			detail: 'quality target missed'
-		});
 		expect(rowRecoveryLabel(rows[1])).toBe('Waiting');
 		expect(rowRecoveryTitle(rows[1])).toBe('No action is available for this row.');
-		expect(rowRecoveryLabel(rows[2])).toBe('Retry folder');
-		expect(rowRecoveryTitle(rows[2])).toContain('folder only');
-		expect(rowRecoveryLabel(rows[3])).toBe('Automatic');
+		expect(rowRecoveryLabel(rows[2])).toBe('Automatic');
 	});
 
 	it('renders exact hard-stop and bypass states in the work-window column', () => {
@@ -353,9 +343,39 @@ describe('Ops workstation mapping', () => {
 	it('surfaces unavailable data and retryable encodes as attention items', () => {
 		const blockers = buildOpsBlockers(dashboardFixture(), hostsFixture(), 'Dashboard unavailable');
 
-		expect(blockers.map((blocker) => blocker.key)).toEqual(['runtime-load', 'needs-attention']);
+		expect(blockers.map((blocker) => blocker.key)).toEqual([
+			'runtime-load',
+			'needs-attention:encode-3'
+		]);
 		expect(blockers[0]).toMatchObject({ tone: 'fail', title: 'Activity is unavailable' });
-		expect(blockers[1]).toMatchObject({ tone: 'wait', action: 'retry-failed-encode' });
+		expect(blockers[1]).toMatchObject({
+			tone: 'wait',
+			href: '/folders/tv/show/season%203',
+			linkLabel: 'Review item'
+		});
+	});
+
+	it('hides target-band internals from the attention summary', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.recent = [
+			{
+				job_id: 'encode-size-miss',
+				prefix: 'tv/show/season 3',
+				status: 'needs_attention',
+				error:
+					'Final output size missed the approved target band: status=over_target, actual=60204063, target=48673111, lower=46239455, upper=51106767.'
+			}
+		];
+
+		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].detail).toBe(
+			'The finished file was outside the approved size range. Your original media is safe; review the item before retrying.'
+		);
+
+		dashboard.encode_queue.recent[0].error =
+			'The approved target size conflicts with the configured quality floor (target_band_violates_quality_floor); target=225000000 bytes, best_reachable=523458023 bytes.';
+		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].detail).toBe(
+			'The saved size goal is too small to preserve the required quality. Choose a new size goal before retrying.'
+		);
 	});
 
 	it('uses the active media scope in paused and mixed queue headlines', () => {
@@ -429,6 +449,9 @@ describe('Ops workstation mapping', () => {
 		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null).title).toBe(
 			'An episode needs attention'
 		);
+		expect(buildOpsBlockers(dashboard, hostsFixture(), null)[0].title).toBe(
+			'Constellation · Season 1 · Episode 1 needs review'
+		);
 
 		dashboard.encode_queue.recent[0].prefix = 'tv/Constellation/S01E01.mkv';
 		dashboard.encode_queue.recent[0].media_scope = mediaScope(
@@ -475,9 +498,10 @@ describe('Ops workstation mapping', () => {
 		const row = buildOpsQueueRows(dashboard, hostsFixture()).find(
 			(candidate) => candidate.key === 'encode:episode-size-miss'
 		);
+		const blocker = buildOpsBlockers(dashboard, hostsFixture(), null)[0];
 
-		expect(row).toMatchObject({
-			action: undefined,
+		expect(row).toBeUndefined();
+		expect(blocker).toMatchObject({
 			detail: 'Choose a fresh size or compression goal before retrying.'
 		});
 	});
@@ -527,12 +551,9 @@ describe('Ops workstation mapping', () => {
 		);
 		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
 
-		expect(row).toMatchObject({
-			host: 'Unassigned',
-			detail: 'Storage unavailable'
-		});
+		expect(row).toBeUndefined();
 		expect(blockers[0]).toMatchObject({
-			title: 'Constellation · Season 1 needs attention',
+			title: 'Constellation · Season 1 needs review',
 			detail:
 				'Mediaforce cannot access /Volumes/media on this computer. Mount the storage, then retry.'
 		});
@@ -778,7 +799,7 @@ describe('Ops workstation mapping', () => {
 		expect(hostPrepareTitle(unsupportedHost)).toBe('Prepare is unavailable for this worker.');
 	});
 
-	it('does not expose prefix retry for stale historical encode rows', () => {
+	it('omits stale historical encode rows from current work', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.queued.push({
 			job_id: 'encode-newer',
@@ -801,7 +822,7 @@ describe('Ops workstation mapping', () => {
 		const rows = buildOpsQueueRows(dashboard);
 		const staleRow = rows.find((row) => row.key === 'encode:encode-stale');
 
-		expect(staleRow).toMatchObject({ action: undefined, actionScope: undefined });
+		expect(staleRow).toBeUndefined();
 		expect(
 			retryableEncodeJobIds([...dashboard.encode_queue.queued, ...dashboard.encode_queue.recent])
 		).not.toContain('encode-stale');
