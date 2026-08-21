@@ -65,7 +65,7 @@ def target_size_provenance(
         effective_policy: Mapping[str, Any],
         duration_seconds: float | None,
 ) -> dict[str, Any]:
-    _, source = source_config.resolve_policy_with_target_provenance(rel_path)
+    source_policy, source = source_config.resolve_policy_with_target_provenance(rel_path)
     video = object_dict(effective_policy.get("video"))
     intent = operator_intent_from_policy(
         video,
@@ -74,6 +74,22 @@ def target_size_provenance(
         subtitle_policy=object_dict(effective_policy.get("subtitle")),
     )
     resolved = intent.size_goal.resolve(duration_seconds)
+    source_intent = operator_intent_from_policy(
+        object_dict(source_policy.get("video")),
+        default_video_policy=source_config.video,
+        audio_policy=object_dict(source_policy.get("audio")),
+        subtitle_policy=object_dict(source_policy.get("subtitle")),
+    )
+    source_resolved = source_intent.size_goal.resolve(duration_seconds)
+    if (
+            source_resolved.target_size_bytes != resolved.target_size_bytes
+            or source_resolved.intent.mode != resolved.intent.mode
+    ):
+        source = {
+            "schema_version": TARGET_SIZE_PROVENANCE_SCHEMA_VERSION,
+            "source": "exact_override",
+            "override_prefix": rel_path.strip("/"),
+        }
     return {
         "schema_version": TARGET_SIZE_PROVENANCE_SCHEMA_VERSION,
         "source": source["source"],
@@ -111,6 +127,11 @@ def exact_item_target_provenance_blocker(
         if str(observation.get("search_objective") or "").strip() != "target_size":
             continue
         trace = _json_object(observation.get("candidate_trace_json"))
+        if trace.get("objective") != "target_size" or trace.get("truncated") is not False:
+            continue
+        observation_id = str(observation.get("observation_id") or "").strip()
+        if not observation_id:
+            continue
         for candidate in object_list(trace.get("candidates")):
             candidate_payload = object_dict(candidate)
             predicted_bytes = int_value(candidate_payload.get("predicted_whole_episode_bytes"))
@@ -119,7 +140,7 @@ def exact_item_target_provenance_blocker(
                 and candidate_payload.get("violates_source_cap") is not True
                 and predicted_bytes > 0
             ):
-                compatible_candidates.append((predicted_bytes, str(observation["observation_id"])))
+                compatible_candidates.append((predicted_bytes, observation_id))
     if not compatible_candidates:
         return None
     quality_safe_minimum_bytes, observation_id = min(compatible_candidates)

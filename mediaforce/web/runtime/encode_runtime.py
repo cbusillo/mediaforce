@@ -35,7 +35,7 @@ from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
-from mediaforce.encoding.free_space import encode_reserve_preflight, large_job_requires_serialization
+from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staging import partial_output_path, safe_unlink
@@ -322,7 +322,7 @@ def clear_stale_encoding_items_when_idle(
             encode_job_status = connection.execute(
                 select(encode_jobs.c.status).where(encode_jobs.c.job_id == encode_job_id)
             ).scalar_one_or_none()
-            if encode_job_status is not None and str(encode_job_status) != "completed":
+            if str(encode_job_status or "") in {"queued", "retry_backoff", "running", "needs_attention"}:
                 continue
         if row["promoted_at"] is not None or _staged_output_is_complete(row):
             if (
@@ -1899,45 +1899,87 @@ def _encode_reserve_items(
     return enriched_items
 
 
-def _encode_items_support_reserve(items: list[dict[str, Any]]) -> bool:
-    return bool(items) and all(
-        str(item.get("source_path") or "").strip()
-        and str(item.get("staging_path") or "").strip()
-        and str(item.get("rel_path") or "").strip()
-        for item in items
-    )
+@dataclass(frozen=True, slots=True)
+class _RunningEncodeReserveState:
+    has_running_work: bool
+    has_large_or_unmeasurable_work: bool
+    reserve_unmeasurable: bool
+    reserved_by_volume: dict[str, int]
 
 
-def _large_job_serialization_waiting_reason(
+def _running_encode_reserve_state(
         connection: DBClient,
         config: MediaforceConfig,
-        candidate_job: dict[str, Any],
-        candidate_items: list[dict[str, Any]],
         *,
         manifest_items_cache: dict[Path, list[dict[str, Any]] | None],
-) -> str | None:
+        reserve_preflight: Any,
+        capacity_cache: CapacityCache,
+) -> _RunningEncodeReserveState:
     running_rows = connection.execute(
         select(encode_jobs.c.job_id)
         .where(encode_jobs.c.status == "running")
-        .where(encode_jobs.c.job_id != str(candidate_job["job_id"]))
         .where(encode_jobs.c.job_kind.in_(RUNNABLE_ENCODE_JOB_KINDS))
     ).mappings().fetchall()
     if not running_rows:
-        return None
-    candidate_is_large = large_job_requires_serialization(config, candidate_items)
+        return _RunningEncodeReserveState(False, False, False, {})
+    has_large_or_unmeasurable_work = False
+    reserve_unmeasurable = False
+    reserved_by_volume: dict[str, int] = {}
     for row in running_rows:
         running_job = load_encode_job(connection, str(row["job_id"]))
         if running_job is None:
+            reserve_unmeasurable = True
+            has_large_or_unmeasurable_work = True
             continue
         running_items = _encode_reserve_items(
             connection,
             config,
             _encode_job_estimate_items(running_job, manifest_items_cache=manifest_items_cache),
         )
-        if not _encode_items_support_reserve(running_items):
-            continue
-        if candidate_is_large or large_job_requires_serialization(config, running_items):
-            return "Waiting for the active large encode job to release its free-space reserve."
+        try:
+            if not running_items or large_job_requires_serialization(config, running_items):
+                has_large_or_unmeasurable_work = True
+        except (OSError, ValueError):
+            has_large_or_unmeasurable_work = True
+        running_reserve = reserve_preflight(
+            config,
+            running_items,
+            host=object_dict(running_job.get("host")),
+            capacity_cache=capacity_cache,
+        )
+        requirements = getattr(running_reserve, "required_by_volume", {})
+        if isinstance(requirements, dict):
+            for volume_key, required_bytes in requirements.items():
+                reserved_by_volume[str(volume_key)] = (
+                    reserved_by_volume.get(str(volume_key), 0) + max(int_value(required_bytes), 0)
+                )
+        if not bool(getattr(running_reserve, "measurable", True)):
+            reserve_unmeasurable = True
+            has_large_or_unmeasurable_work = True
+    return _RunningEncodeReserveState(
+        True,
+        has_large_or_unmeasurable_work,
+        reserve_unmeasurable,
+        reserved_by_volume,
+    )
+
+
+def _large_job_serialization_waiting_reason(
+        config: MediaforceConfig,
+        candidate_items: list[dict[str, Any]],
+        running_state: _RunningEncodeReserveState,
+) -> str | None:
+    if not running_state.has_running_work:
+        return None
+    try:
+        candidate_is_large = large_job_requires_serialization(config, candidate_items)
+    except (OSError, ValueError) as exc:
+        return (
+            "Waiting for complete free-space reserve inputs. Rebuild the production plan or rescan "
+            f"the library, then retry. ({exc})"
+        )
+    if candidate_is_large or running_state.has_large_or_unmeasurable_work:
+        return "Waiting for the active large encode job to release its free-space reserve."
     return None
 
 
@@ -2147,6 +2189,7 @@ def encode_queue_worker_loop(
 def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps) -> None:
     config = deps.load_config(config_path)
     claimed_jobs: list[dict[str, Any]] = []
+    capacity_cache: CapacityCache = {}
     with open_db(config.paths.db_path) as connection:
         ensure_queue_state(connection, updated_at=deps.now_iso())
         connection.commit()
@@ -2162,7 +2205,12 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
         if state.get("is_paused"):
             return
         while True:
-            next_job = claim_next_runnable_encode_job(connection, config, deps)
+            next_job = claim_next_runnable_encode_job(
+                connection,
+                config,
+                deps,
+                capacity_cache=capacity_cache,
+            )
             if next_job is None:
                 break
             claimed_jobs.append(next_job)
@@ -2171,15 +2219,46 @@ def process_encode_queue_once(*, config_path: Path, deps: EncodeQueueRuntimeDeps
             save_queue_state(connection, state)
 
     for job in claimed_jobs:
-        deps.dispatch_encode_job(config_path=config_path, job_id=str(job["job_id"]))
+        try:
+            deps.dispatch_encode_job(config_path=config_path, job_id=str(job["job_id"]))
+        except Exception as exc:
+            deps.logger.exception("Encode job dispatch failed for %s", job["job_id"])
+            try:
+                with open_db(config.paths.db_path) as connection:
+                    failed_job = load_encode_job(connection, str(job["job_id"]))
+                    if failed_job is None:
+                        continue
+                    error_message = f"Encode dispatch failed: {exc}"
+                    failure_kind = (
+                        "ssh_transport"
+                        if _encode_failure_is_ssh_transport(error_message, object_dict(failed_job.get("host")))
+                        else "host_unavailable"
+                    )
+                    transition_encode_job_failure(
+                        connection,
+                        config,
+                        failed_job,
+                        deps,
+                        failure_kind=failure_kind,
+                        error_message=error_message,
+                    )
+            except Exception:
+                deps.logger.exception("Encode dispatch failure recovery failed for %s", job["job_id"])
 
 
 def claim_next_runnable_encode_job(
         connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
+        *,
+        capacity_cache: CapacityCache | None = None,
 ) -> dict[str, Any] | None:
-    next_job = load_next_runnable_encode_job(connection, config, deps)
+    next_job = load_next_runnable_encode_job(
+        connection,
+        config,
+        deps,
+        capacity_cache=capacity_cache,
+    )
     if next_job is None:
         return None
     worker_id = _encode_job_worker_id()
@@ -2229,6 +2308,8 @@ def load_next_runnable_encode_job(
         connection: DBClient,
         config: MediaforceConfig,
         deps: EncodeQueueRuntimeDeps,
+        *,
+        capacity_cache: CapacityCache | None = None,
 ) -> dict[str, Any] | None:
     parent_sync_jobs: dict[str, dict[str, Any]] = {}
 
@@ -2258,6 +2339,14 @@ def load_next_runnable_encode_job(
     duration_samples = load_encode_duration_samples(connection) if duration_estimation_relevant else ()
     globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=now) if rows else {}
     manifest_items_cache: dict[Path, list[dict[str, Any]] | None] = {}
+    shared_capacity_cache = capacity_cache if capacity_cache is not None else {}
+    running_reserve_state = _running_encode_reserve_state(
+        connection,
+        config,
+        manifest_items_cache=manifest_items_cache,
+        reserve_preflight=deps.encode_reserve_preflight,
+        capacity_cache=shared_capacity_cache,
+    )
     host_selection_cache: dict[
         tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None],
         tuple[dict[str, Any] | None, str | None],
@@ -2304,6 +2393,30 @@ def load_next_runnable_encode_job(
             save_encode_job(connection, job)
             defer_parent_sync(job)
         return job
+
+    def reserve_waiting_reason(
+            reserve_items: list[dict[str, Any]],
+            host_payload: dict[str, Any],
+    ) -> str | None:
+        if running_reserve_state.reserve_unmeasurable:
+            return (
+                "Waiting for the active encode work's free-space reserve to become measurable. "
+                "Mount or repair its storage, then retry."
+            )
+        reserve = deps.encode_reserve_preflight(
+            config,
+            reserve_items,
+            host=host_payload,
+            capacity_cache=shared_capacity_cache,
+            reserved_by_volume=running_reserve_state.reserved_by_volume,
+        )
+        if not reserve.allowed:
+            return str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+        return _large_job_serialization_waiting_reason(
+            config,
+            reserve_items,
+            running_reserve_state,
+        )
 
     for queue_position, row in enumerate(rows):
         job = load_encode_job(connection, str(row["job_id"]))
@@ -2420,30 +2533,8 @@ def load_next_runnable_encode_job(
             config,
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
         )
-        serialization_wait = (
-            _large_job_serialization_waiting_reason(
-                connection,
-                config,
-                job,
-                reserve_items,
-                manifest_items_cache=manifest_items_cache,
-            )
-            if _encode_items_support_reserve(reserve_items)
-            else None
-        )
-        if serialization_wait is not None:
-            if str(job.get("waiting_reason") or "") != serialization_wait:
-                job.update({"waiting_reason": serialization_wait, "updated_at": deps.now_iso()})
-                save_encode_job(connection, job)
-                defer_parent_sync(job)
-            continue
-        reserve = (
-            deps.encode_reserve_preflight(config, reserve_items, host=host_payload)
-            if _encode_items_support_reserve(reserve_items)
-            else None
-        )
-        if reserve is not None and not reserve.allowed:
-            waiting_reason = str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
+        waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
+        if waiting_reason is not None:
             if str(job.get("waiting_reason") or "") != waiting_reason:
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})
                 save_encode_job(connection, job)
@@ -2479,25 +2570,7 @@ def load_next_runnable_encode_job(
             config,
             _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache),
         )
-        serialization_wait = _large_job_serialization_waiting_reason(
-            connection,
-            config,
-            job,
-            reserve_items,
-            manifest_items_cache=manifest_items_cache,
-        )
-        reserve = (
-            deps.encode_reserve_preflight(config, reserve_items, host=host_payload)
-            if _encode_items_support_reserve(reserve_items)
-            else None
-        )
-        waiting_reason = (
-            serialization_wait or (
-                str(reserve.waiting_reason or "Waiting for a measurable free-space reserve.")
-                if reserve is not None and not reserve.allowed
-                else None
-            )
-        )
+        waiting_reason = reserve_waiting_reason(reserve_items, host_payload)
         if waiting_reason is not None:
             if str(job.get("waiting_reason") or "") != waiting_reason:
                 job.update({"waiting_reason": waiting_reason, "updated_at": deps.now_iso()})

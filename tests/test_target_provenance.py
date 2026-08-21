@@ -76,6 +76,48 @@ class TargetProvenanceTests(unittest.TestCase):
         self.assertIsNone(blocker)
         load_observations.assert_not_called()
 
+    def test_transient_exact_target_uses_effective_policy_provenance(self) -> None:
+        config = self._config(overrides=[self._override("tv/Example", 225_000_000)])
+        effective_policy = config.resolve_policy(self.rel_path)
+        effective_policy["video"].update({
+            "target_size_bytes": 523_000_000,
+            "target_size_mb": 523,
+            "size_goal_mode": "absolute",
+        })
+
+        provenance = target_size_provenance(
+            source_config=config,
+            rel_path=self.rel_path,
+            effective_policy=effective_policy,
+            duration_seconds=2_700.0,
+        )
+
+        self.assertEqual(provenance["source"], "exact_override")
+        self.assertEqual(provenance["override_prefix"], self.rel_path)
+        self.assertEqual(provenance["requested_target_bytes"], 523_000_000)
+
+    def test_metadata_only_override_does_not_claim_target_provenance(self) -> None:
+        config = self._config(overrides=[{
+            "path_prefix": "tv/Example",
+            "video": {
+                "size_goal_schema_version": 1,
+                "size_goal_mode": "absolute",
+                "size_goal_source": "metadata-only",
+                "sample_projection_tolerance_percent": 5,
+                "final_output_tolerance_percent": 5,
+            },
+        }])
+
+        provenance = target_size_provenance(
+            source_config=config,
+            rel_path=self.rel_path,
+            effective_policy=config.resolve_policy(self.rel_path),
+            duration_seconds=2_700.0,
+        )
+
+        self.assertEqual(provenance["source"], "config_default")
+        self.assertIsNone(provenance["override_prefix"])
+
     def test_sibling_and_stale_observations_do_not_authorize_an_exact_item(self) -> None:
         config = self._config(overrides=[self._override("tv/Example", 225_000_000)])
         provenance = target_size_provenance(
@@ -102,6 +144,58 @@ class TargetProvenanceTests(unittest.TestCase):
         with patch(
             "mediaforce.tuning.target_provenance.load_current_quality_search_observations",
             return_value=observations,
+        ):
+            blocker = exact_item_target_provenance_blocker(object(), self._item(provenance))  # type: ignore[arg-type]
+
+        self.assertIsNone(blocker)
+
+    def test_truncated_candidate_trace_does_not_authorize_blocker(self) -> None:
+        config = self._config(overrides=[self._override("tv/Example", 225_000_000)])
+        provenance = target_size_provenance(
+            source_config=config,
+            rel_path=self.rel_path,
+            effective_policy=config.resolve_policy(self.rel_path),
+            duration_seconds=2_700.0,
+        )
+        observation = self._observation(
+            rel_path=self.rel_path,
+            fingerprint=self.fingerprint,
+            policy_hash=str(provenance["policy_hash"]),
+            minimum=523_000_000,
+        )
+        trace = json.loads(str(observation["candidate_trace_json"]))
+        trace["truncated"] = True
+        observation["candidate_trace_json"] = json.dumps(trace)
+
+        with patch(
+            "mediaforce.tuning.target_provenance.load_current_quality_search_observations",
+            return_value=[observation],
+        ):
+            blocker = exact_item_target_provenance_blocker(object(), self._item(provenance))  # type: ignore[arg-type]
+
+        self.assertIsNone(blocker)
+
+    def test_candidate_trace_without_completeness_marker_does_not_authorize_blocker(self) -> None:
+        config = self._config(overrides=[self._override("tv/Example", 225_000_000)])
+        provenance = target_size_provenance(
+            source_config=config,
+            rel_path=self.rel_path,
+            effective_policy=config.resolve_policy(self.rel_path),
+            duration_seconds=2_700.0,
+        )
+        observation = self._observation(
+            rel_path=self.rel_path,
+            fingerprint=self.fingerprint,
+            policy_hash=str(provenance["policy_hash"]),
+            minimum=523_000_000,
+        )
+        trace = json.loads(str(observation["candidate_trace_json"]))
+        del trace["truncated"]
+        observation["candidate_trace_json"] = json.dumps(trace)
+
+        with patch(
+            "mediaforce.tuning.target_provenance.load_current_quality_search_observations",
+            return_value=[observation],
         ):
             blocker = exact_item_target_provenance_blocker(object(), self._item(provenance))  # type: ignore[arg-type]
 
@@ -221,6 +315,7 @@ class TargetProvenanceTests(unittest.TestCase):
             "search_objective": "target_size",
             "candidate_trace_json": json.dumps({
                 "objective": "target_size",
+                "truncated": False,
                 "candidates": [
                     {
                         "quality_floor_met": True,

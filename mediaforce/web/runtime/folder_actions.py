@@ -19,7 +19,7 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
     load_latest_terminal_encode_job_for_prefix
-from mediaforce.encoding.free_space import encode_reserve_preflight, reserve_inputs_available
+from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
@@ -687,15 +687,14 @@ def queue_folder_encode_action(
         )
         if cadence_blocker is not None:
             return cadence_blocker
-        if reserve_inputs_available(manifest["items"]):
-            reserve = reserve_preflight(preflight_config, manifest["items"])
-            if not reserve.allowed:
-                return {
-                    "ok": False,
-                    "code": "free_space_reserve",
-                    "message": str(reserve.waiting_reason or "Waiting for a measurable free-space reserve."),
-                    "queued_count": 0,
-                }
+        reserve = reserve_preflight(preflight_config, manifest["items"])
+        if not reserve.allowed:
+            return {
+                "ok": False,
+                "code": "free_space_reserve",
+                "message": str(reserve.waiting_reason or "Waiting for a measurable free-space reserve."),
+                "queued_count": 0,
+            }
         if terminal_job_needs_requeue and latest_encode_job is not None:
             prepare_terminal_encode_job_for_requeue_fn(connection, latest_encode_job)
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)

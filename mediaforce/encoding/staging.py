@@ -14,6 +14,7 @@ from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.binaries import ffprobe_binary
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
+from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.process_control import run_command
@@ -465,6 +466,7 @@ def promote_one_item(
         timestamp: Callable[[], str],
         record_event: Callable[[DBClient, int, str, dict[str, Any]], None],
         reserve_preflight: Callable[..., ReservePreflight] = promotion_reserve_preflight,
+        active_reserve_waiting_reason: Callable[[DBClient, str | None], str | None] | None = None,
 ) -> Path:
     stage_row = connection.execute(
         select(staged_artifacts).where(staged_artifacts.c.library_item_id == item["library_item_id"])
@@ -474,6 +476,14 @@ def promote_one_item(
     validation = json.loads(stage_row["validation_json"] or "{}")
     if not force and not validation.get("passed"):
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
+
+    active_reserve_check = active_reserve_waiting_reason or _active_encode_promotion_waiting_reason
+    active_waiting_reason = active_reserve_check(
+        connection,
+        str(stage_row.get("encode_job_id") or "").strip() or None,
+    )
+    if active_waiting_reason is not None:
+        raise RuntimeError(active_waiting_reason)
 
     source_path = Path(item["source_path"])
     staging_path = Path(stage_row["staging_path"])
@@ -485,7 +495,6 @@ def promote_one_item(
 
     reserve = reserve_preflight(
         config,
-        item,
         source_path=source_path,
         staging_path=staging_path,
         destination_path=destination_path,
@@ -611,3 +620,24 @@ def promote_one_item(
         except Exception as rollback_error:
             LOGGER.warning("Failed to roll back promotion event transaction: %s", rollback_error)
     return destination_path
+
+
+def _active_encode_promotion_waiting_reason(
+        connection: DBClient,
+        encode_job_id: str | None,
+) -> str | None:
+    statement = (
+        select(encode_jobs.c.job_id)
+        .where(encode_jobs.c.status == "running")
+        .where(encode_jobs.c.job_kind.in_(("single", "shard")))
+        .limit(1)
+    )
+    if encode_job_id:
+        statement = statement.where(encode_jobs.c.job_id != encode_job_id)
+    active_job_id = connection.execute(statement).scalar_one_or_none()
+    if active_job_id is None:
+        return None
+    return (
+        "Waiting for active encode work to release its free-space reserve before promotion. "
+        "Retry after the active encode finishes."
+    )

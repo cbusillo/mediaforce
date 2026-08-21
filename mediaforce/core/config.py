@@ -260,7 +260,11 @@ class MediaforceConfig:
 
     @property
     def free_space_reserve(self) -> dict[str, Any]:
-        return self.media["free_space_reserve"]
+        configured = self.media.get("free_space_reserve")
+        return {
+            **_FREE_SPACE_RESERVE_DEFAULTS,
+            **(configured if isinstance(configured, dict) else {}),
+        }
 
     @property
     def output_container(self) -> str:
@@ -375,11 +379,6 @@ def _video_override_sets_size_goal(video: dict[str, Any]) -> bool:
             "target_size_mb",
             "target_size_bytes",
             "target_runtime_minutes",
-            "size_goal_schema_version",
-            "size_goal_mode",
-            "size_goal_source",
-            "sample_projection_tolerance_percent",
-            "final_output_tolerance_percent",
         }
         & video.keys()
     )
@@ -455,6 +454,8 @@ def _validate_free_space_reserve(raw: dict[str, Any]) -> None:
         media["free_space_reserve"] = reserve
     if not isinstance(reserve, dict):
         raise ValueError("Config [media.free_space_reserve] must be a table")
+    for key, default_value in _FREE_SPACE_RESERVE_DEFAULTS.items():
+        reserve.setdefault(key, default_value)
     for key in ("operating_headroom_gib", "large_job_gib"):
         value = _positive_number(reserve.get(key))
         if value is None:

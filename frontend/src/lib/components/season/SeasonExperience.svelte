@@ -1423,11 +1423,14 @@
 							<span>Picture and sound decide whether that size is worth keeping.</span>
 							{#if isExactItemScope && targetProvenance}
 								<small>Target source: {targetProvenance}</small>
-								{#if folder.target_size_provenance?.blocker}
-									<small>{folder.target_size_provenance.blocker.message}</small>
-								{/if}
 							{/if}
 						</div>
+					</div>
+				{/if}
+				{#if isExactItemScope && folder.target_size_provenance?.blocker}
+					<div class="target-provenance-blocker" role="alert">
+						<strong>This saved target cannot start production.</strong>
+						<span>{folder.target_size_provenance.blocker.message}</span>
 					</div>
 				{/if}
 
@@ -5822,6 +5825,26 @@
 
 	.goal-contract__truth {
 		background: var(--mf-active-bg);
+	}
+
+	.target-provenance-blocker {
+		background: var(--mf-fail-bg);
+		border: 1px solid var(--mf-fail-line);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 4px;
+		padding: 12px 14px;
+	}
+
+	.target-provenance-blocker strong {
+		color: var(--mf-fail-fg);
+		font-size: 13px;
+	}
+
+	.target-provenance-blocker span {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		line-height: 1.45;
 	}
 
 	.optional-instructions {
