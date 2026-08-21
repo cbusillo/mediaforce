@@ -549,6 +549,7 @@ export interface EncodeQueueSummary {
 	running: EncodeQueueJob[];
 	queued: EncodeQueueJob[];
 	recent?: EncodeQueueJob[];
+	needs_attention?: EncodeQueueJob[];
 	telemetry?: EncodeQueueTelemetry;
 	state: {
 		is_paused: boolean;

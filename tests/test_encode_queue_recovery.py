@@ -2950,6 +2950,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         )
         self.assertTrue(all(object_dict(job["media_scope"])["domain"] == "movie" for job in summary["recent"]))
 
+    def test_encode_queue_summary_exposes_every_attention_job(self) -> None:
+        self._write_manifest("manifest-attention-list.json", [])
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(3):
+                self._save_job(
+                    connection,
+                    job_id=f"attention-{index}",
+                    manifest_name="manifest-attention-list.json",
+                    host={},
+                    status="needs_attention",
+                    attempt_count=1,
+                )
+
+            summary = summarize_encode_queue(connection, library_types={"tv": "tv"})
+
+        self.assertEqual(summary["needs_attention_count"], 3)
+        self.assertEqual(
+            [job["job_id"] for job in summary["needs_attention"]],
+            ["attention-2", "attention-1", "attention-0"],
+        )
+        self.assertTrue(
+            all(object_dict(job["media_scope"])["domain"] == "tv" for job in summary["needs_attention"])
+        )
+
     def test_permission_denied_ssh_failure_still_needs_attention_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-permission.mkv")
         staging_path = self._staging_path("episode-host-permission.mkv")
