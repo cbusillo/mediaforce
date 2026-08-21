@@ -14,6 +14,10 @@ ranking, and queue execution so each layer remains explainable and recoverable.
 - Retry recovery sends missing, unreadable, or invalid manifests to operator
   attention instead of leaving the job in `retry_backoff`; only transient
   artifact cleanup failures wait for another backoff interval.
+- Retry cleanup treats a responsive remote `rm` failure or local/controller
+  permission, read-only, malformed-path, or directory cleanup failure as a
+  deterministic operator issue and moves the job to `needs_attention`; SSH
+  transport/readiness failures remain deferred so the job can retry later.
 - Specials and Season 0 never identify a series' current season.
 - Provider failures preserve the last successful metadata.
 

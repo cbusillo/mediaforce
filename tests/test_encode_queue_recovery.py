@@ -489,6 +489,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 update(staged_artifacts)
                 .where(staged_artifacts.c.library_item_id == item_id)
                 .values(
+                    encode_job_id="job-remote-cleanup",
                     encode_host_key="remote",
                     encode_host_mode="ssh",
                     encode_media_access="mounted",
@@ -527,6 +528,157 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(job["retry_not_before"])
         self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
         self.assertIsNone(job["terminal_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_retry_backoff_terminalizes_local_cleanup_failure(self) -> None:
+        source_path = self._create_source_file("episode-local-cleanup.mkv")
+        staging_path = self._staging_path("episode-local-cleanup.mkv")
+        staging_path.mkdir(parents=True, exist_ok=True)
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(encode_job_id="job-local-cleanup")
+            )
+            manifest_path = self._write_manifest(
+                "manifest-local-cleanup.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-local-cleanup",
+                manifest_name=manifest_path.name,
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-local-cleanup")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "deterministic")
+        self.assertEqual(job["last_failure_kind"], "deterministic")
+        self.assertIn("Local or controller cleanup failed", str(job["error"]))
+        self.assertIn("directory", str(job["error"]))
+        self.assertIsNone(job["retry_not_before"])
+        self.assertIsNone(job["waiting_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_retry_backoff_keeps_remote_transport_failure_in_backoff(self) -> None:
+        source_path = self._create_source_file("episode-remote-transport.mkv")
+        staging_path = self.root / "remote-staging" / "episode-remote-transport.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_job_id="job-remote-transport",
+                    encode_host_key="remote",
+                    encode_host_mode="ssh",
+                    encode_media_access="mounted",
+                )
+            )
+            manifest_path = self._write_manifest(
+                "manifest-remote-transport.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-remote-transport",
+                manifest_name=manifest_path.name,
+                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            with patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                side_effect=OSError("remote unavailable"),
+            ), patch(
+                "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
+                return_value=0,
+            ):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-remote-transport")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertIsNotNone(job["retry_not_before"])
+        self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
+        self.assertIsNone(job["terminal_reason"])
+        assert staged_row is not None
+        self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_retry_backoff_terminalizes_remote_rm_rejection(self) -> None:
+        source_path = self._create_source_file("episode-remote-rm-rejection.mkv")
+        staging_path = self.root / "remote-staging" / "episode-remote-rm-rejection.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            connection.execute(
+                update(staged_artifacts)
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(
+                    encode_job_id="job-remote-rm-rejection",
+                    encode_host_key="remote",
+                    encode_host_mode="ssh",
+                    encode_media_access="mounted",
+                )
+            )
+            manifest_path = self._write_manifest(
+                "manifest-remote-rm-rejection.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-remote-rm-rejection",
+                manifest_name=manifest_path.name,
+                host={"key": "remote", "label": "Remote", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            with patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                return_value=subprocess.CompletedProcess(["ssh"], 1, stdout="", stderr="permission denied"),
+            ):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-remote-rm-rejection")
+            staged_row = self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path)
+
+        self.assertIsNotNone(job)
+        assert job is not None
+        self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["terminal_reason"], "deterministic")
+        self.assertEqual(job["last_failure_kind"], "deterministic")
+        self.assertIn("Remote cleanup rejected", str(job["error"]))
+        self.assertIn("permission denied", str(job["error"]))
+        self.assertIsNone(job["retry_not_before"])
+        self.assertIsNone(job["waiting_reason"])
         assert staged_row is not None
         self.assertEqual(staged_row["staging_path"], str(staging_path))
 
@@ -22497,7 +22649,7 @@ raise SystemExit(0)
         remove_path = encode_runtime._remove_path
         writer_ran = False
 
-        def remove_with_concurrent_writer(path: Path) -> None:
+        def remove_with_concurrent_writer(path: Path) -> object:
             nonlocal writer_ran
             if path == staging_b and not writer_ran:
                 writer_ran = True
@@ -22511,7 +22663,7 @@ raise SystemExit(0)
                             details_json="{}",
                         )
                     )
-            remove_path(path)
+            return remove_path(path)
 
         with open_db(self.config.paths.db_path) as connection, patch(
             "mediaforce.web.runtime.encode_runtime._remove_path",

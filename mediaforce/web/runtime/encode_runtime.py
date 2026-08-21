@@ -54,7 +54,26 @@ from mediaforce.web.runtime.worker_supervision import run_supervised_worker_loop
 class _EncodeRetryArtifactCleanupOutcome(StrEnum):
     CLEANED = "cleaned"
     CLEANUP_DEFERRED = "cleanup_deferred"
+    CLEANUP_FAILED = "cleanup_failed"
     MANIFEST_UNREADABLE = "manifest_unreadable"
+
+
+class _StagingPathCleanupOutcome(StrEnum):
+    CLEANED = "cleaned"
+    CLEANUP_DEFERRED = "cleanup_deferred"
+    CLEANUP_FAILED = "cleanup_failed"
+
+
+@dataclass(frozen=True, slots=True)
+class _StagingPathCleanupResult:
+    outcome: _StagingPathCleanupOutcome
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodeRetryArtifactCleanupResult:
+    outcome: _EncodeRetryArtifactCleanupOutcome
+    detail: str | None = None
 
 
 @dataclass(slots=True)
@@ -173,8 +192,10 @@ def reconcile_encode_jobs(
                 deps=deps,
             )
         else:
-            cleanup_outcome = _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
-        if cleanup_outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE:
+            cleanup_outcome = _EncodeRetryArtifactCleanupResult(
+                _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE,
+            )
+        if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE:
             transition_encode_job_failure(
                 connection,
                 config,
@@ -187,7 +208,7 @@ def reconcile_encode_jobs(
                 ),
             )
             continue
-        if cleanup_outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
+        if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
             retry_delay = _encode_job_retry_delay_seconds(
                 min(int_value(payload.get("attempt_count")), deps.encode_job_max_attempts),
                 deps,
@@ -202,6 +223,19 @@ def reconcile_encode_jobs(
             )
             save_encode_job(connection, payload)
             sync_encode_job_parent(connection, payload, deps)
+            continue
+        if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED:
+            transition_encode_job_failure(
+                connection,
+                config,
+                payload,
+                deps,
+                failure_kind="deterministic",
+                error_message=_encode_retry_artifact_cleanup_error_message(
+                    payload,
+                    cleanup_outcome.detail,
+                ),
+            )
             continue
         payload.update(
             {
@@ -260,6 +294,7 @@ def clear_stale_encoding_items_when_idle(
             staged_artifacts.c.promoted_at,
             staged_artifacts.c.encode_completed_at,
             staged_artifacts.c.staging_fingerprint,
+            staged_artifacts.c.encode_job_id,
             staged_artifacts.c.encode_host_key,
             staged_artifacts.c.encode_host_label,
         )
@@ -280,6 +315,13 @@ def clear_stale_encoding_items_when_idle(
         item_id = int(row["id"])
         if _active_standalone_cli_encode(connection, item_id):
             continue
+        encode_job_id = str(row["encode_job_id"] or "").strip()
+        if encode_job_id:
+            encode_job_status = connection.execute(
+                select(encode_jobs.c.status).where(encode_jobs.c.job_id == encode_job_id)
+            ).scalar_one_or_none()
+            if encode_job_status is not None and str(encode_job_status) != "completed":
+                continue
         if row["promoted_at"] is not None or _staged_output_is_complete(row):
             if (
                     str(row["status"] or "") == "encoding"
@@ -296,14 +338,16 @@ def clear_stale_encoding_items_when_idle(
             continue
         cleanup_succeeded = True
         for staging_path, host in _candidate_stale_staging_targets(config, row):
-            cleanup_succeeded = _remove_stale_staging_path(staging_path, host=host) and cleanup_succeeded
-            cleanup_succeeded = _remove_stale_staging_path(
+            cleanup_result = _remove_stale_staging_path(staging_path, host=host)
+            cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
+            cleanup_result = _remove_stale_staging_path(
                 partial_output_path(staging_path),
                 host=host,
-            ) and cleanup_succeeded
+            )
+            cleanup_succeeded = cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANED and cleanup_succeeded
         if not cleanup_succeeded:
             deps.logger.warning(
-                "Preserving stale staged artifact for item %s because its encoded host is unreachable.",
+                "Preserving stale staged artifact for item %s because cleanup could not reach the target.",
                 item_id,
             )
             continue
@@ -385,7 +429,7 @@ def _remove_stale_staging_path(
         *,
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
-) -> bool:
+) -> _StagingPathCleanupResult:
     host_payload = object_dict(host)
     remote_mounted_host = (
         bool(host_payload)
@@ -395,14 +439,14 @@ def _remove_stale_staging_path(
     if remote_mounted_host and prefer_remote:
         return _remove_remote_stale_staging_path(path, host_payload)
     if path.exists():
-        _remove_path(path)
+        result = _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
-        return not path.exists()
+        return result
     if remote_mounted_host:
         return _remove_remote_stale_staging_path(path, host_payload)
-    _remove_path(path)
+    result = _remove_path(path)
     _prune_empty_quality_temp_dir(path.parent)
-    return not path.exists()
+    return result
 
 
 def remove_stale_staging_path(
@@ -411,7 +455,10 @@ def remove_stale_staging_path(
         host: dict[str, Any] | None = None,
         prefer_remote: bool = True,
 ) -> bool:
-    return _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote)
+    return (
+        _remove_stale_staging_path(path, host=host, prefer_remote=prefer_remote).outcome
+        is _StagingPathCleanupOutcome.CLEANED
+    )
 
 
 def _prune_empty_quality_temp_dir(path: Path) -> None:
@@ -422,7 +469,7 @@ def _prune_empty_quality_temp_dir(path: Path) -> None:
             return
 
 
-def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> bool:
+def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> _StagingPathCleanupResult:
     quoted_path = shlex.quote(str(path))
     script = f"rm -f {quoted_path}"
     if path.parent.name.startswith(".mediaforce-ab-av1-") or path.parent.name.startswith(".ab-av1-"):
@@ -434,9 +481,23 @@ def _remove_remote_stale_staging_path(path: Path, host: dict[str, Any]) -> bool:
         )
     try:
         result = run_remote_command(host, ["sh", "-lc", script], timeout=10)
-    except Exception:
-        return False
-    return result.returncode == 0
+    except Exception as exc:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail=f"{path}: {exc}",
+        )
+    if result.returncode == 0:
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
+    detail = (result.stderr or result.stdout or f"remote cleanup exited with status {result.returncode}").strip()
+    if result.returncode == 255:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail=f"{path}: {detail}",
+        )
+    return _StagingPathCleanupResult(
+        _StagingPathCleanupOutcome.CLEANUP_FAILED,
+        detail=f"{path}: {detail}",
+    )
 
 
 def running_encode_job_count(connection: DBClient) -> int:
@@ -2781,11 +2842,11 @@ def _cleanup_encode_retry_artifacts(
         host: dict[str, Any] | None = None,
         commit_between_items: bool = True,
         deps: EncodeQueueRuntimeDeps,
-) -> _EncodeRetryArtifactCleanupOutcome:
+) -> _EncodeRetryArtifactCleanupResult:
     try:
         manifest = json.loads(manifest_path.read_text())
     except (OSError, json.JSONDecodeError):
-        return _EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE
+        return _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.MANIFEST_UNREADABLE)
     now_iso = deps.now_iso()
     cleanup_succeeded_for_all = True
     manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
@@ -2824,7 +2885,7 @@ def _cleanup_encode_retry_artifacts(
                 and _staged_output_is_complete({**dict(stage_row), "status": library_status})
             )
         )
-        partial_cleanup_succeeded = True
+        partial_cleanup_deferred = False
         partial_paths = {
             partial_output_path(Path(str(value)))
             for value in (staging_value, manifest_staging_value)
@@ -2832,30 +2893,44 @@ def _cleanup_encode_retry_artifacts(
         }
         if not promoted:
             for partial_path in partial_paths:
-                partial_cleanup_succeeded = _remove_stale_staging_path(
+                partial_cleanup_result = _remove_stale_staging_path(
                     partial_path,
                     host=host,
                     prefer_remote=False,
-                ) and partial_cleanup_succeeded
-            if not partial_cleanup_succeeded:
+                )
+                if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_FAILED:
+                    return _EncodeRetryArtifactCleanupResult(
+                        _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED,
+                        detail=partial_cleanup_result.detail,
+                    )
+                if partial_cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
+                    partial_cleanup_deferred = True
+            if partial_cleanup_deferred:
                 cleanup_succeeded_for_all = False
                 deps.logger.warning(
-                    "Preserving partial staged artifact for item %s because its encoded host is unreachable.",
+                    "Preserving partial staged artifact for item %s because cleanup could not reach the target.",
                     library_item_id,
                 )
         if library_item_id is None or promoted or complete:
             continue
-        cleanup_succeeded = partial_cleanup_succeeded
+        cleanup_succeeded = not partial_cleanup_deferred
         if staging_path is not None:
-            cleanup_succeeded = _remove_stale_staging_path(
+            cleanup_result = _remove_stale_staging_path(
                 staging_path,
                 host=host,
                 prefer_remote=False,
             )
+            if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_FAILED:
+                return _EncodeRetryArtifactCleanupResult(
+                    _EncodeRetryArtifactCleanupOutcome.CLEANUP_FAILED,
+                    detail=cleanup_result.detail,
+                )
+            if cleanup_result.outcome is _StagingPathCleanupOutcome.CLEANUP_DEFERRED:
+                cleanup_succeeded = False
         if not cleanup_succeeded:
             cleanup_succeeded_for_all = False
             deps.logger.warning(
-                "Preserving staged artifact for item %s because its encoded host is unreachable.",
+                "Preserving staged artifact for item %s because cleanup could not reach the target.",
                 library_item_id,
             )
             continue
@@ -2871,10 +2946,25 @@ def _cleanup_encode_retry_artifacts(
         if commit_between_items:
             connection.commit()
     return (
-        _EncodeRetryArtifactCleanupOutcome.CLEANED
+        _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANED)
         if cleanup_succeeded_for_all
-        else _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED
+        else _EncodeRetryArtifactCleanupResult(_EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED)
     )
+
+
+def _encode_retry_artifact_cleanup_error_message(
+        job: dict[str, Any],
+        detail: str | None,
+) -> str:
+    host_mode = str(object_dict(job.get("host")).get("mode") or "").strip()
+    if host_mode == "ssh":
+        prefix = "Remote cleanup rejected the interrupted encode output removal."
+    else:
+        prefix = "Local or controller cleanup failed while removing interrupted encode output."
+    guidance = " Fix the stale path or filesystem permissions, then retry the job."
+    if detail:
+        return f"{prefix} Details: {detail}.{guidance}"
+    return f"{prefix}{guidance}"
 
 
 def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
@@ -2907,12 +2997,19 @@ def _encode_failure_is_quality_policy_failure(message: str) -> bool:
     )
 
 
-def _remove_path(path: Path | None) -> None:
+def _remove_path(path: Path | None) -> _StagingPathCleanupResult:
     if path is None or not path.exists():
-        return
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
     if path.is_dir():
-        return
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_FAILED,
+            detail=f"expected a file but found a directory: {path}",
+        )
     try:
         safe_unlink(path)
-    except OSError:
-        return
+    except OSError as exc:
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_FAILED,
+            detail=f"{path}: {exc}",
+        )
+    return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANED)
