@@ -1,12 +1,12 @@
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 
 from mediaforce.tuning.calibration_jobs import list_queue_summary
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import open_db
-from mediaforce.core.db_tables import library_items
+from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db_tables import calibration_jobs, library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
 from mediaforce.library.media_scopes import resolve_media_scope
 from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_movie_scope_payload
@@ -22,6 +22,8 @@ def dashboard_summary_payload(
         folder_card_cache_key: Any,
         preview_folder_cards: Any,
         load_scan_status: Any,
+        load_calibration_state: Any,
+        review_gate: Any,
         decorate_encode_queue_for_scheduler: Any,
         library_color_map_for_config: Any,
         preview_limit: int | None = None,
@@ -45,6 +47,14 @@ def dashboard_summary_payload(
                 ).scalar_one()
             ) == 0
         calibration_queue = list_queue_summary(connection)
+        review_ready = _review_ready_samples(
+            connection,
+            config,
+            load_calibration_state=load_calibration_state,
+            review_gate=review_gate,
+        )
+        calibration_queue["review_ready"] = review_ready
+        calibration_queue["review_ready_count"] = len(review_ready)
         encode_queue = decorate_encode_queue_for_scheduler(
             config,
             summarize_encode_queue(connection, library_types=config.library_type_map),
@@ -58,6 +68,64 @@ def dashboard_summary_payload(
         "catalog_empty": catalog_empty,
         "folder_cache_key": _serialize_cache_key(cache_key),
     }
+
+
+def _review_ready_samples(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        load_calibration_state: Any,
+        review_gate: Any,
+) -> list[dict[str, Any]]:
+    ranked_jobs = select(
+        calibration_jobs.c.job_id,
+        calibration_jobs.c.prefix,
+        calibration_jobs.c.status,
+        calibration_jobs.c.lane,
+        calibration_jobs.c.finished_at,
+        func.row_number().over(
+            partition_by=calibration_jobs.c.prefix,
+            order_by=(calibration_jobs.c.created_at.desc(), literal_column("rowid").desc()),
+        ).label("job_rank"),
+    ).subquery()
+    completed_sample_rows = connection.execute(
+        select(
+            ranked_jobs.c.job_id,
+            ranked_jobs.c.prefix,
+            ranked_jobs.c.finished_at,
+        )
+        .where(ranked_jobs.c.job_rank == 1)
+        .where(ranked_jobs.c.lane == "sample")
+        .where(ranked_jobs.c.status == "completed")
+        .order_by(ranked_jobs.c.finished_at.desc())
+    ).mappings().fetchall()
+    review_ready: list[dict[str, Any]] = []
+    for row in completed_sample_rows:
+        prefix = str(row["prefix"] or "").strip()
+        if not prefix:
+            continue
+        try:
+            calibration = load_calibration_state(config, prefix)
+        except (OSError, ValueError):
+            continue
+        if calibration is None or str(calibration.get("job_id") or "") != str(row["job_id"]):
+            continue
+        if review_gate(calibration).get("status") != "needs_approval":
+            continue
+        media_scope = resolve_media_scope(
+            connection,
+            prefix,
+            library_types=config.library_type_map,
+        )
+        review_ready.append(
+            {
+                "job_id": str(row["job_id"]),
+                "prefix": prefix,
+                "finished_at": row["finished_at"],
+                "media_scope": media_scope.to_payload(),
+            }
+        )
+    return review_ready
 
 
 def dashboard_folders_payload(

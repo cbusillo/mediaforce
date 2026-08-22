@@ -363,6 +363,13 @@ export interface QueueLane {
 	recent_failed_count?: number;
 }
 
+export interface ReviewReadySample {
+	job_id: string;
+	prefix: string;
+	finished_at?: string | null;
+	media_scope?: MediaScopePayload | null;
+}
+
 export interface EncodeJobProgressTelemetry {
 	total_duration_seconds?: number;
 	remaining_duration_seconds?: number;
@@ -811,6 +818,8 @@ export interface DashboardSummaryPayload {
 		full: QueueLane;
 		active_count: number;
 		recent_failed_count?: number;
+		review_ready?: ReviewReadySample[];
+		review_ready_count?: number;
 	};
 	encode_queue: EncodeQueueSummary;
 	catalog_empty: boolean;

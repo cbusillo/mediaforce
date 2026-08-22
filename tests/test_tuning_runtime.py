@@ -1281,6 +1281,8 @@ class TuningRuntimeTests(unittest.TestCase):
             folder_card_cache_key=lambda _config: ("empty", 0, 0),
             preview_folder_cards=lambda _config, _connection: [],
             load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=lambda _config, _prefix: None,
+            review_gate=lambda _calibration: {"status": "missing_sample"},
             decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
             library_color_map_for_config=lambda _config: {},
         )
@@ -1298,6 +1300,8 @@ class TuningRuntimeTests(unittest.TestCase):
             folder_card_cache_key=lambda _config: ("one-item", 0, 0),
             preview_folder_cards=fail_preview_cards,
             load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=lambda _config, _prefix: None,
+            review_gate=lambda _calibration: {"status": "missing_sample"},
             decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
             library_color_map_for_config=lambda _config: {},
             preview_limit=0,
@@ -1306,6 +1310,175 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["folders_preview"], [])
         self.assertFalse(payload["catalog_empty"])
 
+    def test_dashboard_summary_payload_surfaces_completed_sample_pending_approval(self) -> None:
+        media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
+        self._insert_library_item(rel_path=media_prefix)
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "review-ready-sample",
+                    "prefix": media_prefix,
+                    "status": "completed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": media_prefix},
+                    "created_at": "2026-08-21T13:54:52+00:00",
+                    "finished_at": "2026-08-21T13:58:21+00:00",
+                    "updated_at": "2026-08-21T13:58:21+00:00",
+                },
+            )
+
+        calibration = {"job_id": "review-ready-sample", "review_media_ready": True}
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("review-ready", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=lambda _config, candidate_prefix: (
+                calibration if candidate_prefix == media_prefix else None
+            ),
+            review_gate=lambda _calibration: {"status": "needs_approval"},
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 1)
+        review_ready = payload["calibration_queue"]["review_ready"][0]
+        self.assertEqual(review_ready["job_id"], "review-ready-sample")
+        self.assertEqual(review_ready["prefix"], media_prefix)
+        self.assertEqual(review_ready["media_scope"]["match"], "exact_item")
+
+    def test_dashboard_summary_payload_omits_approved_sample(self) -> None:
+        media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
+        self._insert_library_item(rel_path=media_prefix)
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "approved-sample",
+                    "prefix": media_prefix,
+                    "status": "completed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": media_prefix},
+                    "created_at": "2026-08-21T13:54:52+00:00",
+                    "finished_at": "2026-08-21T13:58:21+00:00",
+                    "updated_at": "2026-08-21T13:58:21+00:00",
+                },
+            )
+
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("approved", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=lambda _config, _prefix: {"job_id": "approved-sample"},
+            review_gate=lambda _calibration: {"status": "accepted"},
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
+        self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+
+    def test_dashboard_summary_payload_omits_sample_superseded_by_newer_job(self) -> None:
+        media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
+        self._insert_library_item(rel_path=media_prefix)
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "older-completed-sample",
+                    "prefix": media_prefix,
+                    "status": "completed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": media_prefix},
+                    "created_at": "2026-08-21T13:54:52+00:00",
+                    "finished_at": "2026-08-21T13:58:21+00:00",
+                    "updated_at": "2026-08-21T13:58:21+00:00",
+                },
+            )
+            save_job(
+                connection,
+                {
+                    "job_id": "newer-failed-sample",
+                    "prefix": media_prefix,
+                    "status": "failed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": media_prefix},
+                    "created_at": "2026-08-21T14:54:52+00:00",
+                    "finished_at": "2026-08-21T14:58:21+00:00",
+                    "updated_at": "2026-08-21T14:58:21+00:00",
+                },
+            )
+
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("superseded", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=lambda _config, _prefix: {"job_id": "older-completed-sample"},
+            review_gate=lambda _calibration: {"status": "needs_approval"},
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
+        self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+
+    def test_dashboard_summary_payload_ignores_unreadable_review_state(self) -> None:
+        media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
+        self._insert_library_item(rel_path=media_prefix)
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "unreadable-review-state",
+                    "prefix": media_prefix,
+                    "status": "completed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": media_prefix},
+                    "created_at": "2026-08-21T13:54:52+00:00",
+                    "finished_at": "2026-08-21T13:58:21+00:00",
+                    "updated_at": "2026-08-21T13:58:21+00:00",
+                },
+            )
+
+        def fail_calibration_load(_config: MediaforceConfig, _prefix: str) -> None:
+            raise ValueError("invalid calibration state")
+
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("unreadable", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=fail_calibration_load,
+            review_gate=lambda _calibration: {"status": "needs_approval"},
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
+        self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+
     def test_dashboard_summary_payload_rejects_negative_preview_limit(self) -> None:
         with self.assertRaises(ValueError):
             dashboard_summary_payload(
@@ -1313,6 +1486,8 @@ class TuningRuntimeTests(unittest.TestCase):
                 folder_card_cache_key=lambda _config: ("empty", 0, 0),
                 preview_folder_cards=lambda _config, _connection: [],
                 load_scan_status=lambda _connection, _config, prefix=None: None,
+                load_calibration_state=lambda _config, _prefix: None,
+                review_gate=lambda _calibration: {"status": "missing_sample"},
                 decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
                 library_color_map_for_config=lambda _config: {},
                 preview_limit=-1,

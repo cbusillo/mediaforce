@@ -687,6 +687,8 @@ def create_app(
             folder_card_cache_key=_folder_card_cache_key,
             preview_folder_cards=_preview_folder_cards,
             load_scan_status=_load_scan_status,
+            load_calibration_state=_load_calibration_state,
+            review_gate=_review_gate,
             decorate_encode_queue_for_scheduler=_decorate_encode_queue_for_scheduler,
             library_color_map_for_config=_library_color_map_for_config,
             preview_limit=preview_limit,
