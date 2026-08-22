@@ -1368,6 +1368,85 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(review_ready["prefix"], media_prefix)
         self.assertEqual(review_ready["media_scope"]["match"], "exact_item")
 
+    def test_dashboard_summary_payload_preserves_durable_pending_review_rows(self) -> None:
+        first_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
+        second_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E50.mkv"
+        self._insert_library_item(rel_path=first_prefix)
+        self._insert_library_item(rel_path=second_prefix)
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "durable-review-ready",
+                    "prefix": first_prefix,
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": first_prefix},
+                    "created_at": "2026-08-21T13:54:52+00:00",
+                    "finished_at": "2026-08-21T13:58:21+00:00",
+                    "updated_at": "2026-08-21T13:58:21+00:00",
+                },
+            )
+            save_job(
+                connection,
+                {
+                    "job_id": "durable-review-unreadable",
+                    "prefix": second_prefix,
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"rel_path": second_prefix},
+                    "created_at": "2026-08-21T14:54:52+00:00",
+                    "finished_at": "2026-08-21T14:58:21+00:00",
+                    "updated_at": "2026-08-21T14:58:21+00:00",
+                },
+            )
+
+        def load_calibration_state(_config: MediaforceConfig, prefix: str) -> dict[str, Any] | None:
+            if prefix == first_prefix:
+                return {"job_id": "durable-review-ready"}
+            if prefix == second_prefix:
+                raise OSError("review state is temporarily unavailable")
+            return None
+
+        def review_gate(calibration: Any) -> dict[str, str]:
+            if calibration and calibration.get("job_id") == "durable-review-ready":
+                return {"status": "needs_approval"}
+            return {"status": "accepted"}
+
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("durable-review", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=load_calibration_state,
+            review_gate=review_gate,
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        sample_queue = payload["calibration_queue"]["sample"]
+        self.assertEqual(sample_queue["pending_review_count"], 2)
+        self.assertEqual(
+            {row["job_id"] for row in sample_queue["pending_review"]},
+            {"durable-review-ready", "durable-review-unreadable"},
+        )
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 1)
+        self.assertEqual(
+            [row["job_id"] for row in payload["calibration_queue"]["review_ready"]],
+            ["durable-review-ready"],
+        )
+        self.assertEqual(
+            set(payload["calibration_queue"]["review_ready"][0]),
+            {"job_id", "prefix", "finished_at", "media_scope"},
+        )
+
     def test_dashboard_summary_payload_omits_approved_sample(self) -> None:
         media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
         self._insert_library_item(rel_path=media_prefix)

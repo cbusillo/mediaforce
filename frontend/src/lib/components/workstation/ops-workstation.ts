@@ -612,9 +612,16 @@ export function buildCalibrationRows(
 ): OpsQueueRow[] {
 	const queue = dashboard?.calibration_queue;
 	if (!queue) return [];
+	const reviewReadyJobIds = new Set(
+		(queue.review_ready ?? []).map((sample) => compactText(sample.job_id)).filter(Boolean)
+	);
+	const unavailablePendingReviews = (queue.sample.pending_review ?? []).filter(
+		(job) => !reviewReadyJobIds.has(compactText(job.job_id))
+	);
 	const currentRows = [
 		...buildCalibrationLaneRows('sample', queue.sample.running, 'running'),
 		...buildCalibrationLaneRows('sample', queue.sample.queued, 'queued'),
+		...buildCalibrationLaneRows('sample', unavailablePendingReviews, 'pending_review'),
 		...buildCalibrationLaneRows('proof', queue.full.running, 'running'),
 		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued')
 	];
@@ -1009,6 +1016,11 @@ export function buildOpsStatusTiles(
 	const calibration = dashboard?.calibration_queue;
 	const capacity = hostCapacityCounts(hosts, encode);
 	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
+	const pendingReviewCount = Math.max(
+		reviewReadyCount,
+		calibration?.sample.pending_review_count ?? 0
+	);
+	const unavailableReviewCount = pendingReviewCount - reviewReadyCount;
 	return [
 		{
 			label: 'Work schedule',
@@ -1044,9 +1056,18 @@ export function buildOpsStatusTiles(
 		{
 			label: 'Sample checks',
 			value: `${calibration?.sample.running_count ?? 0} running · ${calibration?.sample.queued_count ?? 0} queued`,
-			detail: `${reviewReadyCount} waiting for review`,
+			detail:
+				unavailableReviewCount > 0
+					? `${reviewReadyCount} ready · ${unavailableReviewCount} unavailable`
+					: `${reviewReadyCount} waiting for review`,
 			tone:
-				reviewReadyCount > 0 ? 'ready' : (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
+				unavailableReviewCount > 0
+					? 'wait'
+					: reviewReadyCount > 0
+						? 'ready'
+						: (calibration?.active_count ?? 0) > 0
+							? 'active'
+							: 'idle'
 		},
 		{
 			label: 'Workers',
@@ -1076,7 +1097,13 @@ export function buildOpsFooterSignals(
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
 	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
-	const attentionCount = encodeAttentionJobs(encode).length + reviewReadyCount;
+	const pendingReviewCount = Math.max(
+		reviewReadyCount,
+		calibration?.sample.pending_review_count ?? 0
+	);
+	const unavailableReviewCount = pendingReviewCount - reviewReadyCount;
+	const encodeAttentionCount = encodeAttentionJobs(encode).length;
+	const attentionCount = encodeAttentionCount + pendingReviewCount;
 	return [
 		{
 			label: 'Processing',
@@ -1091,7 +1118,12 @@ export function buildOpsFooterSignals(
 		{
 			label: 'Attention',
 			value: String(attentionCount),
-			tone: reviewReadyCount > 0 ? 'ready' : attentionCount > 0 ? 'wait' : 'idle'
+			tone:
+				encodeAttentionCount > 0 || unavailableReviewCount > 0
+					? 'wait'
+					: reviewReadyCount > 0
+						? 'ready'
+						: 'idle'
 		},
 		{
 			label: 'Checks',
