@@ -158,6 +158,10 @@ function reviewReadySampleLabel(sample: ReviewReadySample): string {
 	return compactText(scope?.title) || opsWorkLabel(sample.prefix);
 }
 
+function reviewReadySummaryCopy(count: number): string {
+	return `${count} ${count === 1 ? 'sample' : 'samples'} ready for review`;
+}
+
 function encodeAttentionJobs(
 	queue: DashboardSummaryPayload['encode_queue'] | null | undefined
 ): EncodeQueueJob[] {
@@ -611,10 +615,8 @@ export function buildCalibrationRows(
 	const currentRows = [
 		...buildCalibrationLaneRows('sample', queue.sample.running, 'running'),
 		...buildCalibrationLaneRows('sample', queue.sample.queued, 'queued'),
-		...buildCalibrationLaneRows('sample', queue.sample.pending_review, 'pending_review'),
 		...buildCalibrationLaneRows('proof', queue.full.running, 'running'),
-		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued'),
-		...buildCalibrationLaneRows('proof', queue.full.pending_review, 'pending_review')
+		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued')
 	];
 	if (!includeHistory) return currentRows;
 	return [...currentRows, ...buildOpsHistoryRows(dashboard)];
@@ -849,21 +851,6 @@ export function buildOpsReadinessSummary(
 			metricValue: String(impossibleWindowJobs.length)
 		};
 	}
-	if (reviewReadyCount > 0) {
-		return {
-			tone: 'ready',
-			title:
-				reviewReadyCount === 1
-					? `${reviewReadySampleLabel(reviewReadySamples[0])} is ready for review`
-					: `${reviewReadyCount} samples are ready for review`,
-			detail:
-				reviewReadyCount === 1
-					? 'Compare the sample and decide whether to approve it.'
-					: 'Compare each sample and decide whether to approve it.',
-			metricLabel: 'Needs you',
-			metricValue: String(reviewReadyCount)
-		};
-	}
 	if (runningCount > 0) {
 		const activeProcessingCount = Math.max(runningCount, capacity.activeEncodes);
 		const activeTotal = activeProcessingCount + activeChecks;
@@ -886,6 +873,9 @@ export function buildOpsReadinessSummary(
 				`${encodeCountLabel(attentionJobs, needsAttention)} ${needsAttention === 1 ? 'needs' : 'need'} attention`
 			);
 		}
+		if (reviewReadyCount > 0) {
+			detailParts.push(reviewReadySummaryCopy(reviewReadyCount));
+		}
 		if (queue?.telemetry?.eta_copy) {
 			detailParts.push(`Estimated finish in ${queue.telemetry.eta_copy}`);
 		}
@@ -901,10 +891,12 @@ export function buildOpsReadinessSummary(
 		};
 	}
 	if (needsAttention > 0) {
+		const reviewDetail =
+			reviewReadyCount > 0 ? ` · ${reviewReadySummaryCopy(reviewReadyCount)}` : '';
 		return {
 			tone: 'wait',
 			title: `${encodeCountLabel(attentionJobs, needsAttention)} ${needsAttention === 1 ? 'needs' : 'need'} attention`,
-			detail: `${encodeCountLabel(attentionJobs, needsAttention)} ${needsAttention === 1 ? 'needs' : 'need'} a quick review before retrying.`,
+			detail: `${encodeCountLabel(attentionJobs, needsAttention)} ${needsAttention === 1 ? 'needs' : 'need'} a quick review before retrying.${reviewDetail}`,
 			metricLabel: 'Needs you',
 			metricValue: String(needsAttention)
 		};
@@ -951,10 +943,12 @@ export function buildOpsReadinessSummary(
 		};
 	}
 	if (activeChecks > 0) {
+		const reviewDetail =
+			reviewReadyCount > 0 ? ` · ${reviewReadySummaryCopy(reviewReadyCount)}` : '';
 		return {
 			tone: 'active',
 			title: 'Mediaforce is working',
-			detail: `${activeChecks} ${activeChecks === 1 ? 'test' : 'tests'} active`,
+			detail: `${activeChecks} ${activeChecks === 1 ? 'test' : 'tests'} active${reviewDetail}`,
 			metricLabel: 'Running',
 			metricValue: String(activeChecks)
 		};
@@ -967,6 +961,21 @@ export function buildOpsReadinessSummary(
 				queue?.state.scheduler_summary ?? 'Waiting work will start when its allowed time begins.',
 			metricLabel: 'Waiting',
 			metricValue: String(queuedWaiting)
+		};
+	}
+	if (reviewReadyCount > 0) {
+		return {
+			tone: 'ready',
+			title:
+				reviewReadyCount === 1
+					? `${reviewReadySampleLabel(reviewReadySamples[0])} is ready for review`
+					: `${reviewReadyCount} samples are ready for review`,
+			detail:
+				reviewReadyCount === 1
+					? 'Compare the sample and decide whether to approve it.'
+					: 'Compare each sample and decide whether to approve it.',
+			metricLabel: 'Needs you',
+			metricValue: String(reviewReadyCount)
 		};
 	}
 	if (capacity.encodeReady > 0) {

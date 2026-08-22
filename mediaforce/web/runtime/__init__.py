@@ -2,7 +2,7 @@ from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clea
 from mediaforce.web.runtime.completed_runtime import clear_completed_backups_action, completed_page_payload, \
     confirm_originals_removed_action, list_completed_folders
 from mediaforce.web.runtime.dashboard_payloads import dashboard_folders_payload, dashboard_library_payload, \
-    dashboard_summary_payload, folder_status_payload
+    dashboard_summary_payload, folder_status_payload, reconcile_pending_review_samples
 from mediaforce.web.runtime.folder_ai_tuning import FolderAiTuneDeps, folder_ai_tune_action, \
     folder_ai_tune_confirm_action, folder_ai_tune_preview_action
 from mediaforce.web.runtime.folder_actions import approve_measured_encode_recovery_action, promote_folder_outputs_action, \
@@ -48,6 +48,7 @@ __all__ = [
     "dashboard_folders_payload",
     "dashboard_library_payload",
     "dashboard_summary_payload",
+    "reconcile_pending_review_samples",
     "default_sample_host_key",
     "default_sample_host_key_from_statuses",
     "ensure_encode_host_ready",

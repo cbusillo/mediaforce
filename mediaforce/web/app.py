@@ -158,7 +158,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_
     proposal_context_snapshot, proposal_signal_copy, promote_folder_outputs_action, \
     approve_measured_encode_recovery_action, \
     queue_folder_encode_action, recent_tuning_sessions, \
-    refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
+    reconcile_pending_review_samples, refresh_host_status_cache, reset_folder_card_cache, resume_encode_queue_action, \
     retry_failed_encode_prefix_action, retry_failed_encode_queue_action, review_media_context, \
     review_pack_dir, review_pair_key, review_pairs, safe_collect_host_statuses, save_advice_state, \
     save_calibration_state, save_pending_proposal, save_profile_action, \
@@ -584,6 +584,18 @@ def create_app(
                     if repaired_scan_rows:
                         LOGGER.warning("Repaired %s interrupted scan runs.", repaired_scan_rows)
                     _recover_calibration_jobs(connection, config)
+                    resolved_review_rows = reconcile_pending_review_samples(
+                        connection,
+                        config,
+                        load_calibration_state=_load_calibration_state,
+                        review_gate=_review_gate,
+                        updated_at=_now_iso(),
+                    )
+                    if resolved_review_rows:
+                        LOGGER.info(
+                            "Resolved %s stale calibration review rows during startup.",
+                            resolved_review_rows,
+                        )
                     _recover_encode_queue(connection, config)
                 background_runtime = _start_background_workers(config)
                 _safe_collect_host_statuses(config)

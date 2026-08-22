@@ -1,14 +1,15 @@
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy import func, literal_column, select
+from sqlalchemy import func, select
 
-from mediaforce.tuning.calibration_jobs import list_queue_summary
+from mediaforce.tuning.calibration_jobs import list_pending_review_sample_jobs, list_queue_summary, \
+    resolve_pending_review_job
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import calibration_jobs, library_items
+from mediaforce.core.db_tables import library_items
 from mediaforce.encoding.encode_queue import summarize_encode_queue
-from mediaforce.library.media_scopes import resolve_media_scope
+from mediaforce.library.media_scopes import MediaScopeConflict, resolve_media_scope
 from mediaforce.library.movie_library import adapt_movie_workflow_payload, load_movie_scope_payload
 from mediaforce.library.staged_integrity import staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
@@ -53,6 +54,8 @@ def dashboard_summary_payload(
             load_calibration_state=load_calibration_state,
             review_gate=review_gate,
         )
+        calibration_queue["sample"]["pending_review"] = review_ready
+        calibration_queue["sample"]["pending_review_count"] = len(review_ready)
         calibration_queue["review_ready"] = review_ready
         calibration_queue["review_ready_count"] = len(review_ready)
         encode_queue = decorate_encode_queue_for_scheduler(
@@ -77,55 +80,59 @@ def _review_ready_samples(
         load_calibration_state: Any,
         review_gate: Any,
 ) -> list[dict[str, Any]]:
-    ranked_jobs = select(
-        calibration_jobs.c.job_id,
-        calibration_jobs.c.prefix,
-        calibration_jobs.c.status,
-        calibration_jobs.c.lane,
-        calibration_jobs.c.finished_at,
-        func.row_number().over(
-            partition_by=calibration_jobs.c.prefix,
-            order_by=(calibration_jobs.c.created_at.desc(), literal_column("rowid").desc()),
-        ).label("job_rank"),
-    ).subquery()
-    completed_sample_rows = connection.execute(
-        select(
-            ranked_jobs.c.job_id,
-            ranked_jobs.c.prefix,
-            ranked_jobs.c.finished_at,
-        )
-        .where(ranked_jobs.c.job_rank == 1)
-        .where(ranked_jobs.c.lane == "sample")
-        .where(ranked_jobs.c.status == "completed")
-        .order_by(ranked_jobs.c.finished_at.desc())
-    ).mappings().fetchall()
     review_ready: list[dict[str, Any]] = []
-    for row in completed_sample_rows:
-        prefix = str(row["prefix"] or "").strip()
+    for job in list_pending_review_sample_jobs(connection):
+        prefix = str(job.get("prefix") or "").strip()
         if not prefix:
             continue
         try:
             calibration = load_calibration_state(config, prefix)
         except (OSError, ValueError):
             continue
-        if calibration is None or str(calibration.get("job_id") or "") != str(row["job_id"]):
+        if calibration is None or str(calibration.get("job_id") or "") != str(job.get("job_id") or ""):
             continue
         if review_gate(calibration).get("status") != "needs_approval":
             continue
-        media_scope = resolve_media_scope(
-            connection,
-            prefix,
-            library_types=config.library_type_map,
-        )
+        try:
+            media_scope = resolve_media_scope(
+                connection,
+                prefix,
+                library_types=config.library_type_map,
+            )
+        except (MediaScopeConflict, OSError, ValueError):
+            continue
         review_ready.append(
             {
-                "job_id": str(row["job_id"]),
-                "prefix": prefix,
-                "finished_at": row["finished_at"],
+                **job,
                 "media_scope": media_scope.to_payload(),
             }
         )
     return review_ready
+
+
+def reconcile_pending_review_samples(
+        connection: DBClient,
+        config: MediaforceConfig,
+        *,
+        load_calibration_state: Any,
+        review_gate: Any,
+        updated_at: str,
+) -> int:
+    resolved_count = 0
+    for job in list_pending_review_sample_jobs(connection):
+        prefix = str(job.get("prefix") or "").strip()
+        try:
+            calibration = load_calibration_state(config, prefix) if prefix else None
+        except (OSError, ValueError):
+            continue
+        current_job_id = str(job.get("job_id") or "")
+        calibration_job_id = str((calibration or {}).get("job_id") or "")
+        gate_status = review_gate(calibration).get("status") if calibration is not None else "missing_sample"
+        if calibration_job_id == current_job_id and gate_status == "needs_approval":
+            continue
+        if resolve_pending_review_job(connection, current_job_id, updated_at=updated_at):
+            resolved_count += 1
+    return resolved_count
 
 
 def dashboard_folders_payload(

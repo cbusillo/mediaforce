@@ -37,6 +37,7 @@ from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authorize_compression_change, \
     compression_intent_from_item, compression_intent_from_policy
 from mediaforce.tuning.content_intent_observations import record_visual_content_intent_observation
+from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_evidence_blocker, \
     cadence_safety_partition, older_season_cadence_payload
@@ -321,7 +322,7 @@ def queue_folder_encode_action(
                 detail="Confirm the older-season selection before starting production.",
             )
         existing_job = load_job_state(connection, config, normalized_prefix)
-        if existing_job and existing_job.get("status") in {"queued", "starting", "running", "pending_review"}:
+        if existing_job and existing_job.get("status") in {"queued", "starting", "running"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         calibration = load_calibration_state(config, normalized_prefix)
         gate = review_gate(calibration)
@@ -2142,6 +2143,7 @@ def save_profile_action(
         calibration_payload["accepted_draft_hash"] = current_draft_hash
         calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
         calibration_payload["accepted_sample_job_id"] = str(calibration_payload.get("job_id") or "")
+        accepted_sample_job_id = str(calibration_payload["accepted_sample_job_id"])
         source_scope = object_dict(quality_risk_contract.get("source_scope"))
         contract_policy = object_dict(quality_risk_contract.get("policy"))
         review_tags = [
@@ -2181,6 +2183,13 @@ def save_profile_action(
                 recorded_at=str(calibration_payload["accepted_at"]),
             )
         save_calibration_state(config, normalized_prefix, calibration_payload)
+        if accepted_sample_job_id:
+            with open_db(config.paths.db_path) as connection:
+                resolve_pending_review_job(
+                    connection,
+                    accepted_sample_job_id,
+                    updated_at=str(calibration_payload["accepted_at"]),
+                )
         if approval_artifact is not None:
             approval_artifact["sample_job_id"] = str(calibration_payload.get("job_id") or "")
         quality_risk_state = append_quality_risk_record(

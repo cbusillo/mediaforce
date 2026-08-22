@@ -61,8 +61,8 @@ from mediaforce.tuning.tuning_memory import (
 )
 from mediaforce.tuning.quality_risk import build_quality_risk_contract, quality_risk_public_view, \
     with_quality_risk_intent
-from mediaforce.tuning.calibration_jobs import load_job, load_latest_failed_target_size_sample_job, save_job, \
-    update_job_telemetry
+from mediaforce.tuning.calibration_jobs import list_queue_summary, load_job, \
+    load_latest_failed_target_size_sample_job, save_job, update_job_telemetry
 from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.web.app import (
@@ -90,14 +90,16 @@ from mediaforce.web.app import (
     _upsert_override,
 )
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
-from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, run_calibration_job
+from mediaforce.web.runtime.calibration_runtime import CalibrationRunDeps, calibration_completion_status, \
+    run_calibration_job
 from mediaforce.web.runtime.completed_runtime import (
     ORIGINALS_REMOVED_EVENT,
     clear_completed_backups_action,
     completed_page_payload,
     confirm_originals_removed_action,
 )
-from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload
+from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload, reconcile_pending_review_samples
+from mediaforce.library.media_scopes import MediaScopeConflict
 from mediaforce.web.runtime.folder_ai_tuning import (
     FolderAiTuneDeps,
     _blocking_sample_evidence_issue,
@@ -1289,6 +1291,20 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertNotIn("archive_cleanup", payload)
 
+    def test_calibration_completion_status_opens_only_reviewable_samples(self) -> None:
+        self.assertEqual(
+            calibration_completion_status({"mode": "sample", "review_media_ready": True}),
+            "pending_review",
+        )
+        self.assertEqual(
+            calibration_completion_status({"mode": "sample", "review_media_ready": False}),
+            "completed",
+        )
+        self.assertEqual(
+            calibration_completion_status({"mode": "full", "review_media_ready": True}),
+            "completed",
+        )
+
     def test_dashboard_summary_payload_preview_limit_zero_skips_folder_cards(self) -> None:
         self._insert_library_item(rel_path="tv/show/episode-1.mkv")
 
@@ -1319,7 +1335,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 {
                     "job_id": "review-ready-sample",
                     "prefix": media_prefix,
-                    "status": "completed",
+                    "status": "pending_review",
                     "lane": "sample",
                     "action": "ai_tune",
                     "host": {},
@@ -1361,7 +1377,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 {
                     "job_id": "approved-sample",
                     "prefix": media_prefix,
-                    "status": "completed",
+                    "status": "pending_review",
                     "lane": "sample",
                     "action": "ai_tune",
                     "host": {},
@@ -1388,16 +1404,16 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
         self.assertEqual(payload["calibration_queue"]["review_ready"], [])
 
-    def test_dashboard_summary_payload_omits_sample_superseded_by_newer_job(self) -> None:
+    def test_dashboard_summary_payload_uses_newest_successful_review(self) -> None:
         media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
         self._insert_library_item(rel_path=media_prefix)
         with open_db(self.config.paths.db_path) as connection:
             save_job(
                 connection,
                 {
-                    "job_id": "older-completed-sample",
+                    "job_id": "older-review-sample",
                     "prefix": media_prefix,
-                    "status": "completed",
+                    "status": "pending_review",
                     "lane": "sample",
                     "action": "ai_tune",
                     "host": {},
@@ -1411,9 +1427,9 @@ class TuningRuntimeTests(unittest.TestCase):
             save_job(
                 connection,
                 {
-                    "job_id": "newer-failed-sample",
+                    "job_id": "newer-review-sample",
                     "prefix": media_prefix,
-                    "status": "failed",
+                    "status": "pending_review",
                     "lane": "sample",
                     "action": "ai_tune",
                     "host": {},
@@ -1430,15 +1446,22 @@ class TuningRuntimeTests(unittest.TestCase):
             folder_card_cache_key=lambda _config: ("superseded", 0, 0),
             preview_folder_cards=lambda _config, _connection: [],
             load_scan_status=lambda _connection, _config, prefix=None: None,
-            load_calibration_state=lambda _config, _prefix: {"job_id": "older-completed-sample"},
+            load_calibration_state=lambda _config, _prefix: {"job_id": "newer-review-sample"},
             review_gate=lambda _calibration: {"status": "needs_approval"},
             decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
             library_color_map_for_config=lambda _config: {},
             preview_limit=0,
         )
 
-        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
-        self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 1)
+        self.assertEqual(
+            payload["calibration_queue"]["review_ready"][0]["job_id"],
+            "newer-review-sample",
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            older_job = load_job(connection, "older-review-sample")
+        self.assertIsNotNone(older_job)
+        self.assertEqual(older_job["status"], "superseded")
 
     def test_dashboard_summary_payload_ignores_unreadable_review_state(self) -> None:
         media_prefix = "tv/Bluey (2018)/Season 3/Bluey.S03E49.mkv"
@@ -1449,7 +1472,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 {
                     "job_id": "unreadable-review-state",
                     "prefix": media_prefix,
-                    "status": "completed",
+                    "status": "pending_review",
                     "lane": "sample",
                     "action": "ai_tune",
                     "host": {},
@@ -1478,6 +1501,189 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
         self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+
+    def test_dashboard_summary_payload_does_not_scan_completed_sample_history(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(25):
+                save_job(
+                    connection,
+                    {
+                        "job_id": f"completed-history-{index}",
+                        "prefix": f"tv/show/season-{index}",
+                        "status": "completed",
+                        "lane": "sample",
+                        "action": "ai_tune",
+                        "host": {},
+                        "policy": {},
+                        "sample_item": {},
+                        "created_at": f"2026-08-01T00:{index:02d}:00+00:00",
+                        "finished_at": f"2026-08-01T00:{index:02d}:30+00:00",
+                        "updated_at": f"2026-08-01T00:{index:02d}:30+00:00",
+                    },
+                )
+
+        payload = dashboard_summary_payload(
+            self.config,
+            folder_card_cache_key=lambda _config: ("history", 0, 0),
+            preview_folder_cards=lambda _config, _connection: [],
+            load_scan_status=lambda _connection, _config, prefix=None: None,
+            load_calibration_state=lambda *_args: (_ for _ in ()).throw(
+                AssertionError("completed history should not be loaded")
+            ),
+            review_gate=lambda _calibration: {"status": "needs_approval"},
+            decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+            library_color_map_for_config=lambda _config: {},
+            preview_limit=0,
+        )
+
+        self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+
+    def test_dashboard_summary_payload_skips_ambiguous_review_scope(self) -> None:
+        media_prefix = "tv/show/ambiguous"
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "ambiguous-review",
+                    "prefix": media_prefix,
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {},
+                    "created_at": "2026-08-22T00:00:00+00:00",
+                    "finished_at": "2026-08-22T00:01:00+00:00",
+                    "updated_at": "2026-08-22T00:01:00+00:00",
+                },
+            )
+
+        with patch(
+            "mediaforce.web.runtime.dashboard_payloads.resolve_media_scope",
+            side_effect=MediaScopeConflict(media_prefix),
+        ):
+            payload = dashboard_summary_payload(
+                self.config,
+                folder_card_cache_key=lambda _config: ("ambiguous", 0, 0),
+                preview_folder_cards=lambda _config, _connection: [],
+                load_scan_status=lambda _connection, _config, prefix=None: None,
+                load_calibration_state=lambda _config, _prefix: {"job_id": "ambiguous-review"},
+                review_gate=lambda _calibration: {"status": "needs_approval"},
+                decorate_encode_queue_for_scheduler=lambda _config, summary: summary,
+                library_color_map_for_config=lambda _config: {},
+                preview_limit=0,
+            )
+
+        self.assertEqual(payload["calibration_queue"]["review_ready_count"], 0)
+        self.assertEqual(payload["calibration_queue"]["review_ready"], [])
+
+    def test_reconcile_pending_review_samples_resolves_accepted_rows(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "accepted-review",
+                    "prefix": "tv/show/season-1",
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {},
+                    "created_at": "2026-08-22T00:00:00+00:00",
+                    "finished_at": "2026-08-22T00:01:00+00:00",
+                    "updated_at": "2026-08-22T00:01:00+00:00",
+                },
+            )
+            queue_before = list_queue_summary(connection)
+            resolved = reconcile_pending_review_samples(
+                connection,
+                self.config,
+                load_calibration_state=lambda _config, _prefix: {"job_id": "accepted-review"},
+                review_gate=lambda _calibration: {"status": "accepted"},
+                updated_at="2026-08-22T00:02:00+00:00",
+            )
+            stored = load_job(connection, "accepted-review")
+
+        self.assertEqual(queue_before["active_count"], 0)
+        self.assertEqual(queue_before["sample"]["pending_review_count"], 1)
+        self.assertEqual(resolved, 1)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["status"], "completed")
+
+    def test_reconcile_pending_review_samples_preserves_unreadable_rows(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "temporarily-unreadable-review",
+                    "prefix": "tv/show/season-1",
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {},
+                    "created_at": "2026-08-22T00:00:00+00:00",
+                    "finished_at": "2026-08-22T00:01:00+00:00",
+                    "updated_at": "2026-08-22T00:01:00+00:00",
+                },
+            )
+
+            def unreadable_calibration(_config: Any, _prefix: str) -> dict[str, Any] | None:
+                raise OSError("storage is temporarily unavailable")
+
+            resolved = reconcile_pending_review_samples(
+                connection,
+                self.config,
+                load_calibration_state=unreadable_calibration,
+                review_gate=lambda _calibration: {"status": "accepted"},
+                updated_at="2026-08-22T00:02:00+00:00",
+            )
+            stored = load_job(connection, "temporarily-unreadable-review")
+
+        self.assertEqual(resolved, 0)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["status"], "pending_review")
+
+    def test_failed_replacement_keeps_previous_review_pending(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            save_job(
+                connection,
+                {
+                    "job_id": "previous-review",
+                    "prefix": "tv/show/season-1",
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {},
+                    "created_at": "2026-08-22T00:00:00+00:00",
+                    "finished_at": "2026-08-22T00:01:00+00:00",
+                    "updated_at": "2026-08-22T00:01:00+00:00",
+                },
+            )
+            save_job(
+                connection,
+                {
+                    "job_id": "failed-replacement",
+                    "prefix": "tv/show/season-1",
+                    "status": "failed",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {},
+                    "created_at": "2026-08-22T01:00:00+00:00",
+                    "finished_at": "2026-08-22T01:01:00+00:00",
+                    "updated_at": "2026-08-22T01:01:00+00:00",
+                },
+            )
+            previous = load_job(connection, "previous-review")
+
+        self.assertIsNotNone(previous)
+        self.assertEqual(previous["status"], "pending_review")
 
     def test_dashboard_summary_payload_rejects_negative_preview_limit(self) -> None:
         with self.assertRaises(ValueError):

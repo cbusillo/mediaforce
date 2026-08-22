@@ -141,6 +141,10 @@ real browser at desktop and 390px widths:
 - retry waiting and source unavailable: plain labels plus next retry/source copy
 - failed, cancelled, and complete: terminal copy without pretending work is
   still running
+- sample ready for review: the decision remains in the attention list and links
+  to the exact media item; active or blocked work keeps headline priority while
+  mentioning the pending review count, and review-ready becomes the headline
+  only when operational work is quiet
 - global pause: catalog refresh, preparation, and resume disabled while encode
   approval/processing controls remain separate
 - source warning: cached-state preservation is explicit and the remembered

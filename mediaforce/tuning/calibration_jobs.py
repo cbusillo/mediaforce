@@ -17,7 +17,10 @@ from mediaforce.library.media_scopes import resolve_media_scope, scope_prefix_ov
 
 T = TypeVar("T")
 
-ACTIVE_JOB_STATUSES = {"queued", "starting", "running", "pending_review"}
+RUNNING_JOB_STATUSES = frozenset({"starting", "running"})
+EXECUTION_ACTIVE_JOB_STATUSES = RUNNING_JOB_STATUSES | {"queued"}
+ACTIVE_JOB_STATUSES = EXECUTION_ACTIVE_JOB_STATUSES | {"pending_review"}
+SUCCESSFUL_SAMPLE_JOB_STATUSES = ("completed", "pending_review", "superseded")
 
 
 def load_latest_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:
@@ -127,13 +130,39 @@ def load_recent_completed_sample_jobs(
     rows = connection.execute(
         _calibration_job_select()
         .where(calibration_jobs.c.lane == "sample")
-        .where(calibration_jobs.c.status == "completed")
+        .where(calibration_jobs.c.status.in_(SUCCESSFUL_SAMPLE_JOB_STATUSES))
         .where(calibration_jobs.c.started_at.is_not(None))
         .where(calibration_jobs.c.finished_at.is_not(None))
         .order_by(calibration_jobs.c.finished_at.desc(), _rowid_column().desc())
         .limit(limit)
     ).mappings().fetchall()
     return [_hydrate_job(row) for row in rows]
+
+
+def list_pending_review_sample_jobs(connection: DBClient) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        _calibration_job_select()
+        .where(calibration_jobs.c.lane == "sample")
+        .where(calibration_jobs.c.status == "pending_review")
+        .order_by(calibration_jobs.c.finished_at.desc(), _rowid_column().desc())
+    ).mappings().fetchall()
+    return [_hydrate_job(row) for row in rows]
+
+
+def resolve_pending_review_job(
+        connection: DBClient,
+        job_id: str,
+        *,
+        status: str = "completed",
+        updated_at: str,
+) -> bool:
+    result = connection.execute(
+        update(calibration_jobs)
+        .where(calibration_jobs.c.job_id == job_id)
+        .where(calibration_jobs.c.status == "pending_review")
+        .values(status=status, updated_at=updated_at)
+    )
+    return bool(result.rowcount)
 
 
 def list_queued_jobs(connection: DBClient) -> list[dict[str, Any]]:
@@ -225,7 +254,7 @@ def list_queue_summary(connection: DBClient, *, limit_per_lane: int = 6) -> dict
         key = f"{bucket}_count"
         if key in lane_summary:
             lane_summary[key] += 1
-        if status in ACTIVE_JOB_STATUSES:
+        if status in EXECUTION_ACTIVE_JOB_STATUSES:
             summary["active_count"] += 1
         if bucket in lane_summary and len(lane_summary[bucket]) < limit_per_lane:
             lane_summary[bucket].append(payload)
@@ -283,6 +312,15 @@ def queue_position(connection: DBClient, job_id: str) -> tuple[int, int] | None:
 
 def save_job(connection: DBClient, payload: dict[str, Any]) -> None:
     values = _serialize_job(payload)
+    if values["status"] == "pending_review":
+        connection.execute(
+            update(calibration_jobs)
+            .where(calibration_jobs.c.prefix == values["prefix"])
+            .where(calibration_jobs.c.lane == "sample")
+            .where(calibration_jobs.c.status == "pending_review")
+            .where(calibration_jobs.c.job_id != values["job_id"])
+            .values(status="superseded", updated_at=values["updated_at"])
+        )
     statement = sqlite_insert(calibration_jobs).values(**values)
     connection.execute(
         statement.on_conflict_do_update(
