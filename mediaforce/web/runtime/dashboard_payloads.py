@@ -54,8 +54,6 @@ def dashboard_summary_payload(
             load_calibration_state=load_calibration_state,
             review_gate=review_gate,
         )
-        calibration_queue["sample"]["pending_review"] = review_ready
-        calibration_queue["sample"]["pending_review_count"] = len(review_ready)
         calibration_queue["review_ready"] = review_ready
         calibration_queue["review_ready_count"] = len(review_ready)
         encode_queue = decorate_encode_queue_for_scheduler(
@@ -103,7 +101,9 @@ def _review_ready_samples(
             continue
         review_ready.append(
             {
-                **job,
+                "job_id": str(job.get("job_id") or ""),
+                "prefix": prefix,
+                "finished_at": job.get("finished_at"),
                 "media_scope": media_scope.to_payload(),
             }
         )

@@ -5,6 +5,7 @@ import {
 	buildOpsHistoryRows,
 	buildOpsQueueRows,
 	buildOpsReadinessSummary,
+	buildOpsFooterSignals,
 	buildOpsStatusTiles,
 	hostPrepareDisabled,
 	hostPrepareTitle,
@@ -502,6 +503,74 @@ describe('Ops workstation mapping', () => {
 			title: 'A season needs attention',
 			detail: expect.stringContaining('1 sample ready for review')
 		});
+	});
+
+	it('keeps encode attention dominant in the footer while still counting review-ready samples', () => {
+		const dashboard = quietDashboardFixture();
+		const reviewReadySample = {
+			job_id: 'sample-review-mixed',
+			prefix: 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+			media_scope: {
+				...mediaScope(
+					'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+					'tv',
+					'media_file',
+					'exact_item'
+				),
+				parent: {
+					prefix: 'tv/Bluey (2018)/Season 3',
+					title: 'Season 3'
+				}
+			}
+		};
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention = [
+			{
+				job_id: 'encode-needs-review',
+				prefix: 'tv/show/season 1',
+				status: 'needs_attention'
+			}
+		];
+		dashboard.encode_queue.needs_attention_count = 1;
+		dashboard.calibration_queue.review_ready = [reviewReadySample];
+		dashboard.calibration_queue.review_ready_count = 1;
+		dashboard.calibration_queue.sample.pending_review = [reviewReadySample];
+		dashboard.calibration_queue.sample.pending_review_count = 1;
+
+		let signals = buildOpsFooterSignals(dashboard, hostsFixture());
+		expect(signals).toHaveLength(4);
+		expect(signals[1]).toMatchObject({ label: 'Attention', value: '2', tone: 'wait' });
+
+		dashboard.encode_queue.needs_attention = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+		signals = buildOpsFooterSignals(dashboard, hostsFixture());
+		expect(signals[1]).toMatchObject({ label: 'Attention', value: '1', tone: 'ready' });
+
+		dashboard.calibration_queue.sample.pending_review.push({
+			job_id: 'sample-review-unavailable',
+			prefix: 'tv/show/ambiguous',
+			status: 'pending_review'
+		});
+		dashboard.calibration_queue.sample.pending_review_count = 2;
+		signals = buildOpsFooterSignals(dashboard, hostsFixture());
+		expect(signals[1]).toMatchObject({ label: 'Attention', value: '2', tone: 'wait' });
+		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[2]).toMatchObject({
+			detail: '1 ready · 1 unavailable',
+			tone: 'wait'
+		});
+		expect(buildOpsQueueRows(dashboard, hostsFixture()).map((row) => row.key)).toEqual(
+			expect.arrayContaining(['sample:sample-review-unavailable'])
+		);
+		expect(buildOpsQueueRows(dashboard, hostsFixture()).map((row) => row.key)).not.toContain(
+			'sample:sample-review-mixed'
+		);
+
+		dashboard.calibration_queue.review_ready = [];
+		dashboard.calibration_queue.review_ready_count = 0;
+		dashboard.calibration_queue.sample.pending_review = [];
+		dashboard.calibration_queue.sample.pending_review_count = 0;
+		signals = buildOpsFooterSignals(dashboard, hostsFixture());
+		expect(signals[1]).toMatchObject({ label: 'Attention', value: '0', tone: 'idle' });
 	});
 
 	it('does not repeat the series name when an exact TV item has no season folder', () => {
