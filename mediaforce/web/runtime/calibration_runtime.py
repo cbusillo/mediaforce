@@ -429,6 +429,15 @@ def remove_path(path: Path | None) -> None:
         return
 
 
+def calibration_completion_status(calibration_payload: dict[str, Any]) -> str:
+    if (
+            str(calibration_payload.get("mode") or "sample") == "sample"
+            and bool(calibration_payload.get("review_media_ready"))
+    ):
+        return "pending_review"
+    return "completed"
+
+
 def run_calibration_job(
         *,
         config_path: Path,
@@ -550,6 +559,8 @@ def run_calibration_job(
         calibration_payload["job_id"] = job_id
         deps.save_calibration_state(config, prefix, calibration_payload)
         deps.record_run_verdict(config, prefix, calibration_payload)
+        finished_at = deps.now_iso()
+        completed_status = calibration_completion_status(calibration_payload)
         with open_db(config.paths.db_path) as connection:
             deps.save_job_state(
                 connection,
@@ -558,13 +569,13 @@ def run_calibration_job(
                 {
                     **job,
                     "job_id": job_id,
-                    "status": "completed",
-                    "finished_at": deps.now_iso(),
+                    "status": completed_status,
+                    "finished_at": finished_at,
                     "error": None,
                     "result": deps.summarize_calibration_result(calibration_payload),
                 },
             )
-        terminal_status = "completed"
+        terminal_status = completed_status
     except ProcessCancelledError:
         terminal_status = "stopped"
         with open_db(config.paths.db_path) as connection:

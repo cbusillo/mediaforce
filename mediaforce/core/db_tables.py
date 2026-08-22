@@ -249,6 +249,12 @@ Index(
     calibration_jobs.c.status,
     calibration_jobs.c.created_at.asc(),
 )
+Index(
+    "idx_calibration_jobs_lane_status_finished",
+    calibration_jobs.c.lane,
+    calibration_jobs.c.status,
+    calibration_jobs.c.finished_at.desc(),
+)
 
 encode_queue_state = Table(
     "encode_queue_state",

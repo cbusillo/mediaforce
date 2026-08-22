@@ -31,6 +31,7 @@ from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db import reset_engine_cache
 from mediaforce.core.db_tables import alembic_version
 from mediaforce.core.db_tables import background_work_state
+from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import evidence_queue_state
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
@@ -55,7 +56,7 @@ from mediaforce.web.runtime_lock import (
 )
 from mediaforce.web import runtime_lock as runtime_lock_module
 
-CURRENT_DB_REVISION = "20260731_0020"
+CURRENT_DB_REVISION = "20260822_0021"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -6829,6 +6830,146 @@ class DatabaseRuntimeTests(unittest.TestCase):
 
             self.assertEqual(version, CURRENT_DB_REVISION)
             self.assertIn("media_fingerprint_json", columns)
+
+    def test_open_db_indexes_and_backfills_pending_calibration_reviews(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "library.sqlite3"
+            with open_db(db_path):
+                pass
+            reset_engine_cache()
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute(
+                    "DROP INDEX IF EXISTS idx_calibration_jobs_lane_status_finished"
+                )
+
+                def insert_job(
+                        job_id: str,
+                        prefix: str,
+                        status: str,
+                        lane: str,
+                        created_at: str,
+                ) -> None:
+                    raw_connection.execute(
+                        """
+                        INSERT INTO calibration_jobs (
+                            job_id,
+                            prefix,
+                            status,
+                            lane,
+                            action,
+                            host_json,
+                            policy_json,
+                            sample_item_json,
+                            created_at,
+                            finished_at,
+                            updated_at
+                        ) VALUES (?, ?, ?, ?, 'ai_tune', '{}', '{}', '{}', ?, ?, ?)
+                        """,
+                        (job_id, prefix, status, lane, created_at, created_at, created_at),
+                    )
+
+                insert_job(
+                    "review-old",
+                    "tv/review",
+                    "completed",
+                    "sample",
+                    "2026-08-20T00:00:00+00:00",
+                )
+                insert_job(
+                    "review-current",
+                    "tv/review",
+                    "completed",
+                    "sample",
+                    "2026-08-21T00:00:00+00:00",
+                )
+                insert_job(
+                    "failed-old",
+                    "tv/failed",
+                    "completed",
+                    "sample",
+                    "2026-08-20T00:00:00+00:00",
+                )
+                insert_job(
+                    "failed-current",
+                    "tv/failed",
+                    "failed",
+                    "sample",
+                    "2026-08-21T00:00:00+00:00",
+                )
+                insert_job(
+                    "full-current",
+                    "tv/full",
+                    "completed",
+                    "full",
+                    "2026-08-21T00:00:00+00:00",
+                )
+                raw_connection.execute(
+                    "UPDATE alembic_version SET version_num = ?",
+                    ("20260731_0020",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+
+            with open_db(db_path) as connection:
+                version = connection.execute(select(alembic_version.c.version_num)).scalar_one()
+                indexes = {
+                    str(index.get("name") or "")
+                    for index in inspect(connection).get_indexes("calibration_jobs")
+                }
+                statuses = dict(
+                    connection.execute(
+                        select(calibration_jobs.c.job_id, calibration_jobs.c.status)
+                    ).all()
+                )
+
+            self.assertEqual(version, CURRENT_DB_REVISION)
+            self.assertIn("idx_calibration_jobs_lane_status_finished", indexes)
+            self.assertEqual(statuses["review-old"], "completed")
+            self.assertEqual(statuses["review-current"], "pending_review")
+            self.assertEqual(statuses["failed-old"], "pending_review")
+            self.assertEqual(statuses["failed-current"], "failed")
+            self.assertEqual(statuses["full-current"], "completed")
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                raw_connection.execute(
+                    "UPDATE calibration_jobs SET status = 'superseded' WHERE job_id = ?",
+                    ("review-old",),
+                )
+                raw_connection.commit()
+            finally:
+                raw_connection.close()
+            reset_engine_cache()
+
+            with _alembic_script_location() as script_location:
+                command.downgrade(
+                    _alembic_config(db_path, script_location),
+                    "20260731_0020",
+                )
+
+            raw_connection = sqlite3.connect(db_path)
+            try:
+                downgraded_statuses = dict(
+                    raw_connection.execute(
+                        "SELECT job_id, status FROM calibration_jobs"
+                    ).fetchall()
+                )
+                downgraded_indexes = {
+                    str(row[1])
+                    for row in raw_connection.execute(
+                        "PRAGMA index_list('calibration_jobs')"
+                    ).fetchall()
+                }
+            finally:
+                raw_connection.close()
+
+            self.assertEqual(downgraded_statuses["review-current"], "completed")
+            self.assertEqual(downgraded_statuses["failed-old"], "completed")
+            self.assertEqual(downgraded_statuses["review-old"], "completed")
+            self.assertNotIn("idx_calibration_jobs_lane_status_finished", downgraded_indexes)
 
     def test_open_db_adds_library_lifecycle_metadata_to_previous_revision(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

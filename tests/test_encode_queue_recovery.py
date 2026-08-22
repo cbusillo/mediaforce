@@ -8068,14 +8068,39 @@ raise SystemExit(0)
             payload = calibration_state.get(prefix)
             return dict(payload) if payload is not None else None
 
+        calibration_status_during_save: list[str | None] = []
+
         def save_calibration_state(
                 _config: MediaforceConfig,
                 prefix: str,
                 payload: folder_actions_runtime.ActionPayload,
         ) -> None:
+            with open_db(self.config.paths.db_path) as connection:
+                calibration_status_during_save.append(
+                    connection.scalar(
+                        select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == "sample-1")
+                    )
+                )
             calibration_state[prefix] = dict(payload)
 
         cleared_proposals: list[str] = []
+        with open_db(self.config.paths.db_path) as connection:
+            save_calibration_job(
+                connection,
+                {
+                    "job_id": "sample-1",
+                    "prefix": "tv/show",
+                    "status": "pending_review",
+                    "lane": "sample",
+                    "action": "ai_tune",
+                    "host": {},
+                    "policy": {},
+                    "sample_item": {"library_item_id": 1},
+                    "created_at": "2026-08-22T00:00:00+00:00",
+                    "finished_at": "2026-08-22T00:01:00+00:00",
+                    "updated_at": "2026-08-22T00:01:00+00:00",
+                },
+            )
 
         result = folder_actions_runtime.save_profile_action(
             self.config,
@@ -8100,12 +8125,17 @@ raise SystemExit(0)
         assert calibration is not None
         self.assertTrue(calibration.get("accepted_at"))
         self.assertTrue(calibration.get("accepted_policy_hash"))
+        self.assertEqual(calibration_status_during_save, ["pending_review"])
         self.assertEqual(cleared_proposals, ["tv/show"])
         with open_db(self.config.paths.db_path) as connection:
             queued_count = connection.scalar(
                 select(func.count()).select_from(encode_jobs).where(encode_jobs.c.prefix == "tv/show")
             )
+            calibration_status = connection.scalar(
+                select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == "sample-1")
+            )
         self.assertEqual(queued_count, 0)
+        self.assertEqual(calibration_status, "completed")
 
     def test_save_profile_action_records_frozen_content_intent_boundary(self) -> None:
         intent = CompressionIntentV1(level="perceptual_floor", source="operator", confirmed=True)
@@ -17100,6 +17130,47 @@ raise SystemExit(0)
             job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
 
         deps.run_calibration_job.assert_not_called()
+
+    def test_pending_review_does_not_block_replacement_sample_dispatch(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            for job_id, status, created_at in (
+                ("pending-sample", "pending_review", "2026-08-22T00:00:00+00:00"),
+                ("replacement-sample", "queued", "2026-08-22T01:00:00+00:00"),
+            ):
+                save_calibration_job(
+                    connection,
+                    {
+                        "job_id": job_id,
+                        "prefix": "tv/show/season-1",
+                        "status": status,
+                        "lane": "sample",
+                        "action": "ai_tune",
+                        "host": {},
+                        "policy": {},
+                        "sample_item": {},
+                        "created_at": created_at,
+                        "finished_at": created_at if status == "pending_review" else None,
+                        "updated_at": created_at,
+                    },
+                )
+
+        deps = web_app._calibration_queue_runtime_deps()
+        with patch("mediaforce.web.runtime.job_runtime.load_config", return_value=self.config), patch(
+            "mediaforce.web.runtime.job_runtime.dispatch_calibration_job"
+        ) as dispatch:
+            job_runtime.process_calibration_queue_once(config_path=self.config.paths.config_path, deps=deps)
+
+        dispatch.assert_called_once()
+        self.assertEqual(dispatch.call_args.args[1]["job_id"], "replacement-sample")
+        with open_db(self.config.paths.db_path) as connection:
+            pending_status = connection.scalar(
+                select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == "pending-sample")
+            )
+            replacement_status = connection.scalar(
+                select(calibration_jobs.c.status).where(calibration_jobs.c.job_id == "replacement-sample")
+            )
+        self.assertEqual(pending_status, "pending_review")
+        self.assertEqual(replacement_status, "running")
 
     def test_encode_queue_worker_loop_logs_pass_failures_and_keeps_running(self) -> None:
         deps = Mock()

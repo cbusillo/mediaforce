@@ -646,7 +646,7 @@ def folder_ai_tune_preview_action(
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
-        if existing_job and existing_job.get("status") in {"queued", "starting", "running", "pending_review"}:
+        if existing_job and existing_job.get("status") in {"queued", "starting", "running"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         latest_failed_sample_job_loader = deps.load_latest_failed_sample_job_state or deps.load_retryable_sample_job_state
         latest_failed_sample_job = _latest_failed_sample_job_payload(
@@ -781,7 +781,7 @@ def folder_ai_tune_confirm_action(
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
         existing_job = deps.load_job_state(connection, config, normalized_prefix)
-        if existing_job and existing_job.get("status") in {"queued", "starting", "running", "pending_review"}:
+        if existing_job and existing_job.get("status") in {"queued", "starting", "running"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         sample_item = deps.sample_item(connection, config, normalized_prefix)
         if sample_item is None:
@@ -946,7 +946,7 @@ def _retry_latest_sample_job(
         if existing_job is None:
             return {"ok": False, "message": "Ask the bench for a draft first."}
         status = str(existing_job.get("status") or "").strip()
-        if status in {"queued", "starting", "running", "pending_review"}:
+        if status in {"queued", "starting", "running"}:
             return {"ok": False, "message": "A calibration job is already active for this folder."}
         if status not in {"failed", "stopped"}:
             return {"ok": False, "message": "Ask the bench for a draft first."}

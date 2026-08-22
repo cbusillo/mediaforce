@@ -168,6 +168,17 @@ function dashboardFixture(): DashboardSummaryPayload {
 	};
 }
 
+function quietDashboardFixture(): DashboardSummaryPayload {
+	const dashboard = dashboardFixture();
+	dashboard.encode_queue.running = [];
+	dashboard.encode_queue.running_count = 0;
+	dashboard.encode_queue.queued = [];
+	dashboard.encode_queue.queued_count = 0;
+	dashboard.calibration_queue.sample.running = [];
+	dashboard.calibration_queue.active_count = 0;
+	return dashboard;
+}
+
 function hostsFixture(): HostsPayload {
 	return {
 		compact: true,
@@ -406,6 +417,14 @@ describe('Ops workstation mapping', () => {
 			}
 		];
 		dashboard.calibration_queue.review_ready_count = 1;
+		dashboard.calibration_queue.sample.pending_review = [
+			{
+				job_id: 'sample-review-1',
+				prefix: 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+				status: 'pending_review'
+			}
+		];
+		dashboard.calibration_queue.sample.pending_review_count = 1;
 
 		const blockers = buildOpsBlockers(dashboard, hostsFixture(), null);
 
@@ -421,16 +440,67 @@ describe('Ops workstation mapping', () => {
 			linkLabel: 'Review sample'
 		});
 		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
+			tone: 'active',
+			title: 'feature is working',
+			detail: expect.stringContaining('1 sample ready for review'),
+			metricLabel: 'Running'
+		});
+		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[2]).toMatchObject({
+			label: 'Sample checks',
+			detail: '1 waiting for review',
+			tone: 'ready'
+		});
+		expect(buildOpsQueueRows(dashboard, hostsFixture()).map((row) => row.key)).not.toContain(
+			'sample:sample-review-1'
+		);
+	});
+
+	it('uses review-ready as the headline only when queue work is quiet', () => {
+		const dashboard = quietDashboardFixture();
+		dashboard.calibration_queue.review_ready = [
+			{
+				job_id: 'sample-review-quiet',
+				prefix: 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+				media_scope: {
+					...mediaScope(
+						'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv',
+						'tv',
+						'media_file',
+						'exact_item'
+					),
+					parent: {
+						prefix: 'tv/Bluey (2018)/Season 3',
+						title: 'Season 3'
+					}
+				}
+			}
+		];
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
 			tone: 'ready',
 			title: 'Bluey · Season 3 · Episode 49 is ready for review',
 			detail: 'Compare the sample and decide whether to approve it.',
 			metricLabel: 'Needs you',
 			metricValue: '1'
 		});
-		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[2]).toMatchObject({
-			label: 'Sample checks',
-			detail: '1 waiting for review',
-			tone: 'ready'
+	});
+
+	it('keeps processing attention ahead of review-ready samples', () => {
+		const dashboard = quietDashboardFixture();
+		dashboard.calibration_queue.review_ready = [
+			{
+				job_id: 'sample-review-with-attention',
+				prefix: 'tv/show/season 1',
+				media_scope: mediaScope('tv/show/season 1', 'tv', 'tv_season')
+			}
+		];
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
+			tone: 'wait',
+			title: 'A season needs attention',
+			detail: expect.stringContaining('1 sample ready for review')
 		});
 	});
 

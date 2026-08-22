@@ -18,7 +18,8 @@ from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
 
-from mediaforce.tuning.calibration_jobs import claim_next_queued_calibration_job, load_active_overlapping_job, \
+from mediaforce.tuning.calibration_jobs import RUNNING_JOB_STATUSES, claim_next_queued_calibration_job, \
+    load_active_overlapping_job, \
     load_latest_failed_sample_job, \
     load_latest_failed_target_size_sample_job, load_latest_job, load_latest_overlapping_job, \
     load_latest_retryable_sample_job, load_latest_sample_job, load_recent_completed_sample_jobs, queue_position, save_job
@@ -825,7 +826,7 @@ def process_calibration_queue_once(*, config_path: Any, deps: CalibrationQueueRu
                 calibration_jobs.c.prefix,
                 calibration_jobs.c.status,
             )
-            .where(calibration_jobs.c.status.in_(("starting", "running", "pending_review")))
+            .where(calibration_jobs.c.status.in_(tuple(RUNNING_JOB_STATUSES)))
             .order_by(calibration_jobs.c.created_at, literal_column("rowid"))
         ).mappings().fetchall()
         running_by_lane = {lane: 0 for lane in capacities}
