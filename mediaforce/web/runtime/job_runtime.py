@@ -201,6 +201,7 @@ def calibration_job_progress_payload(
     compatibility_key = str(stored.get("compatibility_key") or calibration_job_compatibility_key(payload))
     heartbeat_at = _parse_job_timestamp(payload.get("heartbeat_at"))
     started_at = _parse_job_timestamp(payload.get("started_at") or payload.get("created_at"))
+    stage_started_at = _parse_job_timestamp(stored.get("stage_started_at"))
     finished_at = _parse_job_timestamp(payload.get("finished_at"))
     active_status = status in {"starting", "running"}
     terminal_elapsed_seconds = int_value(stored.get("total_elapsed_seconds"))
@@ -214,6 +215,11 @@ def calibration_job_progress_payload(
     heartbeat_age_seconds = (
         max(0, round((now - heartbeat_at).total_seconds()))
         if active_status and heartbeat_at
+        else None
+    )
+    stage_elapsed_seconds = (
+        max(0, round((now - stage_started_at).total_seconds()))
+        if active_status and stage_started_at
         else None
     )
     estimate = (
@@ -231,6 +237,7 @@ def calibration_job_progress_payload(
         "schema_version": 1,
         "compatibility_key": compatibility_key,
         "elapsed_seconds": elapsed_seconds,
+        "stage_elapsed_seconds": stage_elapsed_seconds,
         "estimate": estimate,
     }
     if status == "queued":

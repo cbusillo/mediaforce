@@ -30,6 +30,7 @@
 		rowRecoveryLabel,
 		rowRecoveryTitle,
 		RefreshCoordinator,
+		visibleEncodeQueueCounts,
 		workerCapabilitiesSummary,
 		type OpsActionId,
 		type OpsQueueRow
@@ -58,6 +59,7 @@
 	const readiness = $derived(buildOpsReadinessSummary(dashboard, hosts, loadError));
 	const statusTiles = $derived(buildOpsStatusTiles(dashboard, hosts, loadError));
 	const footerSignals = $derived(buildOpsFooterSignals(dashboard, hosts));
+	const visibleEncodeCounts = $derived(visibleEncodeQueueCounts(dashboard));
 	const encodeQueue = $derived(dashboard?.encode_queue ?? null);
 	const calibrationQueue = $derived(dashboard?.calibration_queue ?? null);
 	const queuedWaitingCount = $derived(encodeQueue?.queued_waiting_count ?? 0);
@@ -419,7 +421,7 @@
 									>{encodeQueue?.state.scheduler_summary ?? 'Work schedule unavailable'}</strong
 								>
 								<span
-									>{(encodeQueue?.queued_count ?? 0).toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
+									>{visibleEncodeCounts.queued.toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
 										'en-US'
 									)}
 									need attention</span
@@ -520,7 +522,7 @@
 										<td data-label="Progress">
 											<div class="cell-stack">
 												<strong>{row.progress}</strong>
-												<span>{row.detail}</span>
+												<span title={row.detail}>{row.detail}</span>
 											</div>
 										</td>
 										<td data-label="Work window" class="schedule-cell">
@@ -542,6 +544,10 @@
 													title={rowRecoveryTitle(row)}
 													onclick={() => runAction(action, undefined, row)}
 													>{rowRecoveryLabel(row)}</button
+												>
+											{:else if row.status === 'Needs review' && canOpenFolder(row)}
+												<a class="inline-link" href={resolve(folderRoutePath(row.prefix))}
+													>Review item</a
 												>
 											{:else}
 												<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
@@ -1103,15 +1109,15 @@
 	}
 
 	.ops-table--jobs th:nth-child(1) {
-		width: 13%;
+		width: 16%;
 	}
 
 	.ops-table--jobs th:nth-child(2) {
-		width: 21%;
+		width: 23%;
 	}
 
 	.ops-table--jobs th:nth-child(3) {
-		width: 14%;
+		width: 12%;
 	}
 
 	.ops-table--jobs th:nth-child(4) {
@@ -1119,11 +1125,11 @@
 	}
 
 	.ops-table--jobs th:nth-child(5) {
-		width: 22%;
+		width: 15%;
 	}
 
 	.ops-table--jobs th:nth-child(6) {
-		width: 10%;
+		width: 14%;
 	}
 
 	.cell-stack {
@@ -1131,6 +1137,19 @@
 		gap: var(--mf-space-2);
 		justify-items: start;
 		min-width: 0;
+	}
+
+	.ops-table--jobs .work-link strong,
+	.ops-table--jobs .cell-stack > span {
+		overflow-wrap: anywhere;
+	}
+
+	.ops-table--jobs .cell-stack > span {
+		display: -webkit-box;
+		line-clamp: 3;
+		overflow: hidden;
+		-webkit-box-orient: vertical;
+		-webkit-line-clamp: 3;
 	}
 
 	.schedule-cell__content > span {

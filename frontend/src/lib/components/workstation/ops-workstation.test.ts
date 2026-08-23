@@ -456,6 +456,127 @@ describe('Ops workstation mapping', () => {
 		);
 	});
 
+	it('shows one current row when an encode job transitions into sample review', () => {
+		const dashboard = quietDashboardFixture();
+		const prefix = 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv';
+		dashboard.encode_queue.running = [
+			{
+				job_id: 'encode-sample-shadow',
+				prefix,
+				status: 'running',
+				host: { label: 'M4 Studio' },
+				progress: { percent_complete: 1, current_item_rel_path: prefix }
+			},
+			{
+				job_id: 'encode-unrelated',
+				prefix: 'movies/Unrelated Feature',
+				status: 'running'
+			}
+		];
+		dashboard.encode_queue.running_count = 2;
+		dashboard.calibration_queue.sample.pending_review = [
+			{
+				job_id: 'sample-review-transition',
+				prefix,
+				status: 'pending_review',
+				host: { label: 'M4 Studio' }
+			}
+		];
+		dashboard.calibration_queue.sample.pending_review_count = 1;
+
+		const rows = buildOpsQueueRows(dashboard, hostsFixture());
+		expect(rows.map((row) => row.key)).toEqual([
+			'encode:encode-unrelated',
+			'sample:sample-review-transition'
+		]);
+		expect(rows[1]).toMatchObject({
+			status: 'Waiting',
+			progress: 'Complete',
+			scheduler: 'Review unavailable',
+			detail:
+				'Review media is unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+		});
+	});
+
+	it('hides the transitional encode row when the sample is ready for review', () => {
+		const dashboard = quietDashboardFixture();
+		const reviewPrefix = 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.mkv';
+		const reviewReadySample = {
+			job_id: 'sample-review-ready',
+			prefix: reviewPrefix,
+			status: 'pending_review'
+		};
+		dashboard.encode_queue.running = [
+			{
+				job_id: 'encode-review-ready-shadow',
+				prefix: reviewPrefix,
+				media_scope: mediaScope(reviewPrefix, 'tv', 'media_file', 'exact_item'),
+				status: 'running'
+			}
+		];
+		dashboard.encode_queue.running_count = 1;
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.calibration_queue.sample.pending_review = [reviewReadySample];
+		dashboard.calibration_queue.sample.pending_review_count = 1;
+		dashboard.calibration_queue.review_ready = [reviewReadySample];
+		dashboard.calibration_queue.review_ready_count = 1;
+
+		expect(buildOpsQueueRows(dashboard, hostsFixture())).toEqual([]);
+		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[1]).toMatchObject({
+			value: '0 running · 0 queued',
+			tone: 'idle'
+		});
+		expect(buildOpsFooterSignals(dashboard, hostsFixture())[0]).toMatchObject({
+			value: '0/0',
+			tone: 'idle'
+		});
+	});
+
+	it('only hides the encode row processing the reviewed item within a shared folder scope', () => {
+		const dashboard = quietDashboardFixture();
+		const folderPrefix = 'tv/Bluey (2018)/Season 3';
+		const reviewPrefix = `${folderPrefix}/Bluey.2018.S03E49.1080p.mkv`;
+		dashboard.encode_queue.running = [
+			{
+				job_id: 'encode-sample-shadow',
+				prefix: folderPrefix,
+				media_scope: mediaScope(folderPrefix, 'tv', 'tv_season'),
+				status: 'running',
+				progress: { current_item_rel_path: reviewPrefix }
+			},
+			{
+				job_id: 'encode-sibling-episode',
+				prefix: folderPrefix,
+				media_scope: mediaScope(folderPrefix, 'tv', 'tv_season'),
+				status: 'running',
+				progress: { current_item_rel_path: `${folderPrefix}/Bluey.2018.S03E50.1080p.mkv` }
+			}
+		];
+		dashboard.encode_queue.running_count = 2;
+		dashboard.calibration_queue.sample.pending_review = [
+			{
+				job_id: 'sample-review-transition',
+				prefix: reviewPrefix,
+				status: 'pending_review'
+			}
+		];
+		dashboard.calibration_queue.sample.pending_review_count = 1;
+
+		expect(buildOpsQueueRows(dashboard, hostsFixture()).map((row) => row.key)).toEqual([
+			'encode:encode-sibling-episode',
+			'sample:sample-review-transition'
+		]);
+		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[1]).toMatchObject({
+			value: '1 running · 0 queued'
+		});
+		expect(buildOpsFooterSignals(dashboard, hostsFixture())[0]).toMatchObject({
+			value: '1/0',
+			tone: 'active'
+		});
+	});
+
 	it('uses review-ready as the headline only when queue work is quiet', () => {
 		const dashboard = quietDashboardFixture();
 		dashboard.calibration_queue.review_ready = [
@@ -486,6 +607,37 @@ describe('Ops workstation mapping', () => {
 			detail: 'Compare the sample and decide whether to approve it.',
 			metricLabel: 'Needs you',
 			metricValue: '1'
+		});
+	});
+
+	it('does not claim an unavailable sample review needs operator action', () => {
+		const dashboard = quietDashboardFixture();
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention = [];
+		dashboard.encode_queue.needs_attention_count = 0;
+		dashboard.calibration_queue.sample.pending_review = [
+			{
+				job_id: 'sample-review-unavailable',
+				prefix: 'tv/show/ambiguous',
+				status: 'pending_review'
+			}
+		];
+		dashboard.calibration_queue.sample.pending_review_count = 1;
+
+		expect(buildOpsReadinessSummary(dashboard, hostsFixture(), null)).toMatchObject({
+			tone: 'ready',
+			title: 'Ready for work',
+			metricLabel: 'Available'
+		});
+		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[2]).toMatchObject({
+			detail: '0 ready · 1 unavailable',
+			tone: 'wait'
+		});
+		expect(buildOpsQueueRows(dashboard, hostsFixture())[0]).toMatchObject({
+			status: 'Waiting',
+			scheduler: 'Review unavailable',
+			detail:
+				'Review media is unavailable. Mediaforce kept the completed sample visible for diagnosis.'
 		});
 	});
 

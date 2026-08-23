@@ -542,7 +542,7 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       .then(
         () => null,
         (error) => error,
-    );
+      );
     await policySelect.selectOption("on");
     await saveRequested;
     await showButton(alternateShowName).click();
@@ -623,6 +623,210 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
   }
 }
 
+async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
+    await page.goto(`${baseUrl}${route}`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page
+      .getByRole("heading", { name: /^Testing / })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    const activeRoom = page.locator(".active-room");
+    const activeText = (await activeRoom.textContent()) ?? "";
+    for (const expectedText of [
+      "Configured goal",
+      "Episode target",
+      "Test band",
+      "Mediaforce found settings near",
+      "Building comparison clips",
+      "2 of 3 comparison steps",
+      "Worker health",
+      "Based on 3 comparable completed tests",
+    ]) {
+      if (!activeText.includes(expectedText)) {
+        throw new Error(`Active test progress omitted: ${expectedText}`);
+      }
+    }
+    if (
+      activeText.includes("Your test is starting") ||
+      activeText.includes("searching for settings") ||
+      activeText.includes("Step progress") ||
+      activeText.includes("for the whole episode")
+    ) {
+      throw new Error(
+        "Active test progress retained stale or misleading copy.",
+      );
+    }
+    const progressbar = activeRoom.getByRole("progressbar", {
+      name: /Building comparison clips/,
+    });
+    if (
+      (await progressbar.getAttribute("aria-valuenow")) !== "2" ||
+      (await progressbar.getAttribute("aria-valuemax")) !== "3"
+    ) {
+      throw new Error(
+        "Active test stage progress did not expose bounded work telemetry.",
+      );
+    }
+    if (await page.locator(".quality-memory").isVisible()) {
+      throw new Error("Quality memory competed with the active test surface.");
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    const narrowState = await page.evaluate(() => ({
+      overflow:
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+      progressVisible: (() => {
+        const progress = document.querySelector(".active-progress");
+        return progress instanceof HTMLElement && progress.offsetHeight > 0;
+      })(),
+    }));
+    if (narrowState.overflow || !narrowState.progressVisible) {
+      throw new Error(
+        `Active test progress failed narrow layout: ${JSON.stringify(narrowState)}`,
+      );
+    }
+    console.log("route ok: Active test progress is truthful and responsive");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkReviewTransitionDedupe(baseUrl, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
+    const transitionPrefix = "tv/Transition Fixture/Season 1/Episode 01.mkv";
+    const transitionFolderPrefix = "tv/Transition Fixture/Season 1";
+    const siblingPrefix = `${transitionFolderPrefix}/Episode 02.mkv`;
+    await page.route(/\/api\/dashboard(?:\?.*)?$/, async (route) => {
+      const response = await route.fetch();
+      const payload = await response.json();
+      payload.encode_queue.running = [
+        ...(payload.encode_queue.running ?? []),
+        {
+          job_id: "web-smoke-transition-encode",
+          prefix: transitionFolderPrefix,
+          status: "running",
+          host: { label: "Smoke fixture" },
+          progress: {
+            percent_complete: 1,
+            current_item_rel_path: transitionPrefix,
+          },
+        },
+        {
+          job_id: "web-smoke-transition-sibling",
+          prefix: transitionFolderPrefix,
+          status: "running",
+          host: { label: "Smoke fixture" },
+          progress: {
+            percent_complete: 2,
+            current_item_rel_path: siblingPrefix,
+          },
+        },
+      ];
+      payload.encode_queue.running_count = payload.encode_queue.running.length;
+      payload.calibration_queue.sample.pending_review = [
+        ...(payload.calibration_queue.sample.pending_review ?? []),
+        {
+          job_id: "web-smoke-transition-sample",
+          prefix: transitionPrefix,
+          status: "pending_review",
+          host: { label: "Smoke fixture" },
+          created_at: "2026-08-21T13:54:52+00:00",
+          notes:
+            "Use the configured runtime-normalized goal, then make a representative test so the operator can judge the picture and sound.",
+        },
+      ];
+      payload.calibration_queue.sample.pending_review_count =
+        payload.calibration_queue.sample.pending_review.length;
+      await route.fulfill({ response, json: payload });
+    });
+    await page.goto(`${baseUrl}/ops`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    const transitionRows = page
+      .getByRole("row")
+      .filter({ hasText: "Episode 01.mkv" });
+    await transitionRows.first().waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
+    if ((await transitionRows.count()) !== 1) {
+      throw new Error(
+        "Working now repeated one file across encode and sample-review states.",
+      );
+    }
+    const siblingRows = page
+      .getByRole("row")
+      .filter({ hasText: "Episode 02.mkv" });
+    await siblingRows.first().waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
+    if ((await siblingRows.count()) !== 1) {
+      throw new Error(
+        "Working now hid unrelated active encoding that shared the reviewed item's folder.",
+      );
+    }
+    const transitionText = (await transitionRows.first().innerText()) ?? "";
+    const normalizedTransitionText = transitionText.toLowerCase();
+    if (
+      !normalizedTransitionText.includes("waiting") ||
+      !normalizedTransitionText.includes("complete") ||
+      !normalizedTransitionText.includes("review unavailable") ||
+      normalizedTransitionText.includes("review item") ||
+      transitionText.includes("2026-08-21T13:54:52+00:00") ||
+      normalizedTransitionText.includes("runtime-normalized goal") ||
+      normalizedTransitionText.includes("running")
+    ) {
+      throw new Error(
+        `Working now kept the wrong transition state: ${transitionText}`,
+      );
+    }
+    const desktopOverflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    if (desktopOverflow) {
+      throw new Error(
+        "Working now transition state caused desktop page overflow.",
+      );
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await transitionRows.first().waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
+    await siblingRows.first().waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
+    const narrowOverflow = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+    );
+    if (narrowOverflow) {
+      throw new Error(
+        "Working now transition state caused narrow page overflow.",
+      );
+    }
+    console.log("route ok: Working now deduplicates review transitions");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -674,6 +878,161 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       undefined,
       { timeout: timeoutMs },
     );
+    const revisionPanel = page.locator("#revision-pane");
+    if ((await revisionPanel.count()) !== 0) {
+      throw new Error(
+        "Review revision pane was expanded before the operator requested it.",
+      );
+    }
+    for (const label of [
+      "Keep this version",
+      "Use less space",
+      "Improve picture or sound",
+    ]) {
+      await page.getByRole("button", { name: label, exact: true }).waitFor({
+        state: "visible",
+        timeout: timeoutMs,
+      });
+    }
+    if (
+      (await page
+        .getByRole("button", {
+          name: "Try better quality",
+          exact: true,
+        })
+        .count()) !== 0
+    ) {
+      throw new Error(
+        "Review page still exposed the overlapping better-quality action.",
+      );
+    }
+    await page
+      .getByRole("button", { name: "Improve picture or sound", exact: true })
+      .click();
+    await revisionPanel.waitFor({ state: "visible", timeout: timeoutMs });
+    const sameSizeChoice = revisionPanel.getByRole("radio", {
+      name: /Revise at the same size/,
+    });
+    const roomierChoice = revisionPanel.getByRole("radio", {
+      name: /Allow a larger file/,
+    });
+    if (
+      !(await sameSizeChoice.isChecked()) ||
+      !(await roomierChoice.isEnabled())
+    ) {
+      throw new Error(
+        "Review revision strategies did not expose the expected defaults.",
+      );
+    }
+    await revisionPanel
+      .getByRole("button", { name: "Picture looks soft", exact: true })
+      .click();
+    await roomierChoice.check();
+    if (
+      !((await revisionPanel.textContent()) ?? "").includes(
+        "has not been judged yet",
+      )
+    ) {
+      throw new Error(
+        "Roomier revision copy did not preserve the unjudged-target boundary.",
+      );
+    }
+    await revisionPanel.getByRole("button", { name: "Never mind" }).click();
+    await page.waitForFunction(
+      () =>
+        document.activeElement?.textContent?.includes(
+          "Improve picture or sound",
+        ),
+      undefined,
+      { timeout: timeoutMs },
+    );
+    const trySmallerButton = page.getByRole("button", {
+      name: "Use less space",
+      exact: true,
+    });
+    if (await trySmallerButton.isEnabled()) {
+      await trySmallerButton.click();
+      const smallerDialog = page.getByRole("dialog", {
+        name: "Try a smaller version?",
+      });
+      const manualPicker = page.locator(".goal-room");
+      let smallerOutcome;
+      try {
+        smallerOutcome = await Promise.any([
+          smallerDialog
+            .waitFor({ state: "visible", timeout: timeoutMs })
+            .then(() => "dialog"),
+          manualPicker
+            .waitFor({ state: "visible", timeout: timeoutMs })
+            .then(() => "picker"),
+        ]);
+      } catch {
+        throw new Error(
+          "Use less space produced neither the confirmation dialog nor the size picker.",
+        );
+      }
+      if (smallerOutcome === "dialog") {
+        const smallerDialogText = (await smallerDialog.textContent()) ?? "";
+        for (const expectedText of [
+          "Next target: about",
+          "Approach: keep shrinking only while picture and sound remain acceptable",
+          "Same resolution and quality checks",
+          "Revision concerns will be cleared after the smaller test starts and are not sent with it",
+        ]) {
+          if (!smallerDialogText.includes(expectedText)) {
+            throw new Error(
+              `Try-smaller confirmation omitted: ${expectedText}`,
+            );
+          }
+        }
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(
+          () => document.activeElement?.textContent?.includes("Use less space"),
+          undefined,
+          { timeout: timeoutMs },
+        );
+      } else {
+        await page.goto(`${baseUrl}${route}`, {
+          waitUntil: "domcontentloaded",
+          timeout: timeoutMs,
+        });
+        await page
+          .getByRole("button", {
+            name: "Improve picture or sound",
+            exact: true,
+          })
+          .waitFor({ state: "visible", timeout: timeoutMs });
+      }
+    } else {
+      console.log(
+        "review adjustment skipped: Use less space is disabled because no sample host is available",
+      );
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page
+      .getByRole("button", { name: "Improve picture or sound", exact: true })
+      .click();
+    await revisionPanel.waitFor({ state: "visible", timeout: timeoutMs });
+    const narrowState = await page.evaluate(() => ({
+      pageOverflow:
+        document.documentElement.scrollWidth >
+        document.documentElement.clientWidth,
+      paneVisible: (() => {
+        const pane = document.querySelector("#revision-pane");
+        if (!(pane instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(pane);
+        return (
+          !pane.hidden &&
+          style.display !== "none" &&
+          style.visibility !== "hidden"
+        );
+      })(),
+    }));
+    if (narrowState.pageOverflow || !narrowState.paneVisible) {
+      throw new Error(
+        `Review revision pane failed narrow layout: ${JSON.stringify(narrowState)}`,
+      );
+    }
     console.log("route ok: Full-screen comparison workspace");
   } finally {
     await browser.close();
@@ -862,6 +1221,21 @@ async function main() {
       );
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
       await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
+      const samplingFixture = fixtures.folderRoutes.find(
+        (fixtureRoute) =>
+          fixtureRoute.route === "/folders/tv/Sampling%20Show/Season%201",
+      );
+      if (!samplingFixture) {
+        throw new Error(
+          "Fixture payload did not include the active-test route.",
+        );
+      }
+      await checkActiveTestProgress(
+        targetUrl,
+        samplingFixture.route,
+        args.routeTimeoutMs,
+      );
+      await checkReviewTransitionDedupe(targetUrl, args.routeTimeoutMs);
       const reviewReadyFixture = fixtures.folderRoutes.find(
         (fixtureRoute) =>
           fixtureRoute.route === "/folders/tv/Review%20Ready/Season%201",

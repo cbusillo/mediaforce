@@ -169,6 +169,7 @@ def search_target_size(
         search_max_crf: int | None = None,
         warm_start: QualitySearchWarmStart | None = None,
         expected_search_signature_id: str | None = None,
+        candidate_progress_callback: Callable[[int, int], None] | None = None,
 ) -> QualitySearchResult:
     _validate_search_inputs(stream_budget_ledger)
     compression_intent = compression_intent_from_policy(video_policy)
@@ -270,6 +271,8 @@ def search_target_size(
                 ledger=stream_budget_ledger,
             )
         )
+        if candidate_progress_callback is not None:
+            candidate_progress_callback(len(candidates), MAX_TARGET_SIZE_CANDIDATES)
 
     measure(seed_crf, "target_seed")
     while len(candidates) < MAX_TARGET_SIZE_CANDIDATES:

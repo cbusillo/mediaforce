@@ -504,6 +504,7 @@ export interface CalibrationJobProgress {
 	heartbeat_at?: string | null;
 	heartbeat_age_seconds?: number | null;
 	elapsed_seconds?: number | null;
+	stage_elapsed_seconds?: number | null;
 	liveness?: 'queued' | 'starting' | 'reporting' | 'delayed' | 'not_reporting';
 	work?: { completed: number; total: number } | null;
 	estimate?: CalibrationProgressEstimate | null;

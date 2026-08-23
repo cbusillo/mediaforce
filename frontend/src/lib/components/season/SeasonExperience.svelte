@@ -17,8 +17,10 @@
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
+		calibrationActivityStatusLabel,
 		calibrationEtaSummary,
 		calibrationAcceptsUnderTargetResult,
+		calibrationFreshnessLabel,
 		calibrationJobTargetContract,
 		calibrationLivenessLabel,
 		calibrationResolutionLabel,
@@ -47,6 +49,8 @@
 		resolvedTargetSummary,
 		reviewFeedbackIntent,
 		reviewFeedbackRequest,
+		reviewAdjustmentIntent,
+		reviewSizeAdjustment,
 		reviewSampleSizes,
 		scopedEncodeProgress,
 		seasonIdentity,
@@ -58,6 +62,8 @@
 		technicalVideoPolicy,
 		testRequestWithInstructions,
 		withCompressionIntent,
+		type ReviewSizeAdjustment,
+		type ReviewSizeAdjustmentDirection,
 		type SizeGoal
 	} from '$lib/season/experience';
 
@@ -70,6 +76,8 @@
 		| 'checking'
 		| 'finishing'
 		| 'recovering';
+
+	type RevisionMode = 'same_target' | 'roomier';
 
 	type ActionResponse = {
 		ok?: boolean;
@@ -87,13 +95,20 @@
 	};
 
 	type SafetyDialog = {
-		kind: 'approval' | 'recovery' | 'lifecycle_override' | 'older_seasons_override';
+		kind:
+			| 'approval'
+			| 'recovery'
+			| 'lifecycle_override'
+			| 'older_seasons_override'
+			| 'review_adjustment';
 		title: string;
 		detail: string;
 		primaryLabel: string;
 		confirmHighImpact?: boolean;
 		confirmSizeTradeoff?: boolean;
 		changes?: string[];
+		adjustment?: ReviewSizeAdjustment;
+		adjustmentKind?: 'smaller' | 'roomier';
 	};
 
 	let {
@@ -121,6 +136,8 @@
 	let actionPhase = $state<ActionPhase>('idle');
 	let actionError = $state('');
 	let actionMessage = $state('');
+	let actionMessageTone = $state<'success' | 'neutral'>('success');
+	let actionMessageStateKey = $state('');
 	let blockerAction = $state<{ route: '/ops'; label: string } | null>(null);
 	let actionStartedAt = $state(0);
 	let clock = $state(Date.now());
@@ -128,6 +145,9 @@
 	let operatorInstructions = $state('');
 	let selectedConcerns = $state<QualityRiskTag[]>([]);
 	let reviewFeedback = $state('');
+	let revisionPaneOpen = $state(false);
+	let revisionMode = $state<RevisionMode>('same_target');
+	let revisionPanePrefix = $state('');
 	let goalButtons = $state<HTMLButtonElement[]>([]);
 	let compressionIntentButtons = $state<HTMLButtonElement[]>([]);
 	let safetyDialog = $state<SafetyDialog | null>(null);
@@ -296,8 +316,8 @@
 		['queued', 'running'].includes(asText(asRecord(exactCalibrationJob).status).toLowerCase())
 	);
 	const currentTargetBytes = $derived(
-		(activeJobTargetIsCurrent ? activeJobTargetBytes : 0) ||
-			targetSummary?.targetBytes ||
+		targetSummary?.targetBytes ||
+			(activeJobTargetIsCurrent ? activeJobTargetBytes : 0) ||
 			sizeTarget.budgetBytes ||
 			selectedGoal?.targetSizeBytes ||
 			activeJobTargetBytes ||
@@ -316,6 +336,29 @@
 	const riskSummary = $derived(compareRiskSummary(folder));
 	const qualityMemory = $derived(qualityMemoryView(folder));
 	const approvalBlocked = $derived(Boolean(targetConstraint || riskSummary?.blocked));
+	const activeOperatorIntent = $derived(currentOperatorIntent(folder));
+	const smallerReviewAdjustment = $derived(
+		activeOperatorIntent
+			? reviewSizeAdjustment(
+					goals,
+					compressionIntentOptions,
+					'smaller',
+					currentTargetBytes,
+					expectedEpisodeBytes
+				)
+			: null
+	);
+	const higherQualityReviewAdjustment = $derived(
+		activeOperatorIntent
+			? reviewSizeAdjustment(goals, compressionIntentOptions, 'higher_quality', currentTargetBytes)
+			: null
+	);
+	const revisionPaneForced = $derived(
+		Boolean(targetConstraint || riskSummary?.blocked || sizeTargetMissed)
+	);
+	const revisionPaneVisible = $derived(
+		!riskSummary?.requiresCadenceResolution && (revisionPaneForced || revisionPaneOpen)
+	);
 	const hasReviewFeedback = $derived(
 		selectedConcerns.length > 0 || reviewFeedback.trim().length > 0
 	);
@@ -347,6 +390,56 @@
 		hostOptions.length > 0 && !hostOptions.some((host) => host.available !== false)
 	);
 	const activeSampleJob = $derived(asRecord(exactCalibrationJob));
+	const activeSampleProgress = $derived(asRecord(activeSampleJob.progress));
+	const activeSampleStatusLabel = $derived(calibrationActivityStatusLabel(exactCalibrationJob));
+	const activeSampleWorker = $derived(
+		asText(asRecord(activeSampleJob.host).label) || selectedHost?.label || 'Choosing one'
+	);
+	const activeSampleWorkCompleted = $derived(
+		asNumber(asRecord(activeSampleProgress.work).completed)
+	);
+	const activeSampleWorkTotal = $derived(asNumber(asRecord(activeSampleProgress.work).total));
+	const activeSampleWorkPercent = $derived(
+		activeSampleWorkTotal > 0
+			? Math.min(100, Math.max(0, (activeSampleWorkCompleted / activeSampleWorkTotal) * 100))
+			: 0
+	);
+	const activeSampleStageKey = $derived(asText(activeSampleProgress.stage));
+	const activeSampleBuildingComparison = $derived(
+		['selecting_review_moments', 'building_review', 'saving_results', 'completed'].includes(
+			activeSampleStageKey
+		)
+	);
+	const activeSampleReferenceSizeBytes = $derived(
+		targetSummary?.referenceSizeBytes ||
+			(exactTargetContract?.mode === 'normalized' ? exactTargetContract.target_size_bytes : 0)
+	);
+	const activeSampleReferenceRuntimeMinutes = $derived(
+		targetSummary?.referenceRuntimeMinutes || exactTargetContract?.target_runtime_minutes || 0
+	);
+	const activeSampleConfiguredGoalLabel = $derived(
+		targetSummary?.mode === 'normalized' &&
+			activeSampleReferenceSizeBytes > 0 &&
+			activeSampleReferenceRuntimeMinutes > 0
+			? `${formatDecimalFileSize(activeSampleReferenceSizeBytes)} / ${Math.round(activeSampleReferenceRuntimeMinutes)} min`
+			: targetSummary?.targetBytes
+				? formatDecimalFileSize(targetSummary.targetBytes)
+				: sizeTargetLabel
+	);
+	const activeSampleConfiguredGoalDetail = $derived(
+		targetSummary?.mode === 'normalized' ? 'Runtime-normalized' : 'Per episode'
+	);
+	const activeSampleEpisodeTargetLabel = $derived(
+		targetSummary?.targetBytes ? formatDecimalFileSize(targetSummary.targetBytes) : sizeTargetLabel
+	);
+	const activeSampleRuntimeLabel = $derived(
+		targetSummary?.itemRuntimeSeconds ? formatDuration(targetSummary.itemRuntimeSeconds) : ''
+	);
+	const activeSampleBandLabel = $derived(
+		targetSummary
+			? `${formatDecimalFileSize(targetSummary.sampleLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}`
+			: 'Still resolving'
+	);
 	const finishedEpisodeCount = $derived(
 		asNumber(folder.summary?.statuses.encoded) +
 			asNumber(folder.summary?.statuses.validated) +
@@ -382,7 +475,19 @@
 	);
 	const actionElapsed = $derived(elapsedCopy(actionStartedAt ? clock - actionStartedAt : 0));
 	const backendElapsed = $derived(
-		elapsedCopy(clock - parseTimestamp(activeSampleJob.started_at ?? activeSampleJob.created_at))
+		asNumber(activeSampleProgress.elapsed_seconds) > 0
+			? elapsedCopy(asNumber(activeSampleProgress.elapsed_seconds) * 1000)
+			: elapsedCopy(
+					clock - parseTimestamp(activeSampleJob.started_at ?? activeSampleJob.created_at)
+				)
+	);
+	const activeSampleStageElapsed = $derived(
+		asNumber(activeSampleProgress.stage_elapsed_seconds) > 0
+			? elapsedCopy(asNumber(activeSampleProgress.stage_elapsed_seconds) * 1000)
+			: ''
+	);
+	const activeSampleUpdated = $derived(
+		calibrationFreshnessLabel(activeSampleProgress.heartbeat_age_seconds)
 	);
 	const scopeActivityStatus = $derived(scopeActivityJob?.status ?? 'idle');
 	const scopeActivityFailure = $derived(['failed', 'stopped'].includes(scopeActivityStatus));
@@ -448,6 +553,34 @@
 
 	$effect(() => {
 		if (selectedMoment !== displayedMoment) selectedMoment = displayedMoment;
+	});
+
+	$effect(() => {
+		const nextStateKey = `${folder.prefix}:${humanState.key}`;
+		if (!actionMessageStateKey) {
+			actionMessageStateKey = nextStateKey;
+			return;
+		}
+		if (actionMessageStateKey === nextStateKey) return;
+		actionMessageStateKey = nextStateKey;
+		actionMessage = '';
+		actionMessageTone = 'success';
+	});
+
+	$effect(() => {
+		if (revisionPanePrefix === folder.prefix) return;
+		revisionPanePrefix = folder.prefix;
+		revisionPaneOpen = false;
+		revisionMode = 'same_target';
+		selectedConcerns = [];
+		reviewFeedback = '';
+		operatorInstructions = '';
+	});
+
+	$effect(() => {
+		if (revisionMode === 'roomier' && !higherQualityReviewAdjustment) {
+			revisionMode = 'same_target';
+		}
 	});
 
 	$effect(() => {
@@ -555,6 +688,10 @@
 			actionError = 'Choose a concern or describe what should change before making a revised test.';
 			return;
 		}
+		if (!revisionPaneForced && revisionMode === 'roomier') {
+			await chooseReviewAdjustment('higher_quality');
+			return;
+		}
 		await retryMeasuredTarget();
 	}
 
@@ -570,6 +707,7 @@
 	) {
 		actionError = '';
 		actionMessage = '';
+		actionMessageTone = 'success';
 		blockerAction = null;
 		actionStartedAt = Date.now();
 		actionPhase = 'planning';
@@ -596,6 +734,11 @@
 				'We prepared the test but couldn’t start it.'
 			);
 			retryMode = false;
+			revisionPaneOpen = false;
+			revisionMode = 'same_target';
+			selectedConcerns = [];
+			reviewFeedback = '';
+			operatorInstructions = '';
 			actionMessage = 'Your test is starting.';
 			await onMutate();
 			succeeded = true;
@@ -620,6 +763,7 @@
 		const draftHash = asText(calibration.draft_hash);
 		actionError = '';
 		actionMessage = '';
+		actionMessageTone = 'success';
 		blockerAction = null;
 		actionStartedAt = Date.now();
 		actionPhase = 'approving';
@@ -859,6 +1003,34 @@
 			await queueOlderSeasons();
 			return;
 		}
+		if (dialog.kind === 'review_adjustment') {
+			if (!dialog.adjustment || !activeOperatorIntent) {
+				actionError = '';
+				actionMessage =
+					'The guided adjustment is no longer available. Choose another size instead.';
+				actionMessageTone = 'neutral';
+				await chooseDifferentSize();
+				return;
+			}
+			const operatorIntent = reviewAdjustmentIntent(activeOperatorIntent, dialog.adjustment);
+			if (dialog.adjustmentKind === 'roomier') {
+				await startTest(
+					reviewFeedbackRequest(
+						goalRequest(dialog.adjustment.goal),
+						selectedConcerns,
+						reviewFeedback,
+						operatorInstructions
+					),
+					operatorIntent
+				);
+				return;
+			}
+			await startTest(
+				testRequestWithInstructions(goalRequest(dialog.adjustment.goal), operatorInstructions),
+				operatorIntent
+			);
+			return;
+		}
 		await performMeasuredRecovery();
 	}
 
@@ -907,6 +1079,7 @@
 	async function runAction(phase: ActionPhase, fallback: string, operation: () => Promise<void>) {
 		actionError = '';
 		actionMessage = '';
+		actionMessageTone = 'success';
 		blockerAction = null;
 		actionStartedAt = Date.now();
 		actionPhase = phase;
@@ -1061,6 +1234,69 @@
 		await focusCurrentHeading();
 	}
 
+	async function openRevisionPane() {
+		revisionPaneOpen = true;
+		await tick();
+		document.getElementById('revision-pane-title')?.focus();
+	}
+
+	async function closeRevisionPane() {
+		revisionPaneOpen = false;
+		await tick();
+		(
+			document.querySelector('[data-review-action="needs-improvement"]') as HTMLElement | null
+		)?.focus();
+	}
+
+	async function chooseReviewAdjustment(direction: ReviewSizeAdjustmentDirection) {
+		const adjustment =
+			direction === 'smaller' ? smallerReviewAdjustment : higherQualityReviewAdjustment;
+		if (!adjustment) {
+			actionError = '';
+			actionMessage =
+				direction === 'smaller'
+					? 'A guided smaller target is not available for this test. Choose another size instead.'
+					: 'A larger guided target is not available. Choose another size instead.';
+			actionMessageTone = 'neutral';
+			await chooseDifferentSize();
+			return;
+		}
+		const target = formatDecimalFileSize(adjustment.goal.targetSizeBytes);
+		const current = formatDecimalFileSize(expectedEpisodeBytes);
+		const roomier = direction === 'higher_quality';
+		await openSafetyDialog({
+			kind: 'review_adjustment',
+			title: roomier ? 'Allow a larger file for the next test?' : 'Try a smaller version?',
+			detail: roomier
+				? `Mediaforce will make one test targeting about ${target} instead of about ${sizeTargetLabel}. The episode will be larger, with more room for picture quality. Resolution and quality checks stay the same. Nothing will be replaced.`
+				: `Mediaforce will create one smaller test targeting about ${target} for this ${scopeNoun}. It keeps the same resolution and quality checks. Nothing will be replaced.`,
+			primaryLabel: roomier ? 'Make the larger-file test' : 'Make the smaller test',
+			changes: roomier
+				? [
+						`Reviewed target: about ${sizeTargetLabel}`,
+						`Next target: about ${target} — not judged yet`,
+						'Approach: use the added space for the highest measured fidelity',
+						'Same resolution and quality checks'
+					]
+				: [
+						...(expectedEpisodeBytes > 0 ? [`Current test: about ${current}`] : []),
+						`Next target: about ${target}`,
+						'Approach: keep shrinking only while picture and sound remain acceptable',
+						'Same resolution and quality checks',
+						...(hasReviewFeedback
+							? [
+									'Revision concerns will be cleared after the smaller test starts and are not sent with it'
+								]
+							: []),
+						...(operatorInstructions.trim()
+							? ['Other priorities are included with the smaller test']
+							: [])
+					],
+			adjustment,
+			adjustmentKind: roomier ? 'roomier' : 'smaller'
+		});
+	}
+
 	function selectGoal(key: SizeGoal['key']) {
 		selectedGoalKey = key;
 		selectedGoalPrefix = folder.prefix;
@@ -1151,13 +1387,18 @@
 				</div>
 			</div>
 		{:else if actionMessage}
-			<div class="action-notice action-notice--success" role="status">
-				<span aria-hidden="true">✓</span>
+			<div
+				class="action-notice"
+				class:action-notice--success={actionMessageTone === 'success'}
+				class:action-notice--neutral={actionMessageTone === 'neutral'}
+				role="status"
+			>
+				<span aria-hidden="true">{actionMessageTone === 'success' ? '✓' : 'i'}</span>
 				<div><strong>{actionMessage}</strong></div>
 			</div>
 		{/if}
 
-		{#if !folder.pending && heldEpisodeCount > 0}
+		{#if !folder.pending && heldEpisodeCount > 0 && humanState.key !== 'making_test'}
 			<div class="lifecycle-notice" role="status">
 				<span aria-hidden="true">◆</span>
 				<div>
@@ -1518,58 +1759,98 @@
 				</div>
 			</section>
 		{:else if humanState.key === 'making_test'}
-			<section class="active-room" aria-live="polite">
+			<section class="active-room">
+				<div class="active-status">
+					<span>{sampleEpisode || scopeTitle}</span>
+					<strong>{activeSampleStatusLabel}</strong>
+					<span>{activeSampleWorker}</span>
+					<span>{backendElapsed} elapsed</span>
+					<span>{activeSampleUpdated}</span>
+					{#if heldEpisodeCount > 0}<span>Current-season hold remains in place</span>{/if}
+				</div>
 				<div class="active-copy">
-					<p class="eyebrow">Test in progress</p>
-					<h1>Making your test</h1>
+					<h1>Testing {sampleEpisode || scopeTitle}</h1>
 					<p class="lede">
-						{sampleEpisode} is being used to target {sizeTargetLabel} for the whole episode, then check
-						whether the picture and sound hold up.
+						{#if activeSampleBuildingComparison}
+							Mediaforce found settings near {activeSampleEpisodeTargetLabel} and is building the comparison
+							clips.
+						{:else}
+							Mediaforce is testing settings that land this episode near
+							{activeSampleEpisodeTargetLabel} while keeping picture and sound acceptable.
+						{/if}
+						Nothing in your library is replaced.
 					</p>
 					<div class="active-facts">
 						<div>
-							<span>Whole-episode target</span><strong>{sizeTargetLabel}</strong>
-						</div>
-						{#if targetSummary}
-							<div>
-								<span>Representative test band</span><strong
-									>{formatDecimalFileSize(
-										targetSummary.sampleLowerBoundBytes
-									)}–{formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}</strong
-								>
-							</div>
-						{/if}
-						<div><span>Current step</span><strong>{activeSampleStage}</strong></div>
-						<div>
-							<span>Step progress</span><strong>{activeSampleWork || activeSampleLiveness}</strong>
-						</div>
-						<div
-							class="active-fact--eta"
-							class:telemetry-attention={activeSampleEta.tone === 'attention'}
-						>
-							<span>Estimated remaining</span><strong>{activeSampleEta.value}</strong>
-							<small>{activeSampleEta.detail}</small>
+							<span>Configured goal</span><strong>{activeSampleConfiguredGoalLabel}</strong>
+							<small>{activeSampleConfiguredGoalDetail}</small>
 						</div>
 						<div>
-							<span>Computer</span><strong
-								>{asText(asRecord(activeSampleJob.host).label) ||
-									selectedHost?.label ||
-									'Choosing one'}</strong
+							<span>Episode target</span><strong>{activeSampleEpisodeTargetLabel}</strong>
+							{#if activeSampleRuntimeLabel}<small>{activeSampleRuntimeLabel} runtime</small>{/if}
+						</div>
+						<div>
+							<span>Test band</span><strong>{activeSampleBandLabel}</strong>
+							<small
+								>{targetSummary
+									? `±${targetSummary.sampleTolerancePercent}% while testing`
+									: 'Waiting for the resolved test band'}</small
 							>
 						</div>
-						<div><span>Time so far</span><strong>{backendElapsed}</strong></div>
 					</div>
 				</div>
-				<div class="test-visual" aria-hidden="true">
-					<div class="test-disc"><span>1</span><small>episode</small></div>
-					<i class="orbit orbit-one"></i><i class="orbit orbit-two"></i>
-				</div>
+				<section class="active-progress" aria-labelledby="active-progress-title">
+					<header class="active-progress__header">
+						<div aria-live="polite">
+							<span>Current step</span>
+							<h2 id="active-progress-title">{activeSampleStage}</h2>
+						</div>
+						{#if activeSampleStageElapsed}<strong>{activeSampleStageElapsed} in this step</strong
+							>{/if}
+					</header>
+					{#if activeSampleWorkTotal > 0}
+						<div class="active-progress__work">
+							<div
+								class="active-progress__track"
+								role="progressbar"
+								aria-label={`${activeSampleStage}: ${activeSampleWork}`}
+								aria-valuemin="0"
+								aria-valuemax={activeSampleWorkTotal}
+								aria-valuenow={activeSampleWorkCompleted}
+							>
+								<i style={`width: ${activeSampleWorkPercent}%`}></i>
+							</div>
+							<strong>{activeSampleWork}</strong>
+						</div>
+					{/if}
+					<div class="active-progress__facts">
+						<div>
+							<span>Estimated remaining</span>
+							<strong>{activeSampleEta.value}</strong>
+							<small>{activeSampleEta.detail}</small>
+						</div>
+						<div class:telemetry-attention={activeSampleEta.tone === 'attention'}>
+							<span>Worker health</span>
+							<strong>{activeSampleLiveness}</strong>
+							<small>{activeSampleWorker} · {activeSampleUpdated}</small>
+						</div>
+						<div>
+							<span>Total elapsed</span>
+							<strong>{backendElapsed}</strong>
+							<small>The page can be left open or closed.</small>
+						</div>
+					</div>
+				</section>
 				<div class="step-line">
-					<span class="done"><i>✓</i> Size chosen</span>
-					<span class="active"><i></i> Making test moments</span>
-					<span><i></i> Compare</span>
+					<span class="done"><i>✓</i> Goal set</span>
+					<span
+						class:done={activeSampleBuildingComparison}
+						class:active={!activeSampleBuildingComparison}
+						><i>{activeSampleBuildingComparison ? '✓' : ''}</i> Test settings</span
+					>
+					<span class:active={activeSampleBuildingComparison}><i></i> Build comparison</span>
 				</div>
-				<p class="active-note">The test does not replace anything in your library.</p>
+				<p class="active-note">The test builds short review clips only. No episode is replaced.</p>
 			</section>
 		{:else if humanState.key === 'ready_to_compare'}
 			<section class="compare-room">
@@ -1824,14 +2105,18 @@
 					</small>
 				</div>
 
-				{#if !riskSummary?.requiresCadenceResolution}
-					<div class="review-feedback-panel">
+				{#if revisionPaneVisible}
+					<div class="review-feedback-panel" id="revision-pane">
 						<div class="review-feedback-panel__heading">
 							<div>
-								<span>Want a revision?</span>
-								<h2>Tell Mediaforce what should change.</h2>
+								<span>Improve picture or sound</span>
+								<h2 id="revision-pane-title" tabindex="-1">What should improve?</h2>
 							</div>
-							<p>The same size target stays in place unless you choose a different goal.</p>
+							{#if !revisionPaneForced}
+								<button class="text-link" type="button" onclick={closeRevisionPane}>
+									Never mind
+								</button>
+							{/if}
 						</div>
 						<div class="concern-options" role="group" aria-label="Review concerns">
 							{#each REVIEW_CONCERNS as concern (concern.tag)}
@@ -1867,16 +2152,66 @@
 								<small>{operatorInstructions.length}/600</small>
 							</label>
 						</div>
+						{#if !revisionPaneForced}
+							<fieldset class="revision-mode">
+								<legend>How should Mediaforce make the next test?</legend>
+								<label class:active={revisionMode === 'same_target'}>
+									<input type="radio" bind:group={revisionMode} value="same_target" />
+									<span>Revise at the same size</span>
+									<small>
+										Keep the target at about {sizeTargetLabel}. Mediaforce will try to address what
+										you noticed without increasing the size goal.
+									</small>
+								</label>
+								<label
+									class:active={revisionMode === 'roomier'}
+									class:revision-mode__option--unavailable={!higherQualityReviewAdjustment}
+								>
+									<input
+										type="radio"
+										bind:group={revisionMode}
+										value="roomier"
+										disabled={!higherQualityReviewAdjustment}
+									/>
+									<span>Allow a larger file</span>
+									<small>
+										{higherQualityReviewAdjustment
+											? `Raise the next target to about ${formatDecimalFileSize(higherQualityReviewAdjustment.goal.targetSizeBytes)}. The episode will be larger, with more room for picture quality.`
+											: 'A larger guided target is not available for this test.'}
+									</small>
+								</label>
+								{#if !higherQualityReviewAdjustment}
+									<p class="revision-mode__fallback">
+										<button class="text-link" type="button" onclick={chooseDifferentSize}>
+											Choose a different size
+										</button>
+										to set a larger target manually.
+									</p>
+								{/if}
+							</fieldset>
+						{/if}
 						<div class="review-feedback-panel__action">
 							<p>
-								Submitting a concern records the current evidence as rejected and starts a revised
-								representative test.
+								{#if !revisionPaneForced && revisionMode === 'roomier'}
+									Your notes describe the version you reviewed. The next test raises the target to
+									about {higherQualityReviewAdjustment
+										? formatDecimalFileSize(higherQualityReviewAdjustment.goal.targetSizeBytes)
+										: 'a larger size'} and has not been judged yet. Nothing is replaced.
+								{:else}
+									This marks the current version as not acceptable and creates another test at the
+									same target. Nothing is replaced.
+								{/if}
 							</p>
+							{#if revisionPaneForced}
+								<button class="text-link" type="button" onclick={chooseDifferentSize}>
+									Choose a different goal
+								</button>
+							{/if}
 							<button
 								class="secondary-button"
 								type="button"
 								onclick={submitReviewFeedback}
-								disabled={!hasReviewFeedback || noAvailableHosts}
+								disabled={!hasReviewFeedback || noAvailableHosts || actionPhase !== 'idle'}
 							>
 								Make a revised test
 							</button>
@@ -1913,16 +2248,8 @@
 							<h2>The size result is incomplete.</h2>
 							<p>Make another test before deciding whether to use this setting for the season.</p>
 						{:else}
-							<h2>
-								{reviewHasSound
-									? 'Does the new version look and sound right?'
-									: 'Does the new version look right?'}
-							</h2>
-							<p>
-								{reviewHasSound
-									? 'Look at faces, motion, dark scenes, and listen for anything distracting.'
-									: 'Look at faces, motion, dark scenes, and fine detail.'}
-							</p>
+							<h2>What do you want to do with this version?</h2>
+							<p>Keep it, see if it can use less space, or tell Mediaforce what should improve.</p>
 						{/if}
 					</div>
 					<div class="decision-actions">
@@ -1977,17 +2304,32 @@
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 							</button>
 						{:else}
-							<button class="secondary-button" type="button" onclick={chooseDifferentSize}
-								>Try a different size</button
-							>
 							<button
 								class="primary-button primary-button--light"
 								type="button"
 								onclick={() => approveTest()}
 								disabled={!currentPair || approvalBlocked}
 							>
-								Looks good
+								Keep this version
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
+							</button>
+							<button
+								class="secondary-button"
+								type="button"
+								onclick={() => chooseReviewAdjustment('smaller')}
+								disabled={actionPhase !== 'idle' || noAvailableHosts}
+							>
+								Use less space
+							</button>
+							<button
+								class="secondary-button"
+								type="button"
+								data-review-action="needs-improvement"
+								onclick={openRevisionPane}
+								aria-expanded={revisionPaneOpen}
+								aria-controls={revisionPaneVisible ? 'revision-pane' : undefined}
+							>
+								Improve picture or sound
 							</button>
 						{/if}
 					</div>
@@ -2431,7 +2773,7 @@
 			<div class="safety-dialog-backdrop">
 				<div
 					class="safety-dialog"
-					role="alertdialog"
+					role={safetyDialog.kind === 'review_adjustment' ? 'dialog' : 'alertdialog'}
 					aria-modal="true"
 					aria-labelledby="safety-dialog-title"
 					aria-describedby="safety-dialog-detail"
@@ -2439,7 +2781,9 @@
 					onkeydown={handleSafetyDialogKeydown}
 				>
 					<p class={safetyDialog.confirmSizeTradeoff ? 'eyebrow eyebrow--missed' : 'eyebrow'}>
-						Before you continue
+						{safetyDialog.kind === 'review_adjustment'
+							? 'Another comparison'
+							: 'Before you continue'}
 					</p>
 					<h2 id="safety-dialog-title">{safetyDialog.title}</h2>
 					<p id="safety-dialog-detail">{safetyDialog.detail}</p>
@@ -2463,9 +2807,8 @@
 		{/if}
 
 		<section
-			hidden={isExactItemScope &&
-				humanState.key === 'ready_to_make' &&
-				qualityMemory.state === 'empty'}
+			hidden={humanState.key === 'making_test' ||
+				(isExactItemScope && humanState.key === 'ready_to_make' && qualityMemory.state === 'empty')}
 			class="quality-memory"
 			class:quality-memory--empty={qualityMemory.state === 'empty'}
 			class:quality-memory--attention={qualityMemory.tone === 'attention'}
@@ -2854,6 +3197,15 @@
 		background: #4e8063;
 	}
 
+	.action-notice--neutral {
+		background: rgb(90 97 107 / 9%);
+		border-color: rgb(90 97 107 / 24%);
+	}
+
+	.action-notice--neutral > span {
+		background: #65717d;
+	}
+
 	.goal-room,
 	.ready-room,
 	.finished-room,
@@ -3209,74 +3561,6 @@
 	.active-facts strong {
 		font-size: 13px;
 		font-weight: 650;
-	}
-
-	.test-visual {
-		align-items: center;
-		aspect-ratio: 1;
-		display: flex;
-		justify-content: center;
-		max-width: 430px;
-		position: relative;
-	}
-
-	.test-disc {
-		align-items: center;
-		background: radial-gradient(circle at 38% 30%, #688775, #26372e 70%);
-		border: 1px solid rgb(255 255 255 / 13%);
-		border-radius: 50%;
-		box-shadow: 0 35px 100px rgb(30 80 55 / 28%);
-		display: flex;
-		flex-direction: column;
-		height: 210px;
-		justify-content: center;
-		position: relative;
-		width: 210px;
-		z-index: 2;
-	}
-
-	.test-disc span {
-		font-family: 'Iowan Old Style', Georgia, serif;
-		font-size: 82px;
-		font-weight: 400;
-		letter-spacing: -0.08em;
-		line-height: 0.85;
-	}
-
-	.test-disc small {
-		color: #b9c6bd;
-		font-size: 10px;
-		font-weight: 750;
-		letter-spacing: 0.12em;
-		margin-top: 14px;
-		text-transform: uppercase;
-	}
-
-	.orbit {
-		animation: orbit 10s linear infinite;
-		border: 1px solid rgb(141 183 158 / 24%);
-		border-radius: 50%;
-		inset: 28px;
-		position: absolute;
-	}
-
-	.orbit::after {
-		background: #91c5a5;
-		border-radius: 50%;
-		box-shadow: 0 0 18px #75a98b;
-		content: '';
-		height: 8px;
-		left: 50%;
-		position: absolute;
-		top: -4px;
-		width: 8px;
-	}
-
-	.orbit-two {
-		animation-direction: reverse;
-		animation-duration: 14s;
-		inset: 0;
-		opacity: 0.45;
 	}
 
 	.step-line {
@@ -4015,7 +4299,6 @@
 			grid-template-columns: 1fr;
 		}
 
-		.test-visual,
 		.progress-ring {
 			justify-self: center;
 		}
@@ -4133,16 +4416,6 @@
 			grid-template-columns: 1fr;
 		}
 
-		.test-visual {
-			max-width: 320px;
-			width: 100%;
-		}
-
-		.test-disc {
-			height: 170px;
-			width: 170px;
-		}
-
 		.step-line span {
 			font-size: 9px;
 			gap: 4px;
@@ -4187,7 +4460,6 @@
 		.breathing-mark i,
 		.working-orbit i,
 		.elapsed i,
-		.orbit,
 		.step-line .active i {
 			animation: none;
 		}
@@ -4195,6 +4467,7 @@
 		.experience-page,
 		.goal-options button,
 		.primary-button,
+		.active-progress__track i,
 		.progress-track i {
 			transition: none;
 		}
@@ -4349,6 +4622,16 @@
 		color: var(--mf-ready-fg);
 	}
 
+	.action-notice--neutral {
+		background: var(--mf-idle-bg);
+		border-color: var(--mf-idle-line);
+		color: var(--mf-idle-fg);
+	}
+
+	.action-notice--neutral > span {
+		background: var(--mf-idle-fg);
+	}
+
 	.action-notice p {
 		color: inherit;
 	}
@@ -4471,8 +4754,7 @@
 		line-height: 1.4;
 	}
 
-	.scope-activity-facts .telemetry-attention,
-	.active-facts .telemetry-attention {
+	.scope-activity-facts .telemetry-attention {
 		background: var(--mf-wait-bg);
 	}
 
@@ -4814,19 +5096,49 @@
 	}
 
 	.active-room {
-		align-items: center;
+		align-items: stretch;
 		display: grid;
-		gap: 22px;
+		gap: 16px;
 		grid-template-columns: minmax(0, 1fr);
 		justify-items: stretch;
 		min-height: 0;
 		text-align: left;
 	}
 
+	.active-status {
+		align-items: center;
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-tertiary);
+		display: flex;
+		flex-wrap: wrap;
+		font-family: var(--mf-font-mono);
+		font-size: 11px;
+		gap: 7px 16px;
+		padding: 10px 12px;
+	}
+
+	.active-status strong {
+		color: var(--mf-active-fg);
+		font-size: inherit;
+	}
+
+	.active-status > * + *::before {
+		color: var(--mf-line-strong);
+		content: '·';
+		margin-right: 16px;
+	}
+
 	.active-copy {
 		display: grid;
 		gap: 9px;
-		max-width: 720px;
+		max-width: none;
+	}
+
+	.active-copy .lede {
+		margin: 0;
+		max-width: 760px;
 	}
 
 	.active-facts {
@@ -4859,8 +5171,106 @@
 		font-size: 14px;
 	}
 
-	.test-visual {
-		display: none;
+	.active-progress {
+		background: var(--mf-bg-panel-2);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 14px;
+		padding: 14px;
+	}
+
+	.active-progress__header {
+		align-items: end;
+		display: flex;
+		gap: 20px;
+		justify-content: space-between;
+	}
+
+	.active-progress__header > div {
+		display: grid;
+		gap: 3px;
+	}
+
+	.active-progress__header span,
+	.active-progress__facts span {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+	}
+
+	.active-progress__header h2 {
+		font-size: 16px;
+		margin: 0;
+	}
+
+	.active-progress__header > strong {
+		color: var(--mf-fg-secondary);
+		font-family: var(--mf-font-mono);
+		font-size: 11px;
+		font-weight: 500;
+	}
+
+	.active-progress__work {
+		display: grid;
+		gap: 7px;
+	}
+
+	.active-progress__work > strong {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+		font-weight: 500;
+	}
+
+	.active-progress__track {
+		background: var(--mf-bg-raised);
+		border-radius: 999px;
+		height: 6px;
+		overflow: hidden;
+	}
+
+	.active-progress__track i {
+		background: var(--mf-active-solid);
+		border-radius: inherit;
+		display: block;
+		height: 100%;
+		min-width: 0;
+		transition: width var(--mf-dur-slow) var(--mf-ease);
+	}
+
+	.active-progress__facts {
+		background: var(--mf-line-muted);
+		border: 1px solid var(--mf-line-muted);
+		border-radius: var(--mf-radius-2);
+		display: grid;
+		gap: 1px;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		overflow: hidden;
+	}
+
+	.active-progress__facts > div {
+		background: var(--mf-bg-panel);
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+		padding: 11px 12px;
+	}
+
+	.active-progress__facts strong {
+		color: var(--mf-fg-primary);
+		font-size: 13px;
+	}
+
+	.active-progress__facts small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		line-height: 1.4;
+	}
+
+	.active-progress__facts .telemetry-attention {
+		background: var(--mf-wait-bg);
 	}
 
 	.step-line {
@@ -4888,6 +5298,10 @@
 	.step-line span.active {
 		background: var(--mf-bg-panel);
 		color: var(--mf-active-fg);
+	}
+
+	.step-line span.done {
+		color: var(--mf-ready-fg);
 	}
 
 	.active-note {
@@ -5930,14 +6344,10 @@
 	}
 
 	.active-facts {
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
 	@media (min-width: 761px) {
-		.active-facts .active-fact--eta {
-			grid-column: span 2;
-		}
-
 		.recovery-plan__computer {
 			grid-column: span 2;
 		}
@@ -6082,6 +6492,11 @@
 		gap: 3px;
 	}
 
+	.review-feedback-panel__heading > .text-link {
+		flex: 0 0 auto;
+		min-height: 36px;
+	}
+
 	.review-feedback-panel__heading span {
 		color: var(--mf-active-fg);
 		font-size: 10px;
@@ -6134,6 +6549,67 @@
 	.review-feedback-fields label {
 		border: 1px solid var(--mf-line-muted);
 		border-radius: var(--mf-radius-2);
+	}
+
+	.revision-mode {
+		border: 0;
+		display: grid;
+		gap: 8px;
+		margin: 0;
+		padding: 0;
+	}
+
+	.revision-mode legend {
+		color: var(--mf-fg-primary);
+		font-size: 12px;
+		font-weight: 650;
+		margin-bottom: 2px;
+		padding: 0;
+	}
+
+	.revision-mode > label {
+		align-items: start;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		column-gap: 9px;
+		cursor: pointer;
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr);
+		padding: 10px 12px;
+	}
+
+	.revision-mode > label.active {
+		background: var(--mf-active-bg);
+		border-color: var(--mf-active-line);
+	}
+
+	.revision-mode > label > input {
+		margin-top: 2px;
+	}
+
+	.revision-mode > label > span {
+		color: var(--mf-fg-primary);
+		font-size: 12px;
+		font-weight: 650;
+	}
+
+	.revision-mode > label > small {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+		grid-column: 2;
+		line-height: 1.45;
+	}
+
+	.revision-mode__option--unavailable {
+		cursor: not-allowed;
+		opacity: 0.58;
+	}
+
+	.revision-mode__fallback {
+		color: var(--mf-fg-secondary);
+		font-size: 11px;
+		margin: 0;
 	}
 
 	.review-feedback-panel__action {
@@ -6245,6 +6721,22 @@
 			padding: 15px 16px 48px;
 		}
 
+		.active-status {
+			align-items: start;
+			display: grid;
+			gap: 4px;
+		}
+
+		.active-status > * + *::before {
+			display: none;
+		}
+
+		.active-progress__header {
+			align-items: start;
+			flex-direction: column;
+			gap: 6px;
+		}
+
 		.goal-options {
 			grid-template-columns: 1fr;
 		}
@@ -6263,6 +6755,7 @@
 		}
 
 		.active-facts,
+		.active-progress__facts,
 		.scope-activity-facts,
 		.recovery-plan,
 		.ready-summary {
@@ -6310,6 +6803,7 @@
 		}
 
 		.active-facts div,
+		.active-progress__facts > div,
 		.scope-activity-facts div,
 		.recovery-plan div,
 		.ready-summary div {
@@ -6317,6 +6811,7 @@
 		}
 
 		.active-facts div:last-child,
+		.active-progress__facts > div:last-child,
 		.scope-activity-facts div:last-child,
 		.recovery-plan div:last-child,
 		.ready-summary div:last-child {

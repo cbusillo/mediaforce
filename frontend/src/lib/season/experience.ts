@@ -8,6 +8,7 @@ import type {
 	FolderCard,
 	FolderPayload,
 	FolderStatusPayload,
+	CompressionIntentOptionPayload,
 	CompressionIntentRequestPayload,
 	OperatorIntentRequestPayload,
 	QualityRiskPayload,
@@ -257,6 +258,14 @@ export interface SizeGoal {
 	mode: SizeGoalMode;
 	operatorIntent: OperatorIntentRequestPayload;
 	requiresExplicitSelection: boolean;
+}
+
+export type ReviewSizeAdjustmentDirection = 'smaller' | 'higher_quality';
+
+export interface ReviewSizeAdjustment {
+	direction: ReviewSizeAdjustmentDirection;
+	goal: SizeGoal;
+	compressionIntent: CompressionIntentRequestPayload;
 }
 
 export interface SizeTargetAnalysis {
@@ -1148,7 +1157,14 @@ export function calibrationStageLabel(job: CalibrationJobPayload | null | undefi
 export function calibrationWorkLabel(job: CalibrationJobPayload | null | undefined): string {
 	const work = job?.progress?.work;
 	if (!work || work.total <= 0) return '';
-	return `${Math.max(0, Math.min(work.completed, work.total))} of ${work.total} review steps`;
+	const completed = Math.max(0, Math.min(work.completed, work.total));
+	if (job?.progress?.stage === 'searching_target') {
+		return `${completed} of up to ${work.total} size candidates tested`;
+	}
+	if (job?.progress?.stage === 'building_review') {
+		return `${completed} of ${work.total} comparison steps`;
+	}
+	return `${completed} of ${work.total} steps`;
 }
 
 export function calibrationLivenessLabel(job: CalibrationJobPayload | null | undefined): string {
@@ -1160,6 +1176,21 @@ export function calibrationLivenessLabel(job: CalibrationJobPayload | null | und
 	if (liveness === 'not_reporting') return 'Computer has stopped reporting progress';
 	if (liveness === 'queued') return 'Waiting in the test queue';
 	return 'Waiting for the first progress update';
+}
+
+export function calibrationActivityStatusLabel(
+	job: CalibrationJobPayload | null | undefined
+): string {
+	if (job?.status === 'queued') return 'Test waiting';
+	if (job?.status === 'starting') return 'Test starting';
+	return 'Test running';
+}
+
+export function calibrationFreshnessLabel(value: unknown): string {
+	if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 'No update yet';
+	if (value <= 5) return 'Updated just now';
+	if (value < 60) return `Updated ${Math.floor(value)} sec ago`;
+	return `Updated ${Math.floor(value / 60)} min ago`;
 }
 
 export function calibrationEtaSummary(
@@ -1190,7 +1221,7 @@ export function calibrationEtaSummary(
 	const estimate = progress?.estimate;
 	if (!estimate) {
 		return {
-			value: 'Not enough history for an ETA',
+			value: 'No estimate yet',
 			detail: 'A remaining-time range appears after three comparable tests have finished.',
 			tone: progress?.liveness === 'delayed' ? 'attention' : 'quiet'
 		};
@@ -1476,6 +1507,65 @@ export function withCompressionIntent(
 		...intent,
 		schema_version: 2,
 		compression_intent: { ...compressionIntent, confirmed: true }
+	};
+}
+
+export function reviewAdjustmentIntent(
+	currentIntent: OperatorIntentRequestPayload,
+	adjustment: ReviewSizeAdjustment
+): OperatorIntentRequestPayload {
+	const nextIntent = {
+		...currentIntent,
+		size_goal: { ...adjustment.goal.operatorIntent.size_goal },
+		resolution: { ...currentIntent.resolution },
+		...(currentIntent.quality ? { quality: { ...currentIntent.quality } } : {}),
+		...(currentIntent.streams
+			? {
+					streams: {
+						...(currentIntent.streams.audio ? { audio: { ...currentIntent.streams.audio } } : {}),
+						...(currentIntent.streams.subtitle
+							? { subtitle: { ...currentIntent.streams.subtitle } }
+							: {})
+					}
+				}
+			: {})
+	};
+	delete nextIntent.quality_risk_tags;
+	delete nextIntent.quality_risk_details;
+	delete nextIntent.evidence_authority;
+	return withCompressionIntent(nextIntent, adjustment.compressionIntent);
+}
+
+export function reviewSizeAdjustment(
+	goals: readonly SizeGoal[],
+	compressionOptions: readonly CompressionIntentOptionPayload[],
+	direction: ReviewSizeAdjustmentDirection,
+	currentTargetBytes = 0,
+	currentResultBytes = 0
+): ReviewSizeAdjustment | null {
+	const goalKey = direction === 'smaller' ? 'smaller' : 'roomier';
+	const compressionLevel = direction === 'smaller' ? 'perceptual_floor' : 'reference';
+	const goal = goals.find((candidate) => candidate.key === goalKey);
+	const compressionOption = compressionOptions.find(
+		(candidate) => candidate.key === compressionLevel
+	);
+	if (!goal || !compressionOption) return null;
+	if (
+		currentTargetBytes > 0 &&
+		((direction === 'smaller' && goal.targetSizeBytes >= currentTargetBytes) ||
+			(direction === 'higher_quality' && goal.targetSizeBytes <= currentTargetBytes))
+	)
+		return null;
+	if (
+		direction === 'smaller' &&
+		currentResultBytes > 0 &&
+		goal.targetSizeBytes >= currentResultBytes
+	)
+		return null;
+	return {
+		direction,
+		goal,
+		compressionIntent: compressionOption.compression_intent
 	};
 }
 

@@ -26,6 +26,7 @@ class TargetSizeSearchTests(unittest.TestCase):
     def test_perceptual_floor_selects_130_mb_over_150_mb(self) -> None:
         ledger = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
         measured: list[int] = []
+        progress: list[tuple[int, int]] = []
 
         def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
             crf_int = int(crf)
@@ -71,9 +72,11 @@ class TargetSizeSearchTests(unittest.TestCase):
             host=None,
             quality_temp_dir=None,
             run_sample_encode=run_sample,
+            candidate_progress_callback=lambda completed, total: progress.append((completed, total)),
         )
 
         self.assertEqual(measured, [35, 36, 37])
+        self.assertEqual(progress, [(1, 6), (2, 6), (3, 6)])
         self.assertEqual(result.crf, 36.0)
         self.assertEqual(
             result.target_size_trace["selected_candidate"]["predicted_whole_episode_bytes"],

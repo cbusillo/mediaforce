@@ -145,6 +145,10 @@ real browser at desktop and 390px widths:
   to the exact media item; active or blocked work keeps headline priority while
   mentioning the pending review count, and review-ready becomes the headline
   only when operational work is quiet
+- review decisions: `Keep this version`, `Use less space`, and
+  `Improve picture or sound` remain reachable and keyboard-focused correctly;
+  smaller-target confirmation says prior concerns are cleared, while picture or
+  sound revision makes same-size versus larger-file intent explicit
 - global pause: catalog refresh, preparation, and resume disabled while encode
   approval/processing controls remain separate
 - source warning: cached-state preservation is explicit and the remembered
@@ -257,13 +261,21 @@ bounded review moment cannot appear to be the length of the source episode.
 
 While the review assistant or a representative sample is active, the first
 Folder Studio viewport must show a prominent live-operation state with the
-current action, worker, and elapsed/status copy. Operators must not need to
-scroll past old evidence to learn whether work is still running.
+current action, worker, and elapsed/status copy. It must distinguish the
+configured normalized goal, whole-episode target, and representative-test band,
+show progress only for a bounded measurable stage, and label historical ETA as
+an estimate. Operators must not need to scroll past old evidence to learn
+whether work is still running.
 
 On Activity, unresolved processing failures must appear newest first. A missing
 controller media mount must remain queued instead of dispatching futile SSH
 retries, identify storage as the blocker, and show `Selecting computer` or
-`Unassigned` rather than a placeholder host name.
+`Unassigned` rather than a placeholder host name. When one sample transitions
+out of processing, the exact item's stale encode row must disappear, but another
+active item under the same folder must remain visible. A review-ready item moves
+to the attention list; a completed sample without available review media remains
+as one non-actionable diagnostic row. Verify the current-work table at desktop
+and 390px widths without horizontal page overflow.
 
 On Library, each show and season must expose projected space savings at the
 selection point. Verify that every sort option visibly reorders shows, that the

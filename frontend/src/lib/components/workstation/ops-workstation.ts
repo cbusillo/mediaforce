@@ -314,8 +314,64 @@ function controllerStorageWaitingJobs(
 	});
 }
 
-function calibrationPrefix(job: CalibrationJob): string {
+function calibrationPrefix(job: { prefix?: unknown; folder_prefix?: unknown }): string {
 	return compactText(job.prefix) || compactText(job.folder_prefix) || 'system scope';
+}
+
+function normalizedQueuePath(value: unknown): string {
+	return compactText(value).replace(/^\/+|\/+$/g, '');
+}
+
+function encodeJobShadowsSampleReview(
+	job: EncodeQueueJob,
+	pendingReviewPrefixes: Set<string>
+): boolean {
+	const currentItem = normalizedQueuePath(job.progress?.current_item_rel_path);
+	if (currentItem && pendingReviewPrefixes.has(currentItem)) return true;
+
+	if (job.media_scope?.match !== 'exact_item') return false;
+	const exactItemPrefix = normalizedQueuePath(job.media_scope.prefix || job.prefix);
+	return Boolean(exactItemPrefix && pendingReviewPrefixes.has(exactItemPrefix));
+}
+
+function sampleReviewShadowEncodeJobKeys(
+	dashboard: DashboardSummaryPayload | null | undefined
+): Set<string> {
+	const calibrationQueue = dashboard?.calibration_queue;
+	const pendingReviewPrefixes = new Set(
+		[...(calibrationQueue?.sample.pending_review ?? []), ...(calibrationQueue?.review_ready ?? [])]
+			.map((job) => normalizedQueuePath(calibrationPrefix(job)))
+			.filter(Boolean)
+	);
+	return new Set(
+		[...(dashboard?.encode_queue?.running ?? []), ...(dashboard?.encode_queue?.queued ?? [])]
+			.filter((job) => encodeJobShadowsSampleReview(job, pendingReviewPrefixes))
+			.map((job) => `encode:${job.job_id}`)
+	);
+}
+
+function visibleEncodeJobs(jobs: EncodeQueueJob[], shadowJobKeys: Set<string>): EncodeQueueJob[] {
+	return jobs.filter((job) => !shadowJobKeys.has(`encode:${job.job_id}`));
+}
+
+export function visibleEncodeQueueCounts(dashboard: DashboardSummaryPayload | null | undefined): {
+	running: number;
+	queued: number;
+} {
+	const queue = dashboard?.encode_queue;
+	const shadowJobKeys = sampleReviewShadowEncodeJobKeys(dashboard);
+	const visibleRunningJobs = visibleEncodeJobs(queue?.running ?? [], shadowJobKeys);
+	const visibleQueuedJobs = visibleEncodeJobs(queue?.queued ?? [], shadowJobKeys);
+	return {
+		running: Math.max(
+			(queue?.running_count ?? 0) - ((queue?.running.length ?? 0) - visibleRunningJobs.length),
+			0
+		),
+		queued: Math.max(
+			(queue?.queued_count ?? 0) - ((queue?.queued.length ?? 0) - visibleQueuedJobs.length),
+			0
+		)
+	};
 }
 
 function calibrationDetail(job: CalibrationJob): string {
@@ -544,29 +600,42 @@ function buildCalibrationLaneRows(
 	laneName: OpsQueueKind,
 	jobs: CalibrationJob[] | undefined,
 	status: string,
-	options: { historical?: boolean } = {}
+	options: { historical?: boolean; reviewAvailable?: boolean } = {}
 ): OpsQueueRow[] {
-	return (jobs ?? []).map((job, index) => ({
-		key: `${laneName}:${compactText(job.job_id) || compactText(job.prefix) || `${status}:${index}`}`,
-		kind: laneName,
-		tone: options.historical ? 'idle' : statusTone(status),
-		status: options.historical ? 'History' : statusCopy(status),
-		prefix: calibrationPrefix(job),
-		host: calibrationHostCopy(job),
-		phase: options.historical
-			? laneName === 'sample'
-				? 'sample check history'
-				: 'review evidence history'
-			: laneName === 'sample'
-				? 'sample check'
-				: 'review evidence',
-		progress: compactText(job.progress) || compactText(job.stage) || '—',
-		scheduler:
-			compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
-		schedulerDetail: '',
-		schedulerTone: 'idle',
-		detail: calibrationDetail(job)
-	}));
+	return (jobs ?? []).map((job, index) => {
+		const waitingForReview = !options.historical && status === 'pending_review';
+		const reviewUnavailable = waitingForReview && options.reviewAvailable === false;
+		return {
+			key: `${laneName}:${compactText(job.job_id) || compactText(job.prefix) || `${status}:${index}`}`,
+			kind: laneName,
+			tone: options.historical ? 'idle' : reviewUnavailable ? 'wait' : statusTone(status),
+			status: options.historical ? 'History' : reviewUnavailable ? 'Waiting' : statusCopy(status),
+			prefix: calibrationPrefix(job),
+			host: calibrationHostCopy(job),
+			phase: options.historical
+				? laneName === 'sample'
+					? 'sample check history'
+					: 'review evidence history'
+				: laneName === 'sample'
+					? 'sample check'
+					: 'review evidence',
+			progress: waitingForReview
+				? 'Complete'
+				: compactText(job.progress) || compactText(job.stage) || '—',
+			scheduler: waitingForReview
+				? reviewUnavailable
+					? 'Review unavailable'
+					: 'Finished'
+				: compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
+			schedulerDetail: '',
+			schedulerTone: 'idle',
+			detail: waitingForReview
+				? reviewUnavailable
+					? 'Review media is unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+					: 'Open the item to compare the sample.'
+				: calibrationDetail(job)
+		};
+	});
 }
 
 export function rowRecoveryLabel(row: OpsQueueRow): string {
@@ -621,7 +690,9 @@ export function buildCalibrationRows(
 	const currentRows = [
 		...buildCalibrationLaneRows('sample', queue.sample.running, 'running'),
 		...buildCalibrationLaneRows('sample', queue.sample.queued, 'queued'),
-		...buildCalibrationLaneRows('sample', unavailablePendingReviews, 'pending_review'),
+		...buildCalibrationLaneRows('sample', unavailablePendingReviews, 'pending_review', {
+			reviewAvailable: false
+		}),
 		...buildCalibrationLaneRows('proof', queue.full.running, 'running'),
 		...buildCalibrationLaneRows('proof', queue.full.queued, 'queued')
 	];
@@ -649,10 +720,11 @@ export function buildOpsQueueRows(
 	hosts?: HostsPayload | null,
 	now = new Date()
 ): OpsQueueRow[] {
-	return [
-		...buildEncodeRows(dashboard, hosts, now),
-		...buildCalibrationRows(dashboard, { includeHistory: false })
-	];
+	const shadowEncodeJobIds = sampleReviewShadowEncodeJobKeys(dashboard);
+	const encodeRows = buildEncodeRows(dashboard, hosts, now).filter(
+		(row) => !shadowEncodeJobIds.has(row.key)
+	);
+	return [...encodeRows, ...buildCalibrationRows(dashboard, { includeHistory: false })];
 }
 
 export function buildOpsBlockers(
@@ -802,11 +874,13 @@ export function buildOpsReadinessSummary(
 	const queue = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
 	const capacity = hostCapacityCounts(hosts, queue);
-	const runningCount = queue?.running_count ?? 0;
-	const queuedCount = queue?.queued_count ?? 0;
+	const shadowEncodeJobKeys = sampleReviewShadowEncodeJobKeys(dashboard);
+	const visibleRunningJobs = visibleEncodeJobs(queue?.running ?? [], shadowEncodeJobKeys);
+	const visibleQueuedJobs = visibleEncodeJobs(queue?.queued ?? [], shadowEncodeJobKeys);
+	const { running: runningCount, queued: queuedCount } = visibleEncodeQueueCounts(dashboard);
 	const queuedWaiting = queue?.queued_waiting_count ?? 0;
 	const storageWaitingJobs = controllerStorageWaitingJobs(dashboard);
-	const activeJobs = [...(queue?.running ?? []), ...(queue?.queued ?? [])];
+	const activeJobs = [...visibleRunningJobs, ...visibleQueuedJobs];
 	const attentionJobs = encodeAttentionJobs(queue);
 	const needsAttention = Math.max(queue?.needs_attention_count ?? 0, attentionJobs.length);
 	const reviewReadySamples = calibration?.review_ready ?? [];
@@ -870,10 +944,10 @@ export function buildOpsReadinessSummary(
 		if (activeChecks > 0) {
 			detailParts.push(`${activeChecks} ${activeChecks === 1 ? 'test' : 'tests'} active`);
 		}
-		if (queuedCount === 1 && queue?.queued[0]?.prefix) {
-			detailParts.push(`${opsWorkLabel(queue.queued[0].prefix)} is queued`);
+		if (queuedCount === 1 && visibleQueuedJobs[0]?.prefix) {
+			detailParts.push(`${opsWorkLabel(visibleQueuedJobs[0].prefix)} is queued`);
 		} else if (queuedCount > 0) {
-			detailParts.push(`${encodeCountLabel(queue?.queued ?? [], queuedCount)} queued`);
+			detailParts.push(`${encodeCountLabel(visibleQueuedJobs, queuedCount)} queued`);
 		}
 		if (needsAttention > 0) {
 			detailParts.push(
@@ -889,8 +963,8 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: 'active',
 			title:
-				runningCount === 1 && queue?.running[0]?.prefix
-					? `${opsWorkLabel(queue.running[0].prefix)} is working`
+				runningCount === 1 && visibleRunningJobs[0]?.prefix
+					? `${opsWorkLabel(visibleRunningJobs[0].prefix)} is working`
 					: 'Mediaforce is working',
 			detail: detailParts.join(' · ') || 'Mediaforce is working.',
 			metricLabel: 'Running',
@@ -1015,12 +1089,14 @@ export function buildOpsStatusTiles(
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
 	const capacity = hostCapacityCounts(hosts, encode);
+	const { running: visibleRunningCount, queued: visibleQueuedCount } =
+		visibleEncodeQueueCounts(dashboard);
 	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
-	const pendingReviewCount = Math.max(
+	const samplePendingReviewCount = Math.max(
 		reviewReadyCount,
 		calibration?.sample.pending_review_count ?? 0
 	);
-	const unavailableReviewCount = pendingReviewCount - reviewReadyCount;
+	const unavailableReviewCount = samplePendingReviewCount - reviewReadyCount;
 	return [
 		{
 			label: 'Work schedule',
@@ -1041,15 +1117,15 @@ export function buildOpsStatusTiles(
 		},
 		{
 			label: 'Processing',
-			value: `${encode?.running_count ?? 0} running · ${encode?.queued_count ?? 0} queued`,
+			value: `${visibleRunningCount} running · ${visibleQueuedCount} queued`,
 			detail:
 				encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} retry available`,
 			tone:
 				(encode?.needs_attention_count ?? 0) > 0
 					? 'wait'
-					: (encode?.running_count ?? 0) > 0
+					: visibleRunningCount > 0
 						? 'active'
-						: (encode?.queued_count ?? 0) > 0
+						: visibleQueuedCount > 0
 							? 'wait'
 							: 'idle'
 		},
@@ -1097,23 +1173,19 @@ export function buildOpsFooterSignals(
 	const encode = dashboard?.encode_queue;
 	const calibration = dashboard?.calibration_queue;
 	const reviewReadyCount = calibration?.review_ready?.length ?? 0;
-	const pendingReviewCount = Math.max(
+	const samplePendingReviewCount = Math.max(
 		reviewReadyCount,
 		calibration?.sample.pending_review_count ?? 0
 	);
-	const unavailableReviewCount = pendingReviewCount - reviewReadyCount;
+	const unavailableReviewCount = samplePendingReviewCount - reviewReadyCount;
 	const encodeAttentionCount = encodeAttentionJobs(encode).length;
-	const attentionCount = encodeAttentionCount + pendingReviewCount;
+	const attentionCount = encodeAttentionCount + samplePendingReviewCount;
+	const visibleCounts = visibleEncodeQueueCounts(dashboard);
 	return [
 		{
 			label: 'Processing',
-			value: `${encode?.running_count ?? 0}/${encode?.queued_count ?? 0}`,
-			tone:
-				(encode?.running_count ?? 0) > 0
-					? 'active'
-					: (encode?.queued_count ?? 0) > 0
-						? 'wait'
-						: 'idle'
+			value: `${visibleCounts.running}/${visibleCounts.queued}`,
+			tone: visibleCounts.running > 0 ? 'active' : visibleCounts.queued > 0 ? 'wait' : 'idle'
 		},
 		{
 			label: 'Attention',

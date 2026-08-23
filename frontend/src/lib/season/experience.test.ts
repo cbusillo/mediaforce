@@ -10,14 +10,18 @@ import type {
 	FolderPayload,
 	FolderStatusPayload,
 	FolderWorkflowState,
+	CompressionIntentOptionPayload,
+	OperatorIntentRequestPayload,
 	SizeGoalOptionPayload,
 	WorkflowLane
 } from '$lib/api/types';
 import {
 	activeSeasonCards,
 	approvalGuardFromMessage,
+	calibrationActivityStatusLabel,
 	calibrationEtaSummary,
 	calibrationAcceptsUnderTargetResult,
+	calibrationFreshnessLabel,
 	calibrationJobTargetContract,
 	calibrationLivenessLabel,
 	calibrationStageLabel,
@@ -45,6 +49,8 @@ import {
 	resolvedTargetSummary,
 	reviewFeedbackIntent,
 	reviewFeedbackRequest,
+	reviewAdjustmentIntent,
+	reviewSizeAdjustment,
 	reviewSampleSizes,
 	scopedEncodeProgress,
 	seasonIdentity,
@@ -640,6 +646,21 @@ function sizeOption(
 	};
 }
 
+function compressionIntentOptions(): CompressionIntentOptionPayload[] {
+	return (['reference', 'transparent', 'balanced', 'perceptual_floor'] as const).map((level) => ({
+		key: level,
+		title: level,
+		detail: level,
+		selected: level === 'balanced',
+		accepts_under_target_result: level === 'transparent' || level === 'perceptual_floor',
+		compression_intent: {
+			schema_version: 1,
+			level,
+			confirmed: true
+		}
+	}));
+}
+
 function workflowState(primaryLane: WorkflowLane, state = primaryLane): FolderWorkflowState {
 	return {
 		prefix: card.prefix,
@@ -1034,6 +1055,33 @@ describe('season experience translation', () => {
 		expect(request.compression_intent).toEqual({
 			schema_version: 1,
 			level: 'transparent',
+			confirmed: true
+		});
+	});
+
+	it('changes review size and compression while preserving the reviewed resolution', () => {
+		const currentIntent = sizeOption('recommended', 'absolute', 225, 225).operator_intent;
+		currentIntent.resolution = {
+			mode: 'max_height',
+			max_height: 1080
+		};
+		const goals = sizeGoals(
+			folder({
+				size_goal_options: [
+					sizeOption('recommended', 'absolute', 225, 225),
+					sizeOption('smaller', 'absolute', 150, 150)
+				]
+			})
+		);
+		const adjustment = reviewSizeAdjustment(goals, compressionIntentOptions(), 'smaller');
+
+		const request = reviewAdjustmentIntent(currentIntent, adjustment!);
+
+		expect(request.size_goal.value_mb).toBe(150);
+		expect(request.resolution).toEqual(currentIntent.resolution);
+		expect(request.resolution).not.toBe(currentIntent.resolution);
+		expect(request.compression_intent).toMatchObject({
+			level: 'perceptual_floor',
 			confirmed: true
 		});
 	});
@@ -1455,6 +1503,93 @@ describe('season experience translation', () => {
 		expect(goals.map((goal) => goal.megabytesPerEpisode)).toEqual([587, 440, 880]);
 		expect(goals[0].mode).toBe('normalized');
 		expect(goalRequest(goals[0])).toContain('300 MB / 45 minute runtime-normalized goal');
+	});
+
+	it('maps a smaller review judgment to the smaller goal and perceptual floor', () => {
+		const goals = sizeGoals(
+			folder({
+				size_goal_options: [
+					sizeOption('recommended', 'normalized', 300, 149, 45),
+					sizeOption('smaller', 'normalized', 225, 112, 45),
+					sizeOption('roomier', 'normalized', 450, 223, 45)
+				]
+			})
+		);
+
+		const adjustment = reviewSizeAdjustment(goals, compressionIntentOptions(), 'smaller');
+
+		expect(adjustment).toMatchObject({
+			direction: 'smaller',
+			goal: { key: 'smaller', targetSizeBytes: 112_000_000 },
+			compressionIntent: { level: 'perceptual_floor', confirmed: true }
+		});
+	});
+
+	it('maps a better-quality judgment to the roomier goal and reference intent', () => {
+		const goals = sizeGoals(
+			folder({
+				size_goal_options: [
+					sizeOption('recommended', 'normalized', 300, 149, 45),
+					sizeOption('smaller', 'normalized', 225, 112, 45),
+					sizeOption('roomier', 'normalized', 450, 223, 45)
+				]
+			})
+		);
+
+		const adjustment = reviewSizeAdjustment(goals, compressionIntentOptions(), 'higher_quality');
+		const currentIntent: OperatorIntentRequestPayload = {
+			...goals[0].operatorIntent,
+			quality_risk_tags: ['softness_detail_loss'],
+			quality_risk_details: 'The reviewed version lost fine texture.',
+			evidence_authority: 'rejected_visual_result' as const
+		};
+		const operatorIntent = reviewAdjustmentIntent(currentIntent, adjustment!);
+
+		expect(adjustment).toMatchObject({
+			direction: 'higher_quality',
+			goal: { key: 'roomier', targetSizeBytes: 223_000_000 },
+			compressionIntent: { level: 'reference', confirmed: true }
+		});
+		expect(operatorIntent).not.toHaveProperty('evidence_authority');
+		expect(operatorIntent).not.toHaveProperty('quality_risk_tags');
+		expect(operatorIntent).not.toHaveProperty('quality_risk_details');
+	});
+
+	it('does not invent a review adjustment when its goal or intent is unavailable', () => {
+		const recommendedOnly = sizeGoals(
+			folder({ size_goal_options: [sizeOption('recommended', 'normalized', 300, 149, 45)] })
+		);
+
+		expect(reviewSizeAdjustment(recommendedOnly, compressionIntentOptions(), 'smaller')).toBeNull();
+		expect(reviewSizeAdjustment([], [], 'higher_quality')).toBeNull();
+	});
+
+	it('only offers directional review presets that move the current target correctly', () => {
+		const goals = sizeGoals(
+			folder({
+				size_goal_options: [
+					sizeOption('recommended', 'normalized', 300, 149, 45),
+					sizeOption('smaller', 'normalized', 225, 112, 45),
+					sizeOption('roomier', 'normalized', 450, 223, 45)
+				]
+			})
+		);
+
+		expect(
+			reviewSizeAdjustment(goals, compressionIntentOptions(), 'smaller', 100_000_000)
+		).toBeNull();
+		expect(
+			reviewSizeAdjustment(goals, compressionIntentOptions(), 'smaller', 149_000_000, 100_000_000)
+		).toBeNull();
+		expect(
+			reviewSizeAdjustment(goals, compressionIntentOptions(), 'higher_quality', 250_000_000)
+		).toBeNull();
+		expect(
+			reviewSizeAdjustment(goals, compressionIntentOptions(), 'smaller', 149_000_000)
+		).toMatchObject({ goal: { key: 'smaller' } });
+		expect(
+			reviewSizeAdjustment(goals, compressionIntentOptions(), 'higher_quality', 149_000_000)
+		).toMatchObject({ goal: { key: 'roomier' } });
 	});
 
 	it('publishes explicit sample and final bands for the active whole-episode target', () => {
@@ -1992,8 +2127,36 @@ describe('season experience translation', () => {
 		};
 
 		expect(calibrationStageLabel(job)).toBe('Building comparison clips');
-		expect(calibrationWorkLabel(job)).toBe('2 of 3 review steps');
+		expect(calibrationWorkLabel(job)).toBe('2 of 3 comparison steps');
 		expect(calibrationLivenessLabel(job)).toBe('Computer is reporting normally');
+	});
+
+	it('keeps queued status and missing heartbeat freshness truthful', () => {
+		expect(
+			calibrationActivityStatusLabel({
+				job_id: 'test-queued',
+				prefix: card.prefix,
+				status: 'queued'
+			})
+		).toBe('Test waiting');
+		expect(calibrationFreshnessLabel(undefined)).toBe('No update yet');
+		expect(calibrationFreshnessLabel(0)).toBe('Updated just now');
+		expect(calibrationFreshnessLabel(75)).toBe('Updated 1 min ago');
+	});
+
+	it('describes bounded target-search candidate progress without implying job completion', () => {
+		expect(
+			calibrationWorkLabel({
+				job_id: 'test-search',
+				prefix: card.prefix,
+				status: 'running',
+				progress: {
+					schema_version: 1,
+					stage: 'searching_target',
+					work: { completed: 3, total: 6 }
+				}
+			})
+		).toBe('3 of up to 6 size candidates tested');
 	});
 
 	it('renders historical ETA ranges without false precision', () => {

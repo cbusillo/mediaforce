@@ -77,6 +77,12 @@ debugging a worker, or comparing logs against backend output.
   retrying the sample.
 - Review media exists: `Ready to review`. Download or inspect evidence before
   approving.
+- Review-ready sample decisions use `Keep this version`, `Use less space`, and
+  `Improve picture or sound`. Keeping approves the evidence already reviewed.
+  Using less space requests a smaller target and clears prior picture/sound
+  judgments so the new evidence is judged fresh. Improving picture or sound
+  keeps the current target by default; `Allow a larger file` is a separate,
+  explicit choice when the operator wants more room for quality.
 - Proposal warning exists: `Review warning`. The user must inspect the warning
   before approving.
 - Proposal accepted: `Approved`. The folder settings are accepted, and that
@@ -105,6 +111,20 @@ remain unchanged` while memory is observation-only.
 - Attention copy describes the human outcome and safety state. Do not expose
   exception names, internal status values, raw byte bounds, or policy markers
   in the first-level Activity view.
+- Active sample copy keeps three size concepts distinct: the configured
+  runtime-normalized goal, the resolved whole-episode target, and the bounded
+  representative-test band. Do not present the short test bytes as an episode
+  result.
+- Show a progress percentage only for a bounded stage with measurable work.
+  Label historical ETA as an estimate, and keep worker health, heartbeat
+  freshness, and elapsed time visible as separate facts rather than blending
+  them into false precision.
+- When a sample finishes, suppress only the transitional encode row whose
+  current item or exact-item scope matches it; preserve sibling encoding even
+  when it shares a folder prefix. If review media is ready, move the item to the
+  attention list and remove it from current work. If review media is
+  unavailable, retain one non-actionable completed row for diagnosis without a
+  review link.
 - Worker available: `Ready`. This worker can accept work now.
 - Worker schedule closed: `Off schedule`. This is normal and not a failure if
   other workers are ready.
