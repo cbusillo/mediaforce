@@ -55,6 +55,7 @@ import {
 	scopedEncodeProgress,
 	seasonIdentity,
 	seasonPromotionIntegrity,
+	stagedEpisodeLinks,
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
 	targetConstraintSummary,
@@ -2023,6 +2024,49 @@ describe('season experience translation', () => {
 			} as FolderPayload)
 		).toBe('Show.S02E07.mkv');
 		expect(formatFileSize(1_073_741_824)).toBe('1.0 GB');
+	});
+
+	it('links staged season output to the exact episode workspace', () => {
+		const relPath = 'tv/Bluey (2018)/Season 3/Bluey.2018.S03E49.1080p.BluRay.mkv';
+		const links = stagedEpisodeLinks({
+			...status,
+			staged_integrity: {
+				scope: status.media_scope,
+				counts: { remote_only_or_unreachable: 1, not_started: 49 },
+				blocker_count: 50,
+				blockers: [],
+				database_truncated: false,
+				discovery: { requested: true, truncated: false, entries_scanned: 50 },
+				records: [
+					{
+						disposition: 'remote_only_or_unreachable',
+						item_id: 8421,
+						rel_path: relPath,
+						staging_path: '/Volumes/media/transcode/Bluey.mkv',
+						code: 'staged_integrity_remote_only_or_unreachable',
+						next_action: 'restore_staging_access',
+						detail: 'Reconnect storage.'
+					},
+					{
+						disposition: 'not_started',
+						item_id: 8422,
+						rel_path: 'tv/Bluey (2018)/Season 3/Bluey.S03E50.mkv',
+						staging_path: null,
+						code: 'staged_integrity_not_started',
+						next_action: 'queue_encode',
+						detail: 'Not encoded.'
+					}
+				]
+			}
+		});
+
+		expect(links).toEqual([
+			{
+				label: 'Episode 49',
+				relPath,
+				href: '/folders/tv/Bluey%20(2018)/Season%203/Bluey.2018.S03E49.1080p.BluRay.mkv'
+			}
+		]);
 	});
 
 	it('formats operator-facing target totals with decimal units', () => {

@@ -20945,6 +20945,60 @@ raise SystemExit(0)
 
         self.assertTrue(payload["polling_active"])
 
+    def test_folder_status_disables_validation_when_staged_storage_is_unreachable(self) -> None:
+        workflow = {
+            "primary_lane": "validate",
+            "detail": "1 encoded output needs validation.",
+            "next_action": {
+                "kind": "validate_outputs",
+                "label": "Validate outputs",
+                "enabled": True,
+                "target_prefix": "tv/show/Season 1",
+            },
+            "blockers": [],
+        }
+
+        dashboard_payloads._apply_staged_access_to_workflow(
+            workflow,
+            {
+                "counts": {
+                    "remote_only_or_unreachable": 1,
+                    "not_started": 49,
+                }
+            },
+        )
+
+        self.assertFalse(workflow["next_action"]["enabled"])
+        self.assertEqual(
+            workflow["detail"],
+            "1 staged file needs shared storage reconnected before this check can run.",
+        )
+        self.assertEqual(
+            workflow["blockers"],
+            ["Reconnect shared storage before checking staged output."],
+        )
+
+    def test_folder_status_keeps_validation_enabled_for_unstarted_neighbors(self) -> None:
+        workflow = {
+            "primary_lane": "validate",
+            "detail": "1 encoded output needs validation.",
+            "next_action": {
+                "kind": "validate_outputs",
+                "label": "Validate outputs",
+                "enabled": True,
+                "target_prefix": "tv/show/Season 1",
+            },
+            "blockers": [],
+        }
+
+        dashboard_payloads._apply_staged_access_to_workflow(
+            workflow,
+            {"counts": {"unvalidated": 1, "not_started": 49}},
+        )
+
+        self.assertTrue(workflow["next_action"]["enabled"])
+        self.assertEqual(workflow["blockers"], [])
+
     def test_submission_cleanup_marks_escaped_calibration_task_failed(self) -> None:
         now = web_app._now_iso()
         with open_db(self.config.paths.db_path) as connection:

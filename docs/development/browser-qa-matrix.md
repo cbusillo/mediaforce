@@ -100,6 +100,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/tv/Promotion%20Ready/Season%201`, and
   `/folders/tv/Finished%20Show/Season%201` cover validation, promotion, and
   completed folder states.
+- Validation with disconnected controller storage must show the completed
+  encoded episode as a direct exact-item link, state that the original is
+  unchanged, and replace the guaranteed-to-fail validation action with the
+  bounded `Reconnect storage and check` path. A failed reconnect must leave the
+  staged output and original untouched and keep validation blocked.
 - Lifecycle states: `tv/Current Season` includes an aged eligible Season 1 and a
   five-day-old active Season 2. Library must show eligible versus held episode
   counts, active-series metadata, the `Auto` policy, and current/acquisition hold

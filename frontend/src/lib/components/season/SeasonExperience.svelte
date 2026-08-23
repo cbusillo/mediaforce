@@ -9,6 +9,7 @@
 		CompressionIntentLevel,
 		FolderPayload,
 		FolderStatusPayload,
+		HostsPayload,
 		OperatorIntentRequestPayload,
 		QualityRiskTag
 	} from '$lib/api/types';
@@ -55,6 +56,7 @@
 		scopedEncodeProgress,
 		seasonIdentity,
 		seasonPromotionIntegrity,
+		stagedEpisodeLinks,
 		shouldPrioritizeScopeActivity,
 		sizeGoals,
 		targetConstraintSummary,
@@ -114,12 +116,14 @@
 	let {
 		folder,
 		status,
+		hosts,
 		folderPending = false,
 		loadError,
 		onMutate
 	}: {
 		folder: FolderPayload;
 		status: FolderStatusPayload;
+		hosts: HostsPayload;
 		folderPending?: boolean;
 		loadError?: string;
 		onMutate: () => Promise<void>;
@@ -212,6 +216,15 @@
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
+	const encodedEpisodeLinks = $derived(stagedEpisodeLinks(status));
+	const stagedAccessBlocked = $derived(
+		(status.staged_integrity?.counts.remote_only_or_unreachable ?? 0) +
+			(status.staged_integrity?.counts.missing ?? 0) >
+			0
+	);
+	const storageRecoveryHost = $derived(
+		hosts.hosts.find((host) => host.storage_recovery_available === true) ?? null
+	);
 	const goals = $derived(sizeGoals(folder));
 	const selectedGoal = $derived(goals.find((goal) => goal.key === selectedGoalKey) ?? goals[0]);
 	const compressionIntentOptions = $derived(folder.compression_intent_options ?? []);
@@ -890,6 +903,30 @@
 					isExactItemScope
 						? 'We couldn’t check this episode.'
 						: 'We couldn’t check the new episodes.'
+				);
+			}
+		);
+	}
+
+	async function reconnectStorageAndCheckOutputs() {
+		if (!storageRecoveryHost) return;
+		await runAction(
+			'checking',
+			isExactItemScope
+				? 'We couldn’t reconnect and check this episode.'
+				: 'We couldn’t reconnect and check the new episodes.',
+			async () => {
+				ensureOk(
+					await postJson<ActionResponse>(`${resolve('/')}api/hosts/prepare`, {
+						host_key: storageRecoveryHost.key
+					}),
+					'We couldn’t reconnect the working folder.'
+				);
+				ensureOk(
+					await postJson<ActionResponse>(endpoint('validate-outputs'), {}),
+					isExactItemScope
+						? 'Storage reconnected, but we couldn’t check this episode.'
+						: 'Storage reconnected, but we couldn’t check the new episodes.'
 				);
 			}
 		);
@@ -2597,18 +2634,66 @@
 			</section>
 		{:else if humanState.key === 'ready_to_check'}
 			<section class="ready-room ready-room--check">
-				<div class="ready-symbol" aria-hidden="true"><span>···</span></div>
+				<div class="ready-symbol" aria-hidden="true">
+					<span>{stagedAccessBlocked ? '!' : '···'}</span>
+				</div>
 				<p class="eyebrow">{isExactItemScope ? 'Episode compressed' : 'Episodes made'}</p>
-				<h1>{isExactItemScope ? 'Let’s check this episode.' : 'Let’s check every new file.'}</h1>
+				<h1>
+					{stagedAccessBlocked
+						? 'Reconnect the working folder.'
+						: isExactItemScope
+							? 'Let’s check this episode.'
+							: 'Let’s check every new file.'}
+				</h1>
 				<p class="lede">
-					{isExactItemScope
-						? 'Before anything changes in your library, Mediaforce checks that the episode opens, plays, and has the expected length.'
-						: 'Before anything changes in your library, Mediaforce checks that each episode opens, plays, and has the expected length.'}
+					{stagedAccessBlocked
+						? isExactItemScope
+							? 'The full encoded episode is finished in Mediaforce’s working folder, and your original library episode is unchanged. This Mac must reconnect shared storage before it can run the technical check. Nothing is replaced by this check.'
+							: 'The full encoded episodes are finished in Mediaforce’s working folder, and your original library episodes are unchanged. This Mac must reconnect shared storage before it can run the technical checks. Nothing is replaced by these checks.'
+						: isExactItemScope
+							? 'The full encoded episode is finished, and your original library episode is unchanged. Mediaforce now checks that the new file opens, plays, and has the expected length. Nothing is replaced by this check.'
+							: 'The full encoded episodes are finished, and your original library episodes are unchanged. Mediaforce now checks that each new file opens, plays, and has the expected length. Nothing is replaced by these checks.'}
 				</p>
-				<button class="primary-button" type="button" onclick={checkOutputs}>
-					{isExactItemScope ? 'Check this episode' : 'Check the new episodes'}
-					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
-				</button>
+				{#if !isExactItemScope && encodedEpisodeLinks.length > 0}
+					<div class="encoded-episode-links" aria-label="Encoded episodes waiting for checks">
+						<span>{encodedEpisodeLinks.length === 1 ? 'Encoded episode' : 'Encoded episodes'}</span>
+						{#each encodedEpisodeLinks as episode (episode.relPath)}
+							<a href={resolve(episode.href)}>
+								<strong>{episode.label}</strong>
+								<small>Open episode</small>
+							</a>
+						{/each}
+					</div>
+				{/if}
+				{#if stagedAccessBlocked && storageRecoveryHost}
+					<button
+						class="primary-button"
+						type="button"
+						onclick={reconnectStorageAndCheckOutputs}
+						disabled={actionPhase !== 'idle'}
+					>
+						Reconnect storage and check
+						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+					</button>
+					<p class="action-note">
+						Mediaforce will reconnect {storageRecoveryHost.label}, then run the check.
+					</p>
+				{:else if stagedAccessBlocked}
+					<a class="primary-button" href={resolve('/ops')}>Open workers and storage</a>
+					<p class="action-note">
+						Reconnect the working folder before checking. Your originals stay unchanged.
+					</p>
+				{:else}
+					<button
+						class="primary-button"
+						type="button"
+						onclick={checkOutputs}
+						disabled={actionPhase !== 'idle'}
+					>
+						{isExactItemScope ? 'Check this episode' : 'Check the new episodes'}
+						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
+					</button>
+				{/if}
 			</section>
 		{:else if humanState.key === 'ready_to_finish'}
 			<section class="ready-room ready-room--finish">
@@ -5545,6 +5630,43 @@
 	.ready-room--blocked .ready-symbol {
 		background: var(--mf-fail-bg);
 		color: var(--mf-fail-fg);
+	}
+
+	.encoded-episode-links {
+		border-block: 1px solid var(--mf-line-subtle);
+		display: grid;
+		margin: 8px 0 4px;
+		max-width: 560px;
+		width: 100%;
+	}
+
+	.encoded-episode-links > span {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		padding: 10px 0 7px;
+		text-transform: uppercase;
+	}
+
+	.encoded-episode-links a {
+		align-items: center;
+		border-top: 1px solid var(--mf-line-subtle);
+		color: var(--mf-fg-primary);
+		display: flex;
+		justify-content: space-between;
+		padding: 10px 0;
+		text-decoration: none;
+	}
+
+	.encoded-episode-links a:hover strong {
+		text-decoration: underline;
+		text-underline-offset: 3px;
+	}
+
+	.encoded-episode-links small {
+		color: var(--mf-fg-tertiary);
+		font-size: 11px;
 	}
 
 	.action-note {
