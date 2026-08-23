@@ -59,6 +59,7 @@ def search_quality(
         resolved_plan: QualitySearchPlan | None = None,
         warm_start: QualitySearchWarmStart | None = None,
         expected_search_signature_id: str | None = None,
+        candidate_progress_callback: Callable[[int, int], None] | None = None,
 ) -> QualitySearchResult:
     context = resolved_plan or resolve_quality_search_plan(
         video_policy,
@@ -107,6 +108,7 @@ def search_quality(
             search_max_crf=target_search_max_crf,
             warm_start=warm_start,
             expected_search_signature_id=expected_search_signature_id,
+            candidate_progress_callback=candidate_progress_callback,
         )
 
     def run_search(*, metric_target: float, min_crf: int, max_crf: int) -> QualitySearchResult:

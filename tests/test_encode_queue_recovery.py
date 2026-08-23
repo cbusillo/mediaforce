@@ -21109,6 +21109,7 @@ raise SystemExit(0)
                     },
                 )
             active_started_at = now - timedelta(minutes=10)
+            stage_started_at = now - timedelta(minutes=4)
             save_calibration_job(
                 connection,
                 {
@@ -21127,6 +21128,7 @@ raise SystemExit(0)
                     "progress": {
                         "schema_version": 1,
                         "stage": "searching_target",
+                        "stage_started_at": stage_started_at.isoformat(timespec="seconds"),
                         "last_progress_at": now.isoformat(timespec="seconds"),
                     },
                     "updated_at": now.isoformat(timespec="seconds"),
@@ -21139,6 +21141,7 @@ raise SystemExit(0)
                 progress={
                     "schema_version": 1,
                     "stage": "searching_target",
+                    "stage_started_at": stage_started_at.isoformat(timespec="seconds"),
                     "last_progress_at": now.isoformat(timespec="seconds"),
                 },
             )
@@ -21147,6 +21150,8 @@ raise SystemExit(0)
 
         estimate = public["progress"]["estimate"]
         self.assertEqual(public["progress"]["liveness"], "reporting")
+        self.assertGreaterEqual(public["progress"]["stage_elapsed_seconds"], 239)
+        self.assertLessEqual(public["progress"]["stage_elapsed_seconds"], 241)
         self.assertEqual(estimate["kind"], "historical_range")
         self.assertEqual(estimate["sample_size"], 3)
         self.assertGreater(estimate["remaining_seconds_high"], estimate["remaining_seconds_low"])

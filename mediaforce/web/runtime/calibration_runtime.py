@@ -30,7 +30,7 @@ from mediaforce.tuning.content_intent_observations import (
     content_intent_stream_plan_id,
 )
 from mediaforce.tuning.av1_cold_start import unavailable_av1_cold_start_prediction
-from mediaforce.tuning.target_size_search import TargetSizeSearchError
+from mediaforce.tuning.target_size_search import MAX_TARGET_SIZE_CANDIDATES, TargetSizeSearchError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -796,7 +796,16 @@ def run_sampled_calibration(
                     "cold_start_planner_error"
                 )
     if progress_callback is not None:
-        progress_callback("searching_target")
+        progress_callback(
+            "searching_target",
+            completed=0,
+            total=MAX_TARGET_SIZE_CANDIDATES,
+        )
+        quality_kwargs["candidate_progress_callback"] = lambda completed, total: progress_callback(
+            "searching_target",
+            completed=completed,
+            total=total,
+        )
     quality_result = deps.search_quality_for_source(quality_source_path, video_policy, **quality_kwargs)
     if progress_callback is not None:
         progress_callback("measuring_quality")
