@@ -55,6 +55,7 @@ import {
 	scopedEncodeProgress,
 	seasonIdentity,
 	seasonPromotionIntegrity,
+	seasonEpisodeOptions,
 	stagedEpisodeLinks,
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
@@ -2065,6 +2066,82 @@ describe('season experience translation', () => {
 				label: 'Episode 49',
 				relPath,
 				href: '/folders/tv/Bluey%20(2018)/Season%203/Bluey.2018.S03E49.1080p.BluRay.mkv'
+			}
+		]);
+	});
+
+	it('lists every catalog episode for exact-item navigation in numeric order', () => {
+		const options = seasonEpisodeOptions({
+			...status,
+			staged_integrity: {
+				scope: status.media_scope,
+				counts: { not_started: 2, tracked: 1, orphaned: 1 },
+				blocker_count: 3,
+				blockers: [],
+				database_truncated: false,
+				discovery: { requested: true, truncated: false, entries_scanned: 4 },
+				records: [
+					{
+						disposition: 'not_started',
+						item_id: 10,
+						rel_path: 'tv/Show/Season 1/Show.S01E10.mkv',
+						staging_path: null,
+						code: 'staged_integrity_not_started',
+						next_action: 'queue_encode',
+						detail: 'Not encoded.'
+					},
+					{
+						disposition: 'tracked',
+						item_id: 2,
+						rel_path: 'tv/Show/Season 1/Show.S01E02.mkv',
+						staging_path: null,
+						code: 'staged_integrity_tracked',
+						next_action: '',
+						detail: 'Already placed.'
+					},
+					{
+						disposition: 'not_started',
+						item_id: 1,
+						rel_path: 'tv/Show/Season 1/Show.S01E01.mkv',
+						staging_path: null,
+						code: 'staged_integrity_not_started',
+						next_action: 'queue_encode',
+						detail: 'Not encoded.'
+					},
+					{
+						disposition: 'orphaned',
+						item_id: null,
+						rel_path: null,
+						staging_path: '/Volumes/transcode/unknown.mkv',
+						code: 'staged_integrity_orphaned',
+						next_action: 'inspect',
+						detail: 'Untracked.'
+					}
+				]
+			}
+		});
+
+		expect(options).toEqual([
+			{
+				itemId: 1,
+				label: 'Episode 1',
+				statusLabel: 'Not made yet',
+				relPath: 'tv/Show/Season 1/Show.S01E01.mkv',
+				href: '/folders/tv/Show/Season%201/Show.S01E01.mkv'
+			},
+			{
+				itemId: 2,
+				label: 'Episode 2',
+				statusLabel: 'Already in the library',
+				relPath: 'tv/Show/Season 1/Show.S01E02.mkv',
+				href: '/folders/tv/Show/Season%201/Show.S01E02.mkv'
+			},
+			{
+				itemId: 10,
+				label: 'Episode 10',
+				statusLabel: 'Not made yet',
+				relPath: 'tv/Show/Season 1/Show.S01E10.mkv',
+				href: '/folders/tv/Show/Season%201/Show.S01E10.mkv'
 			}
 		]);
 	});

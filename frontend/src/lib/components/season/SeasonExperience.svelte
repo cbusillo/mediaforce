@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { onMount, tick } from 'svelte';
 
@@ -56,6 +57,7 @@
 		scopedEncodeProgress,
 		seasonIdentity,
 		seasonPromotionIntegrity,
+		seasonEpisodeOptions,
 		stagedEpisodeLinks,
 		shouldPrioritizeScopeActivity,
 		sizeGoals,
@@ -152,6 +154,7 @@
 	let revisionPaneOpen = $state(false);
 	let revisionMode = $state<RevisionMode>('same_target');
 	let revisionPanePrefix = $state('');
+	let episodeNavigationPending = $state(false);
 	let goalButtons = $state<HTMLButtonElement[]>([]);
 	let compressionIntentButtons = $state<HTMLButtonElement[]>([]);
 	let safetyDialog = $state<SafetyDialog | null>(null);
@@ -216,7 +219,24 @@
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
+	const episodeOptions = $derived(seasonEpisodeOptions(status));
 	const encodedEpisodeLinks = $derived(stagedEpisodeLinks(status));
+	const episodeNavigationUnavailable = $derived(
+		Boolean(
+			status.staged_integrity?.load_error ||
+			status.staged_integrity?.database_truncated ||
+			status.staged_integrity?.discovery.truncated
+		)
+	);
+	const parentScope = $derived(folder.media_scope?.parent ?? null);
+	const backHref = $derived(
+		isExactItemScope && parentScope?.prefix
+			? resolve(folderRoutePath(parentScope.prefix))
+			: resolve('/')
+	);
+	const backLabel = $derived(
+		isExactItemScope && parentScope?.title ? parentScope.title : 'Library'
+	);
 	const stagedAccessBlocked = $derived(
 		(status.staged_integrity?.counts.remote_only_or_unreachable ?? 0) +
 			(status.staged_integrity?.counts.missing ?? 0) >
@@ -1385,6 +1405,18 @@
 		selectedMoment = index;
 	}
 
+	async function openEpisode(event: Event) {
+		const select = event.currentTarget as HTMLSelectElement;
+		const episode = episodeOptions.find((option) => option.href === select.value);
+		if (!episode || episodeNavigationPending) return;
+		episodeNavigationPending = true;
+		try {
+			await goto(resolve(episode.href), { keepFocus: true, noScroll: true });
+		} finally {
+			episodeNavigationPending = false;
+		}
+	}
+
 	function downloadComparison() {
 		window.location.assign(apiDownloadHref(endpoint('review-compare/download')));
 	}
@@ -1401,9 +1433,9 @@
 <div class:cinematic={pageIsCinematic} class="experience-page">
 	<div class="ambient" aria-hidden="true"></div>
 	<header class="experience-header">
-		<a class="back-link" href={resolve('/')}>
+		<a class="back-link" href={backHref}>
 			<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m12.5 4.5-5.5 5.5 5.5 5.5" /></svg>
-			Library
+			{backLabel}
 		</a>
 		<a class="wordmark" href={resolve('/')}>Mediaforce</a>
 		<span class="header-season">{scopeTitle}</span>
@@ -1486,6 +1518,41 @@
 					{/if}
 				</div>
 			</div>
+		{/if}
+
+		{#if !folder.pending && folder.media_scope?.kind === 'tv_season'}
+			<section class="episode-selector" aria-labelledby="episode-selector-title">
+				<div class="episode-selector__copy">
+					<p class="eyebrow">Episode selection</p>
+					<h2 id="episode-selector-title">Choose an episode</h2>
+					<p>Opening an episode does not start a test or change any media.</p>
+				</div>
+				{#if episodeNavigationUnavailable}
+					<p class="episode-selector__status" role="alert">
+						Episode list unavailable. Refresh this workspace to load every episode.
+					</p>
+				{:else if episodeOptions.length > 0}
+					<label class="episode-selector__control">
+						<span
+							>{episodeOptions.length} {episodeOptions.length === 1 ? 'episode' : 'episodes'}</span
+						>
+						<select
+							aria-label="Choose an episode"
+							disabled={episodeNavigationPending}
+							onchange={openEpisode}
+						>
+							<option value="">
+								{episodeNavigationPending ? 'Opening episode…' : 'Select an episode…'}
+							</option>
+							{#each episodeOptions as episode (episode.itemId)}
+								<option value={episode.href}>{episode.label} — {episode.statusLabel}</option>
+							{/each}
+						</select>
+					</label>
+				{:else}
+					<p class="episode-selector__status">No catalog episodes found.</p>
+				{/if}
+			</section>
 		{/if}
 
 		{#if folder.pending}
@@ -4766,6 +4833,73 @@
 		color: var(--mf-wait-fg);
 	}
 
+	.episode-selector {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 18px;
+		grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+		margin: 0 0 18px;
+		padding: 16px 18px;
+	}
+
+	.episode-selector__copy {
+		display: grid;
+		gap: 3px;
+	}
+
+	.episode-selector__copy .eyebrow {
+		margin: 0;
+	}
+
+	.episode-selector__copy h2 {
+		font-size: 18px;
+		letter-spacing: -0.02em;
+		line-height: 1.2;
+		margin: 0;
+	}
+
+	.episode-selector__copy > p:last-child,
+	.episode-selector__status {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		line-height: 1.45;
+		margin: 0;
+	}
+
+	.episode-selector__control {
+		display: grid;
+		gap: 6px;
+	}
+
+	.episode-selector__control > span {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
+	.episode-selector__control select {
+		background: var(--mf-bg-input);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-primary);
+		font: inherit;
+		font-size: 13px;
+		font-weight: 650;
+		min-height: 44px;
+		padding: 0 38px 0 12px;
+		width: 100%;
+	}
+
+	.episode-selector__control select:disabled {
+		cursor: wait;
+		opacity: 0.65;
+	}
+
 	.loading-room,
 	.working-room,
 	.goal-room,
@@ -7001,6 +7135,13 @@
 		.finished-room,
 		.help-room {
 			padding: 18px;
+		}
+
+		.episode-selector {
+			align-items: stretch;
+			gap: 12px;
+			grid-template-columns: 1fr;
+			padding: 14px;
 		}
 
 		.exact-approved__summary,

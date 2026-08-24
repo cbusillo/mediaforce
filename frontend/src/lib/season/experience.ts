@@ -715,6 +715,35 @@ export function episodeLabel(path: string | null | undefined): string {
 	return fileName?.trim() || 'A representative episode';
 }
 
+export interface SeasonEpisodeOption {
+	itemId: number;
+	label: string;
+	statusLabel: string;
+	relPath: string;
+	href: `/folders/${string}`;
+}
+
+export function seasonEpisodeOptions(status: FolderStatusPayload): SeasonEpisodeOption[] {
+	const options = new Map<string, SeasonEpisodeOption>();
+	for (const record of status.staged_integrity?.records ?? []) {
+		const itemId = record.item_id;
+		const relPath = record.rel_path?.trim();
+		if (itemId === null || !relPath) continue;
+		options.set(relPath, {
+			itemId,
+			label: episodeLabel(relPath),
+			statusLabel: stagedIntegrityDispositionCopy(record.disposition).label,
+			relPath,
+			href: folderRoutePath(relPath)
+		});
+	}
+	return [...options.values()].sort(
+		(left, right) =>
+			left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' }) ||
+			left.itemId - right.itemId
+	);
+}
+
 export function stagedEpisodeLinks(status: FolderStatusPayload): Array<{
 	label: string;
 	relPath: string;

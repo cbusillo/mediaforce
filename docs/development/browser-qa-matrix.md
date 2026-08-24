@@ -105,6 +105,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   unchanged, and replace the guaranteed-to-fail validation action with the
   bounded `Reconnect storage and check` path. A failed reconnect must leave the
   staged output and original untouched and keep validation blocked.
+- A TV season workspace must expose a complete `Choose an episode` control
+  before sample or size actions. Verify that all catalog episodes are present in
+  numeric order with plain workflow state, selecting Episode 2 opens its exact
+  workspace without starting work, and the exact-item header links back to the
+  parent season. Repeat at 1024px and 390px widths.
 - Lifecycle states: `tv/Current Season` includes an aged eligible Season 1 and a
   five-day-old active Season 2. Library must show eligible versus held episode
   counts, active-series metadata, the `Auto` policy, and current/acquisition hold
