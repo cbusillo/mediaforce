@@ -782,9 +782,9 @@ describe('Folder Studio review request mapping', () => {
 			expect.arrayContaining([
 				expect.objectContaining({
 					label: 'Measured sample',
-					source: 'source 4.1 GiB',
-					output: '766 MiB',
-					detail: 'target 300 MB per episode · 2.6x target · folder 16.5 GiB',
+					source: 'source 4.35 GB',
+					output: '803 MB',
+					detail: 'target 300 MB per episode · 2.6x target · folder 17.7 GB',
 					tone: 'wait'
 				}),
 				expect.objectContaining({
@@ -1180,10 +1180,10 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(buildSampleVerdict(folder, calibration)).toMatchObject({
 			label: 'Target missed',
-			title: '766 MiB per episode misses 300 MB per episode.',
-			predictedPerItem: '766 MiB',
-			predictedFolderTotal: '16.5 GiB',
-			reclaim: '58.2 GiB',
+			title: '803 MB per episode misses 300 MB per episode.',
+			predictedPerItem: '803 MB',
+			predictedFolderTotal: '17.7 GB',
+			reclaim: '62.5 GB',
 			predictedBitrate: '2 Mbps',
 			targetBitrate: '796 kbps',
 			targetDelta: '2.6x target',
@@ -1200,7 +1200,7 @@ describe('Folder Studio review request mapping', () => {
 			secondary: 'Revise smaller',
 			secondaryAction: 'revise-smaller',
 			revisionPrompt:
-				'Revise this sample smaller toward 300 MB per episode. The last sample was 766 MiB · 2.6x target; keep the review quality as high as possible, but make the next sample materially smaller.'
+				'Revise this sample smaller toward 300 MB per episode. The last sample was 803 MB · 2.6x target; keep the review quality as high as possible, but make the next sample materially smaller.'
 		});
 	});
 
@@ -1237,7 +1237,7 @@ describe('Folder Studio review request mapping', () => {
 			secondary: 'Revise smaller',
 			secondaryAction: 'revise-smaller',
 			revisionPrompt:
-				'Revise this sample smaller toward 300 MB per episode. The last sample was 766 MiB · 2.6x target; keep the review quality as high as possible, but make the next sample materially smaller.'
+				'Revise this sample smaller toward 300 MB per episode. The last sample was 803 MB · 2.6x target; keep the review quality as high as possible, but make the next sample materially smaller.'
 		});
 		expect(
 			resolveWorkflowActionState('approve-size-tradeoff', {
@@ -1865,7 +1865,7 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(buildSampleVerdict(folder, calibration)).toMatchObject({
 			stalePolicy: true,
-			title: '766 MiB per episode came from older settings.'
+			title: '803 MB per episode came from older settings.'
 		});
 		expect(
 			resolveWorkflow(folder, folderStatusPayload(), calibration, null, null, null, null)
@@ -1879,7 +1879,7 @@ describe('Folder Studio review request mapping', () => {
 		expect(buildDecisionFacts(folder, calibration, null)).toEqual([
 			{
 				label: 'Old sample',
-				value: '766 MiB · 2 Mbps',
+				value: '803 MB · 2 Mbps',
 				detail: 'VMAF 95.0 · 2.6x target · old target 300 MB per episode'
 			},
 			{
@@ -1918,7 +1918,7 @@ describe('Folder Studio review request mapping', () => {
 
 		expect(buildSampleVerdict(folder, calibration)).toMatchObject({
 			stalePolicy: true,
-			title: '766 MiB per episode came from older settings.'
+			title: '803 MB per episode came from older settings.'
 		});
 	});
 
@@ -2089,7 +2089,7 @@ describe('Folder Studio review request mapping', () => {
 		});
 		expect(buildDecisionFacts(folder, calibration, null, workflow)[0]).toMatchObject({
 			label: 'Per episode',
-			value: '238 MiB'
+			value: '250 MB'
 		});
 	});
 
@@ -2316,12 +2316,12 @@ describe('Folder Studio review request mapping', () => {
 		expect(buildDecisionFacts(folder, calibration, pendingProposal)).toEqual([
 			{
 				label: 'Last sample',
-				value: '766 MiB · 2 Mbps',
+				value: '803 MB · 2 Mbps',
 				detail: '2.6x target · target 300 MB per episode · target 796 kbps'
 			},
 			{
 				label: 'Next size ceiling',
-				value: '293 MiB max',
+				value: '307 MB max',
 				detail: '7% of selected source · 300 MB per episode'
 			},
 			{
@@ -2351,7 +2351,7 @@ describe('Folder Studio review request mapping', () => {
 			{ label: 'Resolution', value: '1,920x1,080' },
 			{ label: 'Source rate', value: '11 Mbps' },
 			{ label: 'Codec', value: 'HEVC' },
-			{ label: 'Size', value: '4.1 GiB' }
+			{ label: 'Size', value: '4.35 GB' }
 		]);
 	});
 

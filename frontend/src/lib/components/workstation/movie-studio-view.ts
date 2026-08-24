@@ -8,6 +8,7 @@ import type {
 	ResolvedSizeGoalPayload,
 	StreamBudgetLedgerPayload
 } from '$lib/api/types';
+import { formatFileSize } from '$lib/format';
 
 export interface MovieCurrentWorkView {
 	label: string;
@@ -757,16 +758,7 @@ function formatDuration(value: number | null | undefined): string {
 }
 
 export function formatMovieBytes(value: unknown): string {
-	const bytes = finitePositive(value);
-	if (!bytes) return 'Unknown';
-	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-	let unitIndex = 0;
-	let scaled = bytes;
-	while (scaled >= 1000 && unitIndex < units.length - 1) {
-		scaled /= 1000;
-		unitIndex += 1;
-	}
-	return `${scaled >= 100 ? scaled.toFixed(0) : scaled >= 10 ? scaled.toFixed(1) : scaled.toFixed(2)} ${units[unitIndex]}`;
+	return formatFileSize(value, 'Unknown');
 }
 
 function finitePositive(value: unknown): number | null {

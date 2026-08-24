@@ -3,6 +3,7 @@
 
 	import type { MovieLibraryPayload, MovieMember, MovieTitle } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { formatFileSize } from '$lib/format';
 	import {
 		movieCompositionDetail,
 		movieExpectedOutputBytes,
@@ -101,16 +102,7 @@
 	}
 
 	function formatBytes(value: number | null | undefined): string {
-		if (value == null) return 'No estimate';
-		if (value < 1024) return `${value} B`;
-		const units = ['KB', 'MB', 'GB', 'TB'];
-		let size = value;
-		let unit = -1;
-		while (size >= 1024 && unit < units.length - 1) {
-			size /= 1024;
-			unit += 1;
-		}
-		return `${size >= 10 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+		return formatFileSize(value, 'No estimate');
 	}
 
 	function formatReclaim(title: MovieTitle): string {

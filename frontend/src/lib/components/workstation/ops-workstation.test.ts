@@ -241,7 +241,7 @@ describe('Ops workstation mapping', () => {
 			action: undefined,
 			actionScope: undefined,
 			host: 'Selecting computer',
-			detail: 'transient worker fault'
+			detail: 'Mediaforce could not finish this work.'
 		});
 		expect(rows[0]).toMatchObject({ scopeLabel: 'Movie' });
 		expect(rowRecoveryLabel(rows[1])).toBe('Waiting');

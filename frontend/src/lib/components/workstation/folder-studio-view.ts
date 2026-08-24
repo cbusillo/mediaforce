@@ -25,6 +25,8 @@ import {
 	type ReviewGate,
 	type VisibleReviewArtifact
 } from '$lib/folders/studio';
+import { formatFileSize } from '$lib/format';
+import { operatorStateCopy } from '$lib/operator-copy';
 import type {
 	EncodeQueueJob,
 	EncodeQueueSummary,
@@ -716,23 +718,7 @@ export function resolveFolderTitle(prefix: string): string {
 }
 
 export function formatBytes(value: number | null | undefined): string {
-	if (value == null) return '—';
-	if (!Number.isFinite(value)) return '—';
-	const absValue = Math.abs(value);
-	if (absValue >= 1024 ** 3) {
-		return `${(value / 1024 ** 3).toLocaleString('en-US', {
-			maximumFractionDigits: 1
-		})} GiB`;
-	}
-	if (absValue >= 1024 ** 2) {
-		return `${(value / 1024 ** 2).toLocaleString('en-US', {
-			maximumFractionDigits: absValue >= 100 * 1024 ** 2 ? 0 : 1
-		})} MiB`;
-	}
-	if (absValue >= 1024) {
-		return `${(value / 1024).toLocaleString('en-US', { maximumFractionDigits: 0 })} KiB`;
-	}
-	return `${value.toLocaleString('en-US', { maximumFractionDigits: 0 })} B`;
+	return formatFileSize(value);
 }
 
 function formatDuration(value: number | null | undefined): string {
@@ -1616,7 +1602,7 @@ export function sampleStatusCopy(value: string | null | undefined): string {
 	if (status === 'pending_review') return 'Ready to review';
 	if (status === 'failed' || status === 'stopped') return 'Sample needs retry';
 	if (status === 'idle' || !status) return 'Needs sample';
-	return status.replaceAll('_', ' ');
+	return operatorStateCopy(status);
 }
 
 export function approvalStatusCopy(value: string | null | undefined): string {
@@ -1629,7 +1615,7 @@ export function approvalStatusCopy(value: string | null | undefined): string {
 	if (status === 'blocked') return 'Blocked';
 	if (status === 'needs_review') return 'Needs review';
 	if (status === 'pending_review') return 'Ready to review';
-	return status.replaceAll('_', ' ');
+	return operatorStateCopy(status);
 }
 
 function workflowToneToShellTone(tone: FolderWorkflowState['tone']): ShellTone {

@@ -19,6 +19,7 @@ import type {
 	TargetSizeProvenance
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
+import { formatFileSize as formatOperatorFileSize } from '$lib/format';
 
 export type HumanSeasonStateKey =
 	| 'needs_test'
@@ -747,38 +748,11 @@ export function folderHref(prefix: string): `/folders/${string}` {
 }
 
 export function formatFileSize(bytes: number | null | undefined): string {
-	const value = numberValue(bytes);
-	if (value <= 0) return 'Size not available';
-	const units = [
-		{ threshold: 1024 ** 3, suffix: 'GB' },
-		{ threshold: 1024 ** 2, suffix: 'MB' },
-		{ threshold: 1024, suffix: 'KB' }
-	];
-	for (const unit of units) {
-		if (value >= unit.threshold) {
-			const scaled = value / unit.threshold;
-			const digits = scaled >= 10 ? 0 : 1;
-			return `${scaled.toFixed(digits)} ${unit.suffix}`;
-		}
-	}
-	return `${Math.round(value)} bytes`;
+	return formatOperatorFileSize(bytes, 'Size not available');
 }
 
 export function formatDecimalFileSize(bytes: number | null | undefined): string {
-	const value = numberValue(bytes);
-	if (value <= 0) return '0 MB';
-	for (const unit of [
-		{ threshold: 1_000_000_000_000, suffix: 'TB' },
-		{ threshold: 1_000_000_000, suffix: 'GB' },
-		{ threshold: 1_000_000, suffix: 'MB' }
-	]) {
-		if (value >= unit.threshold) {
-			const scaled = value / unit.threshold;
-			const digits = Number.isInteger(scaled) ? 0 : scaled >= 10 ? 1 : 2;
-			return `${scaled.toFixed(digits)} ${unit.suffix}`;
-		}
-	}
-	return `${Math.round(value / 1_000)} KB`;
+	return formatOperatorFileSize(bytes, '0 MB');
 }
 
 export function expectedSizeChange(

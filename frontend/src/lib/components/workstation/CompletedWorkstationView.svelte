@@ -10,7 +10,7 @@
 		CompletedPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { formatBytes as formatTechnicalBytes } from './folder-studio-view';
+	import { formatFileSize } from '$lib/format';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
@@ -407,7 +407,7 @@
 	function formatTimestamp(value: string | null | undefined): string {
 		if (!value) return '—';
 		const date = new Date(value);
-		if (Number.isNaN(date.getTime())) return value;
+		if (Number.isNaN(date.getTime())) return 'Unknown time';
 		return date.toLocaleString([], {
 			month: 'short',
 			day: '2-digit',
@@ -417,10 +417,7 @@
 	}
 
 	function formatBytes(value: number | null | undefined): string {
-		return formatTechnicalBytes(value)
-			.replace('GiB', 'GB')
-			.replace('MiB', 'MB')
-			.replace('KiB', 'KB');
+		return formatFileSize(value);
 	}
 
 	function eventTone(value: string): ShellTone {
