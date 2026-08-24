@@ -7,6 +7,7 @@ import type {
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
 import { hostSchedulePresentation, jobSchedulePresentation } from '$lib/hosts/schedule';
+import { safeOperatorErrorCopy } from '$lib/operator-copy';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export type OpsQueueKind = 'encode' | 'sample' | 'proof';
@@ -286,7 +287,7 @@ function operatorErrorCopy(value: unknown): string {
 	) {
 		return 'The saved size goal is too small to preserve the required quality. Choose a new size goal before retrying.';
 	}
-	return detail;
+	return safeOperatorErrorCopy(detail, 'Mediaforce could not finish this work.');
 }
 
 function operatorErrorSummary(value: unknown): string {
@@ -521,7 +522,8 @@ function encodeJobRawDetail(job: EncodeQueueJob): string {
 }
 
 export function encodeJobDetail(job: EncodeQueueJob): string {
-	return operatorErrorSummary(compactTelemetryCopy(encodeJobRawDetail(job)));
+	const detail = compactTelemetryCopy(encodeJobRawDetail(job));
+	return activeJobStatus(job.status) ? detail : operatorErrorSummary(detail);
 }
 
 function encodeJobTimestamp(job: EncodeQueueJob): number {
@@ -626,7 +628,7 @@ function buildCalibrationLaneRows(
 				? reviewUnavailable
 					? 'Review unavailable'
 					: 'Finished'
-				: compactText(job.scheduler_status_copy) || compactText(job.created_at) || 'queued order',
+				: compactText(job.scheduler_status_copy) || 'Waiting in queue',
 			schedulerDetail: '',
 			schedulerTone: 'idle',
 			detail: waitingForReview

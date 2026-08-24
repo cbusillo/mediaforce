@@ -13,6 +13,7 @@
 		SettingsLibrary,
 		SettingsPayload
 	} from '$lib/api/types';
+	import { formatFileSize } from '$lib/format';
 	import { hostRuntimeBadgeState } from '$lib/hosts/runtime';
 	import {
 		SCHEDULE_DAY_OPTIONS,
@@ -229,8 +230,7 @@
 	}
 
 	function formatStorage(bytes: number): string {
-		if (!Number.isFinite(bytes) || bytes <= 0) return '0 GB';
-		return `${(bytes / 1024 ** 3).toLocaleString('en-US', { maximumFractionDigits: 1 })} GB`;
+		return formatFileSize(bytes, '0 GB');
 	}
 
 	function selectValue(event: Event): string {

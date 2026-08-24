@@ -11,6 +11,8 @@
 		OtherMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
+	import { formatFileSize } from '$lib/format';
+	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
 
 	let {
 		folder,
@@ -252,10 +254,9 @@
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : 'Studio could not refresh.';
 			actionError = actionCompleted
-				? `The action completed, but Studio could not refresh. ${message}`
-				: message;
+				? 'The action completed, but Studio could not refresh.'
+				: safeOperatorErrorCopy(error, 'Studio could not complete that action.');
 		} finally {
 			pendingAction = '';
 		}
@@ -272,16 +273,7 @@
 	}
 
 	function formatBytes(value: number | null | undefined): string {
-		if (value == null) return 'Unknown';
-		if (value < 1024) return `${value} B`;
-		const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
-		let current = value / 1024;
-		let unit = 0;
-		while (current >= 1024 && unit < units.length - 1) {
-			current /= 1024;
-			unit += 1;
-		}
-		return `${current >= 10 ? current.toFixed(0) : current.toFixed(1)} ${units[unit]}`;
+		return formatFileSize(value, 'Unknown');
 	}
 
 	function formatElapsed(timestamp: string | null | undefined): string {
@@ -305,8 +297,38 @@
 	}
 
 	function memberState(member: OtherMember): string {
-		if (workflow?.primary_lane === 'processing') return 'processing';
-		return member.workflow_state?.state.replaceAll('_', ' ') ?? member.status.replaceAll('_', ' ');
+		if (workflow?.primary_lane === 'processing') return 'Compressing';
+		return operatorStateCopy(member.workflow_state?.state ?? member.status);
+	}
+
+	function sampleState(): string {
+		if (reviewReady) return approved ? 'Approved' : 'Ready to review';
+		return operatorStateCopy(
+			calibrationJob.status,
+			{
+				failed: 'Sample needs retry',
+				queued: 'Sample waiting',
+				retry_backoff: 'Retry scheduled',
+				running: 'Creating sample',
+				starting: 'Starting sample',
+				stopped: 'Sample needs retry'
+			},
+			'Not started'
+		);
+	}
+
+	function compressionState(): string {
+		return operatorStateCopy(
+			encodeJob?.status,
+			{
+				failed: 'Compression needs attention',
+				queued: 'Compression waiting',
+				running: 'Compressing',
+				starting: 'Starting compression',
+				stopped: 'Compression needs attention'
+			},
+			'Idle'
+		);
 	}
 
 	function scopeMembershipToken(): string {
@@ -364,23 +386,19 @@
 		<div><span>Profile</span><strong>{readiness?.profile_label ?? 'Loading'}</strong></div>
 		<div><span>Workflow</span><strong>{workflow?.label ?? 'Loading'}</strong></div>
 		<div>
-			<span>Sample</span><strong
-				>{reviewReady
-					? approved
-						? 'Approved'
-						: 'Review ready'
-					: asText(calibrationJob.status) || 'Not started'}</strong
-			>
+			<span>Sample</span><strong>{sampleState()}</strong>
 		</div>
 		<div>
-			<span>Processing</span><strong>{encodeJob?.status?.replaceAll('_', ' ') ?? 'Idle'}</strong>
+			<span>Compression</span><strong>{compressionState()}</strong>
 		</div>
 		<div><span>Workers online</span><strong>{activeWorkerCount}</strong></div>
 	</section>
 
 	{#if loadError}
 		<div class="notice notice--danger" role="alert">
-			<strong>Studio update failed</strong><span>{loadError}</span>
+			<strong>Studio update failed</strong><span
+				>{safeOperatorErrorCopy(loadError, 'Studio could not load the latest state.')}</span
+			>
 		</div>
 	{/if}
 	{#if actionError}

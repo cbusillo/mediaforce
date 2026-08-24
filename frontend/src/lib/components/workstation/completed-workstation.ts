@@ -4,6 +4,7 @@ import type {
 	CompletedHistoryEvent,
 	CompletedPayload
 } from '$lib/api/types';
+import { normalizeFileSizeCopy } from '$lib/format';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 import { formatBytes } from './folder-studio-view';
 
@@ -89,13 +90,13 @@ export function completedHistoryLabel(event: CompletedHistoryRow): string {
 export function completedHistoryDetail(value: string, event?: CompletedHistoryRow): string {
 	const noun = event ? completedHistoryNoun(event).toLowerCase() : 'media item';
 	const article = noun === 'episode' ? 'an' : 'a';
-	return value
-		.replace(/encode worker/gi, 'A computer')
-		.replace(/processing an item/gi, `making ${article} ${noun}`)
-		.replace(/promoted items/gi, `finished ${noun}s`)
-		.replace(/promoted item/gi, `finished ${noun}`)
-		.replace(/GiB/g, 'GB')
-		.replace(/MiB/g, 'MB');
+	return normalizeFileSizeCopy(
+		value
+			.replace(/encode worker/gi, 'A computer')
+			.replace(/processing an item/gi, `making ${article} ${noun}`)
+			.replace(/promoted items/gi, `finished ${noun}s`)
+			.replace(/promoted item/gi, `finished ${noun}`)
+	);
 }
 
 export function completedHistorySearchText(event: CompletedHistoryRow): string {

@@ -2023,7 +2023,7 @@ describe('season experience translation', () => {
 				}
 			} as FolderPayload)
 		).toBe('Show.S02E07.mkv');
-		expect(formatFileSize(1_073_741_824)).toBe('1.0 GB');
+		expect(formatFileSize(1_073_741_824)).toBe('1.07 GB');
 	});
 
 	it('links staged season output to the exact episode workspace', () => {

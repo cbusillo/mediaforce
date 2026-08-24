@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	formatCounts,
-	formatGiB,
+	formatFileSize,
+	normalizeFileSizeCopy,
 	formatScheduleCountdown,
 	formatScheduleMoment,
 	formatTimestamp,
@@ -10,10 +11,16 @@ import {
 } from './format';
 
 describe('format helpers', () => {
-	it('formats GiB values with the requested precision', () => {
-		expect(formatGiB(0)).toBe('0 GiB');
-		expect(formatGiB(1024 ** 3)).toBe('1.0 GiB');
-		expect(formatGiB(1536 * 1024 ** 2, 2)).toBe('1.50 GiB');
+	it('formats operator-facing file sizes with decimal units and consistent rounding', () => {
+		expect(formatFileSize(null)).toBe('—');
+		expect(formatFileSize(0, 'No estimate')).toBe('No estimate');
+		expect(formatFileSize(337_200_000)).toBe('337 MB');
+		expect(formatFileSize(4_690_000_000)).toBe('4.69 GB');
+		expect(formatFileSize(22_880_013_000)).toBe('22.9 GB');
+	});
+
+	it('converts binary-unit backend copy instead of relabelling it', () => {
+		expect(normalizeFileSizeCopy('Saved 4.1 GiB and 766 MiB')).toBe('Saved 4.4 GB and 803 MB');
 	});
 
 	it('formats mapping counts into a readable summary', () => {

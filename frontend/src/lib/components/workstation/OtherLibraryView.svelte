@@ -3,6 +3,7 @@
 
 	import type { OtherLibraryPayload, OtherWorkUnit } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { formatFileSize } from '$lib/format';
 	import LibraryModeNav from './LibraryModeNav.svelte';
 
 	let {
@@ -84,16 +85,7 @@
 	}
 
 	function formatBytes(value: number | null | undefined): string {
-		if (value == null) return 'Pending';
-		if (value < 1024) return `${value} B`;
-		const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
-		let current = value / 1024;
-		let unit = 0;
-		while (current >= 1024 && unit < units.length - 1) {
-			current /= 1024;
-			unit += 1;
-		}
-		return `${current >= 10 ? current.toFixed(0) : current.toFixed(1)} ${units[unit]}`;
+		return formatFileSize(value, 'Pending');
 	}
 
 	function workflowTone(unit: OtherWorkUnit): string {
