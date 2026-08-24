@@ -18,6 +18,7 @@ import type {
 	StagedIntegrityRecord,
 	TargetSizeProvenance
 } from '$lib/api/types';
+import { folderRoutePath } from '$lib/folder-display';
 
 export type HumanSeasonStateKey =
 	| 'needs_test'
@@ -712,6 +713,25 @@ export function episodeLabel(path: string | null | undefined): string {
 		?.replace(/\.[^.]+$/, '')
 		.replaceAll(/[._-]+/g, ' ');
 	return fileName?.trim() || 'A representative episode';
+}
+
+export function stagedEpisodeLinks(status: FolderStatusPayload): Array<{
+	label: string;
+	relPath: string;
+	href: `/folders/${string}`;
+}> {
+	const records = status.staged_integrity?.records ?? [];
+	const links = new Map<string, { label: string; relPath: string; href: `/folders/${string}` }>();
+	for (const record of records) {
+		const relPath = record.item_id !== null ? record.rel_path?.trim() : '';
+		if (!relPath || ['not_started', 'tracked'].includes(record.disposition)) continue;
+		links.set(relPath, {
+			label: episodeLabel(relPath),
+			relPath,
+			href: folderRoutePath(relPath)
+		});
+	}
+	return [...links.values()].sort((left, right) => left.relPath.localeCompare(right.relPath));
 }
 
 export function exactItemFilename(folder: FolderPayload): string {

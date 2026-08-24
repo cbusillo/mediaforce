@@ -265,6 +265,7 @@
 		<SeasonExperience
 			{folder}
 			{status}
+			{hosts}
 			{folderPending}
 			loadError={loadError ?? undefined}
 			onMutate={refreshStudio}

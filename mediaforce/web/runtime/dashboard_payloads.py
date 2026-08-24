@@ -228,6 +228,7 @@ def folder_status_payload(
             media_scope,
             discover=False,
         ).summary_payload()
+        _apply_staged_access_to_workflow(workflow_state, staged_integrity)
         if media_scope.domain == "movie":
             movie_context = load_movie_scope_payload(connection, config, normalized_prefix)
             if movie_context is not None:
@@ -264,6 +265,35 @@ def folder_status_payload(
         "workflow_state": workflow_state,
         "staged_integrity": staged_integrity,
     }
+
+
+def _apply_staged_access_to_workflow(
+        workflow_state: dict[str, Any],
+        staged_integrity: dict[str, Any],
+) -> None:
+    next_action = workflow_state.get("next_action")
+    if not isinstance(next_action, dict):
+        return
+    action_kind = str(next_action.get("kind") or "")
+    if action_kind not in {"validate_outputs", "promote_outputs"}:
+        return
+    counts = staged_integrity.get("counts")
+    if not isinstance(counts, dict):
+        return
+    remote_count = int(counts.get("remote_only_or_unreachable") or 0)
+    missing_count = int(counts.get("missing") or 0)
+    if remote_count + missing_count == 0:
+        return
+    next_action["enabled"] = False
+    item_count = remote_count + missing_count
+    noun = "file" if item_count == 1 else "files"
+    verb = "needs" if item_count == 1 else "need"
+    workflow_state["detail"] = (
+        f"{item_count} staged {noun} {verb} shared storage reconnected before this check can run."
+    )
+    blockers = workflow_state.setdefault("blockers", [])
+    if isinstance(blockers, list):
+        blockers.append("Reconnect shared storage before checking staged output.")
 
 
 def _scope_activity_payload(
