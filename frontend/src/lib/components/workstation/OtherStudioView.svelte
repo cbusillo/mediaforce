@@ -13,6 +13,8 @@
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import { formatFileSize } from '$lib/format';
 	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
+	import { otherScopeSummary, otherWorkflowDetail, otherWorkflowLabel } from '$lib/other/library';
+	import StateBadge from './StateBadge.svelte';
 
 	let {
 		folder,
@@ -44,6 +46,10 @@
 	const pendingProposal = $derived(asRecord(folder.pending_proposal));
 	const pendingProposalCanQueue = $derived(pendingProposal.can_queue === true);
 	const calibrationJob = $derived(asRecord(folder.calibration_job));
+	const sampleWorkStatus = $derived(asText(calibrationJob.status));
+	const sampleWorkActive = $derived(
+		['queued', 'starting', 'running', 'retry_backoff'].includes(sampleWorkStatus)
+	);
 	const encodeJob = $derived(folder.encode_job ?? null);
 	const hostOptions = $derived(
 		(folder.sample_host_options ?? [])
@@ -77,26 +83,80 @@
 	);
 	const approved = $derived(Boolean(calibration.accepted_at));
 	const scopeNoun = $derived(folder.media_scope.match === 'exact_item' ? 'file' : 'folder');
+	const scopeLabel = $derived(
+		folder.media_scope.match === 'exact_item' ? 'One file' : 'Whole folder'
+	);
+	const itemCount = $derived(context?.item_count ?? 0);
+	const blockedItemCount = $derived(context?.blocked_item_count ?? 0);
+	const includedItemCount = $derived(Math.max(0, itemCount - blockedItemCount));
+	const actionFileCount = $derived(includedItemCount);
+	const scopeSummary = $derived(
+		otherScopeSummary(
+			itemCount,
+			includedItemCount,
+			blockedItemCount,
+			membershipComplete,
+			context?.membership_limit ?? 250
+		)
+	);
+	const membershipReviewLabel = $derived(
+		itemCount === 1
+			? 'I reviewed the file in this folder.'
+			: `I reviewed all ${itemCount} files in this folder.`
+	);
+	const scopeConfirmationDetail = $derived.by(() => {
+		const untouched =
+			blockedItemCount === 0
+				? 'No files are left out.'
+				: `${blockedItemCount} ${blockedItemCount === 1 ? 'file stays' : 'files stay'} untouched.`;
+		if (workflow?.primary_lane === 'validate') {
+			return `${actionFileCount} compressed ${actionFileCount === 1 ? 'file will' : 'files will'} be checked. ${untouched}`;
+		}
+		if (workflow?.primary_lane === 'promote') {
+			return `${actionFileCount} checked ${actionFileCount === 1 ? 'file will replace its original' : 'files will replace their originals'}. ${untouched}`;
+		}
+		return scopeSummary.confirmation;
+	});
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
-	const workflowDetail = $derived(
-		normalizeWorkflowDetail(
-			workflow?.detail ?? 'Workflow details are loading.',
-			context?.item_count ?? 0
-		)
-	);
+	const workflowLabel = $derived(otherWorkflowLabel(workflow, folderPending));
+	const workflowDetail = $derived(otherWorkflowDetail(workflow, actionFileCount));
+	const decisionDetail = $derived.by(() => {
+		if (sampleWorkStatus === 'retry_backoff')
+			return 'The last attempt stopped. Mediaforce will retry this sample shortly.';
+		if (sampleWorkStatus === 'queued')
+			return 'This sample has not started. It is waiting for an available computer.';
+		if (['starting', 'running'].includes(sampleWorkStatus))
+			return 'Mediaforce is creating comparison clips. The original files remain unchanged.';
+		if (['failed', 'stopped'].includes(sampleWorkStatus))
+			return 'The previous sample stopped before its comparison clips were ready. Nothing was replaced.';
+		if (reviewReady && !approved)
+			return 'Compare the original and sample clips. Approval does not replace any files.';
+		if (pendingProposalCanQueue)
+			return 'Nothing has started. Choose Create sample when you are ready.';
+		return workflowDetail;
+	});
 	const decisionTitle = $derived.by(() => {
-		if (workflow?.primary_lane === 'processing') return 'Encoding in progress';
-		if (workflow?.primary_lane === 'validate') return 'Validate encoded output';
-		if (workflow?.primary_lane === 'promote') return 'Promote validated output';
+		if (['queued', 'retry_backoff'].includes(sampleWorkStatus)) return 'Sample waiting';
+		if (['starting', 'running'].includes(sampleWorkStatus)) return 'Creating sample';
+		if (['failed', 'stopped'].includes(sampleWorkStatus)) return 'Sample needs retry';
+		if (reviewReady && !approved) return 'Ready to review';
+		if (pendingProposalCanQueue) return 'Sample setup ready';
+		if (workflow?.primary_lane === 'processing') return 'Compressing now';
+		if (workflow?.primary_lane === 'validate')
+			return actionFileCount === 1 ? 'Check the compressed file' : 'Check the compressed files';
+		if (workflow?.primary_lane === 'promote')
+			return actionFileCount === 1 ? 'Replace the original file' : 'Replace the original files';
 		if (['blocked', 'attention'].includes(workflow?.primary_lane ?? ''))
-			return 'Resolve the workflow blocker';
-		return `Prepare and deliver this ${scopeNoun}`;
+			return 'Fix this before work continues';
+		if (approved && workflow?.primary_lane === 'encode')
+			return actionFileCount === 1 ? 'Compress this file' : 'Compress these files';
+		return `Get this ${scopeNoun} ready to compress`;
 	});
 	const activeOperationCopy = $derived.by(() => {
 		const host = asRecord(encodeJob?.host);
-		const worker =
+		const computer =
 			asText(host.label) ||
 			asText(host.key) ||
 			encodeJob?.progress?.active_host_labels?.[0] ||
@@ -104,7 +164,7 @@
 		const percent = encodeJob?.progress?.percent_complete;
 		const parts = [
 			percent != null ? `${Math.round(percent)}% complete` : 'Progress pending',
-			`Worker: ${worker}`,
+			`Computer: ${computer}`,
 			formatElapsed(encodeJob?.created_at)
 		].filter(Boolean);
 		return parts.join(' · ');
@@ -115,6 +175,7 @@
 			!pendingProposalCanQueue &&
 			!reviewReady &&
 			!approved &&
+			!sampleWorkActive &&
 			!['failed', 'stopped'].includes(asText(calibrationJob.status)) &&
 			!['processing', 'validate', 'promote'].includes(workflow?.primary_lane ?? '')
 	);
@@ -146,7 +207,7 @@
 			if (!response.ok)
 				throw new Error(response.message || 'This scope is not ready for sampling.');
 			note = '';
-			return response.message || 'Sample plan ready. Review it before starting work.';
+			return 'Sample setup is ready. Choose Create sample when you are ready.';
 		});
 	}
 
@@ -161,7 +222,7 @@
 				}
 			);
 			if (!response.ok) throw new Error(response.message || 'The sample could not start.');
-			return response.message || 'Sample run queued.';
+			return 'Sample waiting.';
 		});
 	}
 
@@ -176,7 +237,7 @@
 				}
 			);
 			if (!response.ok) throw new Error(response.message || 'The sample could not restart.');
-			return response.message || 'Sample retry queued.';
+			return 'Sample waiting.';
 		});
 	}
 
@@ -194,7 +255,7 @@
 			);
 			if (!response.ok)
 				throw new Error(response.message || 'The sample approval could not be saved.');
-			return response.message || `Approved the sample for this ${scopeNoun}.`;
+			return `Sample approved for this ${scopeNoun}.`;
 		});
 	}
 
@@ -214,16 +275,26 @@
 				}
 			);
 			if (!response.ok) throw new Error(response.message || 'This work could not be queued.');
-			return response.message || `Queued this ${scopeNoun}.`;
+			return actionFileCount === 1
+				? 'This file is waiting to compress.'
+				: `${actionFileCount} files are waiting to compress.`;
 		});
 	}
 
 	async function validateOutputs() {
-		await folderAction('validate-outputs', 'Validated the ready Other output.');
+		await folderAction(
+			'validate-outputs',
+			actionFileCount === 1 ? 'Checked the compressed file.' : 'Checked the compressed files.'
+		);
 	}
 
 	async function promoteOutputs() {
-		await folderAction('promote-outputs', 'Promoted the validated Other output.');
+		await folderAction(
+			'promote-outputs',
+			actionFileCount === 1
+				? 'Replaced the original file and kept its backup.'
+				: 'Replaced the original files and kept their backups.'
+		);
 	}
 
 	async function folderAction(action: string, successMessage: string) {
@@ -235,7 +306,7 @@
 			);
 			if (!response.ok) throw new Error(response.message || `${action} failed.`);
 			return {
-				message: response.message || successMessage,
+				message: successMessage,
 				targetPrefix: action === 'promote-outputs' ? response.target_prefix : undefined
 			};
 		});
@@ -287,7 +358,7 @@
 		return `Active for ${Math.floor(elapsedMinutes / 60)}h ${elapsedMinutes % 60}m`;
 	}
 
-	function workflowTone(): string {
+	function workflowTone(): 'active' | 'ready' | 'wait' | 'fail' | 'idle' {
 		if (readiness?.state === 'blocked') return 'fail';
 		if (isBrowseOnly) return 'wait';
 		if (workflow?.primary_lane === 'processing') return 'active';
@@ -302,29 +373,36 @@
 	}
 
 	function sampleState(): string {
-		if (reviewReady) return approved ? 'Approved' : 'Ready to review';
+		if (reviewReady) return approved ? 'Sample approved' : 'Ready to review';
+		if (['processing', 'validate', 'promote', 'complete'].includes(workflow?.primary_lane ?? ''))
+			return 'Sample approved';
 		return operatorStateCopy(
 			calibrationJob.status,
 			{
 				failed: 'Sample needs retry',
 				queued: 'Sample waiting',
-				retry_backoff: 'Retry scheduled',
+				retry_backoff: 'Sample waiting',
 				running: 'Creating sample',
-				starting: 'Starting sample',
+				starting: 'Creating sample',
 				stopped: 'Sample needs retry'
 			},
-			'Not started'
+			'Needs sample'
 		);
 	}
 
 	function compressionState(): string {
+		if (workflow?.primary_lane === 'validate') return 'Ready to check';
+		if (workflow?.primary_lane === 'promote') return 'Ready to replace';
+		if (workflow?.primary_lane === 'complete') return 'Finished';
+		if (workflow?.primary_lane === 'processing' && !encodeJob?.status) return 'Compressing';
 		return operatorStateCopy(
 			encodeJob?.status,
 			{
 				failed: 'Compression needs attention',
 				queued: 'Compression waiting',
+				retry_backoff: 'Compression waiting',
 				running: 'Compressing',
-				starting: 'Starting compression',
+				starting: 'Compressing',
 				stopped: 'Compression needs attention'
 			},
 			'Idle'
@@ -341,17 +419,6 @@
 		membershipConfirmed = checked;
 		confirmedMembershipToken = checked ? (context?.membership_token ?? '') : '';
 	}
-
-	function normalizeWorkflowDetail(detail: string, itemCount: number): string {
-		if (itemCount !== 1) {
-			return detail.replace('item(s)', 'items').replace('output(s)', 'outputs');
-		}
-		return detail
-			.replace('item(s)', 'item')
-			.replace('output(s)', 'output')
-			.replace(' output need ', ' output needs ')
-			.replace(' output are ', ' output is ');
-	}
 </script>
 
 <svelte:head>
@@ -363,18 +430,17 @@
 		<div class="studio-header__identity">
 			<a href={resolve('/other')}>← Other Library</a>
 			<div>
-				<span class="eyebrow"
-					>{folder.media_scope.match === 'exact_item' ? 'Exact file' : 'Bounded folder'}</span
-				>
+				<span class="eyebrow">{scopeLabel}</span>
 				<h1>{title}</h1>
 				<p>{folder.prefix}</p>
 			</div>
 		</div>
-		<span class="state-badge" data-tone={workflowTone()}>
-			{readiness?.state === 'ready'
-				? (workflow?.label ?? 'Ready')
-				: (readiness?.label ?? 'Loading')}
-		</span>
+		<div class="studio-state">
+			<StateBadge
+				tone={workflowTone()}
+				label={readiness?.state === 'ready' ? workflowLabel : (readiness?.label ?? 'Loading')}
+			/>
+		</div>
 	</header>
 
 	<section class="status-strip" aria-label="Other Studio status">
@@ -384,18 +450,21 @@
 			>
 		</div>
 		<div><span>Profile</span><strong>{readiness?.profile_label ?? 'Loading'}</strong></div>
-		<div><span>Workflow</span><strong>{workflow?.label ?? 'Loading'}</strong></div>
+		<div><span>Workflow</span><strong>{workflowLabel}</strong></div>
 		<div>
 			<span>Sample</span><strong>{sampleState()}</strong>
 		</div>
 		<div>
 			<span>Compression</span><strong>{compressionState()}</strong>
 		</div>
-		<div><span>Workers online</span><strong>{activeWorkerCount}</strong></div>
+		<div><span>Computers ready</span><strong>{activeWorkerCount}</strong></div>
 	</section>
+	<div class="sr-only" aria-live="polite">
+		Sample: {sampleState()}. Compression: {compressionState()}.
+	</div>
 
 	{#if loadError}
-		<div class="notice notice--danger" role="alert">
+		<div class="notice notice--danger" role="status">
 			<strong>Studio update failed</strong><span
 				>{safeOperatorErrorCopy(loadError, 'Studio could not load the latest state.')}</span
 			>
@@ -414,7 +483,7 @@
 	{#if isBrowseOnly}
 		<div class="notice">
 			<strong>Browse only</strong><span
-				>Enable Production for this root in Settings before sampling or queueing work.</span
+				>Turn on changes for this root in Settings before creating a sample or starting work.</span
 			>
 		</div>
 	{:else if readiness?.state === 'blocked'}
@@ -435,31 +504,34 @@
 					<span class="eyebrow">Decision</span>
 					<h2>{decisionTitle}</h2>
 				</div>
-				<span>{folderPending ? 'Refreshing…' : workflowDetail}</span>
+				<span>{folderPending ? 'Refreshing…' : decisionDetail}</span>
 			</header>
 
 			<div class="scope-contract">
 				<div>
-					<span>Exact membership</span><strong
-						>{context?.membership_complete
-							? `${context.item_count} indexed ${context.item_count === 1 ? 'file' : 'files'}`
-							: `More than ${context?.membership_limit ?? 250} files`}</strong
-					>
+					<span>Files included</span><strong>{scopeSummary.included}</strong>
 				</div>
-				<div><span>Stored size</span><strong>{formatBytes(context?.total_size_bytes)}</strong></div>
 				<div>
-					<span>Grouping</span><strong
+					<span>Current size</span><strong>{formatBytes(context?.total_size_bytes)}</strong>
+				</div>
+				<div>
+					<span>What is included</span><strong
 						>{folder.media_scope.match === 'exact_item'
-							? 'One exact file'
-							: 'All descendants'}</strong
+							? 'Only this file'
+							: 'Files in this folder and its subfolders'}</strong
 					>
 				</div>
 				<div>
-					<span>Semantics</span><strong>No title, season, edition, or spatial inference</strong>
+					<span>Files left untouched</span><strong>{scopeSummary.untouched}</strong>
 				</div>
 			</div>
 
-			{#if requiresMembershipConfirmation}
+			{#if !membershipComplete}
+				<div class="scope-warning" role="status">
+					<strong>This folder is too large to confirm safely.</strong>
+					<span>{scopeSummary.confirmation}</span>
+				</div>
+			{:else if requiresMembershipConfirmation}
 				<label class="confirmation" class:is-disabled={!scopeReady}>
 					<input
 						type="checkbox"
@@ -469,9 +541,8 @@
 							updateMembershipConfirmation((event.currentTarget as HTMLInputElement).checked)}
 					/>
 					<span>
-						<strong>I reviewed all {context?.item_count ?? 0} files in this folder scope.</strong>
-						<small>Sampling and production apply to every eligible file listed in Membership.</small
-						>
+						<strong>{membershipReviewLabel}</strong>
+						<small>{scopeConfirmationDetail}</small>
 					</span>
 				</label>
 			{/if}
@@ -486,9 +557,10 @@
 							placeholder="Optional quality or size direction for this scope"></textarea>
 					</label>
 					<label>
-						<span>Worker</span>
+						<span>Computer</span>
 						<select bind:value={selectedHostKey} disabled={!hostOptions.length}>
-							{#if !hostOptions.length}<option value="">No sample worker available</option>{/if}
+							{#if !hostOptions.length}<option value="">No computer available for samples</option
+								>{/if}
 							{#each hostOptions as host (asText(host.key))}
 								<option value={asText(host.key)}>{asText(host.label) || asText(host.key)}</option>
 							{/each}
@@ -498,30 +570,39 @@
 			{/if}
 
 			<div class="action-row">
-				{#if workflow?.primary_lane === 'processing'}
-					<span class="operation-state"
-						><strong>Production is active.</strong>{activeOperationCopy}</span
+				{#if sampleWorkActive}
+					<span class="operation-state"><strong>{sampleState()}.</strong>{decisionDetail}</span>
+				{:else if workflow?.primary_lane === 'processing'}
+					<span class="operation-state"><strong>Compressing now.</strong>{activeOperationCopy}</span
 					>
 				{:else if workflow?.primary_lane === 'validate'}
-					<button class="primary" disabled={isBusy || isBrowseOnly} onclick={validateOutputs}
-						>Validate ready output</button
+					<button class="primary" disabled={!actionReady || isBusy} onclick={validateOutputs}
+						>{actionFileCount === 1 ? 'Check compressed file' : 'Check compressed files'}</button
 					>
 				{:else if workflow?.primary_lane === 'promote'}
-					<button class="primary" disabled={isBusy || isBrowseOnly} onclick={promoteOutputs}
-						>Promote validated output</button
+					<span class="action-consequence">
+						Runs immediately. Mediaforce keeps {actionFileCount === 1
+							? 'the original backup'
+							: 'original backups'}
+						in the cleanup folder first. Files left out stay untouched.
+					</span>
+					<button class="primary" disabled={!actionReady || isBusy} onclick={promoteOutputs}
+						>{actionFileCount === 1 ? 'Replace original file' : 'Replace original files'}</button
 					>
 				{:else if reviewReady && !approved}
-					<button class="secondary" type="button" onclick={openReviewPack}>Open review pack</button>
+					<button class="secondary" type="button" onclick={openReviewPack}>Compare clips</button>
 					<button class="primary" disabled={!actionReady || isBusy} onclick={approveSample}
-						>Approve reviewed sample</button
+						>Approve sample</button
 					>
 				{:else if approved && workflow?.primary_lane === 'encode'}
 					<button class="primary" disabled={!actionReady || isBusy} onclick={queueApproved}
-						>Queue {context?.eligible_item_count ?? 0} eligible files</button
+						>{actionFileCount === 1
+							? 'Compress this file'
+							: `Compress ${actionFileCount} files`}</button
 					>
 				{:else if pendingProposalCanQueue}
 					<button class="primary" disabled={!actionReady || isBusy} onclick={startSample}
-						>Start proposed sample</button
+						>Create sample</button
 					>
 				{:else if ['failed', 'stopped'].includes(asText(calibrationJob.status))}
 					<button class="primary" disabled={!actionReady || isBusy} onclick={retrySample}
@@ -531,19 +612,19 @@
 					<button
 						class="primary"
 						disabled={!actionReady || isBusy || !hostOptions.length}
-						onclick={prepareSample}>Prepare representative sample</button
+						onclick={prepareSample}>Set up sample</button
 					>
 				{/if}
-				{#if requiresMembershipConfirmation && !membershipConfirmed}
+				{#if requiresMembershipConfirmation && membershipComplete && !membershipConfirmed}
 					<span class="action-help"
-						>{hostOptions.length
-							? 'Confirm membership to enable sample and queue actions.'
-							: 'Confirm membership and bring a sample-capable worker online to prepare a sample.'}</span
+						>{showSampleControls && !hostOptions.length
+							? 'Confirm the included files and bring a computer online for samples.'
+							: 'Confirm the included files to enable this action.'}</span
 					>
 				{:else if readiness?.state !== 'ready'}
-					<span class="action-help">Resolve profile readiness before starting work.</span>
+					<span class="action-help">Fix the settings problem above before starting work.</span>
 				{:else if showSampleControls && !hostOptions.length && !reviewReady}
-					<span class="action-help">Bring a sample-capable worker online.</span>
+					<span class="action-help">Bring a computer online for samples.</span>
 				{/if}
 			</div>
 		</section>
@@ -561,9 +642,10 @@
 
 			{#if context?.membership_complete === false}
 				<div class="membership-warning">
-					<strong>Scope exceeds the safe membership limit.</strong>
+					<strong>Too many files to confirm safely.</strong>
 					<span
-						>Switch this root to exact-file grouping or split the source folder before processing.</span
+						>Switch this root to one-file-at-a-time in Settings or split the source folder before
+						compressing.</span
 					>
 				</div>
 			{/if}
@@ -587,7 +669,9 @@
 						</div>
 						<div class="member-row__actions">
 							<span>{memberState(member)}</span>
-							<a href={resolve(folderRoutePath(member.prefix))}>Open exact file</a>
+							<a href={resolve(folderRoutePath(member.prefix))} aria-label={`Open ${member.label}`}
+								>Open</a
+							>
 						</div>
 					</div>
 				{/each}
@@ -636,6 +720,20 @@
 		min-width: 0;
 	}
 
+	.studio-state {
+		align-self: center;
+	}
+
+	.sr-only {
+		clip: rect(0, 0, 0, 0);
+		clip-path: inset(50%);
+		height: 1px;
+		overflow: hidden;
+		position: absolute;
+		white-space: nowrap;
+		width: 1px;
+	}
+
 	.eyebrow,
 	.scope-contract span,
 	.sample-form label > span,
@@ -662,37 +760,6 @@
 		white-space: nowrap;
 	}
 
-	.state-badge {
-		border: 1px solid var(--mf-line-strong);
-		color: var(--mf-fg-secondary);
-		font-size: 10px;
-		font-weight: 800;
-		letter-spacing: 0.05em;
-		padding: 5px 7px;
-		text-transform: uppercase;
-	}
-
-	.state-badge[data-tone='ready'] {
-		border-color: var(--mf-ready-fg);
-		color: var(--mf-ready-fg);
-	}
-
-	.state-badge[data-tone='active'] {
-		background: var(--mf-active-bg-strong);
-		border-color: var(--mf-active-fg);
-		color: var(--mf-active-fg-bright);
-	}
-
-	.state-badge[data-tone='wait'] {
-		border-color: var(--mf-wait-fg);
-		color: var(--mf-wait-fg);
-	}
-
-	.state-badge[data-tone='fail'] {
-		border-color: var(--mf-fail-fg);
-		color: var(--mf-fail-fg);
-	}
-
 	.status-strip {
 		background: var(--mf-bg-panel);
 		border: 1px solid var(--mf-line);
@@ -717,11 +784,9 @@
 
 	.status-strip strong {
 		font-size: 12px;
+		line-height: 1.35;
 		margin-top: 3px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		text-transform: capitalize;
-		white-space: nowrap;
+		white-space: normal;
 	}
 
 	.notice {
@@ -823,6 +888,21 @@
 		margin-top: 4px;
 	}
 
+	.scope-warning {
+		border-left: 3px solid var(--mf-wait-fg);
+		display: grid;
+		font-size: 12px;
+		gap: 3px;
+		line-height: 1.45;
+		margin-top: 16px;
+		padding: 6px 0 6px 11px;
+	}
+
+	.scope-warning span,
+	.action-consequence {
+		color: var(--mf-fg-secondary);
+	}
+
 	.confirmation {
 		align-items: start;
 		background: var(--mf-bg-subtle);
@@ -922,6 +1002,12 @@
 	.action-help {
 		color: var(--mf-fg-secondary);
 		font-size: 11px;
+	}
+
+	.action-consequence {
+		flex-basis: 100%;
+		font-size: 11px;
+		line-height: 1.5;
 	}
 
 	.operation-state {
@@ -1076,19 +1162,19 @@
 			gap: 10px;
 		}
 
-		.state-badge {
+		.studio-state {
 			align-self: flex-start;
 		}
 
 		.status-strip {
-			grid-template-columns: 1fr 1fr;
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 
-		.status-strip div:nth-child(odd) {
+		.status-strip div:nth-child(3n + 1) {
 			border-left: 0;
 		}
 
-		.status-strip div:nth-child(n + 3) {
+		.status-strip div:nth-child(n + 4) {
 			border-top: 1px solid var(--mf-line);
 		}
 
@@ -1105,20 +1191,8 @@
 			text-align: left;
 		}
 
-		.scope-contract,
 		.sample-form {
 			grid-template-columns: 1fr;
-		}
-
-		.scope-contract div,
-		.scope-contract div:nth-child(odd),
-		.scope-contract div:nth-last-child(-n + 2) {
-			border-bottom: 1px solid var(--mf-line);
-			border-right: 0;
-		}
-
-		.scope-contract div:last-child {
-			border-bottom: 0;
 		}
 
 		.member-row {

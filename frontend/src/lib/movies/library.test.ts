@@ -281,6 +281,19 @@ describe('movie action discoverability', () => {
 		expect(selectMovieLeadTitle([title, readyTitle], 'priority', '')?.prefix).toBe('films/Ready');
 	});
 
+	it('labels active movie work as compression', () => {
+		expect(
+			movieWorkflowLabel({
+				...readyTitle,
+				workflow_state: {
+					...readyTitle.workflow_state!,
+					primary_lane: 'processing',
+					label: 'Processing'
+				}
+			})
+		).toBe('Compressing');
+	});
+
 	it('treats a required file choice as actionable without exposing the backend label', () => {
 		const explicitTitle: MovieTitle = {
 			...readyTitle,

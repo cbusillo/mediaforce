@@ -281,7 +281,8 @@ describe('parentSampleAppliesToExactItem', () => {
 describe('movieReviewStatusLabel', () => {
 	it('uses operator-facing copy for approval-ready and missing samples', () => {
 		expect(movieReviewStatusLabel('needs_approval')).toBe('Ready to review');
-		expect(movieReviewStatusLabel('missing_sample')).toBe('Not prepared');
+		expect(movieReviewStatusLabel('missing_sample')).toBe('Needs sample');
+		expect(movieReviewStatusLabel('accepted')).toBe('Sample approved');
 	});
 
 	it('directs inherited samples back to the title workspace', () =>
@@ -289,7 +290,7 @@ describe('movieReviewStatusLabel', () => {
 });
 
 describe('movieCurrentWorkView', () => {
-	it('explains a paused queue with no available worker', () => {
+	it('explains a paused queue with no available computer', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',
@@ -308,17 +309,17 @@ describe('movieCurrentWorkView', () => {
 			queuePosition: '1 of 1',
 			worker: 'Not assigned',
 			availableWorkers: 'None ready',
-			blockers: ['The processing queue is paused.', 'No processing worker is ready.']
+			blockers: ['The compression queue is paused.', 'No computer is ready for compression.']
 		});
 		expect(view?.elapsed).toBeUndefined();
 		expect(view?.speed).toBeUndefined();
 		expect(view?.eta).toBeUndefined();
 		expect(view?.nextCondition).toBe(
-			'This movie starts automatically after the global processing queue is resumed and a processing worker becomes available.'
+			'This movie starts automatically after the global compression queue is resumed and a computer becomes available.'
 		);
 	});
 
-	it('blocks queued work while the processing queue is stopping', () => {
+	it('blocks queued work while the compression queue is stopping', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',
@@ -335,8 +336,9 @@ describe('movieCurrentWorkView', () => {
 			label: 'Queue stopping',
 			headline: 'Queued, but not able to start',
 			detail: 'Clear the conditions below and Mediaforce starts this movie automatically.',
-			blockers: ['The processing queue is stopping and will not start new work.'],
-			nextCondition: 'This movie starts automatically after the global processing queue is resumed.'
+			blockers: ['The compression queue is stopping and will not start new work.'],
+			nextCondition:
+				'This movie starts automatically after the global compression queue is resumed.'
 		});
 	});
 
@@ -356,7 +358,7 @@ describe('movieCurrentWorkView', () => {
 
 		expect(view).toMatchObject({
 			headline: 'Queued 2 of 4',
-			detail: 'Ready when a worker is free.',
+			detail: 'Ready when a computer is free.',
 			blockers: [],
 			queuePosition: '2 of 4',
 			eta: undefined
@@ -382,7 +384,7 @@ describe('movieCurrentWorkView', () => {
 		});
 	});
 
-	it('shows running progress, worker, speed, elapsed time, and ETA', () => {
+	it('shows running progress, computer, speed, elapsed time, and ETA', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',
@@ -404,8 +406,8 @@ describe('movieCurrentWorkView', () => {
 		);
 
 		expect(view).toMatchObject({
-			headline: 'Processing movie.mkv',
-			detail: 'Encoding',
+			headline: 'Compressing movie.mkv',
+			detail: 'Compressing',
 			percentComplete: 42.4,
 			worker: 'Studio Mac',
 			availableWorkers: '1 ready',
@@ -415,7 +417,7 @@ describe('movieCurrentWorkView', () => {
 		});
 	});
 
-	it('does not borrow the preferred host when a running worker is not reported', () => {
+	it('does not borrow the preferred computer when a running computer is not reported', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',

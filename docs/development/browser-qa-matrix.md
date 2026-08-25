@@ -66,8 +66,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   must outrank a stale 314.6 MB season result without pretending the job belongs
   to the season route.
 - Retryable state: `/folders/tv/Retry%20Show/Season%201`, with a failed sample
-	job that shows the immutable saved target/settings, `Retry sample`, and a
-	separate path to choose different settings.
+  job that shows the immutable saved target/settings, `Retry sample`, and a
+  separate path to choose different settings.
 - Search-limit state: `/folders/tv/Search%20Limit/Season%201`, with a
   deterministic target-search-bound failure that explains why the saved retry
   would repeat and routes the operator to a fresh settings review.
@@ -83,7 +83,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/tv/Quality%20Conflict/Season%201`, proving arithmetic impossibility
   is explained separately from a measured quality-floor conflict.
 - Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
-	complete but production remains unqueued until `Compress the season` is chosen.
+  complete but production remains unqueued until `Compress the season` is chosen.
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
   lifecycle override dialog before queueing.
@@ -183,6 +183,18 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Validation%20Ready/Season%201`: validation-ready state.
 - `/folders/tv/Promotion%20Ready/Season%201`: promotion-ready state.
 - `/folders/tv/Finished%20Show/Season%201`: completed state.
+- `/movies`: Movie Library priority, scope, and replacement-conflict language.
+- `/folders/movies/Editions%20Showcase`: Movie Studio sample setup and whole-title scope.
+- `/folders/movies/Loose%20Feature.mkv`: Movie Studio sample-waiting and one-file scope.
+- `/folders/movies/Review%20Ready`: Movie Studio comparison-clips-ready state.
+- `/folders/movies/Validation%20Ready`: Movie Studio check-ready state.
+- `/folders/movies/Replacement%20Ready%20Large`: Movie Studio replacement-ready state.
+- `/other`: Other Library folder/file language and mapped workflow states.
+- `/folders/other/Field%20Notes`: Other Studio sample setup and inclusion state.
+- `/folders/other/Sampling%20Folder`: Other Studio sample-waiting state.
+- `/folders/other/Review%20Ready`: Other Studio comparison-clips-ready state.
+- `/folders/other/Validation%20Ready`: Other Studio check-ready state.
+- `/folders/other/Promotion%20Ready`: Other Studio replacement-ready state.
 - `/ops`: blockers, worker readiness, queues, and collapsed history.
 - `/completed`: no-action history and cleanup-ready work.
 - `/settings`: basic, advanced, and danger-zone settings sections.

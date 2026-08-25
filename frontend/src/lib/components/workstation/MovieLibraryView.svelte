@@ -174,9 +174,9 @@
 
 	function memberLabel(member: MovieMember): string {
 		if (member.edition_label) return member.edition_label;
-		if (member.role === 'feature') return 'Main feature';
+		if (member.role === 'feature') return 'Main movie';
 		if (member.role === 'extra') return member.extra_category ?? 'Extra';
-		return 'Uncertain membership';
+		return 'Uncertain file';
 	}
 
 	function workflowTone(title: MovieTitle): string {
@@ -187,7 +187,7 @@
 
 	function workflowExplanation(title: MovieTitle): string {
 		if (title.promotion_conflicts.length) {
-			return 'A file already exists where this movie would be published. Open Studio to review it.';
+			return 'A file already exists where this movie would be placed. Open Studio to review it.';
 		}
 		if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
 			return 'You can review these files, but Mediaforce cannot change this library.';
@@ -207,7 +207,7 @@
 			case 'encode':
 				return `${count} ${fileWord} ${count === 1 ? 'is' : 'are'} ready to compress.`;
 			case 'processing':
-				return 'Mediaforce is working on this title now.';
+				return 'Mediaforce is compressing this title now.';
 			case 'attention':
 				return 'This title needs review before work can continue.';
 			case 'mixed': {
@@ -387,7 +387,7 @@
 				<select bind:value={stateFilter}>
 					<option value="all">All states</option>
 					<option value="attention">Needs attention</option>
-					<option value="processing">Processing</option>
+					<option value="processing">Compressing</option>
 					<option value="ready">Ready to act on</option>
 					<option value="explicit">Needs a file choice</option>
 				</select>
@@ -574,7 +574,7 @@
 						{/if}
 						{#if selectedTitle.promotion_conflicts.length}
 							<div class="inline-alert inline-alert--danger">
-								<strong>Cannot publish yet</strong>
+								<strong>Cannot replace yet</strong>
 								{#each selectedTitle.promotion_conflicts as conflict (`${conflict.kind}:${conflict.destination_path}`)}
 									<span>{conflict.detail} <code>{conflict.destination_path}</code></span>
 								{/each}
