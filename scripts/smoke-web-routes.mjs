@@ -441,7 +441,7 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
           "Computers",
           "Work schedule",
           "Work runs anytime",
-          "Compression work never starts",
+          "Work schedule is off",
         ]) {
           if (!bodyText.includes(requiredCopy)) {
             throw new Error(

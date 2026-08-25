@@ -204,7 +204,7 @@
 	});
 	const draftScheduleOptions = $derived([
 		{ key: 'always', label: 'Always', summary: 'Work runs anytime.' },
-		{ key: 'never', label: 'Never', summary: 'Compression work never starts.' },
+		{ key: 'never', label: 'Never', summary: 'Work schedule is off.' },
 		...configuredProfiles.map((profile) => ({
 			key: profile.key.trim(),
 			label: profile.label.trim() || profile.key.trim(),
@@ -1068,7 +1068,7 @@
 								<div class="schedule-row schedule-row--builtin">
 									<StateBadge compact tone="idle" label="Built in" />
 									<strong>Never</strong>
-									<span>Compression work never starts</span>
+									<span>Work schedule is off</span>
 								</div>
 								{#each draft.schedule_profiles as profile, index (`schedule-${profile.index}-${index}`)}
 									<div class="schedule-row">

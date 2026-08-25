@@ -258,6 +258,20 @@ describe('Ops workstation mapping', () => {
 		expect(activityScheduleDetailCopy('runs weekdays between 20:00 and 06:00 (host local)')).toBe(
 			'Work runs weekdays between 20:00 and 06:00 (computer local time)'
 		);
+		expect(
+			activityScheduleDetailCopy('waiting for runs weekdays between 20:00 and 06:00 (host local)')
+		).toBe('Waiting for work weekdays between 20:00 and 06:00 (computer local time)');
+		expect(
+			activitySchedulePresentationCopy(
+				{
+					state: 'host_off_schedule',
+					label: 'Off schedule',
+					tone: 'wait',
+					detail: 'Starts automatically when Smoke Drain Worker opens.'
+				},
+				['Smoke Drain Worker']
+			)?.detail
+		).toBe('Starts automatically when Smoke Drain Worker opens.');
 	});
 
 	it('prioritizes current running, queued, and sample rows', () => {
@@ -286,15 +300,17 @@ describe('Ops workstation mapping', () => {
 
 	it('maps internal sample stages to operator states', () => {
 		const dashboard = dashboardFixture();
-		dashboard.calibration_queue.sample.running[0].progress = {
-			schema_version: 1,
-			stage: 'preparing_source'
-		};
-
-		const sample = buildOpsQueueRows(dashboard).find((row) => row.key === 'sample:sample-1');
-
-		expect(sample).toMatchObject({ status: 'Working', progress: 'Starting' });
-		expect(sample?.progress).not.toContain('_');
+		for (const [stage, expected] of [
+			['preparing_source', 'Starting'],
+			['inspecting_source', 'Working'],
+			['measuring_quality', 'Working'],
+			['selecting_review_moments', 'Working']
+		] as const) {
+			dashboard.calibration_queue.sample.running[0].progress = { schema_version: 1, stage };
+			const sample = buildOpsQueueRows(dashboard).find((row) => row.key === 'sample:sample-1');
+			expect(sample).toMatchObject({ status: 'Working', progress: expected });
+			expect(sample?.progress).not.toContain('_');
+		}
 	});
 
 	it('renders exact hard-stop and bypass states in the work-window column', () => {

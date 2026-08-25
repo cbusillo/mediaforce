@@ -75,7 +75,11 @@
 		(hosts?.hosts ?? [])
 			.map((host) => ({
 				host,
-				schedule: activitySchedulePresentationCopy(hostSchedulePresentation(host, encodeQueue))
+				schedule: activitySchedulePresentationCopy(hostSchedulePresentation(host, encodeQueue), [
+					host.key,
+					host.host ?? '',
+					host.label
+				])
 			}))
 			.filter(
 				(entry) =>
@@ -659,7 +663,8 @@
 						<div class="host-list">
 							{#each hosts?.hosts ?? [] as host (host.key)}
 								{@const schedule = activitySchedulePresentationCopy(
-									hostSchedulePresentation(host, encodeQueue)
+									hostSchedulePresentation(host, encodeQueue),
+									[host.key, host.host ?? '', host.label]
 								)}
 								<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity, dashboard)}">
 									<div class="host-row__head">
