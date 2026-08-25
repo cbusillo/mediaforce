@@ -4,6 +4,7 @@
 /modules.xml
 /misc.xml
 /*.iml
+/inspectionProfiles/Mediaforce.xml
 # Ignored default folder with query files
 /queries/
 # Datasource local storage ignored files

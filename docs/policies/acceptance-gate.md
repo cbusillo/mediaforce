@@ -27,15 +27,29 @@ We do not stop at "it works." We stop when we fully like the result.
 
 ## Inspection authority
 
-- PyCharm is the repository's JetBrains inspection route for Python and general
-  IDE findings.
-- Linked-worktree Python IDE state is produced by the configured inspection
-  preparation, stays ignored, and must not be committed.
+- JetBrains inspection uses language-owned lanes from `.github/github.json`.
+  PyCharm is the required Python lane. WebStorm runs as a non-blocking frontend
+  lane while its Svelte signal is qualified against the native checks.
+- Linked-worktree Python IDE state, frontend dependencies, Svelte generated
+  state, and the named `Mediaforce` inspection profile are produced by
+  `scripts/prepare-jetbrains-inspection.sh`. Generated state stays ignored and
+  must not be committed. Frontend dependencies are reinstalled only when the
+  committed npm manifests change, preventing preparation from invalidating an
+  IDE snapshot on every inspection run. Preparation creates one cross-IDE web
+  module rooted at the repository while retaining the Python SDK and test root,
+  so PyCharm and WebStorm share a stable, non-overlapping content model.
 - `npm --prefix frontend run check` is the semantic authority for Svelte files,
   with `npm --prefix frontend run lint` covering ESLint and formatting policy.
-- A clean JetBrains inspection does not replace the frontend checks. WebStorm
-  may be used interactively, but its inspection API is not a required merge gate
-  unless a future bounded evaluation proves that it reports actionable Svelte
-  findings beyond the native checks.
+- A clean WebStorm lane does not replace the frontend checks. WebStorm findings
+  are readiness evidence, but they do not block merges until a bounded clean and
+  defect matrix proves reliable, non-noisy Svelte coverage beyond the native
+  checks. Frontend-only changes must not be routed through PyCharm.
+- The shared profile disables only the Svelte-incompatible or duplicate
+  style/proofreading findings proven noisy by the bounded probe. It explicitly
+  keeps ESLint, missing-alt, and unused-symbol inspections enabled; changes to
+  that baseline require another clean/defect qualification.
+- A changed-file inspection with no required Python files returns the helper's
+  explicit `no_required_lane_files` result rather than claiming PyCharm covered
+  frontend source.
 - Browser validation remains required for user-visible frontend changes even
   when all static checks pass.
