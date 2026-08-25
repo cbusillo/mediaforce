@@ -342,9 +342,9 @@ export function buildCompletedStatusTiles(
 	if (!payload) {
 		return [
 			{
-				label: 'Completed',
+				label: 'Finished',
 				value: loadError ? 'Unavailable' : 'Loading',
-				detail: loadError ?? 'waiting for completed work',
+				detail: loadError ?? 'waiting for finished work',
 				tone: loadError ? 'fail' : 'idle'
 			}
 		];
@@ -354,7 +354,7 @@ export function buildCompletedStatusTiles(
 	const counts = cleanupStateCounts(folders, archive);
 	return [
 		{
-			label: 'Completed folders',
+			label: 'Finished folders',
 			value: payload.completed_count.toLocaleString('en-US'),
 			detail: `${folders.reduce((total, folder) => total + folder.promoted_item_count, 0).toLocaleString('en-US')} promoted items`,
 			tone: payload.completed_count > 0 ? 'ready' : 'idle'
@@ -395,10 +395,10 @@ export function buildCompletedStatusTiles(
 }
 
 export function buildCompletedFooterSignals(payload: CompletedPayload | null): FooterSignal[] {
-	if (!payload) return [{ label: 'Completed', value: 'unavailable', tone: 'fail' }];
+	if (!payload) return [{ label: 'Finished', value: 'unavailable', tone: 'fail' }];
 	const counts = cleanupStateCounts(payload.folders, payload.archive_cleanup);
 	return [
-		{ label: 'Completed', value: String(payload.completed_count), tone: 'ready' },
+		{ label: 'Finished', value: String(payload.completed_count), tone: 'ready' },
 		{ label: 'Backups', value: String(payload.folders_with_backups_count), tone: 'wait' },
 		{ label: 'Ready', value: String(counts.ready), tone: counts.ready > 0 ? 'ready' : 'idle' },
 		{
