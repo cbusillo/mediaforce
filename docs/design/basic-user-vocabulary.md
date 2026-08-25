@@ -51,6 +51,17 @@ a computer`, `Needs sample`, `Safe to delete`.
 - Movie promotion: use `Replace original now` when the checked replacement is
   ready. State beside the action that it runs immediately and that Mediaforce
   keeps an original backup first.
+- Other scope: use `One file` or `Whole folder` as the high-level choice, then
+  show `Files included` and `Files left untouched` before sample or production
+  actions. `Whole folder` includes supported files in the folder and its
+  subfolders; unsupported or excluded files remain untouched.
+- Other membership: require confirmation only when Mediaforce can show the
+  complete file list. If the folder exceeds the safe membership limit, direct
+  the operator to one-file-at-a-time work or a smaller source folder instead of
+  offering an all-files confirmation.
+- Other replacement: use `Replace original file` or `Replace original files`.
+  State before the action that it runs immediately, original backups go to the
+  cleanup folder first, and files left out remain untouched.
 - Transcode root: use `Working folder` in the Settings storage section.
 - Archive cleanup: use `Delete original backup` or `Delete original backups`
   for Completed and Settings destructive actions. The final confirmation must
@@ -246,6 +257,11 @@ remain unchanged` while memory is observation-only.
   `Current size`, `Expected output`, `Expected savings`,
   `Why it has not started`, `What happens next`, `checked file`, and
   `Replace original now` rather than backend workflow nouns.
+- Other Library should say `folders and files`, `One file`, `Whole folder`,
+  `Files included`, and `Files left untouched`. Keep `work unit`, `semantics`,
+  `inference`, and raw workflow labels out of primary copy. Other Studio should
+  distinguish `Set up sample` from `Create sample`, use `Compare clips` and
+  `Approve sample`, and follow the shared compress/check/replace phase verbs.
 - Activity may expose more technical detail, but first-level headings should
   still use `computers`, `sample queue`, `compression queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete original

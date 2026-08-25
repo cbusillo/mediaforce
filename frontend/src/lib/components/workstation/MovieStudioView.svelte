@@ -12,7 +12,9 @@
 		MovieMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
+	import { safeOperatorErrorCopy } from '$lib/operator-copy';
 	import {
+		folderActionResponseCopy,
 		noteAfterPrepareAgain,
 		noteAfterPreview,
 		noteAfterProposalHydration,
@@ -26,9 +28,12 @@
 		movieCurrentWorkView,
 		movieGoalContractView,
 		movieGoalFactsView,
+		movieRetryResponseCopy,
 		movieReviewStatusLabel,
+		movieSampleSetupResult,
 		movieSizeCapBlockView,
-		parentSampleAppliesToExactItem
+		parentSampleAppliesToExactItem,
+		sampleStopResponseCopy
 	} from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
@@ -55,6 +60,7 @@
 	let actionMessage = $state('');
 	let actionError = $state('');
 	let actionNeedsAttention = $state(false);
+	let actionAttentionTitle = $state('');
 	let noteInput = $state<HTMLTextAreaElement>();
 	let goalEditor = $state<HTMLDetailsElement>();
 	let noteHasNewerText = $state(false);
@@ -185,22 +191,24 @@
 				? currentWork.label
 				: sampleWorkActive
 					? sampleWorkStatus === 'queued'
-						? 'Sample queued'
-						: 'Sampling now'
+						? 'Sample waiting'
+						: 'Creating sample'
 					: canRetrySample
 						? 'Sample needs retry'
 						: pendingProposalIsStale
 							? 'Sample plan is out of date'
 							: pendingProposalCanQueue
 								? 'Sample plan ready'
-								: needsReviewSample
-									? 'Needs a review sample'
-									: movieWorkflowLabel({
-											workflow_state: workflow,
-											promotion_conflicts: conflicts,
-											details_loading: folderPending,
-											availability: context?.availability ?? 'production'
-										})
+								: reviewReady && reviewGate.status !== 'accepted'
+									? 'Ready to review'
+									: needsReviewSample
+										? 'Needs a sample'
+										: movieWorkflowLabel({
+												workflow_state: workflow,
+												promotion_conflicts: conflicts,
+												details_loading: folderPending,
+												availability: context?.availability ?? 'production'
+											})
 	);
 
 	$effect(() => {
@@ -314,10 +322,10 @@
 				throw new Error(response.message || 'The movie target is not ready for sampling.');
 			note = noteAfterPreview(note, response.proposal);
 			if (response.proposal?.can_queue === true) noteHasNewerText = false;
-			return {
-				message: response.message || 'Sample plan ready. Review it before starting work.',
-				attention: response.proposal != null && response.proposal.can_queue !== true
-			};
+			return movieSampleSetupResult(
+				response.proposal != null && response.proposal.can_queue !== true,
+				'Sample setup is ready. Choose Create sample when you are ready.'
+			);
 		});
 	}
 
@@ -344,10 +352,10 @@
 			const keptNewerText = response.proposal?.can_queue === true && nextNote !== '';
 			note = nextNote;
 			if (response.proposal?.can_queue === true) noteHasNewerText = keptNewerText;
-			return {
-				message: response.message || 'Mediaforce prepared the request again.',
-				attention: response.proposal != null && response.proposal.can_queue !== true
-			};
+			return movieSampleSetupResult(
+				response.proposal != null && response.proposal.can_queue !== true,
+				'Mediaforce set up the sample again.'
+			);
 		});
 	}
 
@@ -368,7 +376,7 @@
 				{ proposal_id: asText(pendingProposal.proposal_id) }
 			);
 			if (!response.ok) throw new Error(response.message || 'The movie sample could not start.');
-			return response.message || 'Sample run queued.';
+			return 'Sample waiting.';
 		});
 	}
 
@@ -380,13 +388,13 @@
 				{ proposal_id: '' }
 			);
 			if (!response.ok) throw new Error(response.message || 'The movie sample could not restart.');
-			return response.message || 'Sample retry queued.';
+			return 'Sample waiting.';
 		});
 	}
 
-	async function approveAndQueue() {
+	async function approveSample() {
 		if (isBrowseOnly || isBusy) return;
-		await runAction('approve-queue', async () => {
+		await runAction('approve-sample', async () => {
 			const response = await postJson<{ ok: boolean; message?: string }>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/save-profile`,
 				{
@@ -395,43 +403,54 @@
 					reviewed_draft_hash: asText(calibration.draft_hash)
 				}
 			);
-			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
-			return response.message || `Approved the sample and queued this ${scopeNoun}.`;
+			if (!response.ok)
+				throw new Error(response.message || 'The sample approval could not be saved.');
+			return 'Sample approved. Choose compression when you are ready.';
 		});
 	}
 
 	async function queueApproved() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('queue-title', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`,
-				{ notes: '', bypass_schedule: false }
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				recovered_item_count?: number | null;
+				job?: { item_count?: number | null };
+			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`, {
+				notes: '',
+				bypass_schedule: false
+			});
 			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
-			return response.message || `Queued this ${scopeNoun}.`;
+			const queuedCount =
+				safeCount(response.recovered_item_count) ||
+				safeCount(response.job?.item_count) ||
+				(exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 0));
+			return exactScope || queuedCount === 1
+				? 'This movie file is waiting to compress.'
+				: `${queuedCount} movie files are waiting to compress.`;
 		});
 	}
 
 	async function validateOutputs() {
-		await folderAction('validate-outputs', 'Checked the compressed movie file.');
+		await folderAction('validate-outputs');
 	}
 
 	async function promoteOutputs() {
 		if (conflicts.length) return;
-		await folderAction(
-			'promote-outputs',
-			'Installed the checked replacement and kept a backup of the original.'
-		);
+		await folderAction('promote-outputs');
 	}
 
 	async function retryEncode() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('retry-encode', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				'/api/encode-queue/retry-prefix',
-				{ prefix: folder.prefix }
-			);
-			return response.message || `Queued a retry for this ${scopeNoun}.`;
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				queued_count?: number | null;
+			}>('/api/encode-queue/retry-prefix', { prefix: folder.prefix });
+			if (!response.ok) throw new Error(response.message || 'Compression could not restart.');
+			return movieRetryResponseCopy(safeCount(response.queued_count), response.message, scopeNoun);
 		});
 	}
 
@@ -442,11 +461,12 @@
 				'/api/calibration-queue/stop',
 				{}
 			);
-			return response.message || 'Stopped queued and running sample work.';
+			if (response.ok === false) throw new Error(response.message || 'Sample work could not stop.');
+			return sampleStopResponseCopy(response.message);
 		});
 	}
 
-	async function folderAction(endpoint: 'validate-outputs' | 'promote-outputs', fallback: string) {
+	async function folderAction(endpoint: 'validate-outputs' | 'promote-outputs') {
 		if (isBrowseOnly || isBusy) return;
 		await runAction(endpoint, async () => {
 			const response = await postJson<{
@@ -454,31 +474,45 @@
 				message?: string;
 				conflicts?: Array<Record<string, unknown>>;
 				target_prefix?: string;
+				validated_count?: number | null;
+				failed_count?: number | null;
+				item_count?: number | null;
+				promoted_count?: number | null;
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/${endpoint}`, {});
 			if (!response.ok) throw new Error(response.message || 'The movie action could not run.');
+			const result = folderActionResponseCopy(endpoint, response);
 			return {
-				message: response.message || fallback,
+				...result,
 				targetPrefix: endpoint === 'promote-outputs' ? response.target_prefix : undefined
 			};
 		});
 	}
 
-	type ActionResult = string | { message: string; targetPrefix?: string; attention?: boolean };
+	type ActionResult =
+		| string
+		| {
+				message: string;
+				targetPrefix?: string;
+				attention?: boolean;
+				attentionTitle?: string;
+		  };
 
 	async function runAction(action: string, operation: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
 		actionNeedsAttention = false;
+		actionAttentionTitle = '';
 		let actionCompleted = false;
 		try {
 			const result = await operation();
 			actionMessage = typeof result === 'string' ? result : result.message;
 			actionNeedsAttention = typeof result === 'string' ? false : result.attention === true;
+			actionAttentionTitle = typeof result === 'string' ? '' : (result.attentionTitle ?? '');
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : 'Studio could not refresh.';
+			const message = safeOperatorErrorCopy(error, 'Studio could not refresh.');
 			actionError = actionCompleted
 				? `The movie action completed, but Studio could not refresh. ${message}`
 				: message;
@@ -561,18 +595,21 @@
 			case 'encode':
 				if (sampleWorkActive) {
 					return sampleWorkStatus === 'queued'
-						? 'The review sample is queued.'
-						: 'Mediaforce is preparing the review sample now.';
+						? 'The sample is waiting for an available computer.'
+						: 'Mediaforce is creating the sample now.';
 				}
 				if (pendingProposalCanQueue) {
 					return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready for a review sample.`;
 				}
+				if (reviewReady && reviewGate.status !== 'accepted') {
+					return 'The comparison clips are ready. Review them before compressing.';
+				}
 				if (needsReviewSample) {
-					return `${fileCount} ${fileWord} ${fileCount === 1 ? 'needs' : 'need'} a review sample before compressing.`;
+					return `${fileCount} ${fileWord} ${fileCount === 1 ? 'needs' : 'need'} a sample before compressing.`;
 				}
 				return `${fileCount} ${fileWord} ${fileCount === 1 ? 'is' : 'are'} ready to compress.`;
 			case 'processing':
-				return 'Mediaforce is working on this movie now.';
+				return 'Mediaforce is compressing this movie now.';
 			case 'attention':
 				return 'This movie needs review before work can continue.';
 			case 'mixed': {
@@ -644,6 +681,11 @@
 
 	function asText(value: unknown): string {
 		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function safeCount(value: unknown): number {
+		const count = Number(value);
+		return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
 	}
 
 	function downloadReviewPack() {
@@ -745,7 +787,10 @@
 			class="notice"
 			role={actionNeedsAttention ? 'alert' : 'status'}
 		>
-			<strong>{actionNeedsAttention ? 'Sample needs attention.' : 'Movie state updated.'}</strong
+			<strong
+				>{actionNeedsAttention
+					? actionAttentionTitle || 'Movie action needs attention.'
+					: 'Movie state updated.'}</strong
 			><span>{actionMessage}</span>
 		</div>
 	{/if}
@@ -828,7 +873,7 @@
 						</div>
 						<div class="current-work__facts">
 							<div><span>Queue position</span><strong>{currentWork.queuePosition}</strong></div>
-							<div><span>Worker</span><strong>{currentWork.worker}</strong></div>
+							<div><span>Computer</span><strong>{currentWork.worker}</strong></div>
 							{#if currentWork.tone === 'active'}
 								<div><span>Elapsed</span><strong>{currentWork.elapsed}</strong></div>
 								<div><span>Speed</span><strong>{currentWork.speed}</strong></div>
@@ -836,11 +881,13 @@
 							{:else}
 								{#if currentWork.preferredWorker}
 									<div>
-										<span>Preferred worker</span><strong>{currentWork.preferredWorker}</strong>
+										<span>Preferred computer</span><strong>{currentWork.preferredWorker}</strong>
 										<small>Not assigned until work starts</small>
 									</div>
 								{/if}
-								<div><span>Workers ready</span><strong>{currentWork.availableWorkers}</strong></div>
+								<div>
+									<span>Computers ready</span><strong>{currentWork.availableWorkers}</strong>
+								</div>
 								{#if currentWork.eta}
 									<div><span>ETA</span><strong>{currentWork.eta}</strong></div>
 								{/if}
@@ -848,7 +895,7 @@
 						</div>
 						<div class="current-work__actions">
 							<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
-							<small>Global queue and worker details</small>
+							<small>Global queue and computer details</small>
 						</div>
 						{@render goalContract('Goals in use', false)}
 					</div>
@@ -866,7 +913,7 @@
 								{#if primaryAction() === 'retry-sample'}
 									<p>{sampleFailureDetail()}</p>
 									<small class="decision-note">
-										Retry uses the same file, request, and worker. No full movie work was queued.
+										Retry uses the same file, request, and computer. No full movie work was queued.
 									</small>
 								{:else if primaryAction() === 'review-title-sample'}
 									<p>
@@ -881,13 +928,17 @@
 								{:else if primaryAction() === 'monitor-sample'}
 									<p>
 										{sampleWorkStatus === 'queued'
-											? 'The review sample is queued and will start when its worker is ready.'
-											: 'The review sample is running. Studio will refresh when review media is ready.'}
+											? 'The sample is waiting and will start when its computer is ready.'
+											: 'The sample is running. Studio will refresh when the comparison clips are ready.'}
 									</p>
 								{:else if primaryAction() === 'prepare-again'}
 									<p>{pendingProposalRecovery?.detail}</p>
 								{:else if isSizeCapBlock}
 									<p>{sizeCapBlock.remedy}</p>
+								{:else if reviewReady && reviewGate.status !== 'accepted'}
+									<p>
+										The comparison clips are safe to review. The original movie remains unchanged.
+									</p>
 								{:else if !isWorkflowBlocked}
 									<p>
 										{exactScope
@@ -897,8 +948,7 @@
 								{/if}
 								{#if primaryAction() === 'prepare' && !hostOptions.length}
 									<small class="decision-note">
-										No sample worker is ready. Check Activity for worker availability before
-										preparing the review sample.
+										No computer is ready for samples. Check Activity before setting up the sample.
 									</small>
 								{/if}
 								{#if primaryAction() === 'promote'}
@@ -918,8 +968,8 @@
 										{pendingAction === 'prepare-sample'
 											? 'Preparing…'
 											: hostOptions.length
-												? 'Prepare review sample'
-												: 'No sample worker ready'}
+												? 'Set up sample'
+												: 'No computer ready'}
 									</button>
 									{#if !hostOptions.length}
 										<a class="secondary" href={resolve('/ops')}>Open Activity diagnostics</a>
@@ -930,7 +980,7 @@
 									</button>
 								{:else if primaryAction() === 'start'}
 									<button class="primary" disabled={isBusy} onclick={startSample}>
-										{pendingAction === 'start-sample' ? 'Starting…' : 'Start sample'}
+										{pendingAction === 'start-sample' ? 'Starting…' : 'Create sample'}
 									</button>
 								{:else if primaryAction() === 'monitor-sample'}
 									<button class="secondary" disabled={isBusy} onclick={stopSample}
@@ -946,11 +996,14 @@
 								{:else if primaryAction() === 'queue'}
 									{#if reviewGate.status === 'accepted'}
 										<button class="primary" disabled={isBusy} onclick={queueApproved}
-											>Queue movie work</button
+											>{exactScope ? 'Compress this file' : 'Compress the whole title'}</button
 										>
 									{:else}
-										<button class="primary" disabled={isBusy} onclick={approveAndQueue}
-											>Approve sample and queue</button
+										<button class="secondary" type="button" onclick={downloadReviewPack}
+											>Compare clips</button
+										>
+										<button class="primary" disabled={isBusy} onclick={approveSample}
+											>Approve sample</button
 										>
 									{/if}
 								{:else if primaryAction() === 'validate'}
@@ -975,7 +1028,7 @@
 									>
 								{:else if primaryAction() === 'retry'}
 									<button class="primary" disabled={isBusy} onclick={retryEncode}
-										>Resume unfinished work</button
+										>Try compressing again</button
 									>
 								{:else if primaryAction() === 'complete'}
 									<a class="secondary" href={resolve('/movies')}>Back to Movies</a>
@@ -1063,8 +1116,8 @@
 			{/if}
 
 			<WorkstationPanel
-				eyebrow="Review sample"
-				title="Prepare and review"
+				eyebrow="Sample"
+				title="Create and review a sample"
 				hidden={primaryAction() === 'complete' ||
 					Boolean(currentWork) ||
 					isSizeCapBlock ||
@@ -1109,7 +1162,7 @@
 							>
 							<p>
 								{pendingProposalCanQueue
-									? 'This is the current plan. Use Start sample above when you are ready.'
+									? 'This is the current plan. Choose Create sample above when you are ready.'
 									: pendingProposalRecovery?.detail ||
 										asText(pendingProposal.message) ||
 										'The sample plan needs another request.'}
@@ -1147,10 +1200,10 @@
 					>
 						<summary
 							>{pendingProposalCanQueue || canRetrySample
-								? 'Change sample plan'
+								? 'Change sample setup'
 								: isWorkflowBlocked
-									? 'Revise sample plan'
-									: 'Prepare sample plan'}</summary
+									? 'Revise sample setup'
+									: 'Set up sample'}</summary
 						>
 						<div class="sample-plan-editor__body">
 							{#if pendingProposalCanQueue || canRetrySample}
@@ -1170,9 +1223,9 @@
 							</label>
 							<div class="bench-controls">
 								<label>
-									<span>Worker</span>
+									<span>Computer</span>
 									<select bind:value={selectedHostKey} disabled={!hostOptions.length}>
-										{#if !hostOptions.length}<option value="">No worker available</option>{/if}
+										{#if !hostOptions.length}<option value="">No computer available</option>{/if}
 										{#each hostOptions as host (asText(host.key))}
 											<option value={asText(host.key)}
 												>{asText(host.label) || asText(host.key)}</option
@@ -1185,14 +1238,14 @@
 									disabled={isBusy || isBrowseOnly || !selectedHostKey}
 									onclick={prepareSample}
 									>{pendingProposalCanQueue || canRetrySample
-										? 'Prepare replacement plan'
+										? 'Set up another sample'
 										: isWorkflowBlocked
-											? 'Prepare revised sample'
-											: 'Prepare sample plan'}</button
+											? 'Set up revised sample'
+											: 'Set up sample'}</button
 								>
 								{#if reviewReady}
 									<button class="secondary" type="button" onclick={downloadReviewPack}
-										>Download review files</button
+										>Download comparison clips</button
 									>
 								{/if}
 							</div>
@@ -1225,7 +1278,9 @@
 										: ' · Only runs when opened directly'}
 								</small>
 							</div>
-							<a href={resolve(folderRoutePath(member.prefix))}>Open</a>
+							<a href={resolve(folderRoutePath(member.prefix))} aria-label={`Open ${member.label}`}
+								>Open</a
+							>
 						</div>
 					{/each}
 					{#if !context?.members.length}

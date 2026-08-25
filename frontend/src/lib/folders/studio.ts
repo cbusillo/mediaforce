@@ -1057,3 +1057,53 @@ export function approvalReviewSignature(rows: ComparisonRow[]): string {
 		)
 		.join('|');
 }
+
+export interface FolderActionResponseCopyInput {
+	validated_count?: number | null;
+	failed_count?: number | null;
+	item_count?: number | null;
+	promoted_count?: number | null;
+}
+
+export interface FolderActionResponseCopy {
+	message: string;
+	attention: boolean;
+	attentionTitle?: string;
+}
+
+export function folderActionResponseCopy(
+	action: 'validate-outputs' | 'promote-outputs',
+	response: FolderActionResponseCopyInput
+): FolderActionResponseCopy {
+	if (action === 'validate-outputs') {
+		const passedCount = safeCount(response.validated_count);
+		const failedCount = safeCount(response.failed_count);
+		const itemCount = Math.max(safeCount(response.item_count), passedCount + failedCount);
+		if (failedCount > 0) {
+			return {
+				message: `Checked ${itemCount} ${fileNoun(itemCount)}: ${passedCount} passed, ${failedCount} need attention.`,
+				attention: true,
+				attentionTitle: 'Check needs attention'
+			};
+		}
+		return {
+			message: `Checked ${itemCount} compressed ${fileNoun(itemCount)}. All checks passed.`,
+			attention: false
+		};
+	}
+
+	const promotedCount = safeCount(response.promoted_count);
+	return {
+		message: `Replaced ${promotedCount} original ${fileNoun(promotedCount)} and kept ${promotedCount === 1 ? 'its backup' : 'their backups'}.`,
+		attention: false
+	};
+}
+
+function safeCount(value: unknown): number {
+	const count = Number(value);
+	return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+}
+
+function fileNoun(count: number): string {
+	return count === 1 ? 'file' : 'files';
+}

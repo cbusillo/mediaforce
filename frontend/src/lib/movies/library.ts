@@ -105,7 +105,7 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 		case 'promote':
 			return 'Ready to replace';
 		case 'processing':
-			return 'In progress';
+			return 'Compressing';
 		case 'attention':
 			return 'Needs review';
 		case 'mixed':

@@ -66,6 +66,7 @@ MOVIE_EDITIONS_PREFIX = "movies/Editions Showcase"
 MOVIE_STALE_PLAN_PREFIX = "movies/Stale Sample Plan"
 MOVIE_CONFLICT_PREFIX = "movies/Promotion Conflict"
 MOVIE_TARGET_BLOCKED_PREFIX = "movies/Target Too Large"
+MOVIE_REVIEW_READY_PREFIX = "movies/Review Ready"
 MOVIE_VALIDATION_PREFIX = "movies/Validation Ready"
 MOVIE_PROMOTION_LARGE_PREFIX = "movies/Replacement Ready Large"
 MOVIE_PROMOTION_SMALL_PREFIX = "movies/Replacement Ready Small"
@@ -73,6 +74,8 @@ OTHER_FOLDER_PREFIX = "other/Field Notes"
 OTHER_ROOT_FILE_PREFIX = "other/Loose Capture.mkv"
 OTHER_BLOCKED_PREFIX = "other/Needs Probe"
 OTHER_OVERSIZED_PREFIX = "other/Oversized Intake"
+OTHER_SAMPLING_PREFIX = "other/Sampling Folder"
+OTHER_REVIEW_READY_PREFIX = "other/Review Ready"
 OTHER_ACTIVE_PREFIX = "other/Active Batch"
 OTHER_VALIDATION_PREFIX = "other/Validation Ready"
 OTHER_PROMOTION_PREFIX = "other/Promotion Ready"
@@ -109,6 +112,7 @@ FIXTURE_PREFIXES = (
     MOVIE_STALE_PLAN_PREFIX,
     MOVIE_CONFLICT_PREFIX,
     MOVIE_TARGET_BLOCKED_PREFIX,
+    MOVIE_REVIEW_READY_PREFIX,
     MOVIE_VALIDATION_PREFIX,
     MOVIE_PROMOTION_LARGE_PREFIX,
     MOVIE_PROMOTION_SMALL_PREFIX,
@@ -116,6 +120,8 @@ FIXTURE_PREFIXES = (
     OTHER_ROOT_FILE_PREFIX,
     OTHER_BLOCKED_PREFIX,
     OTHER_OVERSIZED_PREFIX,
+    OTHER_SAMPLING_PREFIX,
+    OTHER_REVIEW_READY_PREFIX,
     OTHER_ACTIVE_PREFIX,
     OTHER_VALIDATION_PREFIX,
     OTHER_PROMOTION_PREFIX,
@@ -773,6 +779,24 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
     _write_review_sample_state(
         config,
         rows_by_prefix,
+        prefix=MOVIE_REVIEW_READY_PREFIX,
+        job_id="web-smoke-movie-review-ready",
+        review_slug="web-smoke-movie-review-ready",
+        predicted_total_size_bytes=3_900_000_000,
+        quality_score=95.4,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
+        prefix=OTHER_REVIEW_READY_PREFIX,
+        job_id="web-smoke-other-review-ready",
+        review_slug="web-smoke-other-review-ready",
+        predicted_total_size_bytes=2_100_000_000,
+        quality_score=94.9,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
         prefix=REVIEW_READY_PREFIX,
         job_id="web-smoke-review-ready",
         review_slug="web-smoke-review-ready",
@@ -1189,6 +1213,17 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             _library_item(
                 project_root=project_root,
                 media_root="movies",
+                rel_path="movies/Review Ready/Feature.mkv",
+                size_bytes=7 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=72,
+                recommendation="review_encode",
+                recommendation_reason="Fixture movie comparison clips ready for review.",
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
                 rel_path="movies/Validation Ready/Feature.mkv",
                 size_bytes=6 * 1024**3,
                 status="encoded",
@@ -1445,6 +1480,30 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 age_days=790,
                 width=None,
                 height=None,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Sampling Folder/Camera C.mkv",
+                size_bytes=4 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=66,
+                recommendation="review_encode",
+                recommendation_reason="Fixture Other sample-waiting state for browser QA.",
+                age_days=785,
+            ),
+            _library_item(
+                project_root=project_root,
+                media_root="other",
+                rel_path="other/Review Ready/Camera D.mkv",
+                size_bytes=4 * 1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=65,
+                recommendation="review_encode",
+                recommendation_reason="Fixture Other comparison clips ready for review.",
+                age_days=782,
             ),
             _library_item(
                 project_root=project_root,
@@ -1870,6 +1929,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         sampling_policy = _policy_with_target(policy, 225)
         retry_policy = _policy_with_target(policy, 225)
         movie_loose_row = next(row for row in rows if row["rel_path"] == MOVIE_LOOSE_PREFIX)
+        other_sampling_row = rows_by_prefix[OTHER_SAMPLING_PREFIX]
         active_started_at = (fixture_now - timedelta(minutes=15)).isoformat(timespec="seconds")
         heartbeat_at = fixture_now.isoformat(timespec="seconds")
         for item_id, row, job in (
@@ -1926,6 +1986,21 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                             fixture_now - timedelta(seconds=20)
                         ).isoformat(timespec="seconds"),
                         "work": {"completed": 2, "total": 3},
+                    },
+                ),
+            ),
+            (
+                ids_by_rel_path[str(other_sampling_row["rel_path"])],
+                other_sampling_row,
+                _job(
+                    job_id="web-smoke-other-sampling",
+                    prefix=OTHER_SAMPLING_PREFIX,
+                    status="queued",
+                    sample_item={
+                        "library_item_id": ids_by_rel_path[str(other_sampling_row["rel_path"])],
+                        **other_sampling_row,
+                        "source_size_bytes": other_sampling_row["size_bytes"],
+                        "resolved_policy": sampling_policy,
                     },
                 ),
             ),
@@ -2209,13 +2284,13 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Other Studio bounded-folder fixture",
                 "route": "/folders/other/Field%20Notes",
                 "marker": "Field Notes",
-                "stageMarker": "Files in this scope",
+                "stageMarker": "Set up sample",
             },
             {
                 "label": "Other Studio exact-file fixture",
                 "route": "/folders/other/Loose%20Capture.mkv",
                 "marker": "Loose Capture",
-                "stageMarker": "One exact file",
+                "stageMarker": "Only this file",
             },
             {
                 "label": "Other Studio profile-blocked fixture",
@@ -2230,22 +2305,34 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "stageMarker": "More than 250 files",
             },
             {
+                "label": "Other Studio sample-waiting fixture",
+                "route": "/folders/other/Sampling%20Folder",
+                "marker": "Sampling Folder",
+                "stageMarker": "Sample waiting",
+            },
+            {
+                "label": "Other Studio review-ready fixture",
+                "route": "/folders/other/Review%20Ready",
+                "marker": "Review Ready",
+                "stageMarker": "Compare clips",
+            },
+            {
                 "label": "Other Studio active-processing fixture",
                 "route": "/folders/other/Active%20Batch",
                 "marker": "Active Batch",
-                "stageMarker": "Production is active.",
+                "stageMarker": "Compressing now.",
             },
             {
                 "label": "Other Studio validation fixture",
                 "route": "/folders/other/Validation%20Ready",
                 "marker": "Validation Ready",
-                "stageMarker": "Validate ready output",
+                "stageMarker": "Check compressed file",
             },
             {
                 "label": "Other Studio promotion fixture",
                 "route": "/folders/other/Promotion%20Ready",
                 "marker": "Promotion Ready",
-                "stageMarker": "Promote validated output",
+                "stageMarker": "Replace original file",
             },
             {
                 "label": "Folder Studio waiting fixture",
@@ -2263,7 +2350,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio review-sample requirement fixture",
                 "route": "/folders/movies/Editions%20Showcase",
                 "marker": "Editions Showcase",
-                "stageMarker": "need a review sample before compressing",
+                "stageMarker": "need a sample before compressing",
             },
             {
                 "label": "Movie Studio stale sample-plan fixture",
@@ -2281,13 +2368,25 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio sample-monitoring fixture",
                 "route": "/folders/movies/Loose%20Feature.mkv",
                 "marker": "Loose Feature",
-                "stageMarker": "Mediaforce is preparing the review sample now.",
+                "stageMarker": "Mediaforce is creating the sample now.",
+            },
+            {
+                "label": "Movie Studio review-ready fixture",
+                "route": "/folders/movies/Review%20Ready",
+                "marker": "Review Ready",
+                "stageMarker": "Download comparison clips",
             },
             {
                 "label": "Movie Studio promotion-conflict fixture",
                 "route": "/folders/movies/Promotion%20Conflict",
                 "marker": "Promotion Conflict",
                 "stageMarker": "Mediaforce cannot replace this movie yet.",
+            },
+            {
+                "label": "Movie Studio validation fixture",
+                "route": "/folders/movies/Validation%20Ready",
+                "marker": "Validation Ready",
+                "stageMarker": "Check compressed file",
             },
             {
                 "label": "Movie Studio checked-output preview fixture",

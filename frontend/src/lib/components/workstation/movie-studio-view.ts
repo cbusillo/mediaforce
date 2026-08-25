@@ -82,6 +82,44 @@ export function canRetrySampleJob(jobId: unknown, hasPendingProposal: boolean): 
 	return typeof jobId === 'string' && jobId.trim().length > 0 && !hasPendingProposal;
 }
 
+export function movieSampleSetupResult(
+	needsAttention: boolean,
+	readyMessage: string
+): { message: string; attention: boolean; attentionTitle?: string } {
+	return needsAttention
+		? {
+				message: 'The sample setup needs another request. Nothing was queued.',
+				attention: true,
+				attentionTitle: 'Sample setup needs attention.'
+			}
+		: { message: readyMessage, attention: false };
+}
+
+export function movieRetryResponseCopy(
+	queuedCount: number,
+	message: string | null | undefined,
+	scopeNoun: string
+): { message: string; attention: boolean } {
+	if (queuedCount > 0) {
+		return {
+			message: `This ${scopeNoun} is waiting to try compression again.`,
+			attention: false
+		};
+	}
+	return {
+		message: message?.toLowerCase().includes('fresh size')
+			? 'Choose a fresh size or compression goal before trying again.'
+			: 'No failed movie compression was ready to retry.',
+		attention: true
+	};
+}
+
+export function sampleStopResponseCopy(message: string | null | undefined): string {
+	return message?.toLowerCase().includes('already idle')
+		? 'Sample work was already stopped.'
+		: 'Stopped waiting and running sample work.';
+}
+
 export function parentSampleAppliesToExactItem(
 	exactPrefix: string,
 	exactJob: CalibrationJobPayload | null | undefined,
@@ -99,12 +137,12 @@ export function movieReviewStatusLabel(status: unknown, inheritedParentSample = 
 	if (inheritedParentSample) return 'Review at title level';
 	return (
 		{
-			accepted: 'Approved',
+			accepted: 'Sample approved',
 			pending_review: 'Ready to review',
 			needs_approval: 'Ready to review',
 			rejected: 'Needs another sample',
 			blocked: 'Needs review',
-			missing_sample: 'Not prepared'
+			missing_sample: 'Needs sample'
 		}[normalized] ?? (normalized ? 'Status unavailable' : 'Not reviewed')
 	);
 }
@@ -194,10 +232,12 @@ export function movieCurrentWorkView(
 
 	if (job.status === 'running') {
 		return {
-			label: 'Processing now',
+			label: 'Compressing now',
 			tone: 'active',
-			headline: currentItem ? `Processing ${fileName(currentItem)}` : 'Processing this movie now',
-			detail: textValue(progress?.phase_label) || 'Mediaforce is compressing the current movie.',
+			headline: currentItem ? `Compressing ${fileName(currentItem)}` : 'Compressing this movie now',
+			detail:
+				normalizeMovieQueueCopy(textValue(progress?.phase_label)) ||
+				'Mediaforce is compressing the current movie.',
 			blockers: [],
 			percentComplete,
 			queuePosition,
@@ -206,7 +246,7 @@ export function movieCurrentWorkView(
 			eta: eta || 'Not available yet',
 			elapsed: formatElapsed(job.started_at, nowMs),
 			speed: formatSpeed(progress?.speed, progress?.fps),
-			nextCondition: 'Mediaforce is processing this movie now.',
+			nextCondition: 'Mediaforce is compressing this movie now.',
 			currentItem
 		};
 	}
@@ -214,22 +254,22 @@ export function movieCurrentWorkView(
 	const blockers: string[] = [];
 	const startConditions: string[] = [];
 	if (queueState?.stop_requested) {
-		blockers.push('The processing queue is stopping and will not start new work.');
-		startConditions.push('the global processing queue is resumed');
+		blockers.push('The compression queue is stopping and will not start new work.');
+		startConditions.push('the global compression queue is resumed');
 	} else if (queueState?.is_paused) {
-		blockers.push('The processing queue is paused.');
-		startConditions.push('the global processing queue is resumed');
+		blockers.push('The compression queue is paused.');
+		startConditions.push('the global compression queue is resumed');
 	}
 	if (availableWorkerCount === 0) {
-		blockers.push('No processing worker is ready.');
-		startConditions.push('a processing worker becomes available');
+		blockers.push('No computer is ready for compression.');
+		startConditions.push('a computer becomes available');
 	}
 	if (
 		job.schedule_waiting ||
 		['active_hard_stop', 'off_schedule'].includes(job.schedule_state ?? '')
 	) {
 		blockers.push('The work schedule is currently closed.');
-		startConditions.push('the processing schedule opens');
+		startConditions.push('the compression schedule opens');
 	}
 	const waitingCopy = textValue(job.waiting_reason) || textValue(job.scheduler_status_copy);
 	if (
@@ -249,8 +289,10 @@ export function movieCurrentWorkView(
 		? 'Queued, but not able to start'
 		: job.queue_position && job.queue_depth
 			? `Queued ${job.queue_position} of ${job.queue_depth}`
-			: 'Queued for processing';
-	const detail = waitingCopy || 'Mediaforce will start this movie when a worker accepts it.';
+			: 'Waiting to compress';
+	const detail =
+		normalizeMovieQueueCopy(waitingCopy) ||
+		'Mediaforce will start this movie when a computer accepts it.';
 
 	return {
 		label: queueState?.stop_requested
@@ -272,9 +314,33 @@ export function movieCurrentWorkView(
 		eta: !blockers.length && eta ? eta : undefined,
 		nextCondition: startConditions.length
 			? `This movie starts automatically after ${joinConditions(startConditions)}.`
-			: 'This movie starts automatically when a processing worker accepts it.',
+			: 'This movie starts automatically when a computer accepts it.',
 		currentItem
 	};
+}
+
+function normalizeMovieQueueCopy(value: string): string {
+	return value
+		.replace(/\bencode queue\b/gi, (match) => matchCase(match, 'compression queue'))
+		.replace(/\bencode jobs?\b/gi, (match) =>
+			matchCase(match, match.toLowerCase().endsWith('s') ? 'compression jobs' : 'compression job')
+		)
+		.replace(/\bencode hosts?\b/gi, (match) =>
+			matchCase(match, match.toLowerCase().endsWith('s') ? 'computers' : 'computer')
+		)
+		.replace(/\bprocessing queue\b/gi, (match) => matchCase(match, 'compression queue'))
+		.replace(/\bencoding\b/gi, (match) => matchCase(match, 'compressing'))
+		.replace(/\bprocessing\b/gi, (match) => matchCase(match, 'compressing'))
+		.replace(/\bencode\b/gi, (match) => matchCase(match, 'compress'))
+		.replace(/\bworkers?\b/gi, (match) =>
+			match.toLowerCase().endsWith('s') ? 'computers' : 'computer'
+		);
+}
+
+function matchCase(source: string, replacement: string): string {
+	return /^[A-Z]/.test(source)
+		? replacement.charAt(0).toUpperCase() + replacement.slice(1)
+		: replacement;
 }
 
 export function movieGoalFactsView(
