@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { DashboardSummaryPayload, HostsPayload, MediaScopePayload } from '$lib/api/types';
 import {
+	activityScheduleDetailCopy,
+	activitySchedulePresentationCopy,
 	buildOpsBlockers,
 	buildOpsHistoryRows,
 	buildOpsQueueRows,
@@ -158,7 +160,7 @@ function dashboardFixture(): DashboardSummaryPayload {
 			state: {
 				is_paused: false,
 				stop_requested: false,
-				scheduler_summary: 'weekdays 09:00-22:00'
+				scheduler_summary: 'runs weekdays between 09:00 and 22:00 (host local)'
 			},
 			telemetry: { eta_copy: '24m' }
 		},
@@ -227,6 +229,55 @@ function hostsFixture(): HostsPayload {
 }
 
 describe('Ops workstation mapping', () => {
+	it('adapts shared schedule labels only for Activity', () => {
+		const cases = [
+			['Running', 'Working'],
+			['Open', 'Ready'],
+			['Not accepting', 'Off schedule'],
+			['Waiting for full window', 'Draining'],
+			['Window too short', 'Draining'],
+			['No schedule state', 'Schedule unavailable'],
+			['Bypassing schedule', 'Bypassing schedule']
+		] as const;
+
+		for (const [label, expected] of cases) {
+			const shared = {
+				state: 'host_open' as const,
+				label,
+				tone: 'ready' as const,
+				detail: '2 workers are ready'
+			};
+			expect(activitySchedulePresentationCopy(shared)).toMatchObject({
+				label: expected,
+				detail: '2 computers are ready'
+			});
+			expect(shared.label).toBe(label);
+		}
+
+		expect(activityScheduleDetailCopy('runs anytime')).toBe('Work runs anytime');
+		expect(activityScheduleDetailCopy('runs weekdays between 20:00 and 06:00 (host local)')).toBe(
+			'Work runs weekdays between 20:00 and 06:00 (computer local time)'
+		);
+		expect(
+			activityScheduleDetailCopy('waiting for runs weekdays between 20:00 and 06:00 (host local)')
+		).toBe('Waiting for work weekdays between 20:00 and 06:00 (computer local time)');
+		expect(activityScheduleDetailCopy('waiting for never runs')).toBe('Work schedule is off');
+		expect(
+			activityScheduleDetailCopy('Mediaforce cannot access /Volumes/worker-staging on host-nuc.')
+		).toBe('Mediaforce cannot access /Volumes/worker-staging on host-nuc.');
+		expect(
+			activitySchedulePresentationCopy(
+				{
+					state: 'host_off_schedule',
+					label: 'Off schedule',
+					tone: 'wait',
+					detail: 'Starts automatically when Smoke Drain Worker opens.'
+				},
+				['Smoke Drain Worker']
+			)?.detail
+		).toBe('Starts automatically when Smoke Drain Worker opens.');
+	});
+
 	it('prioritizes current running, queued, and sample rows', () => {
 		const rows = buildOpsQueueRows(dashboardFixture());
 
@@ -235,6 +286,8 @@ describe('Ops workstation mapping', () => {
 			'encode:encode-2',
 			'sample:sample-1'
 		]);
+		expect(rows.map((row) => row.status)).toEqual(['Working', 'Retry waiting', 'Working']);
+		expect(rows.map((row) => row.status).join(' ')).not.toMatch(/[a-z]+_[a-z_]+/);
 		expect(rows[1]).toMatchObject({
 			scopeLabel: 'Season',
 			tone: 'wait',
@@ -246,7 +299,22 @@ describe('Ops workstation mapping', () => {
 		expect(rows[0]).toMatchObject({ scopeLabel: 'Movie' });
 		expect(rowRecoveryLabel(rows[1])).toBe('Waiting');
 		expect(rowRecoveryTitle(rows[1])).toBe('No action is available for this row.');
-		expect(rowRecoveryLabel(rows[2])).toBe('Automatic');
+		expect(rowRecoveryLabel(rows[2])).toBe('Runs automatically');
+	});
+
+	it('maps internal sample stages to operator states', () => {
+		const dashboard = dashboardFixture();
+		for (const [stage, expected] of [
+			['preparing_source', 'Starting'],
+			['inspecting_source', 'Working'],
+			['measuring_quality', 'Working'],
+			['selecting_review_moments', 'Working']
+		] as const) {
+			dashboard.calibration_queue.sample.running[0].progress = { schema_version: 1, stage };
+			const sample = buildOpsQueueRows(dashboard).find((row) => row.key === 'sample:sample-1');
+			expect(sample).toMatchObject({ status: 'Working', progress: expected });
+			expect(sample?.progress).not.toContain('_');
+		}
 	});
 
 	it('renders exact hard-stop and bypass states in the work-window column', () => {
@@ -315,6 +383,8 @@ describe('Ops workstation mapping', () => {
 			key: 'schedule-window-impossible',
 			tone: 'fail',
 			title: 'Long Show · Season 1 needs a longer work window',
+			detail:
+				'Estimated runtime about 4h is longer than every configured computer work window. Widen a computer work window or bypass the work schedule.',
 			href: '/settings',
 			linkLabel: 'Edit work windows'
 		});
@@ -350,7 +420,7 @@ describe('Ops workstation mapping', () => {
 			prefix: 'tv/show/season 4',
 			detail: 'could not find a viable sample'
 		});
-		expect(rowRecoveryLabel(rows[0])).toBe('No action');
+		expect(rowRecoveryLabel(rows[0])).toBe('Nothing to do');
 	});
 
 	it('surfaces unavailable data and retryable encodes as attention items', () => {
@@ -447,7 +517,7 @@ describe('Ops workstation mapping', () => {
 			metricLabel: 'Running'
 		});
 		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[2]).toMatchObject({
-			label: 'Sample checks',
+			label: 'Sample queue',
 			detail: '1 waiting for review',
 			tone: 'ready'
 		});
@@ -494,7 +564,7 @@ describe('Ops workstation mapping', () => {
 			progress: 'Complete',
 			scheduler: 'Review unavailable',
 			detail:
-				'Review media is unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+				'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
 		});
 	});
 
@@ -525,7 +595,7 @@ describe('Ops workstation mapping', () => {
 
 		expect(buildOpsQueueRows(dashboard, hostsFixture())).toEqual([]);
 		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[1]).toMatchObject({
-			value: '0 running · 0 queued',
+			value: '0 working · 0 waiting',
 			tone: 'idle'
 		});
 		expect(buildOpsFooterSignals(dashboard, hostsFixture())[0]).toMatchObject({
@@ -569,7 +639,7 @@ describe('Ops workstation mapping', () => {
 			'sample:sample-review-transition'
 		]);
 		expect(buildOpsStatusTiles(dashboard, hostsFixture(), null)[1]).toMatchObject({
-			value: '1 running · 0 queued'
+			value: '1 working · 0 waiting'
 		});
 		expect(buildOpsFooterSignals(dashboard, hostsFixture())[0]).toMatchObject({
 			value: '1/0',
@@ -637,7 +707,7 @@ describe('Ops workstation mapping', () => {
 			status: 'Waiting',
 			scheduler: 'Review unavailable',
 			detail:
-				'Review media is unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+				'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
 		});
 	});
 
@@ -1010,28 +1080,28 @@ describe('Ops workstation mapping', () => {
 		expect(blockers[0]).toMatchObject({ tone: 'wait' });
 	});
 
-	it('keeps work schedule, attention, sample, and worker tones semantic', () => {
+	it('keeps work schedule, attention, sample, and computer tones semantic', () => {
 		const tiles = buildOpsStatusTiles(dashboardFixture(), hostsFixture(), null);
 
 		expect(tiles).toMatchObject([
 			{ label: 'Work schedule', tone: 'ready' },
-			{ label: 'Processing', tone: 'wait' },
-			{ label: 'Sample checks', tone: 'active' },
-			{ label: 'Workers', tone: 'ready', value: '1 can encode / 2' }
+			{ label: 'Compression queue', tone: 'wait' },
+			{ label: 'Sample queue', tone: 'active' },
+			{ label: 'Computers', tone: 'ready', value: '1 ready / 2' }
 		]);
 	});
 
-	it('counts busy and off-schedule workers separately from encode-ready capacity', () => {
+	it('counts working and off-schedule computers separately from encode-ready capacity', () => {
 		const hosts = hostsFixture();
 		hosts.hosts[0].active_encode_count = 2;
 
 		const tiles = buildOpsStatusTiles(dashboardFixture(), hosts, null);
 
 		expect(tiles.at(-1)).toMatchObject({
-			label: 'Workers',
+			label: 'Computers',
 			tone: 'wait',
-			value: '1 busy / 2',
-			detail: '2 reachable · 1 busy · 0 unavailable'
+			value: '1 working / 2',
+			detail: '2 reachable · 1 working · 0 unavailable'
 		});
 	});
 
@@ -1064,8 +1134,8 @@ describe('Ops workstation mapping', () => {
 			metricLabel: 'Running',
 			metricValue: '2'
 		});
-		expect(summary.detail).toContain('1 item processing across 1 computer');
-		expect(summary.detail).toContain('1 test active');
+		expect(summary.detail).toContain('1 item compressing across 1 computer');
+		expect(summary.detail).toContain('1 sample active');
 		expect(summary.detail).toContain('show · season 2 is queued');
 		expect(summary.detail).toContain('A season needs attention');
 	});
@@ -1075,15 +1145,18 @@ describe('Ops workstation mapping', () => {
 		const unavailable = { ...ready, available: false, active_encode_count: 0 };
 
 		expect(hostTone(ready)).toBe('active');
-		expect(hostStateCopy(ready)).toBe('Busy');
+		expect(hostStateCopy(ready)).toBe('Working');
 		expect(hostTone(scheduledOff)).toBe('wait');
 		expect(hostStateCopy(scheduledOff)).toBe('Off schedule');
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
+		expect(
+			hostStateCopy({ ...ready, capabilities: [], active_encode_count: 0, queue_active: false })
+		).toBe('Idle');
 	});
 
-	it('treats storage-recoverable workers as reconnecting capacity', () => {
+	it('treats storage-recoverable computers as reconnecting capacity', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.needs_attention_count = 0;
 		dashboard.encode_queue.recent = [];
@@ -1101,11 +1174,11 @@ describe('Ops workstation mapping', () => {
 			'no-hosts-ready'
 		);
 		expect(buildOpsStatusTiles(dashboard, hosts, null).at(-1)).toMatchObject({
-			label: 'Workers',
-			value: '1 can encode / 1'
+			label: 'Computers',
+			value: '1 ready / 1'
 		});
 		expect(hostTone(recoverable)).toBe('wait');
-		expect(hostStateCopy(recoverable)).toBe('Reconnects storage');
+		expect(hostStateCopy(recoverable)).toBe('Reconnecting storage');
 	});
 
 	it('shows running encode telemetry instead of stale restart errors', () => {
@@ -1135,7 +1208,7 @@ describe('Ops workstation mapping', () => {
 
 		expect(buildOpsQueueRows(dashboard)[0]).toMatchObject({
 			host: 'M2 MBP, M1 MBP',
-			phase: '2 active processing tasks'
+			phase: '2 active compression tasks'
 		});
 	});
 
@@ -1168,11 +1241,11 @@ describe('Ops workstation mapping', () => {
 		);
 	});
 
-	it('maps worker capabilities to user-facing labels', () => {
+	it('maps computer capabilities to user-facing labels', () => {
 		expect(workerCapabilitiesSummary(['encode_queue', 'sample_calibration', 'proof_encode'])).toBe(
-			'Process folders · Run samples · Run review evidence'
+			'Can compress media · Can create samples · Can build comparison clips'
 		);
-		expect(workerCapabilitiesSummary([])).toBe('No work assigned');
+		expect(workerCapabilitiesSummary([])).toBe('No work assigned to this computer');
 	});
 
 	it('keeps password-gated host prepare disabled until a password is present', () => {
@@ -1190,9 +1263,9 @@ describe('Ops workstation mapping', () => {
 
 		expect(hostPrepareDisabled(passwordHost, '')).toBe(true);
 		expect(hostPrepareDisabled(passwordHost, 'secret')).toBe(false);
-		expect(hostPrepareTitle(passwordHost)).toBe('Enter the prepare password for this worker.');
+		expect(hostPrepareTitle(passwordHost)).toBe('Enter the setup password for this computer.');
 		expect(hostPrepareDisabled(unsupportedHost, 'secret')).toBe(true);
-		expect(hostPrepareTitle(unsupportedHost)).toBe('Prepare is unavailable for this worker.');
+		expect(hostPrepareTitle(unsupportedHost)).toBe('Setup is unavailable for this computer.');
 	});
 
 	it('omits stale historical encode rows from current work', () => {

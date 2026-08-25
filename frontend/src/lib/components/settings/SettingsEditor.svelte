@@ -15,7 +15,8 @@
 		SettingsPayload
 	} from '$lib/api/types';
 	import { formatFileSize } from '$lib/format';
-	import { hostRuntimeBadgeState } from '$lib/hosts/runtime';
+	import { hostRuntimeBadgeState, isPendingHostRuntime } from '$lib/hosts/runtime';
+	import { workScheduleSummaryCopy } from '$lib/hosts/schedule';
 	import {
 		SCHEDULE_DAY_OPTIONS,
 		addHostDraft,
@@ -202,8 +203,8 @@
 		clearArchiveArmed = false;
 	});
 	const draftScheduleOptions = $derived([
-		{ key: 'always', label: 'Always', summary: 'Runs anytime.' },
-		{ key: 'never', label: 'Never', summary: 'Never starts queued processing.' },
+		{ key: 'always', label: 'Always', summary: 'Work runs anytime.' },
+		{ key: 'never', label: 'Never', summary: 'Work schedule is off.' },
 		...configuredProfiles.map((profile) => ({
 			key: profile.key.trim(),
 			label: profile.label.trim() || profile.key.trim(),
@@ -227,9 +228,9 @@
 			mono: true
 		},
 		{
-			label: 'Workers',
+			label: 'Computers',
 			value: `${readyHostCount}/${configuredHosts.length}`,
-			detail: loadError || 'Ready workers from latest status check',
+			detail: loadError || 'Ready computers from latest status check',
 			tone: (loadError ? 'fail' : readyHostCount > 0 ? 'ready' : 'idle') as BadgeTone,
 			mono: true
 		},
@@ -691,7 +692,7 @@
 						<strong>{defaultMetricCopy}</strong>
 					</a>
 					<a href="#settings-schedules">
-						<span>Schedule</span>
+						<span>Work schedule</span>
 						<strong>{(configuredProfiles.length + 2).toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-workers">
@@ -955,7 +956,7 @@
 									>
 									<small>
 										Scaled to each episode runtime · ±{draft.video_defaults
-											.sample_projection_tolerance_percent}% test · ±{draft.video_defaults
+											.sample_projection_tolerance_percent}% sample · ±{draft.video_defaults
 											.final_output_tolerance_percent}% final
 									</small>
 								</div>
@@ -977,9 +978,11 @@
 					<header class="settings-section__head">
 						<div>
 							<span class="mf-eyebrow">Advanced setup</span>
-							<h2 id="settings-advanced-title">Metadata, computers, and schedule</h2>
+							<h2 id="settings-advanced-title">Metadata, computers, and work schedule</h2>
 						</div>
-						<p>Connect catalog metadata, add machines, and control when processing work may run.</p>
+						<p>
+							Connect catalog metadata, add computers, and control when Mediaforce work may run.
+						</p>
 					</header>
 
 					<div id="settings-metadata" class="settings-anchor">
@@ -1052,26 +1055,26 @@
 
 					<div id="settings-schedules" class="settings-anchor">
 						<WorkstationPanel
-							eyebrow="Schedule"
-							title="Schedule"
+							eyebrow="Work schedule"
+							title="Work schedule"
 							meta={`${configuredProfiles.length.toLocaleString('en-US')} custom`}
 						>
 							<div class="schedule-list">
 								<div class="schedule-row schedule-row--builtin">
 									<StateBadge compact tone="ready" label="Built in" />
 									<strong>Always</strong>
-									<span>Runs anytime</span>
+									<span>Work runs anytime</span>
 								</div>
 								<div class="schedule-row schedule-row--builtin">
 									<StateBadge compact tone="idle" label="Built in" />
 									<strong>Never</strong>
-									<span>Never starts queued processing</span>
+									<span>Work schedule is off</span>
 								</div>
 								{#each draft.schedule_profiles as profile, index (`schedule-${profile.index}-${index}`)}
 									<div class="schedule-row">
 										<div class="schedule-row__fields">
 											<label>
-												<span>Window key</span>
+												<span>Work window key</span>
 												<input
 													class="field"
 													value={profile.key}
@@ -1118,7 +1121,7 @@
 												onclick={() =>
 													(draft.schedule_profiles = removeAtIndex(draft.schedule_profiles, index))}
 											>
-												Remove window
+												Remove work window
 											</button>
 										</div>
 										<div
@@ -1194,12 +1197,16 @@
 											<strong>{host.label || host.host || `Computer ${index + 1}`}</strong>
 										</div>
 										<span
-											>{runtime?.schedule_detail ||
+											>{workScheduleSummaryCopy(runtime?.schedule_detail) ||
 												runtime?.schedule_profile_label ||
 												'No computer status yet'}</span
 										>
 										<small
-											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
+											>{isPendingHostRuntime(runtime)
+												? 'Checking this computer now.'
+												: runtime?.message ||
+													runtime?.active_reason ||
+													'Status check pending'}</small
 										>
 									</div>
 								{:else}
@@ -1219,9 +1226,11 @@
 												/>
 												<strong>{host.label || host.host || `Computer ${index + 1}`}</strong>
 												<span
-													>{runtime?.message ||
-														runtime?.active_reason ||
-														'Status check pending'}</span
+													>{isPendingHostRuntime(runtime)
+														? 'Checking this computer now.'
+														: runtime?.message ||
+															runtime?.active_reason ||
+															'Status check pending'}</span
 												>
 											</div>
 											<button
@@ -1577,7 +1586,7 @@
 					<a href="#settings-libraries">Library folders</a>
 					<a href="#settings-storage">Working space</a>
 					<a href="#settings-assistant-defaults">Default size</a>
-					<a href="#settings-schedules">Schedule</a>
+					<a href="#settings-schedules">Work schedule</a>
 					<a href="#settings-workers">Computers</a>
 					<a href="#settings-danger">Original backups</a>
 				</nav>

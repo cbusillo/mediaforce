@@ -166,7 +166,7 @@
 				<label class="stacked-field">
 					<span>Root ID</span>
 					<input class="field mf-mono" value={selected.key} readonly />
-					<small>Stable identity for scans, workers, and saved work.</small>
+					<small>Stable identity for scans, computers, and saved work.</small>
 				</label>
 				<label class="stacked-field library-form-grid__wide">
 					<span>Local path</span>
