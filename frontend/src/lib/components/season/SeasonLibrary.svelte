@@ -98,6 +98,7 @@
 	const librarySavingsReady = $derived(
 		!detailsPending && seasonCards.every((card) => !card.details_loading)
 	);
+	const libraryOutput = $derived(Math.max(0, librarySize - librarySavings));
 
 	$effect(() => {
 		const available = filteredShows;
@@ -235,7 +236,7 @@
 </script>
 
 <svelte:head>
-	<title>Your TV library · Mediaforce</title>
+	<title>TV Library · Mediaforce</title>
 	<meta
 		name="description"
 		content="Choose a TV season or show, make one test, compare it, and then make the rest smaller."
@@ -246,37 +247,43 @@
 	<LibraryModeNav active="tv" />
 	<header class="page-heading">
 		<div>
-			<h1>Your library</h1>
+			<h1>TV Library</h1>
 			<p>Choose a season, or use one good setup for every season in a show.</p>
 		</div>
 		<div
 			class="library-total"
 			role="group"
 			aria-label={librarySavingsReady
-				? `${seasonCards.length} seasons, ${librarySizeLabel(librarySize)} stored, about ${librarySizeLabel(librarySavings)} available to save`
-				: `${seasonCards.length} seasons, ${librarySizeLabel(librarySize)} stored, savings calculating`}
+				? `${seasonCards.length} seasons, ${librarySizeLabel(librarySize)} current size, about ${librarySizeLabel(libraryOutput)} estimated output, about ${librarySizeLabel(librarySavings)} estimated space saved`
+				: `${seasonCards.length} seasons, ${librarySizeLabel(librarySize)} current size, estimates pending`}
 		>
-			<div><strong>{seasonCards.length}</strong><span>seasons</span></div>
-			<div><strong>{librarySizeLabel(librarySize)}</strong><span>stored</span></div>
+			<div><strong>{seasonCards.length} seasons</strong><span>{showCards.length} shows</span></div>
+			<div><strong>{librarySizeLabel(librarySize)}</strong><span>Current size</span></div>
+			<div>
+				<strong class:metric-pending={!librarySavingsReady}
+					>{librarySavingsReady ? `~${librarySizeLabel(libraryOutput)}` : '…'}</strong
+				><span>Estimated output</span>
+			</div>
 			<div class="library-total__savings">
 				{#if librarySavingsReady}
-					<strong>~{librarySizeLabel(librarySavings)}</strong><span>space to save</span>
+					<strong>~{librarySizeLabel(librarySavings)}</strong>
 				{:else}
-					<strong class="metric-pending">…</strong><span>calculating savings</span>
+					<strong class="metric-pending">…</strong>
 				{/if}
+				<span>Estimated space saved</span>
 			</div>
 		</div>
 	</header>
 
 	{#if loadError}
 		<div class="notice notice--problem" role="alert">
-			<strong>Your library could not be opened.</strong>
+			<strong>TV Library could not open.</strong>
 			<span>{loadError}</span>
 		</div>
 	{/if}
 	{#if detailsError}
 		<div class="notice notice--detail" role="status">
-			<strong>Your library is ready.</strong>
+			<strong>TV Library is ready.</strong>
 			<span>{detailsError} Names, episode counts, and current sizes are still available.</span>
 		</div>
 	{/if}
@@ -291,11 +298,11 @@
 				<span class="resume-card__meta">
 					{resumeCard.card.item_count} episodes · {formatFileSize(resumeCard.card.total_size_bytes)}
 					{#if resumeCard.card.details_loading}
-						· savings calculating
+						· estimating space saved
 					{:else if fullyHeld(resumeCard.card)}
 						· protected · stays original
 					{:else}
-						· about {formatFileSize(resumeCard.card.projected_reclaim_bytes)} to save
+						· estimated space saved: about {formatFileSize(resumeCard.card.projected_reclaim_bytes)}
 					{/if}
 				</span>
 			</div>
@@ -321,7 +328,7 @@
 					<span>Sort</span>
 					<select bind:value={sortMode} aria-label="Sort shows">
 						<option value="savings" disabled={!librarySavingsReady}>
-							Most space to save{librarySavingsReady ? '' : ' (calculating)'}
+							Most estimated space saved{librarySavingsReady ? '' : ' (estimating)'}
 						</option>
 						<option value="size">Largest library</option>
 						<option value="seasons">Most seasons</option>
@@ -334,20 +341,20 @@
 		{#if foldersPending && !seasonCards.length}
 			<div class="loading-state" role="status" aria-live="polite">
 				<span></span><span></span><span></span>
-				<p>Opening your library…</p>
+				<p>Loading TV library…</p>
 			</div>
 		{:else if !filteredShows.length}
 			<div class="empty-state">
 				{#if query.trim()}
-					<h3>No seasons match “{query}”</h3>
+					<h3>No TV shows or seasons match “{query}”</h3>
 					<p>Try a show title or season number.</p>
 					<button class="secondary-button" type="button" onclick={() => (query = '')}
 						>Clear search</button
 					>
 				{:else}
-					<h3>Point Mediaforce at your TV folder to get started.</h3>
-					<p>Your shows and seasons will appear here.</p>
-					<a class="primary-button" href={resolve('/settings')}>Choose folders</a>
+					<h3>No TV shows or seasons found.</h3>
+					<p>Choose a TV folder in Settings, then scan it to see shows and seasons here.</p>
+					<a class="primary-button" href={resolve('/settings')}>Open Settings</a>
 				{/if}
 			</div>
 		{:else}
@@ -381,13 +388,13 @@
 							<span class="show-savings">
 								{#if show.details_loading && show.projected_reclaim_bytes <= 0}
 									<strong class="metric-pending">…</strong>
-									<small>{detailsPending ? 'calculating' : 'not estimated'}</small>
+									<small>{detailsPending ? 'estimating' : 'estimate unavailable'}</small>
 								{:else if fullyHeld(show)}
 									<strong>Held</strong>
 									<small>no eligible savings</small>
 								{:else}
 									<strong>~{formatFileSize(show.projected_reclaim_bytes)}</strong>
-									<small>{show.details_loading ? 'partial estimate' : 'to save'}</small>
+									<small>{show.details_loading ? 'partial estimate' : 'estimated saved'}</small>
 								{/if}
 							</span>
 						</button>
@@ -409,7 +416,7 @@
 								{#if selectedShow.details_loading && selectedShow.projected_reclaim_bytes <= 0}
 									<span class="show-summary__savings"
 										><strong class="metric-pending">…</strong>
-										{detailsPending ? 'calculating savings' : 'savings not estimated'}</span
+										{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</span
 									>
 								{:else if fullyHeld(selectedShow)}
 									<span class="show-summary__savings"
@@ -417,8 +424,8 @@
 									>
 								{:else}
 									<span class="show-summary__savings"
-										><strong>~{formatFileSize(selectedShow.projected_reclaim_bytes)}</strong> to
-										save · {savingsPercent(selectedShow)}%</span
+										><strong>~{formatFileSize(selectedShow.projected_reclaim_bytes)}</strong>
+										estimated saved · {savingsPercent(selectedShow)}%</span
 									>
 								{/if}
 							</div>
@@ -517,13 +524,14 @@
 							<span class="season-savings">
 								{#if season.details_loading}
 									<strong class="metric-pending">…</strong>
-									<small>{detailsPending ? 'calculating savings' : 'not estimated'}</small>
+									<small>{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</small
+									>
 								{:else if seasonLifecycle?.held_candidate_count && !seasonLifecycle.eligible_candidate_count}
 									<strong>Held</strong>
 									<small>stays original</small>
 								{:else}
 									<strong>~{formatFileSize(season.projected_reclaim_bytes)}</strong>
-									<small>to save · {savingsPercent(season)}%</small>
+									<small>estimated saved · {savingsPercent(season)}%</small>
 								{/if}
 							</span>
 							{#if seasonLifecycle?.held_candidate_count}
@@ -586,7 +594,7 @@
 	.library-total {
 		border: 1px solid var(--mf-line-muted);
 		display: grid;
-		grid-template-columns: repeat(3, auto);
+		grid-template-columns: repeat(4, auto);
 		white-space: nowrap;
 	}
 
@@ -1231,7 +1239,7 @@
 
 		.library-total {
 			align-self: flex-start;
-			grid-template-columns: repeat(3, minmax(0, 1fr));
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 			width: 100%;
 		}
 

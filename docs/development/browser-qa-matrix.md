@@ -26,8 +26,9 @@ stuck, open a fresh tab against the same base URL before treating the local
 server as down.
 
 After the non-empty fixture pass, the managed smoke reseeds the same runtime with
-the `empty` profile and reloads the main route family. This proves the UI does
-not only work when the current live library has rows.
+the `empty` profile and reloads the TV, Movie, Other, Activity, and Finished
+route family. This proves the UI does not only work when the current live
+library has rows.
 
 ## Seeded Fixture States
 

@@ -821,11 +821,11 @@
 		</div>
 		{#if !isComplete}
 			<div>
-				<span>Expected output</span><strong>{movieGoalFacts.expectedOutput}</strong>
+				<span>Estimated output</span><strong>{movieGoalFacts.expectedOutput}</strong>
 				<small>Target range {movieGoalFacts.targetRange}</small>
 			</div>
 			<div>
-				<span>Expected savings</span><strong>{movieGoalFacts.expectedSavings}</strong>
+				<span>Estimated space saved</span><strong>{movieGoalFacts.expectedSavings}</strong>
 				<small>{movieGoalFacts.estimateQuality}</small>
 			</div>
 		{/if}

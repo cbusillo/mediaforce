@@ -73,6 +73,20 @@
 	);
 	const reclaimHasUnknowns = $derived(movieReclaimTotalIsLowerBound(payload.titles));
 	const actionableCount = $derived(payload.titles.filter(movieTitleNeedsAction).length);
+	const totalOutputLabel = $derived(
+		detailsPending
+			? '…'
+			: reclaimCoverage === 0
+				? 'No estimate'
+				: `${reclaimHasUnknowns ? 'At most ' : ''}${formatBytes(Math.max(0, totalSize - totalReclaim))}`
+	);
+	const totalReclaimLabel = $derived(
+		detailsPending
+			? '…'
+			: reclaimCoverage === 0
+				? 'No estimate'
+				: `${reclaimHasUnknowns ? 'At least ' : ''}${formatBytes(totalReclaim)}`
+	);
 	const conflictCount = $derived(
 		payload.titles.reduce((total, title) => total + title.promotion_conflicts.length, 0)
 	);
@@ -107,7 +121,7 @@
 
 	function formatReclaim(title: MovieTitle): string {
 		const lowerBound = movieReclaimLowerBound(title);
-		if (lowerBound == null) return 'Savings not measured';
+		if (lowerBound == null) return 'No estimate';
 		if (title.projected_reclaim_bytes == null) return `At least ${formatBytes(lowerBound)}`;
 		if (title.savings_confidence === 'estimated') return `About ${formatBytes(lowerBound)}`;
 		return formatBytes(lowerBound);
@@ -124,15 +138,15 @@
 	}
 
 	function formatExpectedOutput(title: MovieTitle): string {
-		if (title.details_loading) return 'Measuring…';
+		if (title.details_loading) return 'Estimating…';
 		const expectedOutput = movieExpectedOutputBytes(title);
-		return expectedOutput == null ? 'Not estimated' : formatBytes(expectedOutput);
+		return expectedOutput == null ? 'No estimate' : formatBytes(expectedOutput);
 	}
 
 	function reclaimSummary(title: MovieTitle): string {
-		if (title.details_loading) return 'Measuring savings…';
+		if (title.details_loading) return 'Estimating space saved…';
 		const lowerBound = movieReclaimLowerBound(title);
-		if (lowerBound == null) return 'Savings not measured';
+		if (lowerBound == null) return 'No savings estimate';
 		if (title.projected_reclaim_bytes == null) return `Save at least ${formatBytes(lowerBound)}`;
 		if (title.savings_confidence === 'estimated') return `Save about ${formatBytes(lowerBound)}`;
 		return `Save ${formatBytes(lowerBound)}`;
@@ -302,7 +316,7 @@
 </script>
 
 <svelte:head>
-	<title>Your movie library · Mediaforce</title>
+	<title>Movie Library · Mediaforce</title>
 	<meta
 		name="description"
 		content="Browse movie titles, see what needs attention, and open the next safe action."
@@ -314,28 +328,19 @@
 
 	<header class="page-heading">
 		<div class="page-heading__copy">
-			<span class="eyebrow">Movie library</span>
-			<h1>Movies</h1>
+			<h1>Movie Library</h1>
 			<p>
 				See what needs attention, choose a movie, and open its Studio. Whole-title work only
 				includes the main movie unless you choose a specific file.
 			</p>
 		</div>
 		<div class="library-totals" aria-label="Movie library totals">
-			<div><strong>{payload.titles.length}</strong><span>titles</span></div>
-			<div><strong>{formatBytes(totalSize)}</strong><span>stored</span></div>
 			<div>
-				<strong
-					>{detailsPending
-						? '…'
-						: reclaimCoverage === 0
-							? 'No estimate'
-							: reclaimHasUnknowns
-								? `At least ${formatBytes(totalReclaim)}`
-								: formatBytes(totalReclaim)}</strong
-				><span>space you could save</span>
+				<strong>{payload.titles.length} titles</strong><span>{actionableCount} need work</span>
 			</div>
-			<div><strong>{actionableCount}</strong><span>need work</span></div>
+			<div><strong>{formatBytes(totalSize)}</strong><span>Current size</span></div>
+			<div><strong>{totalOutputLabel}</strong><span>Estimated output</span></div>
+			<div><strong>{totalReclaimLabel}</strong><span>Estimated space saved</span></div>
 		</div>
 	</header>
 
@@ -397,8 +402,8 @@
 				<select bind:value={sortMode}>
 					<option value="priority">What to work on next</option>
 					<option value="name">Title A–Z</option>
-					<option value="size">Largest stored</option>
-					<option value="savings">Biggest space savings</option>
+					<option value="size">Largest current size</option>
+					<option value="savings">Most estimated space saved</option>
 					<option value="oldest">Oldest added</option>
 				</select>
 			</label>
@@ -435,12 +440,12 @@
 		{#if structurePending && !payload.titles.length}
 			<div class="empty-state" role="status">
 				<span class="loading-mark" aria-hidden="true"></span>
-				<strong>Reading movie titles</strong>
+				<strong>Loading movie library…</strong>
 				<p>Files appear first; workflow details follow.</p>
 			</div>
 		{:else if !payload.titles.length && !loadError}
 			<div class="empty-state">
-				<strong>No movie titles are indexed yet.</strong>
+				<strong>No movies found.</strong>
 				<p>
 					Add or scan a typed Movies root in Settings. Root-level files and title folders both
 					appear here.
@@ -449,7 +454,7 @@
 			</div>
 		{:else if !titles.length}
 			<div class="empty-state">
-				<strong>No titles match these filters.</strong>
+				<strong>No movies match these filters.</strong>
 				<p>Clear the search or widen the workflow state filter.</p>
 			</div>
 		{:else}
@@ -461,7 +466,8 @@
 							<span>Use arrow keys to move through the list</span>
 						</div>
 						<div class="title-index__header" aria-hidden="true">
-							<span>Title</span><span>Files</span><span>Stored / savings</span><span>Next step</span
+							<span>Title</span><span>Files</span><span>Size / estimated saved</span><span
+								>Next step</span
 							>
 						</div>
 					</div>
@@ -555,12 +561,12 @@
 								>
 							</div>
 							<div>
-								<span>Expected output</span><strong>{formatExpectedOutput(selectedTitle)}</strong>
+								<span>Estimated output</span><strong>{formatExpectedOutput(selectedTitle)}</strong>
 							</div>
 							<div>
-								<span>Expected savings</span><strong
+								<span>Estimated space saved</span><strong
 									>{selectedTitle.details_loading
-										? 'Measuring…'
+										? 'Estimating…'
 										: formatReclaim(selectedTitle)}</strong
 								>
 							</div>

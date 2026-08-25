@@ -287,6 +287,11 @@
 	const targetProvenance = $derived(targetProvenanceSummary(folder.target_size_provenance));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
 	const expectedSeasonBytes = $derived(expectedEpisodeBytes * productionEpisodeCount);
+	const estimatedSeasonSavingsBytes = $derived(
+		!isSeriesScope && expectedSeasonBytes > 0
+			? Math.max(0, originalSeasonSize - expectedSeasonBytes)
+			: null
+	);
 	const exactExpectedSizeChange = $derived(
 		expectedSizeChange(originalSeasonSize, expectedEpisodeBytes)
 	);
@@ -839,8 +844,8 @@
 			`${selection.season_count} ${selection.season_count === 1 ? 'season' : 'seasons'} · ${selection.candidate_count} safety-cleared ${selection.candidate_count === 1 ? 'episode' : 'episodes'}.`,
 			`Safety-cleared size: ${formatDecimalFileSize(selection.current_size_bytes)}.`,
 			olderSeasonProjectedSavingsBytes !== null
-				? `Projected savings: about ${formatDecimalFileSize(olderSeasonProjectedSavingsBytes)}.`
-				: 'Projected savings are not available for this setup.',
+				? `Estimated space saved: about ${formatDecimalFileSize(olderSeasonProjectedSavingsBytes)}.`
+				: 'Estimated space saved is not available for this setup.',
 			`${latestSeason} stays original.`,
 			cadenceBlockedEpisodeCount > 0
 				? `${cadenceBlockedEpisodeCount} ${cadenceBlockedEpisodeCount === 1 ? 'episode has' : 'episodes have'} a measured motion pattern that Mediaforce cannot convert automatically and will stay original.`
@@ -2418,18 +2423,11 @@
 					</div>
 					<div><span>Approved episode target</span><strong>{sizeTargetLabel}</strong></div>
 					<div>
-						<span>{isSeriesScope ? 'Current scope size' : 'Current size'}</span><strong
-							>{formatDecimalFileSize(originalSeasonSize)}</strong
-						>
+						<span>Current size</span><strong>{formatDecimalFileSize(originalSeasonSize)}</strong>
+						{#if isSeriesScope}<small>Whole selected show scope.</small>{/if}
 					</div>
 					<div>
-						<span
-							>{isSeriesScope
-								? 'Estimated eligible output'
-								: isExactItemScope
-									? 'Estimated episode output'
-									: 'Estimated season total'}</span
-						><strong
+						<span>Estimated output</span><strong
 							>{expectedSeasonBytes
 								? formatDecimalFileSize(expectedSeasonBytes)
 								: 'Varies by episode'}</strong
@@ -2440,6 +2438,13 @@
 								: 'Each episode gets its own runtime-derived target.'}</small
 						>
 					</div>
+					{#if estimatedSeasonSavingsBytes !== null}
+						<div>
+							<span>Estimated space saved</span><strong
+								>{formatDecimalFileSize(estimatedSeasonSavingsBytes)}</strong
+							>
+						</div>
+					{/if}
 				</div>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
 					<div class="older-season-option">
@@ -2464,7 +2469,7 @@
 							<small>
 								{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} current
 								{#if olderSeasonProjectedSavingsBytes !== null}
-									· about {formatDecimalFileSize(olderSeasonProjectedSavingsBytes)} projected savings
+									· about {formatDecimalFileSize(olderSeasonProjectedSavingsBytes)} estimated space saved
 								{/if}
 							</small>
 						</div>
