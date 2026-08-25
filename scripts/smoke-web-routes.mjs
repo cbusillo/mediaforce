@@ -407,12 +407,15 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         );
       }
       if (route === "/ops" && label === "Activity") {
+        const requiredCopies = ["Computers", "Stop processing", "Stop samples"];
+        await page.waitForFunction(
+          (required) =>
+            required.every((copy) => document.body.innerText.includes(copy)),
+          requiredCopies,
+          { timeout: timeoutMs },
+        );
         const bodyText = await page.locator("body").innerText();
-        for (const requiredCopy of [
-          "Computers",
-          "Stop processing",
-          "Stop samples",
-        ]) {
+        for (const requiredCopy of requiredCopies) {
           if (!bodyText.includes(requiredCopy)) {
             throw new Error(
               `Activity omitted ${JSON.stringify(requiredCopy)}.`,
@@ -436,13 +439,20 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         }
       }
       if (route === "/settings") {
-        const bodyText = await page.locator("body").innerText();
-        for (const requiredCopy of [
+        const requiredCopies = [
           "Computers",
           "Work schedule",
           "Work runs anytime",
           "Work schedule is off",
-        ]) {
+        ];
+        await page.waitForFunction(
+          (required) =>
+            required.every((copy) => document.body.innerText.includes(copy)),
+          requiredCopies,
+          { timeout: timeoutMs },
+        );
+        const bodyText = await page.locator("body").innerText();
+        for (const requiredCopy of requiredCopies) {
           if (!bodyText.includes(requiredCopy)) {
             throw new Error(
               `Settings omitted ${JSON.stringify(requiredCopy)}.`,
