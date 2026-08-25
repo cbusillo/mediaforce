@@ -30,6 +30,7 @@
 		movieGoalFactsView,
 		movieRetryResponseCopy,
 		movieReviewStatusLabel,
+		movieSampleSetupResult,
 		movieSizeCapBlockView,
 		parentSampleAppliesToExactItem,
 		sampleStopResponseCopy
@@ -321,12 +322,10 @@
 				throw new Error(response.message || 'The movie target is not ready for sampling.');
 			note = noteAfterPreview(note, response.proposal);
 			if (response.proposal?.can_queue === true) noteHasNewerText = false;
-			const attention = response.proposal != null && response.proposal.can_queue !== true;
-			return {
-				message: 'Sample setup is ready. Choose Create sample when you are ready.',
-				attention,
-				attentionTitle: attention ? 'Sample setup needs attention.' : undefined
-			};
+			return movieSampleSetupResult(
+				response.proposal != null && response.proposal.can_queue !== true,
+				'Sample setup is ready. Choose Create sample when you are ready.'
+			);
 		});
 	}
 
@@ -353,12 +352,10 @@
 			const keptNewerText = response.proposal?.can_queue === true && nextNote !== '';
 			note = nextNote;
 			if (response.proposal?.can_queue === true) noteHasNewerText = keptNewerText;
-			const attention = response.proposal != null && response.proposal.can_queue !== true;
-			return {
-				message: 'Mediaforce set up the sample again.',
-				attention,
-				attentionTitle: attention ? 'Sample setup needs attention.' : undefined
-			};
+			return movieSampleSetupResult(
+				response.proposal != null && response.proposal.can_queue !== true,
+				'Mediaforce set up the sample again.'
+			);
 		});
 	}
 

@@ -8,6 +8,7 @@ import {
 	movieGoalFactsView,
 	movieRetryResponseCopy,
 	movieReviewStatusLabel,
+	movieSampleSetupResult,
 	movieSizeCapBlockView,
 	parseServerTimestamp,
 	parentSampleAppliesToExactItem,
@@ -183,6 +184,18 @@ describe('canRetrySampleJob', () => {
 });
 
 describe('movie queue action responses', () => {
+	it('does not call a nonqueueable sample setup ready', () => {
+		expect(movieSampleSetupResult(true, 'Sample setup is ready.')).toEqual({
+			message: 'The sample setup needs another request. Nothing was queued.',
+			attention: true,
+			attentionTitle: 'Sample setup needs attention.'
+		});
+		expect(movieSampleSetupResult(false, 'Sample setup is ready.')).toEqual({
+			message: 'Sample setup is ready.',
+			attention: false
+		});
+	});
+
 	it('does not claim a retry when no work was queued', () => {
 		expect(
 			movieRetryResponseCopy(

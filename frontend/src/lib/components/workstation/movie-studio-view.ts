@@ -82,6 +82,19 @@ export function canRetrySampleJob(jobId: unknown, hasPendingProposal: boolean): 
 	return typeof jobId === 'string' && jobId.trim().length > 0 && !hasPendingProposal;
 }
 
+export function movieSampleSetupResult(
+	needsAttention: boolean,
+	readyMessage: string
+): { message: string; attention: boolean; attentionTitle?: string } {
+	return needsAttention
+		? {
+				message: 'The sample setup needs another request. Nothing was queued.',
+				attention: true,
+				attentionTitle: 'Sample setup needs attention.'
+			}
+		: { message: readyMessage, attention: false };
+}
+
 export function movieRetryResponseCopy(
 	queuedCount: number,
 	message: string | null | undefined,
