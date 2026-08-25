@@ -58,8 +58,8 @@ const routeChecks = [
   ["Movies Library", "/movies", "MOVIE LIBRARY"],
   ["Other Library", "/other", "Other Library"],
   ["Folders compatibility", "/folders", "Your library"],
-  ["Activity", "/ops", "Needs your attention"],
-  ["Settings", "/settings", "Library and working space"],
+  ["Activity", "/ops", "Activity", "Computers"],
+  ["Settings", "/settings", "Library and working space", "Work schedule"],
   ["Finished", "/completed", "Finished media"],
 ];
 
@@ -405,6 +405,63 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         throw new Error(
           `${label} raised browser errors: ${pageErrors.join(" | ")}`,
         );
+      }
+      if (route === "/ops" && label === "Activity") {
+        const bodyText = await page.locator("body").innerText();
+        for (const requiredCopy of [
+          "Computers",
+          "Stop processing",
+          "Stop samples",
+        ]) {
+          if (!bodyText.includes(requiredCopy)) {
+            throw new Error(
+              `Activity omitted ${JSON.stringify(requiredCopy)}.`,
+            );
+          }
+        }
+        const lines = new Set(bodyText.split("\n").map((line) => line.trim()));
+        for (const staleCopy of [
+          "Processing",
+          "Sample checks",
+          "Workers",
+          "Can make",
+          "Reset trust",
+          "Prepare password",
+        ]) {
+          if (lines.has(staleCopy)) {
+            throw new Error(
+              `Activity exposed stale copy ${JSON.stringify(staleCopy)}.`,
+            );
+          }
+        }
+      }
+      if (route === "/settings") {
+        const bodyText = await page.locator("body").innerText();
+        for (const requiredCopy of [
+          "Computers",
+          "Work schedule",
+          "Work runs anytime",
+          "Compression work never starts",
+        ]) {
+          if (!bodyText.includes(requiredCopy)) {
+            throw new Error(
+              `Settings omitted ${JSON.stringify(requiredCopy)}.`,
+            );
+          }
+        }
+        const lines = new Set(bodyText.split("\n").map((line) => line.trim()));
+        for (const staleCopy of [
+          "Workers",
+          "Schedule",
+          "Window key",
+          "Remove window",
+        ]) {
+          if (lines.has(staleCopy)) {
+            throw new Error(
+              `Settings exposed stale copy ${JSON.stringify(staleCopy)}.`,
+            );
+          }
+        }
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`route ok: ${label} ${elapsedMs}ms`);
