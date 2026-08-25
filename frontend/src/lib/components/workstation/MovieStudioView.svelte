@@ -28,9 +28,11 @@
 		movieCurrentWorkView,
 		movieGoalContractView,
 		movieGoalFactsView,
+		movieRetryResponseCopy,
 		movieReviewStatusLabel,
 		movieSizeCapBlockView,
-		parentSampleAppliesToExactItem
+		parentSampleAppliesToExactItem,
+		sampleStopResponseCopy
 	} from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
@@ -438,12 +440,13 @@
 	async function retryEncode() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('retry-encode', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				'/api/encode-queue/retry-prefix',
-				{ prefix: folder.prefix }
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				queued_count?: number | null;
+			}>('/api/encode-queue/retry-prefix', { prefix: folder.prefix });
 			if (!response.ok) throw new Error(response.message || 'Compression could not restart.');
-			return `This ${scopeNoun} is waiting to try compression again.`;
+			return movieRetryResponseCopy(safeCount(response.queued_count), response.message, scopeNoun);
 		});
 	}
 
@@ -455,7 +458,7 @@
 				{}
 			);
 			if (response.ok === false) throw new Error(response.message || 'Sample work could not stop.');
-			return 'Stopped waiting and running sample work.';
+			return sampleStopResponseCopy(response.message);
 		});
 	}
 

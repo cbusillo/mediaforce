@@ -82,6 +82,31 @@ export function canRetrySampleJob(jobId: unknown, hasPendingProposal: boolean): 
 	return typeof jobId === 'string' && jobId.trim().length > 0 && !hasPendingProposal;
 }
 
+export function movieRetryResponseCopy(
+	queuedCount: number,
+	message: string | null | undefined,
+	scopeNoun: string
+): { message: string; attention: boolean } {
+	if (queuedCount > 0) {
+		return {
+			message: `This ${scopeNoun} is waiting to try compression again.`,
+			attention: false
+		};
+	}
+	return {
+		message: message?.toLowerCase().includes('fresh size')
+			? 'Choose a fresh size or compression goal before trying again.'
+			: 'No failed movie compression was ready to retry.',
+		attention: true
+	};
+}
+
+export function sampleStopResponseCopy(message: string | null | undefined): string {
+	return message?.toLowerCase().includes('already idle')
+		? 'Sample work was already stopped.'
+		: 'Stopped waiting and running sample work.';
+}
+
 export function parentSampleAppliesToExactItem(
 	exactPrefix: string,
 	exactJob: CalibrationJobPayload | null | undefined,
@@ -284,6 +309,12 @@ export function movieCurrentWorkView(
 function normalizeMovieQueueCopy(value: string): string {
 	return value
 		.replace(/\bencode queue\b/gi, (match) => matchCase(match, 'compression queue'))
+		.replace(/\bencode jobs?\b/gi, (match) =>
+			matchCase(match, match.toLowerCase().endsWith('s') ? 'compression jobs' : 'compression job')
+		)
+		.replace(/\bencode hosts?\b/gi, (match) =>
+			matchCase(match, match.toLowerCase().endsWith('s') ? 'computers' : 'computer')
+		)
 		.replace(/\bprocessing queue\b/gi, (match) => matchCase(match, 'compression queue'))
 		.replace(/\bencoding\b/gi, (match) => matchCase(match, 'compressing'))
 		.replace(/\bprocessing\b/gi, (match) => matchCase(match, 'compressing'))

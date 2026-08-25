@@ -17,6 +17,7 @@
 	import {
 		otherActionFileCount,
 		otherReadinessBlockerCopy,
+		otherSampleSetupResult,
 		otherScopeSummary,
 		otherWorkflowDetail,
 		otherWorkflowLabel
@@ -235,7 +236,7 @@
 			if (!response.ok)
 				throw new Error(response.message || 'This scope is not ready for sampling.');
 			note = '';
-			return 'Sample setup is ready. Choose Create sample when you are ready.';
+			return otherSampleSetupResult(response.proposal?.can_queue === true);
 		});
 	}
 

@@ -5,6 +5,7 @@ import {
 	mergeOtherLibraryPayloads,
 	otherActionFileCount,
 	otherReadinessBlockerCopy,
+	otherSampleSetupResult,
 	otherScopeSummary,
 	otherWorkflowDetail,
 	otherWorkflowLabel
@@ -131,9 +132,14 @@ describe('Other workflow presentation', () => {
 		['attention', 'Needs attention'],
 		['blocked', 'Needs attention'],
 		['complete', 'Finished'],
-		['mixed', 'Several steps']
+		['mixed', 'Several steps'],
+		['none', 'No work needed']
 	] as const)('maps %s without exposing backend vocabulary', (lane, expected) => {
 		expect(otherWorkflowLabel(workflow(lane))).toBe(expected);
+	});
+
+	it('keeps lifecycle-held scopes protected', () => {
+		expect(otherWorkflowLabel({ ...workflow('none'), state: 'held' })).toBe('Protected');
 	});
 
 	it('builds truthful singular and plural phase details', () => {
@@ -218,5 +224,18 @@ describe('Other scope presentation', () => {
 		expect(otherReadinessBlockerCopy('Choose exact-file grouping before processing.')).toBe(
 			'Choose one-file-at-a-time before compression.'
 		);
+	});
+});
+
+describe('Other sample setup result', () => {
+	it('distinguishes a queueable setup from a nonqueueable request', () => {
+		expect(otherSampleSetupResult(true)).toEqual({
+			message: 'Sample setup is ready. Choose Create sample when you are ready.',
+			attention: false
+		});
+		expect(otherSampleSetupResult(false)).toEqual({
+			message: 'The sample setup needs another request. Nothing was queued.',
+			attention: true
+		});
 	});
 });

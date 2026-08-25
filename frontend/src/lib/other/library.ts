@@ -6,6 +6,23 @@ export interface OtherScopeSummary {
 	confirmation: string;
 }
 
+export interface OtherSampleSetupResult {
+	message: string;
+	attention: boolean;
+}
+
+export function otherSampleSetupResult(canQueue: boolean): OtherSampleSetupResult {
+	return canQueue
+		? {
+				message: 'Sample setup is ready. Choose Create sample when you are ready.',
+				attention: false
+			}
+		: {
+				message: 'The sample setup needs another request. Nothing was queued.',
+				attention: true
+			};
+}
+
 export function otherScopeSummary(
 	itemCount: number,
 	actionFileCount: number,
@@ -85,6 +102,9 @@ export function otherWorkflowLabel(
 			return 'Finished';
 		case 'mixed':
 			return 'Several steps';
+		case 'none':
+			if (workflow?.state === 'held') return 'Protected';
+			return detailsLoading ? 'Loading details' : 'No work needed';
 		default:
 			return detailsLoading ? 'Loading details' : 'Ready';
 	}

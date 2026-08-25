@@ -6,10 +6,12 @@ import {
 	movieCurrentWorkView,
 	movieGoalContractView,
 	movieGoalFactsView,
+	movieRetryResponseCopy,
 	movieReviewStatusLabel,
 	movieSizeCapBlockView,
 	parseServerTimestamp,
-	parentSampleAppliesToExactItem
+	parentSampleAppliesToExactItem,
+	sampleStopResponseCopy
 } from './movie-studio-view';
 import type {
 	PlannedStreamPayload,
@@ -177,6 +179,34 @@ describe('canRetrySampleJob', () => {
 	it('requires a retryable sample job identifier', () => {
 		expect(canRetrySampleJob('', false)).toBe(false);
 		expect(canRetrySampleJob(null, false)).toBe(false);
+	});
+});
+
+describe('movie queue action responses', () => {
+	it('does not claim a retry when no work was queued', () => {
+		expect(
+			movieRetryResponseCopy(
+				0,
+				'Choose a fresh size or compression goal for movies/title before retrying.',
+				'movie title'
+			)
+		).toEqual({
+			message: 'Choose a fresh size or compression goal before trying again.',
+			attention: true
+		});
+		expect(movieRetryResponseCopy(1, 'Retried one folder.', 'movie file')).toEqual({
+			message: 'This movie file is waiting to try compression again.',
+			attention: false
+		});
+	});
+
+	it('keeps an already-idle sample queue neutral', () => {
+		expect(sampleStopResponseCopy('Calibration queue was already idle.')).toBe(
+			'Sample work was already stopped.'
+		);
+		expect(sampleStopResponseCopy('Stopped and cleaned the calibration queue.')).toBe(
+			'Stopped waiting and running sample work.'
+		);
 	});
 });
 
@@ -363,6 +393,21 @@ describe('movieCurrentWorkView', () => {
 			queuePosition: '2 of 4',
 			eta: undefined
 		});
+	});
+
+	it('translates backend encode-host copy to the computer vocabulary', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				scheduler_status_copy: 'Waiting for an available encode host.'
+			},
+			{ is_paused: false, stop_requested: false },
+			1
+		);
+
+		expect(view?.detail).toBe('Waiting for an available computer.');
 	});
 
 	it('treats a queued host as preferred rather than assigned', () => {
