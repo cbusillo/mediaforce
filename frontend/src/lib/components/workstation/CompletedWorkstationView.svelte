@@ -74,6 +74,7 @@
 	let reviewCleanupTrigger = $state<HTMLButtonElement | null>(null);
 	let deleteConfirmButton = $state<HTMLButtonElement | null>(null);
 	let reviewConfirmButton = $state<HTMLButtonElement | null>(null);
+	let actionStatusMessage = $state<HTMLParagraphElement | null>(null);
 	let cleanupPending = $state(false);
 	let reviewPending = $state(false);
 	let actionMessage = $state('');
@@ -208,6 +209,14 @@
 				: 'global-cleanup-blocker'
 			: undefined
 	);
+	$effect(() => {
+		if (armedScope && !cleanupPending && cleanupDisabled(armedScope)) {
+			armedScope = null;
+		}
+		if (armedReview && !reviewPending && actionBlockers.review !== null) {
+			armedReview = null;
+		}
+	});
 	const deleteConfirmCopy = $derived.by(() =>
 		armedScope
 			? buildDeleteConfirmCopy(armedScope, {
@@ -412,6 +421,8 @@
 			actionError = error instanceof Error ? error.message : 'Review update failed.';
 		} finally {
 			reviewPending = false;
+			await tick();
+			actionStatusMessage?.focus();
 		}
 	}
 
@@ -464,6 +475,8 @@
 			actionError = error instanceof Error ? error.message : 'Cleanup failed.';
 		} finally {
 			cleanupPending = false;
+			await tick();
+			actionStatusMessage?.focus();
 		}
 	}
 
@@ -802,6 +815,13 @@
 									class="confirm-panel"
 									role="alertdialog"
 									aria-label="Confirm original backup deletion"
+									tabindex="-1"
+									onkeydown={(event) => {
+										if (event.key === 'Escape' && !cleanupPending) {
+											event.preventDefault();
+											void cancelCleanupConfirmation(scope);
+										}
+									}}
 								>
 									<div>
 										<strong>{deleteConfirmCopy.title}</strong>
@@ -834,6 +854,13 @@
 									class="confirm-panel confirm-panel--review"
 									role="alertdialog"
 									aria-label="Confirm already-gone original backups"
+									tabindex="-1"
+									onkeydown={(event) => {
+										if (event.key === 'Escape' && !reviewPending) {
+											event.preventDefault();
+											void cancelReviewConfirmation();
+										}
+									}}
 								>
 									<div>
 										<strong>{markHandledConfirmCopy.title}</strong>
@@ -862,10 +889,20 @@
 							{/if}
 
 							{#if actionMessage}
-								<p class="action-message">{actionMessage}</p>
+								<p
+									class="action-message"
+									role="status"
+									aria-live="polite"
+									tabindex="-1"
+									bind:this={actionStatusMessage}
+								>
+									{actionMessage}
+								</p>
 							{/if}
 							{#if actionError}
-								<p class="action-error">{actionError}</p>
+								<p class="action-error" role="alert" tabindex="-1" bind:this={actionStatusMessage}>
+									{actionError}
+								</p>
 							{/if}
 							{#if lastCleanupResult}
 								<div class="result-strip">

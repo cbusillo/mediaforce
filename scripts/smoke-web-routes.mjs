@@ -1203,6 +1203,17 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
     });
+    let completedCleanupRequests = 0;
+    let completedReviewRequests = 0;
+    page.on("request", (request) => {
+      if (request.method() !== "POST") return;
+      if (request.url().includes("/api/completed/backups/clear")) {
+        completedCleanupRequests += 1;
+      }
+      if (request.url().includes("/api/completed/originals/confirm-removed")) {
+        completedReviewRequests += 1;
+      }
+    });
     await page.goto(`${baseUrl}/completed`, {
       waitUntil: "domcontentloaded",
       timeout: timeoutMs,
@@ -1239,20 +1250,39 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     await page
       .getByRole("button", { name: "Delete selected original backups" })
       .click();
-    await page.getByText("This cannot be undone.", { exact: true }).waitFor();
-    await page
+    const completedDeleteDialog = page.getByRole("alertdialog", {
+      name: "Confirm original backup deletion",
+    });
+    const selectedDeleteConfirm = completedDeleteDialog.getByRole("button", {
+      name: /Delete [\d,]+ original backups?/,
+    });
+    await selectedDeleteConfirm.waitFor();
+    if (
+      !(await selectedDeleteConfirm.evaluate(
+        (button) => button === document.activeElement,
+      ))
+    ) {
+      throw new Error("Finished delete confirmation did not receive focus.");
+    }
+    await completedDeleteDialog
+      .getByText("This cannot be undone.", { exact: true })
+      .waitFor();
+    await completedDeleteDialog
       .getByText("Your finished files are not touched.", { exact: false })
       .waitFor();
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await completedDeleteDialog.getByRole("button", { name: "Cancel" }).click();
 
     await page
       .getByRole("button", { name: "Delete all original backups" })
       .click();
-    await page
+    await completedDeleteDialog
       .getByText(/including folders hidden by your current filters/)
       .waitFor();
-    await page.getByText("This cannot be undone.", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await completedDeleteDialog
+      .getByText("This cannot be undone.", { exact: true })
+      .waitFor();
+    await page.keyboard.press("Escape");
+    await completedDeleteDialog.waitFor({ state: "hidden" });
 
     await page
       .getByLabel(/Select .* to mark already-gone original backups handled/)
@@ -1261,7 +1291,26 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     await page
       .getByRole("button", { name: "Mark backups already gone as handled" })
       .click();
-    await page.getByText("Nothing is deleted.", { exact: false }).waitFor();
+    const completedReviewDialog = page.getByRole("alertdialog", {
+      name: "Confirm already-gone original backups",
+    });
+    const markHandledConfirm = completedReviewDialog.getByRole("button", {
+      name: "Mark handled",
+      exact: true,
+    });
+    await markHandledConfirm.waitFor();
+    if (
+      !(await markHandledConfirm.evaluate(
+        (button) => button === document.activeElement,
+      ))
+    ) {
+      throw new Error(
+        "Finished mark-handled confirmation did not receive focus.",
+      );
+    }
+    await completedReviewDialog
+      .getByText("Nothing is deleted.", { exact: false })
+      .waitFor();
     if (
       await page.getByText("This cannot be undone.", { exact: true }).count()
     ) {
@@ -1269,7 +1318,12 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
         "Mark-handled confirmation incorrectly uses the delete warning.",
       );
     }
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await completedReviewDialog.getByRole("button", { name: "Cancel" }).click();
+    if (completedCleanupRequests !== 0 || completedReviewRequests !== 0) {
+      throw new Error(
+        "Finished cleanup confirmations sent a request before final confirmation.",
+      );
+    }
 
     await page.setViewportSize(NARROW_VIEWPORT);
     await page.reload({ waitUntil: "domcontentloaded", timeout: timeoutMs });

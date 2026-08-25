@@ -305,7 +305,7 @@ Disabled action titles and inline blockers should use this pattern:
 
 - `Start a sample before approving this folder.`
 - `Choose an available computer before sending.`
-- `Save the changed Cleanup folder before deleting original backups.`
+- `Save the changed Working folder before deleting original backups from its Cleanup folder.`
 - `Review evidence is not ready yet.`
 - `No retryable processing jobs are available.`
 
