@@ -588,7 +588,7 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
       timeout: timeoutMs,
     });
     const action = page.getByRole("button", {
-      name: "Process 1 older season",
+      name: "Compress 1 older season",
     });
     await action.waitFor({ state: "visible", timeout: timeoutMs });
     await action.click();
@@ -634,32 +634,33 @@ async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
       timeout: timeoutMs,
     });
     await page
-      .getByRole("heading", { name: /^Testing / })
+      .getByRole("heading", { name: /^Creating sample for / })
       .waitFor({ state: "visible", timeout: timeoutMs });
     const activeRoom = page.locator(".active-room");
     const activeText = (await activeRoom.textContent()) ?? "";
     for (const expectedText of [
-      "Configured goal",
       "Episode target",
-      "Test band",
       "Mediaforce found settings near",
       "Building comparison clips",
-      "2 of 3 comparison steps",
-      "Worker health",
-      "Based on 3 comparable completed tests",
+      "2 of 3 comparison clips built",
+      "Computer status",
+      "Based on 3 comparable completed samples",
     ]) {
       if (!activeText.includes(expectedText)) {
-        throw new Error(`Active test progress omitted: ${expectedText}`);
+        throw new Error(`Active sample progress omitted: ${expectedText}`);
       }
     }
     if (
-      activeText.includes("Your test is starting") ||
+      activeText.includes("Your sample is starting") ||
       activeText.includes("searching for settings") ||
       activeText.includes("Step progress") ||
+      activeText.includes("Configured goal") ||
+      activeText.includes("Test band") ||
+      activeText.includes("Worker health") ||
       activeText.includes("for the whole episode")
     ) {
       throw new Error(
-        "Active test progress retained stale or misleading copy.",
+        "Active sample progress retained stale or misleading copy.",
       );
     }
     const progressbar = activeRoom.getByRole("progressbar", {
@@ -670,11 +671,13 @@ async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
       (await progressbar.getAttribute("aria-valuemax")) !== "3"
     ) {
       throw new Error(
-        "Active test stage progress did not expose bounded work telemetry.",
+        "Active sample stage progress did not expose bounded work telemetry.",
       );
     }
     if (await page.locator(".quality-memory").isVisible()) {
-      throw new Error("Quality memory competed with the active test surface.");
+      throw new Error(
+        "Quality memory competed with the active sample surface.",
+      );
     }
     await page.setViewportSize({ width: 390, height: 844 });
     const narrowState = await page.evaluate(() => ({
@@ -866,6 +869,19 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
         `Comparison workspace did not expose expected controls: ${JSON.stringify(state)}`,
       );
     }
+    await workspace
+      .getByRole("group", { name: "Picture shown" })
+      .getByRole("button", { name: "Sample", exact: true })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    for (const expectedText of [
+      "Sample",
+      "Clip sizes only.",
+      "Estimated episode output:",
+    ]) {
+      if (!state.text.includes(expectedText)) {
+        throw new Error(`Comparison workspace omitted: ${expectedText}`);
+      }
+    }
     if (
       /\b(CRF|codec|bitrate|VMAF|XPSNR|synchroni[sz]ation)\b/i.test(state.text)
     ) {
@@ -977,7 +993,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
           "Next target: about",
           "Approach: keep shrinking only while picture and sound remain acceptable",
           "Same resolution and quality checks",
-          "Revision concerns will be cleared after the smaller test starts and are not sent with it",
+          "Revision concerns will be cleared after the smaller sample starts and are not sent with it",
         ]) {
           if (!smallerDialogText.includes(expectedText)) {
             throw new Error(

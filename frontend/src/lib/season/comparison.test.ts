@@ -106,7 +106,7 @@ describe('comparison workspace helpers', () => {
 
 			await expect(started).rejects.toMatchObject({ name: 'MediaStartError', side: 'new' });
 			expect(mediaStartFailureMessage('new')).toBe(
-				'The new clip could not be decoded in this browser.'
+				'The sample clip could not be decoded in this browser.'
 			);
 			expect(removeListener).toHaveBeenCalledTimes(2);
 			expect(vi.getTimerCount()).toBe(0);
