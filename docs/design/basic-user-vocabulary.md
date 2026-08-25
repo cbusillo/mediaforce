@@ -65,10 +65,11 @@ a computer`, `Needs sample`, `Safe to delete`.
 - Transcode root: use `Working folder` in the Settings storage section.
 - Archive cleanup: use `Delete original backup` or `Delete original backups`
   for Completed and Settings destructive actions. The final confirmation must
-  say `This cannot be undone`.
+  say `This cannot be undone` beside the final delete control.
 - Archive root: use `Cleanup folder` in Completed and Settings storage copy.
-- Cleanup: use `Delete`, `clear`, or `mark handled`, matching the user's actual
-  consequence.
+- Cleanup: use `Delete` for files that still exist and `Mark handled` when the
+  original backups are already gone. Mark-handled confirmation must say
+  `Nothing is deleted`.
 - Missing sample: use `Needs sample` in Queue and Folder Studio blockers.
 - Polling: use `Checking for updates` in loading and refresh states.
 - Scheduler: use `Work schedule` in Ops and Settings.
@@ -218,8 +219,12 @@ remain unchanged` while memory is observation-only.
   folder is eligible for deletion.
 - Cleanup folder missing: `Cleanup folder missing`. Mediaforce cannot verify or
   delete original backups.
+- Backup outside the Cleanup folder: `Check before deleting`. Mediaforce will
+  not delete original backups outside the configured Cleanup folder.
 - Folder state unknown: `Check before deleting`. The user should not remove
   originals until Mediaforce can verify scope.
+- Original backups already gone: `Backups already gone`. After checking the
+  finished files, the operator can `Mark handled`; nothing is deleted.
 - Cleanup already handled: `Nothing to delete`. No original backups are
   waiting in the cleanup folder.
 
@@ -265,7 +270,7 @@ remain unchanged` while memory is observation-only.
 - Activity may expose more technical detail, but first-level headings should
   still use `computers`, `sample queue`, `compression queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete original
-backups`, `selected backups`, `cleanup folder`, and `safe to delete`.
+backups`, `selected original backups`, `Cleanup folder`, and `ready to delete`.
   Its global headings and lists must remain media-neutral because movie, episode,
   season, and file rows can appear together.
 - Settings should split basic labels from advanced fields. `Working folder`,
@@ -285,6 +290,8 @@ Preferred labels:
 
 - `Delete selected original backups`
 - `Delete all original backups`
+- `Mark handled` for already-missing original backups; this is not destructive
+  and must say `Nothing is deleted`.
 - `Stop processing`
 - `Stop samples`
 - `Reset computer trust`
@@ -298,7 +305,7 @@ Disabled action titles and inline blockers should use this pattern:
 
 - `Start a sample before approving this folder.`
 - `Choose an available computer before sending.`
-- `Save the working folder before deleting originals.`
+- `Save the changed Cleanup folder before deleting original backups.`
 - `Review evidence is not ready yet.`
 - `No retryable processing jobs are available.`
 

@@ -44,7 +44,7 @@
 
 		async function loadSettings() {
 			const [settingsPayload, hostsPayload] = await Promise.all([
-				settle(fetchJson<SettingsPayload>('/api/settings?include_archive_cleanup=0')),
+				settle(fetchJson<SettingsPayload>('/api/settings')),
 				settle(fetchJson<HostsPayload>('/api/hosts?compact=1'))
 			]);
 			if (disposed) return;

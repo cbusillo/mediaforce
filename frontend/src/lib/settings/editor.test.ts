@@ -5,6 +5,7 @@ import {
 	applyLibraryTypeChange,
 	addLibraryDraft,
 	addScheduleDraft,
+	archiveCleanupBlockReason,
 	archiveCleanupTargetDirty,
 	buildArchiveCleanupClearPayload,
 	buildSettingsSavePayload,
@@ -334,6 +335,39 @@ describe('settings draft helpers', () => {
 
 		draft.transcode_root = '/Volumes/UnsavedTranscode';
 		expect(archiveCleanupTargetDirty(draft, payload)).toBe(true);
+	});
+
+	it('explains why original backups cannot be deleted', () => {
+		const readyPayload = {
+			...payload,
+			archive_cleanup: {
+				archive_root: '/Volumes/Transcode/_replaced',
+				file_count: 2,
+				total_size_bytes: 4096,
+				has_cleanup: true
+			}
+		};
+		const draft = draftFromSettings(readyPayload);
+
+		expect(archiveCleanupBlockReason(draft, readyPayload)).toBeNull();
+
+		draft.transcode_root = '/Volumes/UnsavedTranscode';
+		expect(archiveCleanupBlockReason(draft, readyPayload)).toBe(
+			'Save the changed Cleanup folder before deleting original backups.'
+		);
+
+		const emptyPayload = {
+			...readyPayload,
+			archive_cleanup: { ...readyPayload.archive_cleanup, has_cleanup: false, file_count: 0 }
+		};
+		expect(archiveCleanupBlockReason(draftFromSettings(emptyPayload), emptyPayload)).toBe(
+			'No original backups are waiting in the Cleanup folder.'
+		);
+
+		const unsetPayload = { ...emptyPayload, transcode_root: '' };
+		expect(archiveCleanupBlockReason(draftFromSettings(unsetPayload), unsetPayload)).toBe(
+			'Set a Cleanup folder before deleting original backups.'
+		);
 	});
 
 	it('toggles host library assignment without duplicating selected keys', () => {

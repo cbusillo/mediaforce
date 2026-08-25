@@ -2044,7 +2044,7 @@ class TuningRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["resolved_count"], 1)
-        self.assertIn("No files were deleted", result["message"])
+        self.assertIn("Nothing was deleted", result["message"])
         self.assertEqual(after["folders"][0]["cleanup_state"], "cleaned")
         self.assertEqual(after["folders"][0]["missing_backup_count"], 0)
         self.assertEqual(after["folders"][0]["originals_removed_count"], 1)
@@ -2378,7 +2378,7 @@ class TuningRuntimeTests(unittest.TestCase):
             "mediaforce.web.app.clear_completed_backups_action",
             return_value={
                 "ok": True,
-                "message": "No archived originals are waiting for cleanup.",
+                "message": "No original backups are waiting in the Cleanup folder.",
                 "removed_count": 0,
                 "removed_size_bytes": 0,
                 "removed_prefix_count": 0,
