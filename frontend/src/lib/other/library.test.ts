@@ -143,9 +143,6 @@ describe('Other workflow presentation', () => {
 	});
 
 	it('builds truthful singular and plural phase details', () => {
-		expect(otherWorkflowDetail(workflow('encode', { encode: 5 }), 2)).toBe(
-			'2 files are ready to compress.'
-		);
 		expect(otherWorkflowDetail(workflow('validate', { validate: 1 }), 3)).toBe(
 			'1 compressed file needs a final safety check.'
 		);
@@ -154,6 +151,15 @@ describe('Other workflow presentation', () => {
 		);
 		expect(otherWorkflowDetail(workflow('processing'), 1)).toBe(
 			'Mediaforce is compressing this file now.'
+		);
+	});
+
+	it('uses current-action membership rather than the encode lane total', () => {
+		expect(otherWorkflowDetail(workflow('encode', { encode: 5 }), 2)).toBe(
+			'2 files are ready to compress.'
+		);
+		expect(otherWorkflowDetail(workflow('encode', { encode: 5 }), 0, false)).toBe(
+			'Narrow the folder before Mediaforce can confirm which files are ready to compress.'
 		);
 	});
 
@@ -226,6 +232,12 @@ describe('Other scope presentation', () => {
 		);
 		expect(otherReadinessBlockerCopy('Processing cannot start for this work unit.')).toBe(
 			'Compression cannot start for this folder or file.'
+		);
+		expect(otherReadinessBlockerCopy('Bounded work units need processing.')).toBe(
+			'Folder selections need compression.'
+		);
+		expect(otherReadinessBlockerCopy('Use work units before processing.')).toBe(
+			'Use folders or files before compression.'
 		);
 	});
 });

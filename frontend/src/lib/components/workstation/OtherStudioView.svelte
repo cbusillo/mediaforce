@@ -131,7 +131,9 @@
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
 	const workflowLabel = $derived(otherWorkflowLabel(workflow, folderPending));
-	const workflowDetail = $derived(otherWorkflowDetail(workflow, actionFileCount));
+	const workflowDetail = $derived(
+		otherWorkflowDetail(workflow, actionFileCount, membershipComplete)
+	);
 	const decisionDetail = $derived.by(() => {
 		if (sampleWorkStatus === 'retry_backoff')
 			return 'The last attempt stopped. Mediaforce will retry this sample shortly.';

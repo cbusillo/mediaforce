@@ -118,11 +118,15 @@ export function otherWorkflowLabel(
 
 export function otherWorkflowDetail(
 	workflow: FolderWorkflowState | null | undefined,
-	itemCount: number
+	itemCount: number,
+	membershipComplete = true
 ): string {
 	const fallbackCount = Math.max(0, itemCount);
 	switch (workflow?.primary_lane) {
 		case 'encode':
+			if (!membershipComplete) {
+				return 'Narrow the folder before Mediaforce can confirm which files are ready to compress.';
+			}
 			return countedFileCopy(fallbackCount, '', 'is ready to compress', 'are ready to compress');
 		case 'validate':
 			return countedFileCopy(
