@@ -103,6 +103,13 @@ const OPS_STATUS_OVERRIDES: Readonly<Record<string, string>> = {
 	stopped: 'Retry available'
 };
 
+function replaceStandaloneOperatorNoun(value: string, from: string, to: string): string {
+	return value.replace(
+		new RegExp(`(^|[^A-Za-z0-9_/-])${from}(?=$|[^A-Za-z0-9_/-])`, 'gi'),
+		`$1${to}`
+	);
+}
+
 function activityComputerCopy(value: string, protectedTerms: readonly string[] = []): string {
 	const placeholders = [...new Set(protectedTerms.map((term) => term.trim()).filter(Boolean))]
 		.sort((left, right) => right.length - left.length)
@@ -115,11 +122,11 @@ function activityComputerCopy(value: string, protectedTerms: readonly string[] =
 		.replace(/\bhost windows\b/gi, 'computer work windows')
 		.replace(/\bhost window\b/gi, 'computer work window')
 		.replace(/\buse Bypass scheduler\b/gi, 'bypass the work schedule')
-		.replace(/\bBypass scheduler\b/gi, 'Bypass work schedule')
-		.replace(/\bworkers\b/gi, 'computers')
-		.replace(/\bworker\b/gi, 'computer')
-		.replace(/\bhosts\b/gi, 'computers')
-		.replace(/\bhost\b/gi, 'computer');
+		.replace(/\bBypass scheduler\b/gi, 'Bypass work schedule');
+	copy = replaceStandaloneOperatorNoun(copy, 'workers', 'computers');
+	copy = replaceStandaloneOperatorNoun(copy, 'worker', 'computer');
+	copy = replaceStandaloneOperatorNoun(copy, 'hosts', 'computers');
+	copy = replaceStandaloneOperatorNoun(copy, 'host', 'computer');
 	for (const { term, token } of placeholders) copy = copy.replaceAll(token, term);
 	return copy;
 }
@@ -150,9 +157,11 @@ export function activityScheduleDetailCopy(
 ): string {
 	const detail = compactText(value);
 	const waitingSummary = detail.match(/^waiting for (runs .+)$/i)?.[1];
-	const copy = waitingSummary
-		? `Waiting for ${workScheduleSummaryCopy(waitingSummary).replace(/^Work runs /, 'work ')}`
-		: workScheduleSummaryCopy(detail);
+	const copy = /^waiting for never runs$/i.test(detail)
+		? 'Work schedule is off'
+		: waitingSummary
+			? `Waiting for ${workScheduleSummaryCopy(waitingSummary).replace(/^Work runs /, 'work ')}`
+			: workScheduleSummaryCopy(detail);
 	return activityComputerCopy(copy, protectedTerms);
 }
 
@@ -1093,7 +1102,7 @@ export function buildOpsReadinessSummary(
 			tone: 'wait',
 			title: 'Waiting for media storage',
 			detail:
-				storageWaitingJobs[0].scheduler_status_copy ??
+				activityScheduleDetailCopy(storageWaitingJobs[0].scheduler_status_copy) ||
 				'Mount the media storage on this computer to continue.',
 			metricLabel: 'Waiting',
 			metricValue: String(storageWaitingJobs.length)
@@ -1346,6 +1355,6 @@ export function hostStateCopy(
 	);
 	if (schedule) return schedule.label;
 	if (host.active_encode_count > 0) return 'Working';
-	if (host.queue_active === false) return 'Not accepting work';
+	if (host.queue_active === false) return 'Idle';
 	return 'Ready';
 }

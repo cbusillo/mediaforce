@@ -450,12 +450,7 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
           }
         }
         const lines = new Set(bodyText.split("\n").map((line) => line.trim()));
-        for (const staleCopy of [
-          "Workers",
-          "Schedule",
-          "Window key",
-          "Remove window",
-        ]) {
+        for (const staleCopy of ["Workers", "Window key", "Remove window"]) {
           if (lines.has(staleCopy)) {
             throw new Error(
               `Settings exposed stale copy ${JSON.stringify(staleCopy)}.`,

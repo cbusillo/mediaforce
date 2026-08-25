@@ -261,6 +261,10 @@ describe('Ops workstation mapping', () => {
 		expect(
 			activityScheduleDetailCopy('waiting for runs weekdays between 20:00 and 06:00 (host local)')
 		).toBe('Waiting for work weekdays between 20:00 and 06:00 (computer local time)');
+		expect(activityScheduleDetailCopy('waiting for never runs')).toBe('Work schedule is off');
+		expect(
+			activityScheduleDetailCopy('Mediaforce cannot access /Volumes/worker-staging on host-nuc.')
+		).toBe('Mediaforce cannot access /Volumes/worker-staging on host-nuc.');
 		expect(
 			activitySchedulePresentationCopy(
 				{
@@ -1147,6 +1151,9 @@ describe('Ops workstation mapping', () => {
 		expect(hostTone(unavailable)).toBe('fail');
 		expect(hostTone(unavailable, true)).toBe('wait');
 		expect(hostStateCopy(unavailable)).toBe('Unavailable');
+		expect(
+			hostStateCopy({ ...ready, capabilities: [], active_encode_count: 0, queue_active: false })
+		).toBe('Idle');
 	});
 
 	it('treats storage-recoverable computers as reconnecting capacity', () => {
