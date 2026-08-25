@@ -28,6 +28,7 @@
 		calibrationStageLabel,
 		calibrationTargetModeLabel,
 		calibrationWorkLabel,
+		calibrationWorkProgress,
 		compareRiskSummary,
 		currentOperatorIntent,
 		detailSeasonState,
@@ -42,7 +43,6 @@
 		isSeriesPrefix,
 		measuredFollowupRequest,
 		normalizeReviewPairs,
-		normalizedSizePaceBytes,
 		overlappingCalibrationActivity,
 		plainFailureMessage,
 		predictedEpisodeSize,
@@ -205,14 +205,14 @@
 	const scopeNoun = $derived(isSeriesScope ? 'show' : isExactItemScope ? 'episode' : 'season');
 	const makeActionLabel = $derived(
 		isSeriesScope
-			? `Make ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
+			? `Compress ${eligibleEpisodeCount} eligible ${eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}`
 			: isExactItemScope
 				? 'Compress this episode'
 				: heldEpisodeCount > 0
 					? canOverrideLifecycleHolds
-						? 'Override hold and make the season'
+						? 'Override hold and compress the season'
 						: 'Season remains protected'
-					: 'Make the season'
+					: 'Compress the season'
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
@@ -283,14 +283,6 @@
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
 	const sizeTarget = $derived(folderSizeTargetAnalysis(folder));
 	const targetSummary = $derived(resolvedTargetSummary(folder));
-	const normalizedPaceBytes = $derived(
-		targetSummary?.mode === 'normalized'
-			? normalizedSizePaceBytes(
-					targetSummary.referenceSizeBytes,
-					targetSummary.referenceRuntimeMinutes
-				)
-			: 0
-	);
 	const targetConstraint = $derived(targetConstraintSummary(folder, status));
 	const targetProvenance = $derived(targetProvenanceSummary(folder.target_size_provenance));
 	const technicalVideo = $derived(technicalVideoPolicy(folder));
@@ -412,6 +404,7 @@
 		asNumber(asRecord(activeSampleProgress.work).completed)
 	);
 	const activeSampleWorkTotal = $derived(asNumber(asRecord(activeSampleProgress.work).total));
+	const activeSampleWorkProgress = $derived(calibrationWorkProgress(exactCalibrationJob));
 	const activeSampleWorkPercent = $derived(
 		activeSampleWorkTotal > 0
 			? Math.min(100, Math.max(0, (activeSampleWorkCompleted / activeSampleWorkTotal) * 100))
@@ -423,35 +416,11 @@
 			activeSampleStageKey
 		)
 	);
-	const activeSampleReferenceSizeBytes = $derived(
-		targetSummary?.referenceSizeBytes ||
-			(exactTargetContract?.mode === 'normalized' ? exactTargetContract.target_size_bytes : 0)
-	);
-	const activeSampleReferenceRuntimeMinutes = $derived(
-		targetSummary?.referenceRuntimeMinutes || exactTargetContract?.target_runtime_minutes || 0
-	);
-	const activeSampleConfiguredGoalLabel = $derived(
-		targetSummary?.mode === 'normalized' &&
-			activeSampleReferenceSizeBytes > 0 &&
-			activeSampleReferenceRuntimeMinutes > 0
-			? `${formatDecimalFileSize(activeSampleReferenceSizeBytes)} / ${Math.round(activeSampleReferenceRuntimeMinutes)} min`
-			: targetSummary?.targetBytes
-				? formatDecimalFileSize(targetSummary.targetBytes)
-				: sizeTargetLabel
-	);
-	const activeSampleConfiguredGoalDetail = $derived(
-		targetSummary?.mode === 'normalized' ? 'Runtime-normalized' : 'Per episode'
-	);
 	const activeSampleEpisodeTargetLabel = $derived(
 		targetSummary?.targetBytes ? formatDecimalFileSize(targetSummary.targetBytes) : sizeTargetLabel
 	);
 	const activeSampleRuntimeLabel = $derived(
 		targetSummary?.itemRuntimeSeconds ? formatDuration(targetSummary.itemRuntimeSeconds) : ''
-	);
-	const activeSampleBandLabel = $derived(
-		targetSummary
-			? `${formatDecimalFileSize(targetSummary.sampleLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}`
-			: 'Still resolving'
 	);
 	const finishedEpisodeCount = $derived(
 		asNumber(folder.summary?.statuses.encoded) +
@@ -484,7 +453,9 @@
 			!recoveryNeedsFreshGoal
 	);
 	const pageIsCinematic = $derived(
-		['making_test', 'ready_to_compare', 'making_season'].includes(humanState.key) && !retryMode
+		['sample_waiting', 'making_test', 'ready_to_compare', 'making_season'].includes(
+			humanState.key
+		) && !retryMode
 	);
 	const actionElapsed = $derived(elapsedCopy(actionStartedAt ? clock - actionStartedAt : 0));
 	const backendElapsed = $derived(
@@ -664,11 +635,12 @@
 
 	async function makeTest() {
 		if (!selectedGoal || !goalSelectionConfirmed) {
-			actionError = 'Choose how this legacy size should behave before making a test.';
+			actionError = 'Choose how this legacy size should behave before creating the sample.';
 			return;
 		}
 		if (!selectedOperatorIntent || !compressionIntentConfirmed) {
-			actionError = 'Choose how Mediaforce should balance size and quality before making a test.';
+			actionError =
+				'Choose how Mediaforce should balance size and quality before creating the sample.';
 			return;
 		}
 		await startTest(
@@ -687,7 +659,7 @@
 			: testRequestWithInstructions(baseRequest, operatorInstructions);
 		if (!note) {
 			actionError =
-				'The previous test did not preserve its requested size. Choose a size and try again.';
+				'The previous sample did not preserve its requested size. Choose a size and try again.';
 			return;
 		}
 		const operatorIntent = hasReviewFeedback
@@ -698,7 +670,8 @@
 
 	async function submitReviewFeedback() {
 		if (!hasReviewFeedback) {
-			actionError = 'Choose a concern or describe what should change before making a revised test.';
+			actionError =
+				'Choose a concern or describe what should change before creating a revised sample.';
 			return;
 		}
 		if (!revisionPaneForced && revisionMode === 'roomier') {
@@ -732,19 +705,19 @@
 					host_key: selectedHostKey,
 					operator_intent: operatorIntent
 				}),
-				'We couldn’t prepare the test.'
+				'We couldn’t prepare the sample.'
 			);
 			const proposal = asRecord(preview.proposal);
 			const proposalId = asText(proposal.proposal_id);
 			if (!proposalId || proposal.can_queue === false) {
-				throw new Error(preview.message || 'The test plan needs attention before it can start.');
+				throw new Error(preview.message || 'The sample plan needs attention before it can start.');
 			}
 			actionPhase = 'starting';
 			ensureOk(
 				await postJson<ActionResponse>(endpoint('ai-tune/confirm'), {
 					proposal_id: proposalId
 				}),
-				'We prepared the test but couldn’t start it.'
+				'We prepared the sample but couldn’t start it.'
 			);
 			retryMode = false;
 			revisionPaneOpen = false;
@@ -752,11 +725,11 @@
 			selectedConcerns = [];
 			reviewFeedback = '';
 			operatorInstructions = '';
-			actionMessage = 'Your test is starting.';
+			actionMessage = 'Your sample is starting.';
 			await onMutate();
 			succeeded = true;
 		} catch (error) {
-			actionError = humanActionError(error, 'We couldn’t start the test.');
+			actionError = humanActionError(error, 'We couldn’t start the sample.');
 		} finally {
 			actionPhase = 'idle';
 			if (succeeded) await focusCurrentHeading();
@@ -764,10 +737,10 @@
 	}
 
 	async function retryTest() {
-		await runAction('recovering', 'We couldn’t restart the test.', async () => {
+		await runAction('recovering', 'We couldn’t restart the sample.', async () => {
 			ensureOk(
 				await postJson<ActionResponse>(endpoint('ai-tune/confirm'), { proposal_id: '' }),
-				'We couldn’t restart the saved test.'
+				'We couldn’t restart the saved sample.'
 			);
 		});
 	}
@@ -800,13 +773,13 @@
 					kind: 'approval',
 					title: guard.title,
 					detail: guard.detail,
-					primaryLabel: 'Keep this test',
+					primaryLabel: 'Keep this sample',
 					confirmHighImpact: guard.confirmHighImpact,
 					confirmSizeTradeoff: guard.confirmSizeTradeoff,
 					changes: guard.kind === 'high_impact' ? approvalChanges() : []
 				});
 			} else {
-				actionError = humanActionError(error, 'We couldn’t accept the test.');
+				actionError = humanActionError(error, 'We couldn’t accept the sample.');
 			}
 		} finally {
 			actionPhase = 'idle';
@@ -818,7 +791,7 @@
 		await runAction('queueing', `We couldn’t start the ${scopeNoun}.`, async () => {
 			ensureOk(
 				await postJson<ActionResponse>(endpoint('queue-encode'), {
-					notes: 'Approved after comparing the representative test.',
+					notes: 'Approved after comparing the representative sample.',
 					bypass_schedule: false,
 					override_policy_holds: overridePolicyHolds
 				}),
@@ -981,8 +954,8 @@
 					? 'This episode needs a small adjustment.'
 					: 'The unfinished episodes need a small adjustment.',
 				detail: isExactItemScope
-					? 'Mediaforce found a measured setting that should let it finish. The result may not match the approved test exactly; nothing in your library has changed.'
-					: 'Mediaforce found a measured setting that should let them finish. Those episodes may not match the approved test exactly; episodes already made will not change.',
+					? 'Mediaforce found a measured setting that should let it finish. The result may not match the approved sample exactly; nothing in your library has changed.'
+					: 'Mediaforce found a measured setting that should let them finish. Those episodes may not match the approved sample exactly; episodes already compressed will not change.',
 				primaryLabel: 'Adjust and retry'
 			});
 			return;
@@ -1154,23 +1127,19 @@
 	function phaseCopy(phase: ActionPhase): { title: string; detail: string } {
 		const copy: Record<Exclude<ActionPhase, 'idle'>, { title: string; detail: string }> = {
 			planning: {
-				title: 'Preparing your test',
+				title: 'Preparing your sample',
 				detail: 'Choosing settings for your size goal. This first step can take a few minutes.'
 			},
 			starting: {
-				title: 'Starting your test',
+				title: 'Starting your sample',
 				detail: `Sending one representative episode to ${selectedHost?.label || 'an available computer'}.`
 			},
 			approving: {
 				title: 'Saving your decision',
-				detail: `Recording the test you chose and checking whether the ${scopeNoun} can start.`
+				detail: `Recording the sample you chose and checking whether compression can start.`
 			},
 			queueing: {
-				title: isSeriesScope
-					? 'Starting selected seasons'
-					: isExactItemScope
-						? 'Starting the episode'
-						: 'Starting the season',
+				title: 'Starting compression',
 				detail: isExactItemScope
 					? 'Preparing this episode and finding an available computer.'
 					: 'Preparing the remaining episodes and finding available computers.'
@@ -1182,14 +1151,12 @@
 					: 'Confirming that each new file opens, plays, and matches the original length.'
 			},
 			finishing: {
-				title: isSeriesScope
-					? 'Putting the show in place'
-					: isExactItemScope
-						? 'Putting the episode in place'
-						: 'Putting the season in place',
+				title: isExactItemScope
+					? 'Replacing the original episode'
+					: 'Replacing the original episodes',
 				detail: isExactItemScope
-					? 'Moving the original to the backup area and placing the checked smaller file in your library.'
-					: 'Moving the originals to the backup area and placing the checked smaller files in your library.'
+					? 'Moving the original to the cleanup folder and placing the checked smaller file in your library.'
+					: 'Moving the originals to the cleanup folder and placing the checked smaller files in your library.'
 			},
 			recovering: {
 				title: 'Trying again',
@@ -1247,7 +1214,7 @@
 		await openSafetyDialog({
 			kind: 'approval',
 			title: `Accept ${formatDecimalFileSize(expectedEpisodeBytes)} per episode instead of ${sizeTargetLabel}?`,
-			detail: `This saves the tested settings as the ${scopeNoun} profile. Production remains separate until you choose ${makeActionLabel}. It does not change this result to ${sizeTargetLabel} per episode.`,
+			detail: `This saves the sample settings as the ${scopeNoun} profile. Production remains separate until you choose ${makeActionLabel}. It does not change this result to ${sizeTargetLabel} per episode.`,
 			primaryLabel: 'Accept this result',
 			confirmSizeTradeoff: true,
 			changes: [
@@ -1292,7 +1259,7 @@
 			actionError = '';
 			actionMessage =
 				direction === 'smaller'
-					? 'A guided smaller target is not available for this test. Choose another size instead.'
+					? 'A guided smaller target is not available for this sample. Choose another size instead.'
 					: 'A larger guided target is not available. Choose another size instead.';
 			actionMessageTone = 'neutral';
 			await chooseDifferentSize();
@@ -1303,11 +1270,11 @@
 		const roomier = direction === 'higher_quality';
 		await openSafetyDialog({
 			kind: 'review_adjustment',
-			title: roomier ? 'Allow a larger file for the next test?' : 'Try a smaller version?',
+			title: roomier ? 'Allow a larger file for the next sample?' : 'Try a smaller version?',
 			detail: roomier
-				? `Mediaforce will make one test targeting about ${target} instead of about ${sizeTargetLabel}. The episode will be larger, with more room for picture quality. Resolution and quality checks stay the same. Nothing will be replaced.`
-				: `Mediaforce will create one smaller test targeting about ${target} for this ${scopeNoun}. It keeps the same resolution and quality checks. Nothing will be replaced.`,
-			primaryLabel: roomier ? 'Make the larger-file test' : 'Make the smaller test',
+				? `Mediaforce will create one sample targeting about ${target} instead of about ${sizeTargetLabel}. The episode will be larger, with more room for picture quality. Resolution and quality checks stay the same. Nothing will be replaced.`
+				: `Mediaforce will create one smaller sample targeting about ${target} for this ${scopeNoun}. It keeps the same resolution and quality checks. Nothing will be replaced.`,
+			primaryLabel: roomier ? 'Create the larger-file sample' : 'Create the smaller sample',
 			changes: roomier
 				? [
 						`Reviewed target: about ${sizeTargetLabel}`,
@@ -1316,17 +1283,17 @@
 						'Same resolution and quality checks'
 					]
 				: [
-						...(expectedEpisodeBytes > 0 ? [`Current test: about ${current}`] : []),
+						...(expectedEpisodeBytes > 0 ? [`Current sample: about ${current}`] : []),
 						`Next target: about ${target}`,
 						'Approach: keep shrinking only while picture and sound remain acceptable',
 						'Same resolution and quality checks',
 						...(hasReviewFeedback
 							? [
-									'Revision concerns will be cleared after the smaller test starts and are not sent with it'
+									'Revision concerns will be cleared after the smaller sample starts and are not sent with it'
 								]
 							: []),
 						...(operatorInstructions.trim()
-							? ['Other priorities are included with the smaller test']
+							? ['Other priorities are included with the smaller sample']
 							: [])
 					],
 			adjustment,
@@ -1543,7 +1510,7 @@
 									: 'A season sample is running'}
 					</h1>
 					<p class="lede">
-						{scopeActivityOwnerTitle} owns this shared test. {scopeName} has no separate sample running,
+						{scopeActivityOwnerTitle} owns this shared sample. {scopeName} has no separate sample running,
 						so its saved settings are not being used for this work.
 					</p>
 				</div>
@@ -1572,7 +1539,7 @@
 				</div>
 				<div class="scope-activity-actions">
 					<a class="primary-button" href={scopeActivityHref}
-						>Open {scopeActivityOwnerKind} test
+						>Open {scopeActivityOwnerKind} sample
 						<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 					</a>
 					<a class="secondary-button" href={resolve('/ops')}>Open Activity</a>
@@ -1598,16 +1565,16 @@
 							{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'} ·
 							{formatDecimalFileSize(olderSeasonOverride.current_size_bytes)} now.
 							{olderSeasonOverride.latest_season_label || 'The latest season'} stays original. You will
-							compare one representative test before Mediaforce makes the selected older seasons.
+							compare one representative sample before Mediaforce compresses the selected older seasons.
 							{#if cadenceExcludedEpisodeCount > 0}
 								{cadenceExcludedEpisodeCount} episodes without motion-pattern clearance stay original.
 							{/if}
 						{:else if isExactItemScope}
-							1 episode · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one test before
-							Mediaforce makes this episode.
+							1 episode · {formatDecimalFileSize(originalSeasonSize)} now. You will compare one sample
+							before Mediaforce compresses this episode.
 						{:else}
 							{episodeCount} episodes · {formatDecimalFileSize(originalSeasonSize)} now. You will compare
-							one representative test before Mediaforce makes the rest.
+							one representative sample before Mediaforce compresses the rest.
 						{/if}
 					</p>
 				</div>
@@ -1646,16 +1613,20 @@
 				<div class="compression-intent">
 					<div class="compression-intent__heading" aria-live="polite" aria-atomic="true">
 						<div>
-							<span>Compression goal</span>
+							<span>Quality preference</span>
 							<strong>{selectedCompressionIntent?.title ?? 'Choose a goal'}</strong>
 						</div>
 						<p>
 							{selectedCompressionIntent?.detail ??
 								folder.resolved_operator_intent?.compression_intent?.detail ??
-								'Choose a compression goal before Mediaforce can make a test.'}
+								'Choose a quality preference before Mediaforce can create a sample.'}
 						</p>
 					</div>
-					<div class="compression-intent__options" role="radiogroup" aria-label="Compression goal">
+					<div
+						class="compression-intent__options"
+						role="radiogroup"
+						aria-label="Quality preference"
+					>
 						{#each compressionIntentOptions as option, intentIndex (option.key)}
 							<button
 								bind:this={compressionIntentButtons[intentIndex]}
@@ -1675,7 +1646,9 @@
 							</button>
 						{/each}
 					</div>
-					<small>Saved when you make the test so retries keep the same compression goal.</small>
+					<small
+						>Saved when you create the sample so retries keep the same quality preference.</small
+					>
 				</div>
 
 				{#if selectedGoal}
@@ -1685,7 +1658,7 @@
 							<strong>{formatDecimalFileSize(selectedGoal.targetSizeBytes)}</strong>
 						</div>
 						<div>
-							<span>Representative test band</span>
+							<span>Sample band</span>
 							<strong
 								>{formatDecimalFileSize(selectedGoalSampleLower)}–{formatDecimalFileSize(
 									selectedGoalSampleUpper
@@ -1752,13 +1725,14 @@
 								<path d="m9.2 12 1.8 1.8 3.8-4.1" />
 							</svg>
 							<p>
-								<strong>One test first.</strong> The test creates short review clips. It does not replace
-								any episode.
+								<strong>One sample first.</strong> The sample creates short comparison clips. It does
+								not change any episode file.
 							</p>
 						</div>
 						{#if noAvailableHosts}
 							<p class="host-unavailable" role="status">
-								No computers are available right now. Open Details to see what needs attention.
+								No computers are available right now. Open Technical details to see what needs
+								attention.
 							</p>
 						{:else if requiresExplicitGoalSelection && !goalSelectionConfirmed}
 							<p class="host-unavailable" role="status">
@@ -1766,19 +1740,19 @@
 							</p>
 						{:else if !compressionIntentConfirmed}
 							<p class="host-unavailable" role="status">
-								Choose a compression goal before making the test.
+								Choose a quality preference before creating the sample.
 							</p>
 						{/if}
 					</div>
 					<div class="goal-action__button">
 						<span class="mobile-safety">
 							{noAvailableHosts
-								? 'No computers available · Open Details'
+								? 'No computers available · Open Technical details'
 								: requiresExplicitGoalSelection && !goalSelectionConfirmed
 									? 'Choose one size behavior first'
 									: !compressionIntentConfirmed
-										? 'Choose a compression goal first'
-										: 'One short test · Nothing is replaced'}
+										? 'Choose a quality preference first'
+										: 'Short comparison clips · No episode is changed'}
 						</span>
 						<button
 							class="primary-button"
@@ -1789,11 +1763,39 @@
 								!goalSelectionConfirmed ||
 								!compressionIntentConfirmed}
 						>
-							Make a test
+							Create sample
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 						</button>
 					</div>
 				</div>
+			</section>
+		{:else if humanState.key === 'sample_waiting'}
+			<section class="active-room active-room--waiting">
+				<div class="active-status">
+					<span>{sampleEpisode || scopeTitle}</span>
+					<strong>Sample waiting</strong>
+					<span>{activeSampleWorker}</span>
+					<span>{backendElapsed} waiting</span>
+					<span>{activeSampleUpdated}</span>
+				</div>
+				<div class="active-copy">
+					<h1>Sample waiting for {sampleEpisode || scopeTitle}</h1>
+					<p class="lede">
+						This sample has not started yet. It is waiting for an available computer. Nothing has
+						been compressed and nothing in your library is changed.
+					</p>
+					<div class="active-facts">
+						<div>
+							<span>Episode target</span><strong>{activeSampleEpisodeTargetLabel}</strong>
+						</div>
+						<div><span>Computer</span><strong>{activeSampleWorker}</strong></div>
+						<div><span>Waiting since</span><strong>{backendElapsed}</strong></div>
+					</div>
+				</div>
+				<p class="active-note">
+					Nothing starts until a computer picks this sample up. You can leave this page open or
+					close it.
+				</p>
 			</section>
 		{:else if humanState.key === 'making_test'}
 			<section class="active-room">
@@ -1806,33 +1808,22 @@
 					{#if heldEpisodeCount > 0}<span>Current-season hold remains in place</span>{/if}
 				</div>
 				<div class="active-copy">
-					<h1>Testing {sampleEpisode || scopeTitle}</h1>
+					<h1>Creating sample for {sampleEpisode || scopeTitle}</h1>
 					<p class="lede">
 						{#if activeSampleBuildingComparison}
-							Mediaforce found settings near {activeSampleEpisodeTargetLabel} and is building the comparison
+							Mediaforce found settings near {activeSampleEpisodeTargetLabel} and is building comparison
 							clips.
 						{:else}
-							Mediaforce is testing settings that land this episode near
+							This episode is being compressed into comparison clips. Mediaforce is finding settings
+							near
 							{activeSampleEpisodeTargetLabel} while keeping picture and sound acceptable.
 						{/if}
 						Nothing in your library is replaced.
 					</p>
 					<div class="active-facts">
 						<div>
-							<span>Configured goal</span><strong>{activeSampleConfiguredGoalLabel}</strong>
-							<small>{activeSampleConfiguredGoalDetail}</small>
-						</div>
-						<div>
 							<span>Episode target</span><strong>{activeSampleEpisodeTargetLabel}</strong>
 							{#if activeSampleRuntimeLabel}<small>{activeSampleRuntimeLabel} runtime</small>{/if}
-						</div>
-						<div>
-							<span>Test band</span><strong>{activeSampleBandLabel}</strong>
-							<small
-								>{targetSummary
-									? `±${targetSummary.sampleTolerancePercent}% while testing`
-									: 'Waiting for the resolved test band'}</small
-							>
 						</div>
 					</div>
 				</div>
@@ -1845,7 +1836,7 @@
 						{#if activeSampleStageElapsed}<strong>{activeSampleStageElapsed} in this step</strong
 							>{/if}
 					</header>
-					{#if activeSampleWorkTotal > 0}
+					{#if activeSampleWorkProgress.determinate && activeSampleWorkTotal > 0}
 						<div class="active-progress__work">
 							<div
 								class="active-progress__track"
@@ -1857,8 +1848,10 @@
 							>
 								<i style={`width: ${activeSampleWorkPercent}%`}></i>
 							</div>
-							<strong>{activeSampleWork}</strong>
+							<strong>{activeSampleWorkProgress.label}</strong>
 						</div>
+					{:else if activeSampleWorkProgress.label}
+						<p class="active-progress__status">{activeSampleWorkProgress.label}</p>
 					{/if}
 					<div class="active-progress__facts">
 						<div>
@@ -1867,7 +1860,7 @@
 							<small>{activeSampleEta.detail}</small>
 						</div>
 						<div class:telemetry-attention={activeSampleEta.tone === 'attention'}>
-							<span>Worker health</span>
+							<span>Computer status</span>
 							<strong>{activeSampleLiveness}</strong>
 							<small>{activeSampleWorker} · {activeSampleUpdated}</small>
 						</div>
@@ -1883,11 +1876,13 @@
 					<span
 						class:done={activeSampleBuildingComparison}
 						class:active={!activeSampleBuildingComparison}
-						><i>{activeSampleBuildingComparison ? '✓' : ''}</i> Test settings</span
+						><i>{activeSampleBuildingComparison ? '✓' : ''}</i> Find settings</span
 					>
-					<span class:active={activeSampleBuildingComparison}><i></i> Build comparison</span>
+					<span class:active={activeSampleBuildingComparison}><i></i> Build comparison clips</span>
 				</div>
-				<p class="active-note">The test builds short review clips only. No episode is replaced.</p>
+				<p class="active-note">
+					The sample builds short comparison clips only. No episode file is changed.
+				</p>
 			</section>
 		{:else if humanState.key === 'ready_to_compare'}
 			<section class="compare-room">
@@ -1898,51 +1893,29 @@
 								? 'Target needs a change'
 								: sizeTargetMissed
 									? 'Size goal not met'
-									: 'Looks good'}
+									: 'Ready to review'}
 						</p>
 						<h1>{targetConstraint ? targetConstraint.title : `Review ${reviewSubject}`}</h1>
 						<p>{sampleEpisode} · Compare the same moment on both sides.</p>
 					</div>
 				</div>
 
-				{#if targetSummary}
-					<section class="review-contract" aria-label="Resolved review size contract">
-						<header>
-							<span>Review contract</span>
-							<small>
-								{targetSummary.mode === 'normalized' && targetSummary.referenceRuntimeMinutes > 0
-									? `Configured as ${formatDecimalFileSize(targetSummary.referenceSizeBytes)} / ${targetSummary.referenceRuntimeMinutes} min`
-									: 'Configured as a fixed episode target'}
-							</small>
-						</header>
-						<dl>
-							<div>
-								<dt>Runtime</dt>
-								<dd>{formatDuration(targetSummary.itemRuntimeSeconds) || 'Not reported'}</dd>
-							</div>
-							<div>
-								<dt>Size pace</dt>
-								<dd>
-									{normalizedPaceBytes
-										? `${formatDecimalFileSize(normalizedPaceBytes)} / 30 min`
-										: 'Per episode'}
-								</dd>
-							</div>
-							<div>
-								<dt>Episode target</dt>
-								<dd>{formatDecimalFileSize(targetSummary.targetBytes)}</dd>
-							</div>
-							<div>
-								<dt>Final band</dt>
-								<dd>
-									{formatDecimalFileSize(
-										targetSummary.finalLowerBoundBytes
-									)}–{formatDecimalFileSize(targetSummary.finalUpperBoundBytes)}
-								</dd>
-							</div>
-						</dl>
-					</section>
-				{/if}
+				<section class="review-contract" aria-label="Episode size comparison">
+					<dl>
+						<div>
+							<dt>Estimated episode output</dt>
+							<dd>
+								{expectedEpisodeBytes
+									? formatDecimalFileSize(expectedEpisodeBytes)
+									: 'No usable estimate'}
+							</dd>
+						</div>
+						<div>
+							<dt>Episode target</dt>
+							<dd>{sizeTargetLabel}</dd>
+						</div>
+					</dl>
+				</section>
 
 				{#if targetConstraint}
 					<div class="target-warning target-warning--constraint" role="status">
@@ -1961,23 +1934,23 @@
 						<div>
 							<span>Requested size</span>
 							<strong
-								>This test estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, not
+								>This sample estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, not
 								{formatDecimalFileSize(sizeTarget.budgetBytes)}.</strong
 							>
 						</div>
 						<p>
 							{crfLimitReached
-								? 'The test reached its smallest practical setting before it reached your size goal.'
+								? 'The sample reached its smallest practical setting before it reached your size goal.'
 								: 'The measured result stayed above your size goal.'}
-							Review this as a {reviewSubject} checkpoint, then make a smaller test.
+							Review this as a {reviewSubject} checkpoint, then create a smaller sample.
 						</p>
 					</div>
 				{:else if underTargetIsAcceptable}
 					<div class="target-warning target-warning--acceptable" role="status">
 						<div>
-							<span>Compression goal</span>
+							<span>Quality preference</span>
 							<strong
-								>This test estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, below
+								>This sample estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, below
 								your {formatDecimalFileSize(sizeTarget.budgetBytes)} goal.</strong
 							>
 						</div>
@@ -1990,20 +1963,20 @@
 						<div>
 							<span>Requested size</span>
 							<strong
-								>This test estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, below
+								>This sample estimates {formatDecimalFileSize(expectedEpisodeBytes)} per episode, below
 								your
 								{formatDecimalFileSize(sizeTarget.budgetBytes)} goal.</strong
 							>
 						</div>
-						<p>Make another test that spends the unused size on {reviewSubject} quality.</p>
+						<p>Create another sample that spends the unused size on {reviewSubject} quality.</p>
 					</div>
 				{:else if sizeTarget.status === 'missing_prediction'}
 					<div class="target-warning" role="status">
 						<div>
 							<span>Size estimate missing</span>
-							<strong>This test cannot be compared with your requested size yet.</strong>
+							<strong>This sample cannot be compared with your requested size yet.</strong>
 						</div>
-						<p>Make the test again before approving a season-wide result.</p>
+						<p>Create the sample again before approving a season-wide result.</p>
 					</div>
 				{/if}
 
@@ -2013,20 +1986,25 @@
 						selectedMoment={displayedMoment}
 						{audioChoice}
 						episodeLabel={sampleEpisode}
-						originalSizeLabel={`${formatDecimalFileSize(asNumber(sampleItem.source_size_bytes))} per episode`}
-						newSizeLabel={expectedEpisodeBytes
-							? `about ${formatDecimalFileSize(expectedEpisodeBytes)} per episode`
-							: 'test version'}
-						canMakeSoundTest={sampleHasAudio}
-						soundTestDisabled={actionPhase !== 'idle' || noAvailableHosts}
+						originalClipLabel={actualSampleSizes.original
+							? `${formatDecimalFileSize(actualSampleSizes.original)} clip`
+							: 'Clip size unavailable'}
+						sampleClipLabel={actualSampleSizes.smaller
+							? `${formatDecimalFileSize(actualSampleSizes.smaller)} clip`
+							: 'Clip size unavailable'}
+						episodeEstimateLabel={expectedEpisodeBytes
+							? `about ${formatDecimalFileSize(expectedEpisodeBytes)}`
+							: ''}
+						canCreateSoundSample={sampleHasAudio}
+						soundSampleDisabled={actionPhase !== 'idle' || noAvailableHosts}
 						onMomentChange={chooseMoment}
 						onAudioChange={(side) => (audioChoice = side)}
-						onRequestSoundTest={() => void retryMeasuredTarget()}
+						onRequestSoundSample={() => void retryMeasuredTarget()}
 					/>
 				{:else}
 					<div class="missing-media">
-						<h2>The test finished, but the comparison clips are missing.</h2>
-						<p>Nothing was replaced. Make the test again to rebuild the comparison.</p>
+						<h2>The sample finished, but the comparison clips are missing.</h2>
+						<p>Nothing was replaced. Create the sample again to rebuild the comparison.</p>
 					</div>
 				{/if}
 
@@ -2067,81 +2045,6 @@
 					</div>
 				{/if}
 
-				<div class="comparison-ledger" aria-label="Size comparison facts">
-					<div>
-						<span>Whole-episode target</span>
-						<strong>{sizeTargetLabel}</strong>
-						<small
-							>{targetSummary?.mode === 'normalized'
-								? 'Runtime-normalized goal'
-								: 'Per-episode goal'}</small
-						>
-					</div>
-					<div>
-						<span>Representative test band</span>
-						<strong
-							>{targetSummary
-								? `${formatDecimalFileSize(targetSummary.sampleLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.sampleUpperBoundBytes)}`
-								: 'Not available'}</strong
-						>
-						<small
-							>{targetSummary
-								? `±${targetSummary.sampleTolerancePercent}% while testing`
-								: 'Waiting for target evidence'}</small
-						>
-					</div>
-					<div class:comparison-ledger__missed={sizeTargetMissed || Boolean(targetConstraint)}>
-						<span>Predicted whole episode</span>
-						<strong
-							>{expectedEpisodeBytes
-								? formatDecimalFileSize(expectedEpisodeBytes)
-								: 'No usable estimate'}</strong
-						>
-						<small>
-							{sizeTarget.status === 'inside_target_band'
-								? 'Inside the representative band'
-								: sizeTarget.status === 'over_target'
-									? 'Above the representative band'
-									: sizeTarget.status === 'under_target'
-										? 'Below the representative band'
-										: 'Estimate requires another test'}
-						</small>
-					</div>
-					<div>
-						<span>Actual review clips</span>
-						<strong
-							>{actualSampleSizes.original && actualSampleSizes.smaller
-								? `${formatDecimalFileSize(actualSampleSizes.original)} → ${formatDecimalFileSize(actualSampleSizes.smaller)}`
-								: 'Clip bytes unavailable'}</strong
-						>
-						<small
-							>{actualSampleSizes.durationSeconds
-								? `${Math.round(actualSampleSizes.durationSeconds)} seconds sampled · not the episode size`
-								: 'Short review media only · not the episode size'}</small
-						>
-					</div>
-				</div>
-
-				<div class="season-estimate-note">
-					<span
-						>{isSeriesScope
-							? 'Estimated eligible output'
-							: isExactItemScope
-								? 'Estimated episode output'
-								: 'Estimated season total'}</span
-					>
-					<strong
-						>{expectedSeasonBytes
-							? formatDecimalFileSize(expectedSeasonBytes)
-							: 'Still estimating'}</strong
-					>
-					<small>
-						{isExactItemScope
-							? 'Estimate for this episode; final size is confirmed after validation.'
-							: 'Representative estimate only; each production episode uses its own runtime target.'}
-					</small>
-				</div>
-
 				{#if revisionPaneVisible}
 					<div class="review-feedback-panel" id="revision-pane">
 						<div class="review-feedback-panel__heading">
@@ -2179,7 +2082,7 @@
 								<small>{reviewFeedback.length}/600</small>
 							</label>
 							<label>
-								<span>Other priorities for the next test <small>(optional)</small></span>
+								<span>Other priorities for the next sample <small>(optional)</small></span>
 								<textarea
 									bind:value={operatorInstructions}
 									maxlength="600"
@@ -2191,7 +2094,7 @@
 						</div>
 						{#if !revisionPaneForced}
 							<fieldset class="revision-mode">
-								<legend>How should Mediaforce make the next test?</legend>
+								<legend>How should Mediaforce create the next sample?</legend>
 								<label class:active={revisionMode === 'same_target'}>
 									<input type="radio" bind:group={revisionMode} value="same_target" />
 									<span>Revise at the same size</span>
@@ -2214,7 +2117,7 @@
 									<small>
 										{higherQualityReviewAdjustment
 											? `Raise the next target to about ${formatDecimalFileSize(higherQualityReviewAdjustment.goal.targetSizeBytes)}. The episode will be larger, with more room for picture quality.`
-											: 'A larger guided target is not available for this test.'}
+											: 'A larger guided target is not available for this sample.'}
 									</small>
 								</label>
 								{#if !higherQualityReviewAdjustment}
@@ -2230,12 +2133,12 @@
 						<div class="review-feedback-panel__action">
 							<p>
 								{#if !revisionPaneForced && revisionMode === 'roomier'}
-									Your notes describe the version you reviewed. The next test raises the target to
+									Your notes describe the version you reviewed. The next sample raises the target to
 									about {higherQualityReviewAdjustment
 										? formatDecimalFileSize(higherQualityReviewAdjustment.goal.targetSizeBytes)
 										: 'a larger size'} and has not been judged yet. Nothing is replaced.
 								{:else}
-									This marks the current version as not acceptable and creates another test at the
+									This marks the current version as not acceptable and creates another sample at the
 									same target. Nothing is replaced.
 								{/if}
 							</p>
@@ -2250,7 +2153,7 @@
 								onclick={submitReviewFeedback}
 								disabled={!hasReviewFeedback || noAvailableHosts || actionPhase !== 'idle'}
 							>
-								Make a revised test
+								Create a revised sample
 							</button>
 						</div>
 					</div>
@@ -2271,19 +2174,21 @@
 								Resolve the selected file in Activity, then return here to finish your decision.
 							</p>
 						{:else if riskSummary?.blocked}
-							<h2>This test is not safe to approve yet.</h2>
+							<h2>This sample is not safe to approve yet.</h2>
 							<p>{riskSummary.detail}</p>
 						{:else if sizeTarget.status === 'over_target'}
 							<h2>This is a quality checkpoint, not your requested-size result.</h2>
-							<p>Compare it now, then make a smaller test that moves toward your goal.</p>
+							<p>Compare it now, then create a smaller sample that moves toward your goal.</p>
 						{:else if sizeTarget.status === 'under_target' && !underTargetIsAcceptable}
 							<h2>This result is smaller than requested.</h2>
 							<p>
-								Make another test that uses the available size for more {reviewSubject} quality.
+								Create another sample that uses the available size for more {reviewSubject} quality.
 							</p>
 						{:else if sizeTarget.status === 'missing_prediction'}
 							<h2>The size result is incomplete.</h2>
-							<p>Make another test before deciding whether to use this setting for the season.</p>
+							<p>
+								Create another sample before deciding whether to use this setting for the season.
+							</p>
 						{:else}
 							<h2>What do you want to do with this version?</h2>
 							<p>Keep it, see if it can use less space, or tell Mediaforce what should improve.</p>
@@ -2314,7 +2219,7 @@
 								onclick={retryMeasuredTarget}
 								disabled={actionPhase !== 'idle' || noAvailableHosts}
 							>
-								Run another test after fixing this
+								Create another sample after fixing this
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 							</button>
 						{:else if sizeTargetMissed}
@@ -2337,7 +2242,7 @@
 								onclick={retryMeasuredTarget}
 								disabled={actionPhase !== 'idle' || noAvailableHosts}
 							>
-								Run another {sizeTargetLabel} test
+								Create another {sizeTargetLabel} sample
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 							</button>
 						{:else}
@@ -2424,7 +2329,7 @@
 						<li><span>1</span><strong>Compress the full episode</strong></li>
 						<li><span>2</span><strong>Check the compressed file</strong></li>
 						<li>
-							<span>3</span><strong>Choose whether to finish and replace the original</strong>
+							<span>3</span><strong>Choose whether to replace the original</strong>
 						</li>
 					</ol>
 
@@ -2441,7 +2346,7 @@
 						</button>
 						{#if reviewPairs.length}
 							<button class="secondary-button" type="button" onclick={downloadComparison}>
-								Download approved comparison
+								Download approved comparison clips
 							</button>
 						{/if}
 					</div>
@@ -2457,7 +2362,7 @@
 					</summary>
 					<div>
 						<p>
-							The approved test predicts about {formatDecimalFileSize(expectedEpisodeBytes)} for this
+							The approved sample predicts about {formatDecimalFileSize(expectedEpisodeBytes)} for this
 							episode. The finished size can vary within the approved range as Mediaforce preserves the
 							picture and sound rules you reviewed.
 						</p>
@@ -2467,23 +2372,23 @@
 		{:else if humanState.key === 'ready_to_make'}
 			<section class="ready-room">
 				<div class="ready-symbol" aria-hidden="true"><span>✓</span></div>
-				<p class="eyebrow">Test approved</p>
+				<p class="eyebrow">Sample approved</p>
 				<h1>
 					{isSeriesScope
 						? canQueueOlderSeasons
 							? eligibleEpisodeCount > 0
-								? 'Ready to choose which seasons to make.'
-								: 'Ready to process the older seasons.'
-							: 'Ready to make the eligible seasons.'
+								? 'Ready to choose which seasons to compress.'
+								: 'Ready to compress the older seasons.'
+							: 'Ready to compress the eligible seasons.'
 						: isExactItemScope
-							? 'Ready to make this episode.'
+							? 'Ready to compress this episode.'
 							: heldEpisodeCount > 0
 								? 'This season is ready, but protected.'
-								: 'Ready to make the season.'}
+								: 'Ready to compress the season.'}
 				</h1>
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
 					<p class="lede">
-						The approved setup can make {eligibleEpisodeCount} normally eligible
+						The approved setup can compress {eligibleEpisodeCount} normally eligible
 						{eligibleEpisodeCount === 1 ? 'episode' : 'episodes'}. The older-season option can
 						include {olderSeasonOverride.candidate_count} safety-cleared
 						{olderSeasonOverride.candidate_count === 1 ? 'episode' : 'episodes'} across
@@ -2493,7 +2398,7 @@
 					</p>
 				{:else}
 					<p class="lede">
-						Mediaforce will make {productionEpisodeCount}
+						Mediaforce will compress {productionEpisodeCount}
 						{productionEpisodeCount === 1 ? 'episode' : 'episodes'} with the same settings. {heldEpisodeCount >
 						0
 							? `${heldEpisodeCount} protected ${heldEpisodeCount === 1 ? 'episode stays' : 'episodes stay'} original unless you explicitly override this season.`
@@ -2539,7 +2444,7 @@
 				{#if isSeriesScope && canQueueOlderSeasons && olderSeasonOverride}
 					<div class="older-season-option">
 						<div>
-							<strong>Process older seasons</strong>
+							<strong>Compress older seasons</strong>
 							<p>
 								{olderSeasonOverride.latest_season_label || 'The latest season'} stays original.
 								{#if cadenceExcludedEpisodeCount > 0}
@@ -2564,7 +2469,7 @@
 							</small>
 						</div>
 						<button class="primary-button" type="button" onclick={requestQueueOlderSeasons}>
-							Process {olderSeasonOverride.season_count} older
+							Compress {olderSeasonOverride.season_count} older
 							{olderSeasonOverride.season_count === 1 ? 'season' : 'seasons'}
 							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
 						</button>
@@ -2589,19 +2494,19 @@
 					<p class="eyebrow">In progress</p>
 					<h1>
 						{activeOlderSeasonCount > 0
-							? `Making ${activeOlderSeasonCount} older ${activeOlderSeasonCount === 1 ? 'season' : 'seasons'}`
+							? `Compressing ${activeOlderSeasonCount} older ${activeOlderSeasonCount === 1 ? 'season' : 'seasons'}`
 							: isSeriesScope
-								? `Making all ${seriesSeasonCount} ${seriesSeasonLabel}`
+								? `Compressing all ${seriesSeasonCount} ${seriesSeasonLabel}`
 								: isExactItemScope
 									? `Compressing ${exactEpisodeName}`
-									: `Making ${identity.season}`}
+									: `Compressing ${identity.season}`}
 					</h1>
 					<p class="lede">
 						{encodeProgress.currentEpisode === 'A representative episode'
 							? `The ${scopeNoun} is waiting for its next available computer.`
 							: isExactItemScope
 								? `${encodeProgress.currentEpisode} is being compressed now.`
-								: `${encodeProgress.currentEpisode} is being made now.`}
+								: `${encodeProgress.currentEpisode} is being compressed now.`}
 					</p>
 					<div class="progress-facts">
 						<strong>{seasonProgressCompleted} of {encodeProgress.total}</strong>
@@ -2637,7 +2542,7 @@
 				<div class="ready-symbol" aria-hidden="true">
 					<span>{stagedAccessBlocked ? '!' : '···'}</span>
 				</div>
-				<p class="eyebrow">{isExactItemScope ? 'Episode compressed' : 'Episodes made'}</p>
+				<p class="eyebrow">{isExactItemScope ? 'Episode compressed' : 'Episodes compressed'}</p>
 				<h1>
 					{stagedAccessBlocked
 						? 'Reconnect the working folder.'
@@ -2648,8 +2553,8 @@
 				<p class="lede">
 					{stagedAccessBlocked
 						? isExactItemScope
-							? 'The full encoded episode is finished in Mediaforce’s working folder, and your original library episode is unchanged. This Mac must reconnect shared storage before it can run the technical check. Nothing is replaced by this check.'
-							: 'The full encoded episodes are finished in Mediaforce’s working folder, and your original library episodes are unchanged. This Mac must reconnect shared storage before it can run the technical checks. Nothing is replaced by these checks.'
+							? 'The full compressed episode is finished in Mediaforce’s working folder, and your original library episode is unchanged. This computer must reconnect shared storage before it can run the technical check. Nothing is replaced by this check.'
+							: 'The full compressed episodes are finished in Mediaforce’s working folder, and your original library episodes are unchanged. This computer must reconnect shared storage before it can run the technical checks. Nothing is replaced by these checks.'
 						: isExactItemScope
 							? 'The full encoded episode is finished, and your original library episode is unchanged. Mediaforce now checks that the new file opens, plays, and has the expected length. Nothing is replaced by this check.'
 							: 'The full encoded episodes are finished, and your original library episodes are unchanged. Mediaforce now checks that each new file opens, plays, and has the expected length. Nothing is replaced by these checks.'}
@@ -2679,7 +2584,7 @@
 						Mediaforce will reconnect {storageRecoveryHost.label}, then run the check.
 					</p>
 				{:else if stagedAccessBlocked}
-					<a class="primary-button" href={resolve('/ops')}>Open workers and storage</a>
+					<a class="primary-button" href={resolve('/ops')}>Open computers and storage</a>
 					<p class="action-note">
 						Reconnect the working folder before checking. Your originals stay unchanged.
 					</p>
@@ -2699,25 +2604,25 @@
 			<section class="ready-room ready-room--finish">
 				<div class="ready-symbol" aria-hidden="true"><span>✓</span></div>
 				<p class="eyebrow">Every check passed</p>
-				<h1>Ready to finish.</h1>
+				<h1>
+					{isExactItemScope
+						? 'Ready to replace the original episode.'
+						: 'Ready to replace the original episodes.'}
+				</h1>
 				<p class="lede">
 					{isExactItemScope ? 'This episode is accounted for.' : 'Every episode is accounted for.'}
 					{promotionIntegrity.readyCount === 0
 						? 'No checked episodes still need replacement.'
 						: promotionIntegrity.readyCount === 1
-							? 'Finishing replaces the checked episode.'
-							: `Finishing replaces all ${promotionIntegrity.readyCount} checked episodes together.`}
+							? 'Replacing installs the checked episode.'
+							: `Replacing installs all ${promotionIntegrity.readyCount} checked episodes together.`}
 					{isExactItemScope
-						? 'The current original moves to the backup area so it can be recovered later.'
-						: 'The current originals move to the backup area so they can be recovered later.'}
+						? 'The current original moves to the cleanup folder so it can be recovered later.'
+						: 'The current originals move to the cleanup folder so they can be recovered later.'}
 				</p>
 				<SeasonIntegrityPanel integrity={promotionIntegrity} tone="ready" />
 				<button class="primary-button" type="button" onclick={finishSeason}>
-					{isSeriesScope
-						? 'Finish the show'
-						: isExactItemScope
-							? 'Finish this episode'
-							: 'Finish the season'}
+					{isExactItemScope ? 'Replace the original episode' : 'Replace original episodes'}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 				</button>
 				<p class="action-note">Nothing changes until you choose this action.</p>
@@ -2732,8 +2637,8 @@
 				<p class="lede">
 					{humanState.detail} Mediaforce will not replace {isExactItemScope
 						? 'a partial episode'
-						: 'a partial season'} or adopt an untracked file. No originals move to backup while this check
-					is blocked.
+						: 'a partial season'} or adopt an untracked file. No originals move to the cleanup folder
+					while this check is blocked.
 				</p>
 				{#if promotionIntegrity.available}
 					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
@@ -2763,8 +2668,8 @@
 				<h1>{scopeName} is ready.</h1>
 				<p class="lede">
 					{isExactItemScope
-						? 'The smaller episode is in your library. The original remains in the backup area until you choose to remove it.'
-						: `All ${episodeCount} smaller episodes are in your library. The originals remain in the backup area until you choose to remove them.`}
+						? 'The smaller episode is in your library. The original remains in the cleanup folder until you choose to delete it.'
+						: `All ${episodeCount} smaller episodes are in your library. The originals remain in the cleanup folder until you choose to delete them.`}
 				</p>
 				<div class="finished-actions">
 					<a class="primary-button" href={resolve('/')}
@@ -2780,13 +2685,19 @@
 		{:else if humanState.key === 'needs_help'}
 			<section class="help-room">
 				<div class="help-mark" aria-hidden="true">!</div>
-				<p class="eyebrow">{targetConstraint ? 'Size needs a change' : 'A small snag'}</p>
+				<p class="eyebrow">
+					{targetConstraint
+						? 'Size needs a change'
+						: humanState.recoveryKind === 'test'
+							? 'Sample needs retry'
+							: 'A small snag'}
+				</p>
 				<h1>{targetConstraint?.title || `${humanState.label}.`}</h1>
 				<p class="lede">{targetConstraint?.detail || plainFailureMessage(folder, status)}</p>
 				<div class="help-safety">
 					{#if targetConstraint}
 						<strong>No quality rule was silently relaxed.</strong>
-						<span>Choose a viable goal, then Mediaforce can make a fresh representative test.</span>
+						<span>Choose a viable goal, then Mediaforce can create a fresh sample.</span>
 					{:else if humanState.recoveryKind === 'test'}
 						<strong>Your library is safe.</strong>
 						<span>Nothing was replaced. Trying again rebuilds the comparison.</span>
@@ -2796,7 +2707,7 @@
 						>
 						<span
 							>{recoveryNeedsFreshGoal
-								? `Nothing was replaced. Choosing a new size or compression goal makes a fresh test before this ${scopeNoun} can run again.`
+								? `Nothing was replaced. Choosing a new size or quality preference creates a fresh sample before this ${scopeNoun} can run again.`
 								: isExactItemScope
 									? 'Nothing was replaced. Retrying starts only this episode.'
 									: 'Retrying keeps finished episodes and starts only what still needs attention.'}</span
@@ -2804,8 +2715,8 @@
 					{/if}
 				</div>
 				{#if humanState.recoveryKind === 'test' && !targetConstraint}
-					<div class="recovery-plan" aria-label="Saved test plan">
-						<div><span>Test scope</span><strong>{recoveryScopeTitle}</strong></div>
+					<div class="recovery-plan" aria-label="Saved sample plan">
+						<div><span>Sample scope</span><strong>{recoveryScopeTitle}</strong></div>
 						<div><span>Saved target</span><strong>{sizeTargetLabel}</strong></div>
 						<div>
 							<span>Target mode</span><strong
@@ -2840,7 +2751,7 @@
 								: recoveryNeedsAdjustment
 									? 'Review retry'
 									: humanState.recoveryKind === 'test'
-										? 'Retry same test'
+										? 'Retry sample'
 										: isExactItemScope
 											? 'Retry this episode'
 											: 'Retry unfinished episodes')}
@@ -2892,7 +2803,7 @@
 		{/if}
 
 		<section
-			hidden={humanState.key === 'making_test' ||
+			hidden={['sample_waiting', 'making_test'].includes(humanState.key) ||
 				(isExactItemScope && humanState.key === 'ready_to_make' && qualityMemory.state === 'empty')}
 			class="quality-memory"
 			class:quality-memory--empty={qualityMemory.state === 'empty'}
@@ -2958,7 +2869,7 @@
 			<div class="details-content">
 				{#if showGoalScreen && hostOptions.length}
 					<label class="host-select">
-						<span>Computer for the test</span>
+						<span>Computer for this sample</span>
 						<select bind:value={selectedHostKey}>
 							{#each hostOptions as host (host.key)}
 								<option value={host.key} disabled={host.available === false}>
@@ -2969,7 +2880,7 @@
 						<small
 							>{selectedHost?.detail ||
 								selectedHost?.schedule_detail ||
-								'Available for this test.'}</small
+								'Available for this sample.'}</small
 						>
 					</label>
 				{/if}
@@ -5420,20 +5331,9 @@
 	.review-contract {
 		background: var(--mf-bg-panel-2);
 		border: 1px solid var(--mf-line);
-		display: grid;
-		grid-template-columns: minmax(170px, 0.72fr) minmax(0, 3.28fr);
 		overflow: hidden;
 	}
 
-	.review-contract header {
-		align-content: center;
-		border-right: 1px solid var(--mf-line);
-		display: grid;
-		gap: 4px;
-		padding: 11px 14px;
-	}
-
-	.review-contract header span,
 	.review-contract dt {
 		color: var(--mf-fg-tertiary);
 		font-size: 10px;
@@ -5442,15 +5342,9 @@
 		text-transform: uppercase;
 	}
 
-	.review-contract header small {
-		color: var(--mf-fg-secondary);
-		font-size: 10px;
-		line-height: 1.35;
-	}
-
 	.review-contract dl {
 		display: grid;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 		margin: 0;
 	}
 
@@ -6815,17 +6709,6 @@
 		}
 	}
 
-	@media (max-width: 1100px) {
-		.review-contract {
-			grid-template-columns: 1fr;
-		}
-
-		.review-contract header {
-			border-bottom: 1px solid var(--mf-line);
-			border-right: 0;
-		}
-	}
-
 	@media (max-width: 760px) {
 		.experience-header {
 			padding: 15px 16px 0;
@@ -7097,7 +6980,11 @@
 		}
 
 		.mobile-safety {
-			display: none;
+			display: block;
+			font-size: 10px;
+			font-weight: 700;
+			letter-spacing: 0.04em;
+			text-align: center;
 		}
 
 		.season-progress-room {

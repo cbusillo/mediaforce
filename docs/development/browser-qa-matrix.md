@@ -66,8 +66,8 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   must outrank a stale 314.6 MB season result without pretending the job belongs
   to the season route.
 - Retryable state: `/folders/tv/Retry%20Show/Season%201`, with a failed sample
-  job that shows the immutable saved target/settings, `Retry same test`, and a
-  separate path to choose different settings.
+	job that shows the immutable saved target/settings, `Retry sample`, and a
+	separate path to choose different settings.
 - Search-limit state: `/folders/tv/Search%20Limit/Season%201`, with a
   deterministic target-search-bound failure that explains why the saved retry
   would repeat and routes the operator to a fresh settings review.
@@ -83,7 +83,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/tv/Quality%20Conflict/Season%201`, proving arithmetic impossibility
   is explained separately from a measured quality-floor conflict.
 - Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
-  complete but production remains unqueued until `Make the season` is chosen.
+	complete but production remains unqueued until `Compress the season` is chosen.
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
   lifecycle override dialog before queueing.
@@ -233,11 +233,11 @@ same-target measured test the primary action, and require an explicit warning
 that accepting the tradeoff saves the profile and queues the full folder encode.
 
 When review media is ready, `Compare in full screen` must open paused in `Side by
-side` and `Fit`. `One at a time` must switch between `Original` and `New` without
+side` and `Fit`. `One at a time` must switch between `Original` and `Sample` without
 changing the selected moment, playback position, or picture position. Sound
 controls appear only when both clips carry trustworthy sound metadata; legacy or
 silent clips must say they show picture only and offer a plain-language path to
-make a new test when the source has sound. The normal UI must not expose codec,
+create another sample when the source has sound. The normal UI must not expose codec,
 quality-score, synchronization, or other implementation vocabulary.
 
 Playback uses the new clip as the comparison clock. Dragging the timeline may

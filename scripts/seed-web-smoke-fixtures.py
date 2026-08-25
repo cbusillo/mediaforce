@@ -2335,7 +2335,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio retry fixture",
                 "route": "/folders/tv/Retry%20Show/Season%201",
                 "marker": "Retry Show",
-                "stageMarker": "Retry same test",
+                "stageMarker": "Retry sample",
             },
             {
                 "label": "Completed cleanup fixture",
@@ -2351,7 +2351,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio review-ready fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
                 "marker": "Review Ready",
-                "stageMarker": "Looks good",
+                "stageMarker": "Ready to review",
             },
             {
                 "label": "Folder Studio absolute-target fixture",
@@ -2363,7 +2363,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio approved fixture",
                 "route": "/folders/tv/Approved%20Show/Season%201",
                 "marker": "Approved Show",
-                "stageMarker": "Ready to make the season",
+                "stageMarker": "Ready to compress the season",
             },
             {
                 "label": "Folder Studio protected approved fixture",
@@ -2375,7 +2375,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio older-season override fixture",
                 "route": "/folders/tv/Protected%20Ready",
                 "marker": "Protected Ready",
-                "stageMarker": "Ready to process the older seasons",
+                "stageMarker": "Ready to compress the older seasons",
             },
             {
                 "label": "Folder Studio missed-target fixture",
@@ -2405,13 +2405,13 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio target-search-bound fixture",
                 "route": "/folders/tv/Search%20Limit/Season%201",
                 "marker": "Search Limit",
-                "stageMarker": "The test reached a configured limit",
+                "stageMarker": "The sample reached a configured limit",
             },
             {
                 "label": "Folder Studio active processing fixture",
                 "route": "/folders/tv/Encoding%20Show/Season%201",
                 "marker": "Encoding Show",
-                "stageMarker": "Making Season 1",
+                "stageMarker": "Compressing Season 1",
             },
             {
                 "label": "Folder Studio retryable processing fixture",
@@ -2429,7 +2429,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio promotion fixture",
                 "route": "/folders/tv/Promotion%20Ready/Season%201",
                 "marker": "Promotion Ready",
-                "stageMarker": "Ready to finish",
+                "stageMarker": "Ready to replace the original episodes",
             },
             {
                 "label": "Folder Studio partial-promotion fixture",

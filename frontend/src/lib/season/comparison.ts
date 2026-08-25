@@ -82,7 +82,7 @@ export function mediaSourceMatches(
 }
 
 export function mediaStartFailureMessage(side: ComparisonSide): string {
-	return `${side === 'original' ? 'The original' : 'The new'} clip could not be decoded in this browser.`;
+	return `${side === 'original' ? 'The original' : 'The sample'} clip could not be decoded in this browser.`;
 }
 
 export function waitForMediaPlaying(
