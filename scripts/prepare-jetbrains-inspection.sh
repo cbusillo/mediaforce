@@ -18,27 +18,25 @@ uv run "$python_prepare" \
 	--test-root tests \
 	--sync
 
-rm -f "$repo_root/.idea/frontend.iml"
 module_file="$repo_root/.idea/mediaforce.iml"
 node - "$module_file" <<'NODE'
 const fs = require('node:fs');
 
 const moduleFile = process.argv[2];
 const original = fs.readFileSync(moduleFile, 'utf8');
-let normalized = original
-	.replace('<module type="PYTHON_MODULE"', '<module type="WEB_MODULE"')
-	.replace('<content url="file://$MODULE_DIR$">', '<content url="file://$MODULE_DIR$/..">');
+let normalized = original.replace(
+	'<content url="file://$MODULE_DIR$">',
+	'<content url="file://$MODULE_DIR$/..">'
+);
 for (const relativePath of ['.mypy_cache', '.system', '.local', '.code', '.venv', 'tests']) {
 	normalized = normalized.replaceAll(
 		`url="file://$MODULE_DIR$/${relativePath}"`,
 		`url="file://$MODULE_DIR$/../${relativePath}"`
 	);
 }
-for (const relativePath of ['frontend/.svelte-kit', 'frontend/build', 'frontend/node_modules']) {
-	const exclusion = `      <excludeFolder url="file://$MODULE_DIR$/../${relativePath}" />`;
-	if (!normalized.includes(exclusion)) {
-		normalized = normalized.replace('    </content>', `${exclusion}\n    </content>`);
-	}
+const frontendExclusion = '      <excludeFolder url="file://$MODULE_DIR$/../frontend" />';
+if (!normalized.includes(frontendExclusion)) {
+	normalized = normalized.replace('    </content>', `${frontendExclusion}\n    </content>`);
 }
 if (normalized !== original) fs.writeFileSync(moduleFile, normalized);
 NODE
@@ -67,4 +65,10 @@ canonical_profile="$repo_root/config/jetbrains/Mediaforce.xml"
 generated_profile="$repo_root/.idea/inspectionProfiles/Mediaforce.xml"
 if ! cmp -s "$canonical_profile" "$generated_profile"; then
 	cp "$canonical_profile" "$generated_profile"
+fi
+
+mkdir -p "$frontend_root/.idea/inspectionProfiles"
+generated_frontend_profile="$frontend_root/.idea/inspectionProfiles/Mediaforce.xml"
+if ! cmp -s "$canonical_profile" "$generated_frontend_profile"; then
+	cp "$canonical_profile" "$generated_frontend_profile"
 fi

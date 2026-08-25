@@ -67,6 +67,7 @@ def test_jetbrains_inspection_lanes_are_language_owned() -> None:
         ".idea/modules.xml",
         ".idea/misc.xml",
         ".idea/inspectionProfiles/Mediaforce.xml",
+        "frontend/.idea/inspectionProfiles/Mediaforce.xml",
         "frontend/node_modules",
         "frontend/.svelte-kit",
     ]
@@ -89,6 +90,7 @@ def test_jetbrains_inspection_lanes_are_language_owned() -> None:
         "id": "frontend",
         "ide": "WebStorm",
         "required": False,
+        "projectPath": "frontend",
         "include": [
             "frontend/**/*.svelte",
             "frontend/**/*.ts",
@@ -163,11 +165,17 @@ def test_shared_profile_is_bounded_and_generated_state_is_ignored() -> None:
     if GENERATED_PROFILE.exists():
         assert GENERATED_PROFILE.read_bytes() == CANONICAL_PROFILE.read_bytes()
 
+    generated_frontend_profile = ROOT / "frontend" / ".idea" / "inspectionProfiles" / "Mediaforce.xml"
+    assert "/.idea/" in (ROOT / "frontend" / ".gitignore").read_text().splitlines()
+    if generated_frontend_profile.exists():
+        assert generated_frontend_profile.read_bytes() == CANONICAL_PROFILE.read_bytes()
+
     generated_module = ROOT / ".idea" / "mediaforce.iml"
     if generated_module.exists():
         module_xml = generated_module.read_text()
-        assert '<module type="WEB_MODULE" version="4">' in module_xml
+        assert '<module type="PYTHON_MODULE" version="4">' in module_xml
         assert '<content url="file://$MODULE_DIR$/..">' in module_xml
+        assert '<excludeFolder url="file://$MODULE_DIR$/../frontend" />' in module_xml
         assert '<sourceFolder url="file://$MODULE_DIR$/../tests" isTestSource="true" />' in module_xml
 
     prepare_script = ROOT / "scripts" / "prepare-jetbrains-inspection.sh"
