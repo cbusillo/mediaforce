@@ -143,7 +143,7 @@ describe('Other workflow presentation', () => {
 	});
 
 	it('builds truthful singular and plural phase details', () => {
-		expect(otherWorkflowDetail(workflow('encode', { encode: 2 }), 2)).toBe(
+		expect(otherWorkflowDetail(workflow('encode', { encode: 5 }), 2)).toBe(
 			'2 files are ready to compress.'
 		);
 		expect(otherWorkflowDetail(workflow('validate', { validate: 1 }), 3)).toBe(
@@ -224,6 +224,9 @@ describe('Other scope presentation', () => {
 		expect(otherReadinessBlockerCopy('Choose exact-file grouping before processing.')).toBe(
 			'Choose one-file-at-a-time before compression.'
 		);
+		expect(otherReadinessBlockerCopy('Processing cannot start for this work unit.')).toBe(
+			'Compression cannot start for this folder or file.'
+		);
 	});
 });
 
@@ -235,7 +238,8 @@ describe('Other sample setup result', () => {
 		});
 		expect(otherSampleSetupResult(false)).toEqual({
 			message: 'The sample setup needs another request. Nothing was queued.',
-			attention: true
+			attention: true,
+			attentionTitle: 'Sample setup needs attention'
 		});
 	});
 });

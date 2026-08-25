@@ -1068,6 +1068,7 @@ export interface FolderActionResponseCopyInput {
 export interface FolderActionResponseCopy {
 	message: string;
 	attention: boolean;
+	attentionTitle?: string;
 }
 
 export function folderActionResponseCopy(
@@ -1081,7 +1082,8 @@ export function folderActionResponseCopy(
 		if (failedCount > 0) {
 			return {
 				message: `Checked ${itemCount} ${fileNoun(itemCount)}: ${passedCount} passed, ${failedCount} need attention.`,
-				attention: true
+				attention: true,
+				attentionTitle: 'Check needs attention'
 			};
 		}
 		return {

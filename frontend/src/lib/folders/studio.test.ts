@@ -30,7 +30,8 @@ describe('folderActionResponseCopy', () => {
 			})
 		).toEqual({
 			message: 'Checked 5 files: 2 passed, 3 need attention.',
-			attention: true
+			attention: true,
+			attentionTitle: 'Check needs attention'
 		});
 	});
 

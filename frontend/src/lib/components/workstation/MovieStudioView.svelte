@@ -59,6 +59,7 @@
 	let actionMessage = $state('');
 	let actionError = $state('');
 	let actionNeedsAttention = $state(false);
+	let actionAttentionTitle = $state('');
 	let noteInput = $state<HTMLTextAreaElement>();
 	let goalEditor = $state<HTMLDetailsElement>();
 	let noteHasNewerText = $state(false);
@@ -413,6 +414,7 @@
 			const response = await postJson<{
 				ok: boolean;
 				message?: string;
+				recovered_item_count?: number | null;
 				job?: { item_count?: number | null };
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`, {
 				notes: '',
@@ -420,6 +422,7 @@
 			});
 			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
 			const queuedCount =
+				safeCount(response.recovered_item_count) ||
 				safeCount(response.job?.item_count) ||
 				(exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 0));
 			return exactScope || queuedCount === 1
@@ -484,18 +487,27 @@
 		});
 	}
 
-	type ActionResult = string | { message: string; targetPrefix?: string; attention?: boolean };
+	type ActionResult =
+		| string
+		| {
+				message: string;
+				targetPrefix?: string;
+				attention?: boolean;
+				attentionTitle?: string;
+		  };
 
 	async function runAction(action: string, operation: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
 		actionNeedsAttention = false;
+		actionAttentionTitle = '';
 		let actionCompleted = false;
 		try {
 			const result = await operation();
 			actionMessage = typeof result === 'string' ? result : result.message;
 			actionNeedsAttention = typeof result === 'string' ? false : result.attention === true;
+			actionAttentionTitle = typeof result === 'string' ? '' : (result.attentionTitle ?? '');
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
@@ -774,7 +786,10 @@
 			class="notice"
 			role={actionNeedsAttention ? 'alert' : 'status'}
 		>
-			<strong>{actionNeedsAttention ? 'Sample needs attention.' : 'Movie state updated.'}</strong
+			<strong
+				>{actionNeedsAttention
+					? actionAttentionTitle || 'Movie action needs attention.'
+					: 'Movie state updated.'}</strong
 			><span>{actionMessage}</span>
 		</div>
 	{/if}

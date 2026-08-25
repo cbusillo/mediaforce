@@ -9,6 +9,7 @@ export interface OtherScopeSummary {
 export interface OtherSampleSetupResult {
 	message: string;
 	attention: boolean;
+	attentionTitle?: string;
 }
 
 export function otherSampleSetupResult(canQueue: boolean): OtherSampleSetupResult {
@@ -19,7 +20,8 @@ export function otherSampleSetupResult(canQueue: boolean): OtherSampleSetupResul
 			}
 		: {
 				message: 'The sample setup needs another request. Nothing was queued.',
-				attention: true
+				attention: true,
+				attentionTitle: 'Sample setup needs attention'
 			};
 }
 
@@ -74,12 +76,16 @@ export function otherActionFileCount(
 export function otherReadinessBlockerCopy(value: string): string {
 	return value
 		.trim()
-		.replace(/\bexact-file grouping\b/gi, 'one-file-at-a-time')
-		.replace(/\bbounded work units?\b/gi, 'folder selection')
-		.replace(/\bwork units?\b/gi, 'folders or files')
-		.replace(/\bprocessing\b/gi, 'compression')
-		.replace(/\bsampling\b/gi, 'creating a sample')
-		.replace(/\bqueueing\b/gi, 'starting work on');
+		.replace(/\bexact-file grouping\b/gi, (match) => matchCase(match, 'one-file-at-a-time'))
+		.replace(/\bbounded work unit(s?)\b/gi, (match, plural: string) =>
+			matchCase(match, plural ? 'folder selections' : 'folder selection')
+		)
+		.replace(/\bwork unit(s?)\b/gi, (match, plural: string) =>
+			matchCase(match, plural ? 'folders or files' : 'folder or file')
+		)
+		.replace(/\bprocessing\b/gi, (match) => matchCase(match, 'compression'))
+		.replace(/\bsampling\b/gi, (match) => matchCase(match, 'creating a sample'))
+		.replace(/\bqueueing\b/gi, (match) => matchCase(match, 'starting work on'));
 }
 
 export function otherWorkflowLabel(
@@ -117,12 +123,7 @@ export function otherWorkflowDetail(
 	const fallbackCount = Math.max(0, itemCount);
 	switch (workflow?.primary_lane) {
 		case 'encode':
-			return countedFileCopy(
-				laneCount(workflow, 'encode', fallbackCount),
-				'',
-				'is ready to compress',
-				'are ready to compress'
-			);
+			return countedFileCopy(fallbackCount, '', 'is ready to compress', 'are ready to compress');
 		case 'validate':
 			return countedFileCopy(
 				laneCount(workflow, 'validate', fallbackCount),
@@ -192,6 +193,12 @@ export function mergeOtherLibraryPayloads(
 
 function mergeOtherWorkUnit(structure: OtherWorkUnit, details?: OtherWorkUnit): OtherWorkUnit {
 	return details ? { ...structure, ...details } : structure;
+}
+
+function matchCase(source: string, replacement: string): string {
+	return /^[A-Z]/.test(source)
+		? replacement.charAt(0).toUpperCase() + replacement.slice(1)
+		: replacement;
 }
 
 function laneCount(workflow: FolderWorkflowState, lane: string, fallback: number): number {

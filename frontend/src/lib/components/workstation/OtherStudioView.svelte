@@ -47,6 +47,7 @@
 	let actionMessage = $state('');
 	let actionError = $state('');
 	let actionNeedsAttention = $state(false);
+	let actionAttentionTitle = $state('');
 	let confirmedMembershipToken = $state('');
 
 	const context = $derived(folder.other_context ?? null);
@@ -298,6 +299,7 @@
 			const response = await postJson<{
 				ok: boolean;
 				message?: string;
+				recovered_item_count?: number | null;
 				job?: { item_count?: number | null };
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`, {
 				notes: '',
@@ -305,7 +307,10 @@
 				scope_membership_token: scopeMembershipToken()
 			});
 			if (!response.ok) throw new Error(response.message || 'This work could not be queued.');
-			const queuedCount = safeCount(response.job?.item_count) || actionFileCount;
+			const queuedCount =
+				safeCount(response.recovered_item_count) ||
+				safeCount(response.job?.item_count) ||
+				actionFileCount;
 			return queuedCount === 1
 				? 'This file is waiting to compress.'
 				: `${queuedCount} files are waiting to compress.`;
@@ -343,18 +348,27 @@
 		});
 	}
 
-	type ActionResult = string | { message: string; targetPrefix?: string; attention?: boolean };
+	type ActionResult =
+		| string
+		| {
+				message: string;
+				targetPrefix?: string;
+				attention?: boolean;
+				attentionTitle?: string;
+		  };
 
 	async function runAction(action: string, execute: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
 		actionNeedsAttention = false;
+		actionAttentionTitle = '';
 		let actionCompleted = false;
 		try {
 			const result = await execute();
 			actionMessage = typeof result === 'string' ? result : result.message;
 			actionNeedsAttention = typeof result === 'string' ? false : result.attention === true;
+			actionAttentionTitle = typeof result === 'string' ? '' : (result.attentionTitle ?? '');
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
@@ -520,9 +534,11 @@
 			class="notice"
 			role={actionNeedsAttention ? 'alert' : 'status'}
 		>
-			<strong>{actionNeedsAttention ? 'Check needs attention' : 'Updated'}</strong><span
-				>{actionMessage}</span
-			>
+			<strong
+				>{actionNeedsAttention
+					? actionAttentionTitle || 'Action needs attention'
+					: 'Updated'}</strong
+			><span>{actionMessage}</span>
 		</div>
 	{/if}
 	{#if isBrowseOnly}
@@ -643,9 +659,11 @@
 					>
 				{:else if approved && workflow?.primary_lane === 'encode'}
 					<button class="primary" disabled={!actionReady || isBusy} onclick={queueApproved}
-						>{actionFileCount === 1
-							? 'Compress this file'
-							: `Compress ${actionFileCount} files`}</button
+						>{!membershipComplete
+							? 'Compress files'
+							: actionFileCount === 1
+								? 'Compress this file'
+								: `Compress ${actionFileCount} files`}</button
 					>
 				{:else if pendingProposalCanQueue}
 					<button class="primary" disabled={!actionReady || isBusy} onclick={startSample}
