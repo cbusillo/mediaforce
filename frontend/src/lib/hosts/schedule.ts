@@ -20,6 +20,18 @@ function compactText(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
 }
 
+export function workScheduleSummaryCopy(value: string | null | undefined): string {
+	const summary = compactText(value);
+	if (!summary) return '';
+	if (summary === 'runs anytime') return 'Work runs anytime';
+	if (summary === 'never runs') return 'Work schedule is off';
+	if (!summary.startsWith('runs ')) return summary;
+	return `Work ${summary}`
+		.replace(/\(host local\)$/i, '(computer local time)')
+		.replace(/\(controller local\)$/i, '(Mediaforce local time)')
+		.replace(/\(utc\)$/i, '(UTC)');
+}
+
 function record(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }

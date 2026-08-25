@@ -17,7 +17,7 @@ function runtime(overrides: Partial<HostRuntime> = {}): HostRuntime {
 		max_parallel_encodes: 1,
 		active_encode_count: 0,
 		schedule_profile_label: 'Always',
-		schedule_detail: 'runs at any time',
+		schedule_detail: 'runs anytime',
 		active_flag: 'idle',
 		active_reason: '',
 		...overrides
@@ -39,7 +39,7 @@ describe('host runtime status', () => {
 		const offline = runtime({ message: 'Turn on SSH first' });
 
 		expect(hostRuntimeBadgeState(ready)).toEqual({ tone: 'ready', label: 'Ready' });
-		expect(hostRuntimeBadgeState(offline)).toEqual({ tone: 'fail', label: 'Offline' });
+		expect(hostRuntimeBadgeState(offline)).toEqual({ tone: 'fail', label: 'Unavailable' });
 		expect(hostsStatusPending({ compact: true, hosts: [ready, offline] })).toBe(false);
 	});
 });

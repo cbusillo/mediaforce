@@ -4,7 +4,7 @@ export const HOST_STATUS_PENDING_MESSAGE = 'Checking host status...';
 
 export type HostRuntimeBadgeState = {
 	tone: 'idle' | 'ready' | 'wait' | 'fail';
-	label: 'Not checked' | 'Ready' | 'Needs setup' | 'Checking' | 'Offline';
+	label: 'Not checked' | 'Ready' | 'Needs setup' | 'Checking' | 'Unavailable';
 };
 
 type QualitySearchMode = 'worker-local' | 'fully-remote' | 'local-assist';
@@ -108,5 +108,5 @@ export function hostRuntimeBadgeState(
 		return { tone: 'ready', label: 'Ready' };
 	}
 	if (runtime.available) return { tone: 'wait', label: 'Needs setup' };
-	return { tone: 'fail', label: 'Offline' };
+	return { tone: 'fail', label: 'Unavailable' };
 }

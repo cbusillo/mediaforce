@@ -115,7 +115,7 @@ function scheduleHost(overrides: Partial<HostRuntime> = {}): HostRuntime {
 		max_parallel_encodes: 1,
 		active_encode_count: 0,
 		schedule_profile_label: 'Evening',
-		schedule_detail: 'window 18:00-15:00 in host local time',
+		schedule_detail: 'runs weekdays between 18:00 and 15:00 (host local)',
 		schedule_open: false,
 		schedule_timezone: 'America/New_York',
 		schedule_closes_at: null,

@@ -6,8 +6,13 @@ import type {
 	ReviewReadySample
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
-import { hostSchedulePresentation, jobSchedulePresentation } from '$lib/hosts/schedule';
-import { safeOperatorErrorCopy } from '$lib/operator-copy';
+import {
+	hostSchedulePresentation,
+	jobSchedulePresentation,
+	workScheduleSummaryCopy,
+	type SchedulePresentation
+} from '$lib/hosts/schedule';
+import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
 import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 
 export type OpsQueueKind = 'encode' | 'sample' | 'proof';
@@ -88,6 +93,70 @@ type CalibrationJob = Record<string, unknown>;
 
 function compactText(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
+}
+
+const OPS_STATUS_OVERRIDES: Readonly<Record<string, string>> = {
+	failed: 'Retry available',
+	needs_attention: 'Retry available',
+	pending_review: 'Needs review',
+	retry_backoff: 'Retry waiting',
+	stopped: 'Retry available'
+};
+
+function activityComputerCopy(value: string): string {
+	return value
+		.replace(/\bhost schedule windows\b/gi, 'computer work windows')
+		.replace(/\bhost schedule window\b/gi, 'computer work window')
+		.replace(/\bhost windows\b/gi, 'computer work windows')
+		.replace(/\bhost window\b/gi, 'computer work window')
+		.replace(/\buse Bypass scheduler\b/gi, 'bypass the work schedule')
+		.replace(/\bBypass scheduler\b/gi, 'Bypass work schedule')
+		.replace(/\bworkers\b/gi, 'computers')
+		.replace(/\bworker\b/gi, 'computer')
+		.replace(/\bhosts\b/gi, 'computers')
+		.replace(/\bhost\b/gi, 'computer');
+}
+
+export function activitySchedulePresentationCopy(
+	presentation: SchedulePresentation | null
+): SchedulePresentation | null {
+	if (!presentation) return null;
+	const labels: Readonly<Record<string, string>> = {
+		Running: 'Working',
+		Open: 'Ready',
+		'Not accepting': 'Off schedule',
+		'Waiting for full window': 'Draining',
+		'Window too short': 'Draining',
+		'No schedule state': 'Schedule unavailable'
+	};
+	return {
+		...presentation,
+		label: labels[presentation.label] ?? presentation.label,
+		detail: activityComputerCopy(workScheduleSummaryCopy(presentation.detail))
+	};
+}
+
+export function activityScheduleDetailCopy(value: string | null | undefined): string {
+	return activityComputerCopy(workScheduleSummaryCopy(value));
+}
+
+function calibrationProgressCopy(job: CalibrationJob, status: string): string {
+	const progress = record(job.progress);
+	const stage = compactText(progress?.stage) || compactText(job.stage);
+	if (!stage) return '—';
+	return operatorStateCopy(
+		stage,
+		{
+			building_review: 'Working',
+			encoding_full_calibration: 'Working',
+			preparing_host: 'Starting',
+			preparing_source: 'Starting',
+			saving_results: 'Working',
+			searching_quality: 'Working',
+			searching_target: 'Working'
+		},
+		statusCopy(status)
+	);
 }
 
 function numberValue(value: unknown): number {
@@ -205,7 +274,7 @@ function hostEncodeReady(
 	queue?: DashboardSummaryPayload['encode_queue'] | null
 ): boolean {
 	const storageRecovery = host.storage_recovery_available === true;
-	const schedule = hostSchedulePresentation(host, queue);
+	const schedule = activitySchedulePresentationCopy(hostSchedulePresentation(host, queue));
 	return (
 		(host.available || storageRecovery) &&
 		host.schedule_open !== false &&
@@ -263,7 +332,7 @@ function encodeHostCopy(job: EncodeQueueJob): string {
 	const assignedHost = hostCopy(job.host);
 	if (assignedHost) return assignedHost;
 	const status = String(job.status ?? '').toLowerCase();
-	return ['queued', 'retry_backoff'].includes(status) ? 'Selecting computer' : 'Unassigned';
+	return ['queued', 'retry_backoff'].includes(status) ? 'Selecting computer' : 'No computer yet';
 }
 
 function operatorErrorCopy(value: unknown): string {
@@ -382,23 +451,23 @@ function calibrationDetail(job: CalibrationJob): string {
 		compactText(job.notes) ||
 		compactText(job.operator_note) ||
 		compactText(job.created_at) ||
-		'waiting for worker update';
+		'waiting for computer update';
 	const detail =
 		raw
 			.split('\n')
 			.map((line) => line.trim())
 			.filter(Boolean)
 			.at(-1)
-			?.slice(0, 180) ?? 'waiting for worker update';
+			?.slice(0, 180) ?? 'waiting for computer update';
 	const normalized = detail.toLowerCase();
 	if (normalized.includes('failed to find a suitable crf')) {
-		return 'Sample check did not find a usable quality setting.';
+		return 'The sample did not find a usable quality setting.';
 	}
 	if (normalized.includes('interrupted by a web process restart')) {
-		return 'Sample check was interrupted before it finished.';
+		return 'The sample was interrupted before it finished.';
 	}
 	if (normalized.includes('queue job was stopped')) {
-		return 'Sample check was stopped and cleaned up.';
+		return 'The sample was stopped and cleaned up.';
 	}
 	return detail.replace(/^error:\s*/i, '');
 }
@@ -412,26 +481,20 @@ function statusTone(status: string): ShellTone {
 }
 
 function statusCopy(status: string): string {
-	const normalized = status.toLowerCase();
-	if (normalized === 'needs_attention' || normalized === 'failed' || normalized === 'stopped') {
-		return 'Retry available';
-	}
-	if (normalized === 'retry_backoff') return 'Retry waiting';
-	if (normalized === 'pending_review') return 'Needs review';
-	return normalized.replaceAll('_', ' ');
+	return operatorStateCopy(status, OPS_STATUS_OVERRIDES, 'Unknown state');
 }
 
 export function workerCapabilityLabel(capability: string): string {
 	const normalized = capability.trim().toLowerCase();
-	if (normalized === 'encode_queue') return 'Process folders';
-	if (normalized === 'sample_calibration') return 'Run samples';
-	if (normalized === 'proof_encode') return 'Run review evidence';
-	return capability.trim().replaceAll('_', ' ') || 'Mediaforce work';
+	if (normalized === 'encode_queue') return 'Can compress media';
+	if (normalized === 'sample_calibration') return 'Can create samples';
+	if (normalized === 'proof_encode') return 'Can build comparison clips';
+	return capability.trim().replaceAll('_', ' ') || 'Can run Mediaforce work';
 }
 
 export function workerCapabilitiesSummary(capabilities: string[]): string {
 	const labels = capabilities.map(workerCapabilityLabel).filter(Boolean);
-	return labels.length ? labels.join(' · ') : 'No work assigned';
+	return labels.length ? labels.join(' · ') : 'No work assigned to this computer';
 }
 
 export function hostWorkReason(
@@ -439,10 +502,14 @@ export function hostWorkReason(
 	hosts: HostsPayload | null | undefined,
 	dashboard: DashboardSummaryPayload | null | undefined
 ): string {
-	const schedule = hostSchedulePresentation(host, dashboard?.encode_queue);
+	const schedule = activitySchedulePresentationCopy(
+		hostSchedulePresentation(host, dashboard?.encode_queue)
+	);
 	if (host.available && host.schedule_open === false) {
 		return (
-			schedule?.detail || host.schedule_detail || 'Outside its schedule; this is a normal wait.'
+			schedule?.detail ||
+			activityScheduleDetailCopy(host.schedule_detail) ||
+			'Outside its work schedule; this is a normal wait.'
 		);
 	}
 	const activeCount = numberValue(host.active_encode_count);
@@ -451,7 +518,7 @@ export function hostWorkReason(
 		if (schedule) return schedule.detail;
 		return activeCount >= maxParallel
 			? 'Working at capacity.'
-			: `${activeCount} ${activeCount === 1 ? 'item is' : 'items are'} processing; capacity remains.`;
+			: `${activeCount} ${activeCount === 1 ? 'item is' : 'items are'} compressing; capacity remains.`;
 	}
 	if (host.available && host.queue_active !== false) {
 		if (schedule?.state === 'host_draining') return schedule.detail;
@@ -565,7 +632,9 @@ export function buildEncodeRows(
 	const retryableJobIds = retryableEncodeJobIds(displayJobs);
 	return displayJobs.map((job) => {
 		const status = String(job.status ?? '').toLowerCase();
-		const schedule = jobSchedulePresentation(job, hosts?.hosts ?? [], now);
+		const schedule = activitySchedulePresentationCopy(
+			jobSchedulePresentation(job, hosts?.hosts ?? [], now)
+		)!;
 		const jobTone = encodeJobTone(job);
 		const needsChangedInputs = encodeRequiresChangedInputs(job);
 		const canRetryPrefix =
@@ -581,8 +650,8 @@ export function buildEncodeRows(
 			prefix: job.prefix || 'system scope',
 			host: encodeHostCopy(job),
 			phase: activePartCount
-				? `${activePartCount} active processing ${activePartCount === 1 ? 'task' : 'tasks'}`
-				: 'processing queue',
+				? `${activePartCount} active compression ${activePartCount === 1 ? 'task' : 'tasks'}`
+				: 'compression queue',
 			progress: encodeJobProgress(job),
 			scheduler: schedule.label,
 			schedulerDetail: schedule.detail,
@@ -616,24 +685,22 @@ function buildCalibrationLaneRows(
 			host: calibrationHostCopy(job),
 			phase: options.historical
 				? laneName === 'sample'
-					? 'sample check history'
-					: 'review evidence history'
+					? 'sample history'
+					: 'comparison clip history'
 				: laneName === 'sample'
-					? 'sample check'
-					: 'review evidence',
-			progress: waitingForReview
-				? 'Complete'
-				: compactText(job.progress) || compactText(job.stage) || '—',
+					? 'sample'
+					: 'comparison clips',
+			progress: waitingForReview ? 'Complete' : calibrationProgressCopy(job, status),
 			scheduler: waitingForReview
 				? reviewUnavailable
 					? 'Review unavailable'
 					: 'Finished'
-				: compactText(job.scheduler_status_copy) || 'Waiting in queue',
+				: activityScheduleDetailCopy(compactText(job.scheduler_status_copy)) || 'Waiting in queue',
 			schedulerDetail: '',
 			schedulerTone: 'idle',
 			detail: waitingForReview
 				? reviewUnavailable
-					? 'Review media is unavailable. Mediaforce kept the completed sample visible for diagnosis.'
+					? 'Comparison clips are unavailable. Mediaforce kept the completed sample visible for diagnosis.'
 					: 'Open the item to compare the sample.'
 				: calibrationDetail(job)
 		};
@@ -642,14 +709,17 @@ function buildCalibrationLaneRows(
 
 export function rowRecoveryLabel(row: OpsQueueRow): string {
 	if (!row.action) {
-		if (row.tone === 'active') return 'Automatic';
+		if (row.tone === 'active') return 'Runs automatically';
 		if (row.tone === 'wait') return 'Waiting';
-		return 'No action';
+		return 'Nothing to do';
 	}
 	if (row.action === 'retry-encode-prefix') return 'Retry folder';
 	if (row.action === 'retry-failed-encode') return 'Retry all';
 	if (row.action === 'stop-calibration') return 'Stop samples';
-	return row.actionScope === 'global' ? 'Global action' : 'Run action';
+	if (row.action === 'pause-encode') return 'Pause processing';
+	if (row.action === 'resume-encode') return 'Resume processing';
+	if (row.action === 'stop-encode') return 'Stop processing';
+	return row.actionScope === 'global' ? 'Run queue action' : 'Run this action';
 }
 
 export function rowRecoveryTitle(row: OpsQueueRow): string {
@@ -672,9 +742,9 @@ export function hostPrepareDisabled(host: HostRuntime, password: string): boolea
 }
 
 export function hostPrepareTitle(host: HostRuntime): string {
-	if (host.setup_supported === false) return 'Prepare is unavailable for this worker.';
-	if (host.setup_requires_password) return 'Enter the prepare password for this worker.';
-	return 'Prepare this worker for Mediaforce work';
+	if (host.setup_supported === false) return 'Setup is unavailable for this computer.';
+	if (host.setup_requires_password) return 'Enter the setup password for this computer.';
+	return 'Set up this computer for Mediaforce work';
 }
 
 export function buildCalibrationRows(
@@ -779,7 +849,9 @@ export function buildOpsBlockers(
 			key: 'paused',
 			tone: 'wait',
 			title: `${encodeWorkLabel(activeJobs, queuedWork)} is paused`,
-			detail: queue.state.scheduler_summary ?? 'No new media work will start until you resume it.',
+			detail:
+				activityScheduleDetailCopy(queue.state.scheduler_summary) ||
+				'No new media work will start until you resume it.',
 			action: 'resume-encode'
 		});
 	}
@@ -814,8 +886,8 @@ export function buildOpsBlockers(
 					? `${opsWorkLabel(firstJob.prefix)} needs a longer work window`
 					: `${encodeCountLabel(impossibleWindowJobs, impossibleWindowJobs.length)} need longer work windows`,
 			detail:
-				firstJob.waiting_reason ??
-				'The estimated task is longer than every compatible worker window.',
+				activityScheduleDetailCopy(firstJob.waiting_reason) ||
+				'The estimated task is longer than every compatible computer work window.',
 			href: '/settings',
 			linkLabel: 'Edit work windows'
 		});
@@ -826,7 +898,7 @@ export function buildOpsBlockers(
 			tone: 'wait',
 			title: 'Media storage is not available',
 			detail:
-				storageWaitingJobs[0].scheduler_status_copy ??
+				activityScheduleDetailCopy(storageWaitingJobs[0].scheduler_status_copy) ||
 				'Mount the media storage on this computer to continue.'
 		});
 	} else if (
@@ -862,7 +934,9 @@ export function buildOpsBlockers(
 			key: 'schedule-waiting',
 			tone: 'wait',
 			title: `${encodeCountLabel(queue?.queued ?? [], scheduleWaiting)} ${scheduleWaiting === 1 ? 'is' : 'are'} waiting for the scheduled time`,
-			detail: queue?.state.scheduler_summary ?? 'Work will start when its allowed time begins.'
+			detail:
+				activityScheduleDetailCopy(queue?.state.scheduler_summary) ||
+				'Work will start when its allowed time begins.'
 		});
 	}
 	return blockers;
@@ -918,7 +992,9 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: 'wait',
 			title: `${encodeWorkLabel(activeJobs, queuedWork)} is paused`,
-			detail: queue.state.scheduler_summary ?? 'Resume when media work should continue.',
+			detail:
+				activityScheduleDetailCopy(queue.state.scheduler_summary) ||
+				'Resume when media work should continue.',
 			metricLabel: 'Queued',
 			metricValue: String(queuedCount)
 		};
@@ -928,8 +1004,8 @@ export function buildOpsReadinessSummary(
 			tone: 'fail',
 			title: `${encodeCountLabel(impossibleWindowJobs, impossibleWindowJobs.length)} ${impossibleWindowJobs.length === 1 ? 'needs' : 'need'} a longer work window`,
 			detail:
-				impossibleWindowJobs[0].waiting_reason ??
-				'Widen a compatible worker window or intentionally bypass the schedule.',
+				activityScheduleDetailCopy(impossibleWindowJobs[0].waiting_reason) ||
+				'Widen a compatible computer work window or intentionally bypass the schedule.',
 			metricLabel: 'Blocked',
 			metricValue: String(impossibleWindowJobs.length)
 		};
@@ -940,11 +1016,11 @@ export function buildOpsReadinessSummary(
 		const detailParts: string[] = [];
 		if (activeProcessingCount > 0) {
 			detailParts.push(
-				`${activeProcessingCount} ${activeProcessingCount === 1 ? 'item' : 'items'} processing across ${capacity.busy} ${capacity.busy === 1 ? 'computer' : 'computers'}`
+				`${activeProcessingCount} ${activeProcessingCount === 1 ? 'item' : 'items'} compressing across ${capacity.busy} ${capacity.busy === 1 ? 'computer' : 'computers'}`
 			);
 		}
 		if (activeChecks > 0) {
-			detailParts.push(`${activeChecks} ${activeChecks === 1 ? 'test' : 'tests'} active`);
+			detailParts.push(`${activeChecks} ${activeChecks === 1 ? 'sample' : 'samples'} active`);
 		}
 		if (queuedCount === 1 && visibleQueuedJobs[0]?.prefix) {
 			detailParts.push(`${opsWorkLabel(visibleQueuedJobs[0].prefix)} is queued`);
@@ -998,7 +1074,7 @@ export function buildOpsReadinessSummary(
 	if (drainingJobs.length > 0 && runningCount === 0) {
 		return {
 			tone: 'wait',
-			title: 'Workers are draining',
+			title: 'Computers are draining',
 			detail:
 				'No queued task safely fits the time left. Work resumes automatically in the next compatible full window.',
 			metricLabel: 'Waiting',
@@ -1031,7 +1107,7 @@ export function buildOpsReadinessSummary(
 		return {
 			tone: 'active',
 			title: 'Mediaforce is working',
-			detail: `${activeChecks} ${activeChecks === 1 ? 'test' : 'tests'} active${reviewDetail}`,
+			detail: `${activeChecks} ${activeChecks === 1 ? 'sample' : 'samples'} active${reviewDetail}`,
 			metricLabel: 'Running',
 			metricValue: String(activeChecks)
 		};
@@ -1041,7 +1117,8 @@ export function buildOpsReadinessSummary(
 			tone: 'wait',
 			title: 'Waiting for scheduled time',
 			detail:
-				queue?.state.scheduler_summary ?? 'Waiting work will start when its allowed time begins.',
+				activityScheduleDetailCopy(queue?.state.scheduler_summary) ||
+				'Waiting work will start when its allowed time begins.',
 			metricLabel: 'Waiting',
 			metricValue: String(queuedWaiting)
 		};
@@ -1108,7 +1185,8 @@ export function buildOpsStatusTiles(
 					? 'stopping'
 					: 'ready',
 			detail:
-				encode?.state.scheduler_summary ?? (loadError ? 'data unavailable' : 'work window state'),
+				activityScheduleDetailCopy(encode?.state.scheduler_summary) ||
+				(loadError ? 'Activity data is unavailable' : 'No work window reported'),
 			tone: loadError
 				? 'fail'
 				: encode?.state.stop_requested
@@ -1118,8 +1196,8 @@ export function buildOpsStatusTiles(
 						: 'ready'
 		},
 		{
-			label: 'Processing',
-			value: `${visibleRunningCount} running · ${visibleQueuedCount} queued`,
+			label: 'Compression queue',
+			value: `${visibleRunningCount} working · ${visibleQueuedCount} waiting`,
 			detail:
 				encode?.telemetry?.eta_copy ?? `${encode?.needs_attention_count ?? 0} retry available`,
 			tone:
@@ -1132,8 +1210,8 @@ export function buildOpsStatusTiles(
 							: 'idle'
 		},
 		{
-			label: 'Sample checks',
-			value: `${calibration?.sample.running_count ?? 0} running · ${calibration?.sample.queued_count ?? 0} queued`,
+			label: 'Sample queue',
+			value: `${calibration?.sample.running_count ?? 0} working · ${calibration?.sample.queued_count ?? 0} waiting`,
 			detail:
 				unavailableReviewCount > 0
 					? `${reviewReadyCount} ready · ${unavailableReviewCount} unavailable`
@@ -1148,14 +1226,14 @@ export function buildOpsStatusTiles(
 							: 'idle'
 		},
 		{
-			label: 'Workers',
+			label: 'Computers',
 			value:
 				capacity.encodeReady === 0 && capacity.busy > 0
-					? `${capacity.busy} busy / ${capacity.total}`
-					: `${capacity.encodeReady} can encode / ${capacity.total}`,
+					? `${capacity.busy} working / ${capacity.total}`
+					: `${capacity.encodeReady} ready / ${capacity.total}`,
 			detail: capacity.total
-				? `${capacity.available} reachable · ${capacity.busy} busy · ${capacity.unavailable} unavailable`
-				: 'worker status unavailable',
+				? `${capacity.available} reachable · ${capacity.busy} working · ${capacity.unavailable} unavailable`
+				: 'Computer status is unavailable',
 			tone:
 				capacity.encodeReady > 0
 					? 'ready'
@@ -1185,7 +1263,7 @@ export function buildOpsFooterSignals(
 	const visibleCounts = visibleEncodeQueueCounts(dashboard);
 	return [
 		{
-			label: 'Processing',
+			label: 'Compressing',
 			value: `${visibleCounts.running}/${visibleCounts.queued}`,
 			tone: visibleCounts.running > 0 ? 'active' : visibleCounts.queued > 0 ? 'wait' : 'idle'
 		},
@@ -1200,12 +1278,12 @@ export function buildOpsFooterSignals(
 						: 'idle'
 		},
 		{
-			label: 'Checks',
+			label: 'Samples',
 			value: String(calibration?.active_count ?? 0),
 			tone: (calibration?.active_count ?? 0) > 0 ? 'active' : 'idle'
 		},
 		{
-			label: 'Workers',
+			label: 'Computers',
 			value: `${hosts?.hosts.filter((host) => host.available || host.storage_recovery_available === true).length ?? 0}/${hosts?.hosts.length ?? 0}`
 		}
 	];
@@ -1218,7 +1296,9 @@ export function hostTone(
 ): ShellTone {
 	if (host.storage_recovery_available === true) return 'wait';
 	if (!host.available) return fleetHasReadyCapacity ? 'wait' : 'fail';
-	const schedule = hostSchedulePresentation(host, dashboard?.encode_queue);
+	const schedule = activitySchedulePresentationCopy(
+		hostSchedulePresentation(host, dashboard?.encode_queue)
+	);
 	if (schedule) return schedule.tone;
 	if (host.active_encode_count > 0) return 'active';
 	if (host.queue_active === false) return 'idle';
@@ -1229,11 +1309,13 @@ export function hostStateCopy(
 	host: HostRuntime,
 	dashboard?: DashboardSummaryPayload | null
 ): string {
-	if (host.storage_recovery_available === true) return 'Reconnects storage';
+	if (host.storage_recovery_available === true) return 'Reconnecting storage';
 	if (!host.available) return 'Unavailable';
-	const schedule = hostSchedulePresentation(host, dashboard?.encode_queue);
+	const schedule = activitySchedulePresentationCopy(
+		hostSchedulePresentation(host, dashboard?.encode_queue)
+	);
 	if (schedule) return schedule.label;
-	if (host.active_encode_count > 0) return 'Busy';
-	if (host.queue_active === false) return 'Not accepting';
+	if (host.active_encode_count > 0) return 'Working';
+	if (host.queue_active === false) return 'Not accepting work';
 	return 'Ready';
 }

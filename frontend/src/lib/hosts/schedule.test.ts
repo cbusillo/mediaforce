@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { EncodeQueueJob, EncodeQueueSummary, HostRuntime } from '$lib/api/types';
-import { hostSchedulePresentation, jobSchedulePresentation } from './schedule';
+import {
+	hostSchedulePresentation,
+	jobSchedulePresentation,
+	workScheduleSummaryCopy
+} from './schedule';
 
 const NOW = new Date('2026-07-23T16:00:00Z');
 
@@ -19,7 +23,7 @@ function host(overrides: Partial<HostRuntime> = {}): HostRuntime {
 		max_parallel_encodes: 1,
 		active_encode_count: 0,
 		schedule_profile_label: 'Evening',
-		schedule_detail: 'window 18:00-15:00 in host local time',
+		schedule_detail: 'runs weekdays between 18:00 and 15:00 (host local)',
 		schedule_open: true,
 		schedule_timezone: 'America/New_York',
 		schedule_closes_at: '2026-07-23T19:00:00Z',
@@ -52,6 +56,22 @@ function queue(overrides: Partial<EncodeQueueSummary> = {}): EncodeQueueSummary 
 }
 
 describe('schedule presentation', () => {
+	it('adapts every live scheduler summary without changing unknown text', () => {
+		expect(workScheduleSummaryCopy('runs anytime')).toBe('Work runs anytime');
+		expect(workScheduleSummaryCopy('never runs')).toBe('Work schedule is off');
+		expect(workScheduleSummaryCopy('runs weekdays between 20:00 and 06:00 (host local)')).toBe(
+			'Work runs weekdays between 20:00 and 06:00 (computer local time)'
+		);
+		expect(
+			workScheduleSummaryCopy('runs weekdays between 20:00 and 06:00 (controller local)')
+		).toBe('Work runs weekdays between 20:00 and 06:00 (Mediaforce local time)');
+		expect(workScheduleSummaryCopy('runs weekdays between 20:00 and 06:00 (utc)')).toBe(
+			'Work runs weekdays between 20:00 and 06:00 (UTC)'
+		);
+		expect(workScheduleSummaryCopy('custom scheduler detail')).toBe('custom scheduler detail');
+		expect(workScheduleSummaryCopy('')).toBe('');
+	});
+
 	it('shows an exact hard stop for active work', () => {
 		const presentation = jobSchedulePresentation(
 			job({

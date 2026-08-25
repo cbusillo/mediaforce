@@ -9,12 +9,14 @@
 		OperatorWorkPayload
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { hostSchedulePresentation } from '$lib/hosts/schedule';
+	import { hostSchedulePresentation, workScheduleSummaryCopy } from '$lib/hosts/schedule';
 	import OperatorWorkConsole from './OperatorWorkConsole.svelte';
 	import OperatorShell from './OperatorShell.svelte';
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 	import {
+		activityScheduleDetailCopy,
+		activitySchedulePresentationCopy,
 		buildOpsBlockers,
 		buildOpsFooterSignals,
 		buildOpsHistoryRows,
@@ -71,7 +73,10 @@
 	const fleetHasReadyCapacity = $derived(readyHosts > 0);
 	const notableScheduleHosts = $derived(
 		(hosts?.hosts ?? [])
-			.map((host) => ({ host, schedule: hostSchedulePresentation(host, encodeQueue) }))
+			.map((host) => ({
+				host,
+				schedule: activitySchedulePresentationCopy(hostSchedulePresentation(host, encodeQueue))
+			}))
 			.filter(
 				(entry) =>
 					entry.schedule &&
@@ -173,15 +178,15 @@
 
 	function actionTitle(action: OpsActionId): string {
 		if (action === 'stop-encode') return 'Stop current media work and pause what is waiting';
-		if (action === 'stop-calibration') return 'Stop tests that are running or waiting';
+		if (action === 'stop-calibration') return 'Stop samples that are running or waiting';
 		if (action === 'retry-failed-encode')
 			return 'Retry approved folders that are ready to process again';
 		if (action === 'retry-encode-prefix') return 'Retry processing for this folder';
 		if (action === 'pause-encode') return 'Pause processing';
 		if (action === 'resume-encode') return 'Resume processing and clear stop request';
-		if (action === 'start-host') return 'Start or wake this worker';
-		if (action === 'prepare-host') return 'Prepare this worker for Mediaforce work';
-		return 'Reset stored trust for this worker';
+		if (action === 'start-host') return 'Start or wake this computer';
+		if (action === 'prepare-host') return 'Set up this computer for Mediaforce work';
+		return 'Reset stored trust for this computer';
 	}
 
 	function actionBody(
@@ -303,13 +308,13 @@
 		if (actionPending === action) return 'Working';
 		if (action === 'pause-encode') return 'Pause';
 		if (action === 'resume-encode') return 'Resume';
-		if (action === 'retry-failed-encode') return 'Retry unfinished work';
+		if (action === 'retry-failed-encode') return 'Retry all waiting work';
 		if (action === 'retry-encode-prefix') return 'Retry item';
-		if (action === 'stop-encode') return 'Stop media work';
-		if (action === 'stop-calibration') return 'Stop tests';
-		if (action === 'start-host') return 'Start';
-		if (action === 'prepare-host') return 'Prepare';
-		if (action === 'reset-host-trust') return 'Trust';
+		if (action === 'stop-encode') return 'Stop processing';
+		if (action === 'stop-calibration') return 'Stop samples';
+		if (action === 'start-host') return 'Start computer';
+		if (action === 'prepare-host') return 'Set up computer';
+		if (action === 'reset-host-trust') return 'Reset computer trust';
 		return 'Run';
 	}
 
@@ -319,8 +324,8 @@
 
 	function queueKindLabel(row: OpsQueueRow): string {
 		if (row.kind === 'encode') return row.scopeLabel ?? 'Media';
-		if (row.kind === 'proof') return 'Review';
-		return 'Test';
+		if (row.kind === 'proof') return 'Comparison clips';
+		return 'Sample';
 	}
 
 	onMount(() => {
@@ -417,9 +422,10 @@
 										: 'Ready'}
 							/>
 							<div>
-								<strong
-									>{encodeQueue?.state.scheduler_summary ?? 'Work schedule unavailable'}</strong
-								>
+								<strong>
+									{workScheduleSummaryCopy(encodeQueue?.state.scheduler_summary) ||
+										'Work schedule is unavailable'}
+								</strong>
 								<span
 									>{visibleEncodeCounts.queued.toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
 										'en-US'
@@ -652,7 +658,9 @@
 					>
 						<div class="host-list">
 							{#each hosts?.hosts ?? [] as host (host.key)}
-								{@const schedule = hostSchedulePresentation(host, encodeQueue)}
+								{@const schedule = activitySchedulePresentationCopy(
+									hostSchedulePresentation(host, encodeQueue)
+								)}
 								<div class="host-row host-row--{hostTone(host, fleetHasReadyCapacity, dashboard)}">
 									<div class="host-row__head">
 										<StateBadge
@@ -663,22 +671,22 @@
 										<strong>{host.label}</strong>
 									</div>
 									<dl>
-										<dt>Window</dt>
-										<dd title={host.schedule_detail}>
+										<dt>Work window</dt>
+										<dd title={activityScheduleDetailCopy(host.schedule_detail)}>
 											{schedule?.detail || host.schedule_profile_label || 'Always available'}
 										</dd>
 										<dt>Now</dt>
 										<dd>
 											{host.active_encode_count > 0
-												? `${host.active_encode_count.toLocaleString('en-US')} processing ${host.active_encode_count === 1 ? 'task' : 'tasks'}`
+												? `${host.active_encode_count.toLocaleString('en-US')} compressing ${host.active_encode_count === 1 ? 'task' : 'tasks'}`
 												: 'Idle'}
 										</dd>
-										<dt>Can make</dt>
+										<dt>Work it can run</dt>
 										<dd>{workerCapabilitiesSummary(host.capabilities)}</dd>
 									</dl>
 									{#if host.setup_requires_password && host.setup_supported}
 										<label class="host-password">
-											<span>Prepare password</span>
+											<span>Setup password</span>
 											<input
 												type="password"
 												autocomplete="current-password"
@@ -695,7 +703,7 @@
 													type="button"
 													class="control control--compact"
 													title={actionTitle('start-host')}
-													onclick={() => runAction('start-host', host)}>Start</button
+													onclick={() => runAction('start-host', host)}>Start computer</button
 												>
 											{/if}
 											{#if !hostActionDisabled('prepare-host', host) || (host.setup_supported && host.setup_requires_password)}
@@ -704,7 +712,7 @@
 													class="control control--compact"
 													disabled={hostActionDisabled('prepare-host', host)}
 													title={hostPrepareTitle(host)}
-													onclick={() => runAction('prepare-host', host)}>Prepare</button
+													onclick={() => runAction('prepare-host', host)}>Set up computer</button
 												>
 											{/if}
 											{#if !hostActionDisabled('reset-host-trust', host)}
@@ -712,7 +720,8 @@
 													type="button"
 													class="control control--compact"
 													title={actionTitle('reset-host-trust')}
-													onclick={() => runAction('reset-host-trust', host)}>Reset trust</button
+													onclick={() => runAction('reset-host-trust', host)}
+													>Reset computer trust</button
 												>
 											{/if}
 										</div>
@@ -725,16 +734,19 @@
 						</div>
 					</WorkstationPanel>
 
-					<WorkstationPanel eyebrow="Schedule" title="When work may run">
+					<WorkstationPanel eyebrow="Work schedule" title="When work may run">
 						<div class="schedule-list">
 							<div class="scope-row scope-row--active">
 								<span>Current schedule</span>
-								<strong>{encodeQueue?.state.scheduler_summary ?? 'unknown'}</strong>
-								<small
-									>{queuedWaitingCount.toLocaleString('en-US')}
-									{queuedWaitingCount === 1 ? 'item' : 'items'} waiting for the next work window</small
-								>
-								<a class="inline-link" href={resolve('/settings')}>Edit schedule</a>
+								<strong>
+									{workScheduleSummaryCopy(encodeQueue?.state.scheduler_summary) ||
+										'Work schedule is unavailable'}
+								</strong>
+								<small>
+									{queuedWaitingCount.toLocaleString('en-US')}
+									{queuedWaitingCount === 1 ? 'item' : 'items'} waiting for the next work window
+								</small>
+								<a class="inline-link" href={resolve('/settings')}>Edit work schedule</a>
 							</div>
 							{#each notableScheduleHosts as entry (entry.host.key)}
 								<div class="scope-row scope-row--wait">
