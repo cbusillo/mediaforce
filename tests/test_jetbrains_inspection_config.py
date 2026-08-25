@@ -63,9 +63,6 @@ def test_jetbrains_inspection_lanes_are_language_owned() -> None:
     assert inspection["prepare"] == "bash scripts/prepare-jetbrains-inspection.sh"
     assert inspection["requiredGeneratedState"] == [
         ".venv",
-        ".idea/mediaforce.iml",
-        ".idea/modules.xml",
-        ".idea/misc.xml",
         ".idea/inspectionProfiles/Mediaforce.xml",
         "frontend/.idea/inspectionProfiles/Mediaforce.xml",
         "frontend/node_modules",
@@ -169,14 +166,6 @@ def test_shared_profile_is_bounded_and_generated_state_is_ignored() -> None:
     assert "/.idea/" in (ROOT / "frontend" / ".gitignore").read_text().splitlines()
     if generated_frontend_profile.exists():
         assert generated_frontend_profile.read_bytes() == CANONICAL_PROFILE.read_bytes()
-
-    generated_module = ROOT / ".idea" / "mediaforce.iml"
-    if generated_module.exists():
-        module_xml = generated_module.read_text()
-        assert '<module type="PYTHON_MODULE" version="4">' in module_xml
-        assert '<content url="file://$MODULE_DIR$/..">' in module_xml
-        assert '<excludeFolder url="file://$MODULE_DIR$/../frontend" />' in module_xml
-        assert '<sourceFolder url="file://$MODULE_DIR$/../tests" isTestSource="true" />' in module_xml
 
     prepare_script = ROOT / "scripts" / "prepare-jetbrains-inspection.sh"
     assert os.access(prepare_script, os.X_OK)

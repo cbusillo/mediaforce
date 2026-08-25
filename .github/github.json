@@ -53,9 +53,6 @@
       "prepare": "bash scripts/prepare-jetbrains-inspection.sh",
       "requiredGeneratedState": [
         ".venv",
-        ".idea/mediaforce.iml",
-        ".idea/modules.xml",
-        ".idea/misc.xml",
         ".idea/inspectionProfiles/Mediaforce.xml",
         "frontend/.idea/inspectionProfiles/Mediaforce.xml",
         "frontend/node_modules",
