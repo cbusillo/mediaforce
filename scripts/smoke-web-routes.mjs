@@ -20,6 +20,42 @@ const DEFAULT_ROUTE_TIMEOUT_MS = 6000;
 const SERVER_START_TIMEOUT_MS = 12000;
 const NARROW_VIEWPORT = { width: 390, height: 844 };
 const APP_ROOT_SELECTOR = ".app-shell";
+const LIBRARY_METRIC_COPY = [
+  "Current size",
+  "Estimated output",
+  "Estimated space saved",
+];
+const FIXTURE_REQUIRED_COPY = new Map([
+  [
+    "/folders/tv/Approved%20Show/Season%201",
+    [
+      "Current size",
+      "Estimated output",
+      "Estimated space saved",
+      "Nothing is queued until you choose the action below.",
+      "Compress the season",
+    ],
+  ],
+  [
+    "/folders/movies/Target%20Too%20Large",
+    [
+      "Current size",
+      "Estimated output",
+      "Estimated space saved",
+      "Cannot start",
+      "Choose a smaller target in library settings.",
+    ],
+  ],
+  [
+    "/folders/other/Field%20Notes",
+    [
+      "Files included now",
+      "What is included",
+      "Files left untouched",
+      "Set up sample",
+    ],
+  ],
+]);
 
 /**
  * @typedef {object} SmokeFixtureRoute
@@ -54,10 +90,38 @@ const endpointChecks = [
 ];
 
 const routeChecks = [
-  ["Library", "/", "Your library"],
-  ["Movies Library", "/movies", "MOVIE LIBRARY"],
-  ["Other Library", "/other", "Other Library"],
-  ["Folders compatibility", "/folders", "Your library"],
+  [
+    "TV Library",
+    "/",
+    "TV Library",
+    "",
+    LIBRARY_METRIC_COPY,
+    "TV Library · Mediaforce",
+  ],
+  [
+    "Movie Library",
+    "/movies",
+    "Movie Library",
+    "",
+    LIBRARY_METRIC_COPY,
+    "Movie Library · Mediaforce",
+  ],
+  [
+    "Other Library",
+    "/other",
+    "Other Library",
+    "",
+    LIBRARY_METRIC_COPY,
+    "Other Library · Mediaforce",
+  ],
+  [
+    "Folders compatibility",
+    "/folders",
+    "TV Library",
+    "",
+    LIBRARY_METRIC_COPY,
+    "TV Library · Mediaforce",
+  ],
   ["Activity", "/ops", "Activity", "Computers"],
   ["Settings", "/settings", "Library and working space", "Work schedule"],
   ["Finished", "/completed", "Finished media"],
@@ -309,6 +373,134 @@ async function checkEndpoints(baseUrl, timeoutMs) {
   }
 }
 
+async function openRoute(page, baseUrl, route, timeoutMs) {
+  await page.goto(`${baseUrl}${route}`, {
+    waitUntil: "domcontentloaded",
+    timeout: timeoutMs,
+  });
+  await page.waitForSelector(APP_ROOT_SELECTOR, {
+    state: "visible",
+    timeout: timeoutMs,
+  });
+  await page.waitForSelector("main", {
+    state: "visible",
+    timeout: timeoutMs,
+  });
+}
+
+function routeExpectation(
+  route,
+  marker,
+  stageMarker,
+  requiredCopies,
+  expectedTitle,
+) {
+  return {
+    expectedMarker: marker,
+    expectedStageMarker: stageMarker,
+    requiredText: requiredCopies,
+    requiredTitle: expectedTitle,
+    requireFolderReady: route.startsWith("/folders/"),
+  };
+}
+
+async function waitForRouteContent(page, expectation, timeoutMs, label) {
+  await page
+    .waitForFunction(
+      ({
+        expectedMarker,
+        expectedStageMarker,
+        requiredText,
+        requiredTitle,
+        requireFolderReady,
+      }) => {
+        if (!document.body.innerText.includes(expectedMarker)) return false;
+        if (
+          expectedStageMarker &&
+          !document.body.innerText.includes(expectedStageMarker)
+        )
+          return false;
+        const normalizedBody = document.body.innerText.toLocaleLowerCase();
+        if (
+          requiredText.some(
+            (copy) => !normalizedBody.includes(copy.toLocaleLowerCase()),
+          )
+        )
+          return false;
+        if (requiredTitle && document.title !== requiredTitle) return false;
+        if (!requireFolderReady) return true;
+        const readyMarker = document
+          .querySelector("[data-folder-ready-marker]")
+          ?.getAttribute("data-folder-ready-marker");
+        return Boolean(readyMarker?.includes(expectedMarker));
+      },
+      expectation,
+      { timeout: timeoutMs },
+    )
+    .catch((error) => {
+      throw new Error(
+        `${label} did not render the required route content within ${timeoutMs}ms: ${error.message}`,
+      );
+    });
+}
+
+async function readRouteState(page, expectation, inspectNarrowLayout = false) {
+  return page.evaluate(
+    ({
+      expectedMarker,
+      expectedStageMarker,
+      requiredText,
+      requiredTitle,
+      requireFolderReady,
+      inspectNarrow,
+    }) => {
+      const bodyText = document.body.innerText.trim();
+      const normalizedBody = bodyText.toLocaleLowerCase();
+      const readyMarker = document
+        .querySelector("[data-folder-ready-marker]")
+        ?.getAttribute("data-folder-ready-marker");
+      const visibleWideTables = inspectNarrow
+        ? Array.from(document.querySelectorAll("table"))
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              return {
+                text: String(element.textContent ?? "")
+                  .trim()
+                  .replace(/\s+/g, " ")
+                  .slice(0, 80),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+                display: getComputedStyle(element).display,
+              };
+            })
+            .filter(
+              (item) => item.width > window.innerWidth + 2 && item.height > 0,
+            )
+        : [];
+      return {
+        bodyLength: bodyText.length,
+        hasMain: document.querySelector("main") !== null,
+        hasAppRoot: document.querySelector(".app-shell") !== null,
+        hasMarker: bodyText.includes(expectedMarker),
+        hasStageMarker:
+          !expectedStageMarker || bodyText.includes(expectedStageMarker),
+        missingCopies: requiredText.filter(
+          (copy) => !normalizedBody.includes(copy.toLocaleLowerCase()),
+        ),
+        hasExpectedTitle: !requiredTitle || document.title === requiredTitle,
+        hasReadyMarker:
+          !requireFolderReady || Boolean(readyMarker?.includes(expectedMarker)),
+        pageOverflow:
+          inspectNarrow &&
+          document.documentElement.scrollWidth > window.innerWidth + 2,
+        scrollWidth: document.documentElement.scrollWidth,
+        visibleWideTables,
+      };
+    },
+    { ...expectation, inspectNarrow: inspectNarrowLayout },
+  );
+}
+
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -322,78 +514,28 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
       route,
       marker,
       stageMarker = "",
+      requiredCopies = [],
+      expectedTitle = "",
     ] of routeChecksForBrowser) {
       pageErrors.length = 0;
       const started = performance.now();
-      const requireFolderReadyMarker = route.startsWith("/folders/");
-      await page.goto(`${baseUrl}${route}`, {
-        waitUntil: "domcontentloaded",
-        timeout: timeoutMs,
-      });
-      await page.waitForSelector(APP_ROOT_SELECTOR, {
-        state: "visible",
-        timeout: timeoutMs,
-      });
-      await page.waitForSelector("main", {
-        state: "visible",
-        timeout: timeoutMs,
-      });
-      await page
-        .waitForFunction(
-          ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
-            if (!document.body.innerText.includes(expectedMarker)) return false;
-            if (
-              expectedStageMarker &&
-              !document.body.innerText.includes(expectedStageMarker)
-            )
-              return false;
-            if (!requireFolderReady) return true;
-            const readyMarker = document
-              .querySelector("[data-folder-ready-marker]")
-              ?.getAttribute("data-folder-ready-marker");
-            return Boolean(readyMarker?.includes(expectedMarker));
-          },
-          {
-            expectedMarker: marker,
-            expectedStageMarker: stageMarker,
-            requireFolderReady: requireFolderReadyMarker,
-          },
-          { timeout: timeoutMs },
-        )
-        .catch((error) => {
-          throw new Error(
-            `${label} did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
-          );
-        });
-      const state = await page.evaluate(
-        ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
-          const bodyText = document.body.innerText.trim();
-          const readyMarker = document
-            .querySelector("[data-folder-ready-marker]")
-            ?.getAttribute("data-folder-ready-marker");
-          return {
-            bodyLength: bodyText.length,
-            hasMain: document.querySelector("main") !== null,
-            hasAppRoot: document.querySelector(".app-shell") !== null,
-            hasMarker: bodyText.includes(expectedMarker),
-            hasStageMarker:
-              !expectedStageMarker || bodyText.includes(expectedStageMarker),
-            hasReadyMarker:
-              !requireFolderReady ||
-              Boolean(readyMarker?.includes(expectedMarker)),
-          };
-        },
-        {
-          expectedMarker: marker,
-          expectedStageMarker: stageMarker,
-          requireFolderReady: requireFolderReadyMarker,
-        },
+      const expectation = routeExpectation(
+        route,
+        marker,
+        stageMarker,
+        requiredCopies,
+        expectedTitle,
       );
+      await openRoute(page, baseUrl, route, timeoutMs);
+      await waitForRouteContent(page, expectation, timeoutMs, label);
+      const state = await readRouteState(page, expectation);
       if (
         !state.hasAppRoot ||
         !state.hasMain ||
         !state.hasMarker ||
         !state.hasStageMarker ||
+        state.missingCopies.length ||
+        !state.hasExpectedTitle ||
         !state.hasReadyMarker ||
         state.bodyLength < 80
       ) {
@@ -521,7 +663,7 @@ async function checkLibraryStructureWithoutDashboard(
     const state = await page.evaluate(
       (marker) => ({
         hasMarker: document.body.innerText.includes(marker),
-        stillOpening: document.body.innerText.includes("Opening your library"),
+        stillOpening: document.body.innerText.includes("Loading TV library"),
         dashboardBlocked: Boolean(window.__mediaforceDashboardBlocked),
       }),
       expectedMarker,
@@ -660,7 +802,7 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
     for (const marker of [
       "1 season · 1 safety-cleared episode",
       "Safety-cleared size:",
-      "Projected savings: about",
+      "Estimated space saved: about",
       "Season 2 stays original",
       "current-season policy does not change",
     ]) {
@@ -1132,97 +1274,34 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
       route,
       marker,
       stageMarker = "",
+      requiredCopies = [],
+      expectedTitle = "",
     ] of routeChecksForNarrow) {
       pageErrors.length = 0;
       const started = performance.now();
-      const requireFolderReadyMarker = route.startsWith("/folders/");
-      await page.goto(`${baseUrl}${route}`, {
-        waitUntil: "domcontentloaded",
-        timeout: timeoutMs,
-      });
-      await page.waitForSelector(APP_ROOT_SELECTOR, {
-        state: "visible",
-        timeout: timeoutMs,
-      });
-      await page.waitForSelector("main", {
-        state: "visible",
-        timeout: timeoutMs,
-      });
-      await page
-        .waitForFunction(
-          ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
-            if (!document.body.innerText.includes(expectedMarker)) return false;
-            if (
-              expectedStageMarker &&
-              !document.body.innerText.includes(expectedStageMarker)
-            )
-              return false;
-            if (!requireFolderReady) return true;
-            const readyMarker = document
-              .querySelector("[data-folder-ready-marker]")
-              ?.getAttribute("data-folder-ready-marker");
-            return Boolean(readyMarker?.includes(expectedMarker));
-          },
-          {
-            expectedMarker: marker,
-            expectedStageMarker: stageMarker,
-            requireFolderReady: requireFolderReadyMarker,
-          },
-          { timeout: timeoutMs },
-        )
-        .catch((error) => {
-          throw new Error(
-            `${label} narrow route did not show marker ${JSON.stringify(marker)} within ${timeoutMs}ms: ${error.message}`,
-          );
-        });
-      const state = await page.evaluate(
-        ({ expectedMarker, expectedStageMarker, requireFolderReady }) => {
-          const bodyText = document.body.innerText.trim();
-          const readyMarker = document
-            .querySelector("[data-folder-ready-marker]")
-            ?.getAttribute("data-folder-ready-marker");
-          const visibleWideTables = Array.from(
-            document.querySelectorAll("table"),
-          )
-            .map((el) => {
-              const rect = el.getBoundingClientRect();
-              return {
-                text: String(el.textContent ?? "")
-                  .trim()
-                  .replace(/\s+/g, " ")
-                  .slice(0, 80),
-                width: Math.round(rect.width),
-                height: Math.round(rect.height),
-                display: getComputedStyle(el).display,
-              };
-            })
-            .filter(
-              (item) => item.width > window.innerWidth + 2 && item.height > 0,
-            );
-          return {
-            bodyLength: bodyText.length,
-            hasMarker: bodyText.includes(expectedMarker),
-            hasStageMarker:
-              !expectedStageMarker || bodyText.includes(expectedStageMarker),
-            hasReadyMarker:
-              !requireFolderReady ||
-              Boolean(readyMarker?.includes(expectedMarker)),
-            pageOverflow:
-              document.documentElement.scrollWidth > window.innerWidth + 2,
-            scrollWidth: document.documentElement.scrollWidth,
-            visibleWideTables,
-          };
-        },
-        {
-          expectedMarker: marker,
-          expectedStageMarker: stageMarker,
-          requireFolderReady: requireFolderReadyMarker,
-        },
+      const expectation = routeExpectation(
+        route,
+        marker,
+        stageMarker,
+        requiredCopies,
+        expectedTitle,
       );
+      await openRoute(page, baseUrl, route, timeoutMs);
+      await waitForRouteContent(
+        page,
+        expectation,
+        timeoutMs,
+        `${label} narrow`,
+      );
+      const state = await readRouteState(page, expectation, true);
       if (
+        !state.hasAppRoot ||
+        !state.hasMain ||
         state.bodyLength < 80 ||
         !state.hasMarker ||
         !state.hasStageMarker ||
+        state.missingCopies.length ||
+        !state.hasExpectedTitle ||
         !state.hasReadyMarker ||
         state.pageOverflow ||
         state.visibleWideTables.length
@@ -1247,9 +1326,38 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
 async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
   await seedSmokeFixtures(configPath, "empty");
   const emptyRouteChecks = [
-    ["Empty Library", "/", "Point Mediaforce at your TV folder"],
-    ["Empty Folders", "/folders", "Point Mediaforce at your TV folder"],
-    ["Empty Other Library", "/other", "No Other media is indexed"],
+    [
+      "Empty TV Library",
+      "/",
+      "No TV shows or seasons found.",
+      "",
+      LIBRARY_METRIC_COPY,
+      "TV Library · Mediaforce",
+    ],
+    [
+      "Empty Folders",
+      "/folders",
+      "No TV shows or seasons found.",
+      "",
+      LIBRARY_METRIC_COPY,
+      "TV Library · Mediaforce",
+    ],
+    [
+      "Empty Movie Library",
+      "/movies",
+      "No movies found.",
+      "",
+      LIBRARY_METRIC_COPY,
+      "Movie Library · Mediaforce",
+    ],
+    [
+      "Empty Other Library",
+      "/other",
+      "No Other media found.",
+      "",
+      LIBRARY_METRIC_COPY,
+      "Other Library · Mediaforce",
+    ],
     ["Empty Activity", "/ops", "Nothing is running."],
     ["Empty Finished", "/completed", "No finished media match this search"],
   ];
@@ -1571,6 +1679,7 @@ async function main() {
         fixtureRoute.route,
         fixtureRoute.marker,
         fixtureRoute.stageMarker ?? "",
+        FIXTURE_REQUIRED_COPY.get(fixtureRoute.route) ?? [],
       ]);
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
