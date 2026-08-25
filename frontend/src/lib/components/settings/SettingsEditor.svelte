@@ -135,7 +135,7 @@
 	let clearArchiveTrigger = $state<HTMLButtonElement | null>(null);
 	let clearArchiveConfirm = $state<HTMLButtonElement | null>(null);
 	let archiveStatusMessage = $state<HTMLParagraphElement | null>(null);
-	let currentArchiveCleanup = $derived(loadedArchiveCleanup);
+	let archiveCleanupOverride = $state<ArchiveCleanupPayload | null | undefined>(undefined);
 	let archiveMessage = $state('');
 	let archiveError = $state('');
 	let pendingTypeChange = $state<PendingTypeChange | null>(null);
@@ -174,7 +174,9 @@
 	);
 	const runtimeHosts = $derived(hosts?.hosts ?? []);
 	const readyHostCount = $derived(runtimeHosts.filter((host) => host.available).length);
-	const archiveCleanup = $derived(currentArchiveCleanup);
+	const archiveCleanup = $derived(
+		archiveCleanupOverride === undefined ? loadedArchiveCleanup : archiveCleanupOverride
+	);
 	const cleanupSettings = $derived(
 		savedSettings ? { ...savedSettings, archive_cleanup: archiveCleanup } : null
 	);
@@ -476,7 +478,7 @@
 			} else {
 				if (response.settings) {
 					savedSettings = response.settings;
-					currentArchiveCleanup = response.settings.archive_cleanup;
+					archiveCleanupOverride = response.settings.archive_cleanup;
 					lastSettingsKey = settingsKey(response.settings);
 					draft = draftFromSettings(response.settings);
 				}
@@ -519,7 +521,7 @@
 			} else {
 				if (response.archive_cleanup) {
 					savedSettings = { ...savedSettings, archive_cleanup: response.archive_cleanup };
-					currentArchiveCleanup = response.archive_cleanup;
+					archiveCleanupOverride = response.archive_cleanup;
 				}
 				archiveMessage = response.message || 'Original backups deleted.';
 				clearArchiveArmed = false;
@@ -530,7 +532,7 @@
 		} finally {
 			clearArchivePending = false;
 			await tick();
-			archiveStatusMessage?.focus();
+			(clearArchiveArmed ? clearArchiveConfirm : archiveStatusMessage)?.focus();
 		}
 	}
 </script>

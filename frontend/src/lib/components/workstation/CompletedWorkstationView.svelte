@@ -422,7 +422,7 @@
 		} finally {
 			reviewPending = false;
 			await tick();
-			actionStatusMessage?.focus();
+			(armedReview ? reviewConfirmButton : actionStatusMessage)?.focus();
 		}
 	}
 
@@ -476,7 +476,7 @@
 		} finally {
 			cleanupPending = false;
 			await tick();
-			actionStatusMessage?.focus();
+			(armedScope ? deleteConfirmButton : actionStatusMessage)?.focus();
 		}
 	}
 
@@ -797,8 +797,8 @@
 									<span>Nothing to delete</span>
 									<strong
 										>{cleanupReviewCount > 0
-											? `${cleanupReviewCount.toLocaleString('en-US')} completed folders need review.`
-											: `${folders.length.toLocaleString('en-US')} completed folders are handled and shown only as history.`}</strong
+											? `${cleanupReviewCount.toLocaleString('en-US')} finished folders need review.`
+											: `${folders.length.toLocaleString('en-US')} finished folders are handled and shown only as history.`}</strong
 									>
 									<small
 										>{cleanupReviewCount > 0

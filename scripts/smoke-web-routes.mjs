@@ -1243,13 +1243,14 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       )
       .waitFor();
 
-    await page
+    const readyCleanupCheckbox = page
       .getByLabel(/Select .* to delete its original backups/)
-      .first()
-      .check();
-    await page
-      .getByRole("button", { name: "Delete selected original backups" })
-      .click();
+      .first();
+    const selectedDeleteTrigger = page.getByRole("button", {
+      name: "Delete selected original backups",
+    });
+    await readyCleanupCheckbox.check();
+    await selectedDeleteTrigger.click();
     const completedDeleteDialog = page.getByRole("alertdialog", {
       name: "Confirm original backup deletion",
     });
@@ -1271,6 +1272,10 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       .getByText("Your finished files are not touched.", { exact: false })
       .waitFor();
     await completedDeleteDialog.getByRole("button", { name: "Cancel" }).click();
+    await selectedDeleteTrigger.click();
+    await readyCleanupCheckbox.uncheck();
+    await completedDeleteDialog.waitFor({ state: "hidden" });
+    await readyCleanupCheckbox.check();
 
     await page
       .getByRole("button", { name: "Delete all original backups" })
@@ -1385,6 +1390,22 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     await settingsConfirmDialog
       .getByText("Your finished files are not touched.", { exact: true })
       .waitFor();
+    const workingFolderInput = page.getByLabel("Working folder", {
+      exact: true,
+    });
+    const savedWorkingFolder = await workingFolderInput.inputValue();
+    await workingFolderInput.fill(`${savedWorkingFolder}-unsaved-smoke`);
+    await settingsConfirmDialog.waitFor({ state: "hidden" });
+    await page
+      .getByText(
+        "Save the changed Working folder before deleting original backups from its Cleanup folder.",
+        { exact: true },
+      )
+      .last()
+      .waitFor();
+    await workingFolderInput.fill(savedWorkingFolder);
+    await settingsDeleteTrigger.click();
+    await settingsConfirmDialog.waitFor();
     await settingsDeleteTrigger.click();
     await settingsConfirmDialog.waitFor({ state: "hidden" });
     await settingsDeleteTrigger.click();
