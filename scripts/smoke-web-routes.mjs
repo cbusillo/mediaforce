@@ -1197,6 +1197,296 @@ async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
   }
 }
 
+async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    let completedCleanupRequests = 0;
+    let completedReviewRequests = 0;
+    page.on("request", (request) => {
+      if (request.method() !== "POST") return;
+      if (request.url().includes("/api/completed/backups/clear")) {
+        completedCleanupRequests += 1;
+      }
+      if (request.url().includes("/api/completed/originals/confirm-removed")) {
+        completedReviewRequests += 1;
+      }
+    });
+    await page.goto(`${baseUrl}/completed`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page
+      .locator("strong:visible", { hasText: "Backups ready to delete" })
+      .first()
+      .waitFor();
+    await page
+      .locator("strong:visible", { hasText: "Backups already gone" })
+      .first()
+      .waitFor();
+    await page.waitForFunction(() =>
+      document.body.innerText.includes("Cleanup folder"),
+    );
+    await page
+      .getByText("Select at least one folder with original backups.", {
+        exact: true,
+      })
+      .waitFor();
+    await page
+      .getByText(
+        "Select at least one folder whose original backups are already gone.",
+        {
+          exact: true,
+        },
+      )
+      .waitFor();
+
+    const readyCleanupCheckbox = page
+      .getByLabel(/Select .* to delete its original backups/)
+      .first();
+    const selectedDeleteTrigger = page.getByRole("button", {
+      name: "Delete selected original backups",
+    });
+    await readyCleanupCheckbox.check();
+    await selectedDeleteTrigger.click();
+    const completedDeleteDialog = page.getByRole("alertdialog", {
+      name: "Confirm original backup deletion",
+    });
+    const selectedDeleteConfirm = completedDeleteDialog.getByRole("button", {
+      name: /Delete [\d,]+ original backups?/,
+    });
+    await selectedDeleteConfirm.waitFor();
+    if (
+      !(await selectedDeleteConfirm.evaluate(
+        (button) => button === document.activeElement,
+      ))
+    ) {
+      throw new Error("Finished delete confirmation did not receive focus.");
+    }
+    await completedDeleteDialog
+      .getByText("This cannot be undone.", { exact: true })
+      .waitFor();
+    await completedDeleteDialog
+      .getByText("Your finished files are not touched.", { exact: false })
+      .waitFor();
+    await completedDeleteDialog.getByRole("button", { name: "Cancel" }).click();
+    await selectedDeleteTrigger.click();
+    await readyCleanupCheckbox.uncheck();
+    await completedDeleteDialog.waitFor({ state: "hidden" });
+    await readyCleanupCheckbox.check();
+
+    await page
+      .getByRole("button", { name: "Delete all original backups" })
+      .click();
+    await completedDeleteDialog
+      .getByText(/including folders hidden by your current filters/)
+      .waitFor();
+    await completedDeleteDialog
+      .getByText("This cannot be undone.", { exact: true })
+      .waitFor();
+    await page.keyboard.press("Escape");
+    await completedDeleteDialog.waitFor({ state: "hidden" });
+
+    await page
+      .getByLabel(/Select .* to mark already-gone original backups handled/)
+      .first()
+      .check();
+    await page
+      .getByRole("button", { name: "Mark backups already gone as handled" })
+      .click();
+    const completedReviewDialog = page.getByRole("alertdialog", {
+      name: "Confirm already-gone original backups",
+    });
+    const markHandledConfirm = completedReviewDialog.getByRole("button", {
+      name: "Mark handled",
+      exact: true,
+    });
+    await markHandledConfirm.waitFor();
+    if (
+      !(await markHandledConfirm.evaluate(
+        (button) => button === document.activeElement,
+      ))
+    ) {
+      throw new Error(
+        "Finished mark-handled confirmation did not receive focus.",
+      );
+    }
+    await completedReviewDialog
+      .getByText("Nothing is deleted.", { exact: false })
+      .waitFor();
+    if (
+      await page.getByText("This cannot be undone.", { exact: true }).count()
+    ) {
+      throw new Error(
+        "Mark-handled confirmation incorrectly uses the delete warning.",
+      );
+    }
+    await completedReviewDialog.getByRole("button", { name: "Cancel" }).click();
+    if (completedCleanupRequests !== 0 || completedReviewRequests !== 0) {
+      throw new Error(
+        "Finished cleanup confirmations sent a request before final confirmation.",
+      );
+    }
+
+    await page.setViewportSize(NARROW_VIEWPORT);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: timeoutMs });
+    await page
+      .locator("strong:visible", { hasText: "Backups ready to delete" })
+      .first()
+      .waitFor();
+    const narrowState = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    if (narrowState.scrollWidth > narrowState.clientWidth) {
+      throw new Error(
+        `Finished cleanup overflows horizontally at 390px: ${narrowState.scrollWidth}px > ${narrowState.clientWidth}px`,
+      );
+    }
+
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(`${baseUrl}/settings`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    let settingsCleanupDeleteRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().includes("/api/archive-cleanup/clear")
+      ) {
+        settingsCleanupDeleteRequests += 1;
+      }
+    });
+    await page.waitForFunction(() =>
+      document.body.innerText.includes("Original backups"),
+    );
+    const settingsDeleteTrigger = page
+      .locator(".archive-actions")
+      .getByRole("button", {
+        name: "Delete all original backups",
+        exact: true,
+      });
+    const settingsConfirmDialog = page.getByRole("alertdialog", {
+      name: "Confirm original backup deletion",
+    });
+    await settingsDeleteTrigger.click();
+    const settingsConfirmButton = settingsConfirmDialog.getByRole("button", {
+      name: /Delete [\d,]+ original backups?/,
+    });
+    await settingsConfirmButton.waitFor();
+    if (
+      !(await settingsConfirmButton.evaluate(
+        (button) => button === document.activeElement,
+      ))
+    ) {
+      throw new Error("Settings delete confirmation did not receive focus.");
+    }
+    await settingsConfirmDialog
+      .getByText("This cannot be undone.", { exact: true })
+      .waitFor();
+    await settingsConfirmDialog
+      .getByText("Your finished files are not touched.", { exact: true })
+      .waitFor();
+    const workingFolderInput = page.getByLabel("Working folder", {
+      exact: true,
+    });
+    const savedWorkingFolder = await workingFolderInput.inputValue();
+    await workingFolderInput.fill(`${savedWorkingFolder}-unsaved-smoke`);
+    await settingsConfirmDialog.waitFor({ state: "hidden" });
+    await page
+      .getByText(
+        "Save the changed Working folder before deleting original backups from its Cleanup folder.",
+        { exact: true },
+      )
+      .last()
+      .waitFor();
+    await workingFolderInput.fill(savedWorkingFolder);
+    await settingsDeleteTrigger.click();
+    await settingsConfirmDialog.waitFor();
+    await settingsDeleteTrigger.click();
+    await settingsConfirmDialog.waitFor({ state: "hidden" });
+    await settingsDeleteTrigger.click();
+    await settingsConfirmDialog
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+    if (settingsCleanupDeleteRequests !== 0) {
+      throw new Error(
+        "Settings cleanup confirmation sent a delete request before final confirmation.",
+      );
+    }
+
+    const completedResponse = await fetch(`${baseUrl}/api/completed`);
+    const completedPayload = await completedResponse.json();
+    const missingFolderPayload = {
+      ...completedPayload,
+      folders_with_backups_count: 0,
+      archive_cleanup: {
+        ...completedPayload.archive_cleanup,
+        archive_root: "",
+        file_count: 0,
+        total_size_bytes: 0,
+        has_cleanup: false,
+      },
+      folders: completedPayload.folders.map((folder) =>
+        folder.archived_backup_count > 0
+          ? {
+              ...folder,
+              cleanup_state: "blocked",
+              cleanup_detail:
+                "Cleanup folder is not set, so Mediaforce cannot find the original backups.",
+            }
+          : folder,
+      ),
+    };
+    const missingPage = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    await missingPage.route("**/api/completed*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(missingFolderPayload),
+      }),
+    );
+    await missingPage.route("**/api/archive-cleanup*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(missingFolderPayload.archive_cleanup),
+      }),
+    );
+    await missingPage.goto(`${baseUrl}/completed`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await missingPage
+      .getByText(
+        "Cleanup folder is not set, so Mediaforce cannot find the original backups.",
+        {
+          exact: true,
+        },
+      )
+      .first()
+      .waitFor();
+    await missingPage
+      .getByText(
+        "Set a Cleanup folder in Settings before deleting original backups.",
+        {
+          exact: true,
+        },
+      )
+      .waitFor();
+    await missingPage.close();
+
+    console.log("route ok: Finished cleanup language and confirmations");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let managedServer = null;
@@ -1223,6 +1513,9 @@ async function main() {
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+    if (fixtures?.folderRoutes?.length) {
+      await checkCompletedCleanupLanguage(targetUrl, args.routeTimeoutMs);
+    }
     if (fixtures?.folderRoutes?.length) {
       const libraryFixture = fixtures.folderRoutes.find((fixtureRoute) =>
         fixtureRoute.route.startsWith("/folders/tv/"),

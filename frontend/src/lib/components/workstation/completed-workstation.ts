@@ -9,6 +9,28 @@ import type { FooterSignal, ShellTone, StatusTile } from './shell-types';
 import { formatBytes } from './folder-studio-view';
 
 export type CleanupState = 'ready' | 'blocked' | 'unknown' | 'cleaned';
+export type CompletedCleanupScope = 'selected' | 'global';
+
+export type DeleteConfirmCopy = {
+	title: string;
+	scope: string;
+	safety: string;
+	warning: string;
+	confirmLabel: string;
+};
+
+export type MarkHandledConfirmCopy = {
+	title: string;
+	scope: string;
+	safety: string;
+	confirmLabel: string;
+};
+
+export type CleanupActionBlockers = {
+	selected: string | null;
+	global: string | null;
+	review: string | null;
+};
 
 export type CompletedHistoryRow = CompletedHistoryEvent & {
 	source: 'api' | 'folder';
@@ -58,10 +80,10 @@ export function cleanupTone(state: CleanupState): ShellTone {
 }
 
 export function cleanupLabel(state: CleanupState): string {
-	if (state === 'ready') return 'Originals waiting';
-	if (state === 'blocked') return 'Check settings';
-	if (state === 'unknown') return 'Originals already gone';
-	return 'Finished';
+	if (state === 'ready') return 'Backups ready to delete';
+	if (state === 'blocked') return 'Check before deleting';
+	if (state === 'unknown') return 'Backups already gone';
+	return 'Nothing to delete';
 }
 
 function completedHistoryNoun(event: CompletedHistoryRow): string {
@@ -81,9 +103,9 @@ export function completedHistoryLabel(event: CompletedHistoryRow): string {
 	if (normalized.includes('encoding failed')) return `${noun} failed`;
 	if (normalized.includes('validation completed')) return `${noun} checked`;
 	if (normalized.includes('promotion completed')) return `${noun} finished`;
-	if (event.event_type === 'originals_removed_confirmed' || normalized.includes('cleanup')) {
-		return 'Originals removed';
-	}
+	if (event.event_type === 'originals_removed_confirmed') return 'Marked handled';
+	if (normalized.includes('cleanup') || normalized.includes('backup'))
+		return 'Original backups deleted';
 	return event.label.replace(/encode/gi, noun.toLowerCase()).replace(/promotion/gi, 'finish');
 }
 
@@ -117,12 +139,26 @@ export function completedHistorySearchText(event: CompletedHistoryRow): string {
 export function cleanupDetail(folder: CompletedFolderRow, archive: ArchiveCleanupSummary): string {
 	if (folder.cleanup_detail?.trim()) return folder.cleanup_detail.trim();
 	const state = cleanupState(folder, archive);
-	if (state === 'ready') return 'Originals are waiting and can be removed when you are ready.';
-	if (state === 'blocked')
-		return 'Mediaforce cannot check the originals with the current settings.';
+	if (state === 'ready')
+		return 'Original backups are in the Cleanup folder and can be deleted when you are ready.';
+	if (state === 'blocked') return cleanupBlockedReason(folder, archive);
 	if (state === 'unknown')
-		return 'The originals are already gone; confirm after checking the new files.';
-	return 'No originals are waiting to be removed.';
+		return 'The original backups are already gone from the Cleanup folder. Nothing will be deleted; you can mark this handled.';
+	return 'No original backups are waiting in the Cleanup folder.';
+}
+
+export function cleanupBlockedReason(
+	folder: CompletedFolderRow,
+	archive: ArchiveCleanupSummary
+): string {
+	if (!archive.archive_root) {
+		return 'Cleanup folder is not set, so Mediaforce cannot find the original backups.';
+	}
+	const outsideCount = Math.max(folder.outside_archive_root_count ?? 0, 0);
+	if (outsideCount > 0) {
+		return `${outsideCount.toLocaleString('en-US')} original ${outsideCount === 1 ? 'backup sits' : 'backups sit'} outside the Cleanup folder, so Mediaforce will not delete ${outsideCount === 1 ? 'it' : 'them'} here.`;
+	}
+	return 'Mediaforce cannot verify the original backups with the current settings.';
 }
 
 export function folderCanBeMarkedHandled(
@@ -157,6 +193,91 @@ export function totalSavedSize(folders: CompletedFolderRow[]): number {
 	return folders.reduce((total, folder) => total + Math.max(folder.total_bytes_saved ?? 0, 0), 0);
 }
 
+export function buildDeleteConfirmCopy(
+	scope: CompletedCleanupScope,
+	input: {
+		folderCount: number;
+		backupCount: number;
+		backupSizeBytes: number;
+		archiveRoot: string;
+	}
+): DeleteConfirmCopy {
+	const folderCount = Math.max(input.folderCount, 0);
+	const backupCount = Math.max(input.backupCount, 0);
+	const folderNoun = folderCount === 1 ? 'folder' : 'folders';
+	const backupNoun = backupCount === 1 ? 'original backup' : 'original backups';
+	const fileNoun = backupCount === 1 ? 'file' : 'files';
+	const location = input.archiveRoot || 'the Cleanup folder';
+	return scope === 'selected'
+		? {
+				title: `Delete original backups for ${folderCount.toLocaleString('en-US')} selected ${folderNoun}?`,
+				scope: `Deletes ${backupCount.toLocaleString('en-US')} ${fileNoun} (${formatBytes(input.backupSizeBytes)}) from ${location}.`,
+				safety:
+					'Your finished files are not touched. Only the original backups in the Cleanup folder are deleted.',
+				warning: 'This cannot be undone.',
+				confirmLabel: `Delete ${backupCount.toLocaleString('en-US')} ${backupNoun}`
+			}
+		: {
+				title: 'Delete all original backups in the Cleanup folder?',
+				scope: `Deletes all ${backupCount.toLocaleString('en-US')} ${fileNoun} (${formatBytes(input.backupSizeBytes)}) in ${location}, including folders hidden by your current filters.`,
+				safety:
+					'Your finished files are not touched. Only the original backups in the Cleanup folder are deleted.',
+				warning: 'This cannot be undone.',
+				confirmLabel: `Delete all ${backupCount.toLocaleString('en-US')} ${backupNoun}`
+			};
+}
+
+export function buildMarkHandledConfirmCopy(input: {
+	folderCount: number;
+	backupCount: number;
+	archiveRoot: string;
+}): MarkHandledConfirmCopy {
+	const folderCount = Math.max(input.folderCount, 0);
+	const backupCount = Math.max(input.backupCount, 0);
+	return {
+		title: `Mark ${folderCount.toLocaleString('en-US')} ${folderCount === 1 ? 'folder' : 'folders'} as handled?`,
+		scope: `${backupCount.toLocaleString('en-US')} original ${backupCount === 1 ? 'backup is' : 'backups are'} already gone from ${input.archiveRoot || 'the Cleanup folder'}.`,
+		safety: 'Nothing is deleted. This only clears these folders from review.',
+		confirmLabel: 'Mark handled'
+	};
+}
+
+export function cleanupActionBlockers(input: {
+	completedAvailable: boolean;
+	archive: ArchiveCleanupSummary;
+	selectedFolderCount: number;
+	reviewFolderCount: number;
+	cleanupPending: boolean;
+	reviewPending: boolean;
+}): CleanupActionBlockers {
+	if (!input.completedAvailable) {
+		return {
+			selected: 'Finished media is unavailable.',
+			global: 'Finished media is unavailable.',
+			review: 'Finished media is unavailable.'
+		};
+	}
+	return {
+		selected: input.cleanupPending
+			? 'Deleting original backups…'
+			: input.selectedFolderCount === 0
+				? 'Select at least one folder with original backups.'
+				: null,
+		global: input.cleanupPending
+			? 'Deleting original backups…'
+			: !input.archive.archive_root
+				? 'Set a Cleanup folder in Settings before deleting original backups.'
+				: !input.archive.has_cleanup || input.archive.file_count <= 0
+					? 'No original backups are waiting in the Cleanup folder.'
+					: null,
+		review: input.reviewPending
+			? 'Marking folders handled…'
+			: input.reviewFolderCount === 0
+				? 'Select at least one folder whose original backups are already gone.'
+				: null
+	};
+}
+
 export function cleanupStateCounts(folders: CompletedFolderRow[], archive: ArchiveCleanupSummary) {
 	return folders.reduce(
 		(counts, folder) => {
@@ -175,7 +296,7 @@ export function buildCompletedReadinessSummary(
 		return {
 			tone: loadError ? 'fail' : 'idle',
 			title: loadError ? 'Finished media is unavailable' : 'Finished media is loading',
-			detail: loadError ?? 'Opening finished media and its original-file status.',
+			detail: loadError ?? 'Opening finished media and its original-backup status.',
 			metricLabel: 'Finished',
 			metricValue: loadError ? 'offline' : 'loading'
 		};
@@ -187,28 +308,27 @@ export function buildCompletedReadinessSummary(
 	if (counts.ready > 0) {
 		return {
 			tone: 'ready',
-			title: 'Originals are waiting',
-			detail: `${counts.ready.toLocaleString('en-US')} finished ${counts.ready === 1 ? 'item has' : 'items have'} originals waiting for your decision.`,
-			metricLabel: 'Waiting',
+			title: 'Original backups are ready to delete',
+			detail: `${counts.ready.toLocaleString('en-US')} finished ${counts.ready === 1 ? 'item has' : 'items have'} original backups waiting in the Cleanup folder.`,
+			metricLabel: 'Ready to delete',
 			metricValue: String(counts.ready)
 		};
 	}
 	if (reviewCount > 0) {
 		return {
 			tone: counts.blocked > 0 ? 'fail' : 'wait',
-			title:
-				counts.blocked > 0 ? 'Check before deleting' : 'Confirm originals that are already gone',
+			title: counts.blocked > 0 ? 'Check before deleting' : 'Backups already gone',
 			detail:
 				counts.blocked > 0
-					? `${counts.blocked.toLocaleString('en-US')} finished ${counts.blocked === 1 ? 'item needs' : 'items need'} settings checked before originals can be removed.`
-					: `${counts.unknown.toLocaleString('en-US')} finished ${counts.unknown === 1 ? 'item has' : 'items have'} originals already gone; confirm after checking the new files.`,
-			metricLabel: counts.blocked > 0 ? 'Check' : 'Confirm',
+					? `${counts.blocked.toLocaleString('en-US')} finished ${counts.blocked === 1 ? 'item needs' : 'items need'} settings checked before original backups can be deleted.`
+					: `${counts.unknown.toLocaleString('en-US')} finished ${counts.unknown === 1 ? 'item has' : 'items have'} original backups already gone; nothing will be deleted.`,
+			metricLabel: counts.blocked > 0 ? 'Check' : 'Mark handled',
 			metricValue: String(reviewCount)
 		};
 	}
 	return {
 		tone: 'idle',
-		title: 'Everything is settled',
+		title: 'Nothing to delete',
 		detail: `${folders.length.toLocaleString('en-US')} finished ${folders.length === 1 ? 'item is' : 'items are'} settled. Recent changes remain available in History.`,
 		metricLabel: 'Finished',
 		metricValue: String(counts.cleaned)
@@ -222,9 +342,9 @@ export function buildCompletedStatusTiles(
 	if (!payload) {
 		return [
 			{
-				label: 'Completed',
+				label: 'Finished',
 				value: loadError ? 'Unavailable' : 'Loading',
-				detail: loadError ?? 'waiting for completed work',
+				detail: loadError ?? 'waiting for finished work',
 				tone: loadError ? 'fail' : 'idle'
 			}
 		];
@@ -234,21 +354,21 @@ export function buildCompletedStatusTiles(
 	const counts = cleanupStateCounts(folders, archive);
 	return [
 		{
-			label: 'Completed folders',
+			label: 'Finished folders',
 			value: payload.completed_count.toLocaleString('en-US'),
 			detail: `${folders.reduce((total, folder) => total + folder.promoted_item_count, 0).toLocaleString('en-US')} promoted items`,
 			tone: payload.completed_count > 0 ? 'ready' : 'idle'
 		},
 		{
-			label: 'Delete queue',
+			label: 'Backups to delete',
 			value: payload.folders_with_backups_count.toLocaleString('en-US'),
-			detail: `${archive.file_count.toLocaleString('en-US')} files ready to remove`,
+			detail: `${archive.file_count.toLocaleString('en-US')} files in the Cleanup folder`,
 			tone: payload.folders_with_backups_count > 0 ? 'wait' : 'idle'
 		},
 		{
-			label: 'Space ready',
+			label: 'Space to reclaim',
 			value: formatBytes(archive.total_size_bytes),
-			detail: archive.has_cleanup ? 'cleanup available' : 'no cleanup files',
+			detail: archive.has_cleanup ? 'in the Cleanup folder' : 'nothing to delete',
 			tone: archive.has_cleanup ? 'ready' : 'idle',
 			mono: true
 		},
@@ -267,20 +387,20 @@ export function buildCompletedStatusTiles(
 		},
 		{
 			label: 'Cleanup folder',
-			value: archive.archive_root ? 'Configured' : 'Missing',
-			detail: archive.archive_root || 'cleanup folder unavailable',
+			value: archive.archive_root ? 'Set' : 'Not set',
+			detail: archive.archive_root || 'no Cleanup folder set',
 			tone: archive.archive_root ? 'ready' : 'fail'
 		}
 	];
 }
 
 export function buildCompletedFooterSignals(payload: CompletedPayload | null): FooterSignal[] {
-	if (!payload) return [{ label: 'Completed', value: 'unavailable', tone: 'fail' }];
+	if (!payload) return [{ label: 'Finished', value: 'unavailable', tone: 'fail' }];
 	const counts = cleanupStateCounts(payload.folders, payload.archive_cleanup);
 	return [
-		{ label: 'Completed', value: String(payload.completed_count), tone: 'ready' },
-		{ label: 'Originals', value: String(payload.folders_with_backups_count), tone: 'wait' },
-		{ label: 'Waiting', value: String(counts.ready), tone: counts.ready > 0 ? 'ready' : 'idle' },
+		{ label: 'Finished', value: String(payload.completed_count), tone: 'ready' },
+		{ label: 'Backups', value: String(payload.folders_with_backups_count), tone: 'wait' },
+		{ label: 'Ready', value: String(counts.ready), tone: counts.ready > 0 ? 'ready' : 'idle' },
 		{
 			label: 'Review',
 			value: String(counts.blocked + counts.unknown),

@@ -42,7 +42,7 @@ def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: st
     if archive_root is None:
         return {
             "ok": True,
-            "message": "No archived originals are waiting for cleanup.",
+            "message": "No original backups are waiting in the Cleanup folder.",
             "removed_count": 0,
             "removed_size_bytes": 0,
             "archive_cleanup": summary,
@@ -50,7 +50,7 @@ def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: st
     if not archive_root.exists() or summary["file_count"] <= 0:
         return {
             "ok": True,
-            "message": "No archived originals are waiting for cleanup.",
+            "message": "No original backups are waiting in the Cleanup folder.",
             "archive_cleanup": summary,
         }
 
@@ -77,7 +77,7 @@ def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: st
 
     return {
         "ok": True,
-        "message": f"Removed {removed_count} archived original{'s' if removed_count != 1 else ''}.",
+        "message": f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''}.",
         "removed_count": removed_count,
         "removed_size_bytes": removed_size_bytes,
         "archive_cleanup": archive_cleanup_summary(config, transcode_root=transcode_root),
