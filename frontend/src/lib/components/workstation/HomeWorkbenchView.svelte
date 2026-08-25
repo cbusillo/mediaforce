@@ -548,10 +548,10 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Completed" title="Cleanup review">
+			<WorkstationPanel eyebrow="Finished" title="Cleanup review">
 				<dl class="kv">
 					<dt>Route</dt>
-					<dd>Completed</dd>
+					<dd>Finished</dd>
 					<dt>Scope</dt>
 					<dd>Original backups</dd>
 					<dt>Action</dt>
