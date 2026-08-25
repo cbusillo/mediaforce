@@ -18,6 +18,7 @@ uv run "$python_prepare" \
 	--test-root tests \
 	--sync
 
+rm -f "$repo_root/.idea/mediaforce@"*.iml
 module_file="$repo_root/.idea/mediaforce.iml"
 node - "$module_file" <<'NODE'
 const fs = require('node:fs');
