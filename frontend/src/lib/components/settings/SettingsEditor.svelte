@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { tick } from 'svelte';
 	import { postJson } from '$lib/api/client';
 	import type {
 		ArchiveCleanupPayload,
@@ -127,6 +128,8 @@
 	let saveError = $state('');
 	let clearArchivePending = $state(false);
 	let clearArchiveArmed = $state(false);
+	let clearArchiveTrigger = $state<HTMLButtonElement | null>(null);
+	let clearArchiveConfirm = $state<HTMLButtonElement | null>(null);
 	let archiveMessage = $state('');
 	let archiveError = $state('');
 	let pendingTypeChange = $state<PendingTypeChange | null>(null);
@@ -469,14 +472,24 @@
 		}
 	}
 
-	async function clearArchiveCleanup() {
-		if (!savedSettings || clearArchivePending) return;
+	async function toggleArchiveCleanupConfirmation() {
 		archiveMessage = '';
 		archiveError = '';
-		if (!clearArchiveArmed) {
-			clearArchiveArmed = true;
-			return;
-		}
+		clearArchiveArmed = !clearArchiveArmed;
+		await tick();
+		(clearArchiveArmed ? clearArchiveConfirm : clearArchiveTrigger)?.focus();
+	}
+
+	async function cancelArchiveCleanupConfirmation() {
+		clearArchiveArmed = false;
+		await tick();
+		clearArchiveTrigger?.focus();
+	}
+
+	async function clearArchiveCleanup() {
+		if (!savedSettings || clearArchivePending || !clearArchiveArmed) return;
+		archiveMessage = '';
+		archiveError = '';
 		clearArchivePending = true;
 		try {
 			const response = await postJson<ArchiveClearResponse>(
@@ -1429,8 +1442,10 @@
 										class:control--armed={clearArchiveArmed}
 										disabled={archiveCleanupBlocker !== null}
 										aria-expanded={clearArchiveArmed}
+										aria-controls="archive-cleanup-confirm"
 										aria-describedby={archiveCleanupBlocker ? 'archive-cleanup-blocker' : undefined}
-										onclick={clearArchiveCleanup}
+										bind:this={clearArchiveTrigger}
+										onclick={toggleArchiveCleanupConfirmation}
 										>Delete all original backups
 									</button>
 								</div>
@@ -1440,6 +1455,7 @@
 							{/if}
 							{#if clearArchiveArmed}
 								<div
+									id="archive-cleanup-confirm"
 									class="danger-confirm"
 									role="alertdialog"
 									aria-label="Confirm original backup deletion"
@@ -1460,14 +1476,17 @@
 											type="button"
 											class="control control--danger control--armed"
 											disabled={clearArchivePending}
+											bind:this={clearArchiveConfirm}
 											onclick={clearArchiveCleanup}
-											>{clearArchivePending ? 'Deleting…' : 'Delete all original backups'}</button
+											>{clearArchivePending
+												? 'Deleting…'
+												: `Delete ${archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} original ${archiveCleanup?.file_count === 1 ? 'backup' : 'backups'}`}</button
 										>
 										<button
 											type="button"
 											class="control"
 											disabled={clearArchivePending}
-											onclick={() => (clearArchiveArmed = false)}>Cancel</button
+											onclick={cancelArchiveCleanupConfirmation}>Cancel</button
 										>
 									</div>
 								</div>

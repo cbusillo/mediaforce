@@ -199,10 +199,10 @@ export function archiveCleanupBlockReason(
 	settings: SettingsPayload
 ): string | null {
 	if (archiveCleanupTargetDirty(draft, settings)) {
-		return 'Save the changed Cleanup folder before deleting original backups.';
+		return 'Save the changed Working folder before deleting original backups from its Cleanup folder.';
 	}
 	if (!settings.transcode_root.trim()) {
-		return 'Set a Cleanup folder before deleting original backups.';
+		return 'Set a Working folder so Mediaforce can locate the Cleanup folder.';
 	}
 	if (!settings.archive_cleanup?.has_cleanup || (settings.archive_cleanup.file_count ?? 0) <= 0) {
 		return 'No original backups are waiting in the Cleanup folder.';

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import { postJson } from '$lib/api/client';
+	import { tick } from 'svelte';
 	import type {
 		ArchiveCleanupSummary,
 		CompletedCleanupResult,
@@ -68,6 +69,11 @@
 	let reviewPrefixes = $state<Record<string, boolean>>({});
 	let armedScope = $state<CompletedCleanupScope | null>(null);
 	let armedReview = $state<ReviewScope | null>(null);
+	let selectedCleanupTrigger = $state<HTMLButtonElement | null>(null);
+	let globalCleanupTrigger = $state<HTMLButtonElement | null>(null);
+	let reviewCleanupTrigger = $state<HTMLButtonElement | null>(null);
+	let deleteConfirmButton = $state<HTMLButtonElement | null>(null);
+	let reviewConfirmButton = $state<HTMLButtonElement | null>(null);
 	let cleanupPending = $state(false);
 	let reviewPending = $state(false);
 	let actionMessage = $state('');
@@ -195,6 +201,13 @@
 			reviewPending
 		})
 	);
+	const globalCleanupBlockerId = $derived(
+		actionBlockers.global
+			? actionBlockers.global === actionBlockers.selected
+				? 'selected-cleanup-blocker'
+				: 'global-cleanup-blocker'
+			: undefined
+	);
 	const deleteConfirmCopy = $derived.by(() =>
 		armedScope
 			? buildDeleteConfirmCopy(armedScope, {
@@ -309,20 +322,45 @@
 		return scope === 'selected' ? actionBlockers.selected !== null : actionBlockers.global !== null;
 	}
 
-	function armCleanup(scope: CompletedCleanupScope) {
+	async function armCleanup(scope: CompletedCleanupScope) {
+		if (cleanupDisabled(scope)) return;
 		actionMessage = '';
 		actionError = '';
 		lastCleanupResult = null;
-		armedScope = armedScope === scope ? null : scope;
+		const shouldArm = armedScope !== scope;
+		armedScope = shouldArm ? scope : null;
 		armedReview = null;
+		await tick();
+		(shouldArm
+			? deleteConfirmButton
+			: scope === 'selected'
+				? selectedCleanupTrigger
+				: globalCleanupTrigger
+		)?.focus();
 	}
 
-	function armReview(scope: ReviewScope) {
+	async function armReview(scope: ReviewScope) {
+		if (actionBlockers.review !== null) return;
 		actionMessage = '';
 		actionError = '';
 		lastCleanupResult = null;
 		armedScope = null;
-		armedReview = armedReview === scope ? null : scope;
+		const shouldArm = armedReview !== scope;
+		armedReview = shouldArm ? scope : null;
+		await tick();
+		(shouldArm ? reviewConfirmButton : reviewCleanupTrigger)?.focus();
+	}
+
+	async function cancelCleanupConfirmation(scope: CompletedCleanupScope) {
+		armedScope = null;
+		await tick();
+		(scope === 'selected' ? selectedCleanupTrigger : globalCleanupTrigger)?.focus();
+	}
+
+	async function cancelReviewConfirmation() {
+		armedReview = null;
+		await tick();
+		reviewCleanupTrigger?.focus();
 	}
 
 	function applyCompleted(nextCompleted: CompletedPayload) {
@@ -699,9 +737,11 @@
 										class:armed={armedScope === 'selected'}
 										disabled={cleanupDisabled('selected')}
 										aria-expanded={armedScope === 'selected'}
+										aria-controls="selected-cleanup-confirm"
 										aria-describedby={actionBlockers.selected
 											? 'selected-cleanup-blocker'
 											: undefined}
+										bind:this={selectedCleanupTrigger}
 										onclick={() => armCleanup('selected')}>Delete selected original backups</button
 									>
 									<button
@@ -710,7 +750,9 @@
 										class:armed={armedScope === 'global'}
 										disabled={cleanupDisabled('global')}
 										aria-expanded={armedScope === 'global'}
-										aria-describedby={actionBlockers.global ? 'global-cleanup-blocker' : undefined}
+										aria-controls="global-cleanup-confirm"
+										aria-describedby={globalCleanupBlockerId}
+										bind:this={globalCleanupTrigger}
 										onclick={() => armCleanup('global')}>Delete all original backups</button
 									>
 									<button
@@ -719,7 +761,9 @@
 										class:armed={armedReview === 'already-removed'}
 										disabled={actionBlockers.review !== null}
 										aria-expanded={armedReview === 'already-removed'}
+										aria-controls="review-cleanup-confirm"
 										aria-describedby={actionBlockers.review ? 'review-cleanup-blocker' : undefined}
+										bind:this={reviewCleanupTrigger}
 										onclick={() => armReview('already-removed')}
 										>Mark backups already gone as handled</button
 									>
@@ -728,7 +772,7 @@
 									{#if actionBlockers.selected}
 										<p id="selected-cleanup-blocker">{actionBlockers.selected}</p>
 									{/if}
-									{#if actionBlockers.global}
+									{#if actionBlockers.global && actionBlockers.global !== actionBlockers.selected}
 										<p id="global-cleanup-blocker">{actionBlockers.global}</p>
 									{/if}
 									{#if actionBlockers.review}
@@ -754,6 +798,7 @@
 							{#if armedScope && deleteConfirmCopy}
 								{@const scope = armedScope}
 								<div
+									id={`${scope}-cleanup-confirm`}
 									class="confirm-panel"
 									role="alertdialog"
 									aria-label="Confirm original backup deletion"
@@ -769,6 +814,7 @@
 											type="button"
 											class="control control--danger armed"
 											disabled={cleanupPending}
+											bind:this={deleteConfirmButton}
 											onclick={() => confirmCleanup(scope)}
 											>{cleanupPending ? 'Deleting…' : deleteConfirmCopy.confirmLabel}</button
 										>
@@ -776,7 +822,7 @@
 											type="button"
 											class="control"
 											disabled={cleanupPending}
-											onclick={() => (armedScope = null)}>Cancel</button
+											onclick={() => cancelCleanupConfirmation(scope)}>Cancel</button
 										>
 									</div>
 								</div>
@@ -784,6 +830,7 @@
 
 							{#if armedReview === 'already-removed'}
 								<div
+									id="review-cleanup-confirm"
 									class="confirm-panel confirm-panel--review"
 									role="alertdialog"
 									aria-label="Confirm already-gone original backups"
@@ -798,6 +845,7 @@
 											type="button"
 											class="control control--primary armed"
 											disabled={reviewPending}
+											bind:this={reviewConfirmButton}
 											onclick={confirmAlreadyRemoved}
 											>{reviewPending
 												? 'Marking handled…'
@@ -807,7 +855,7 @@
 											type="button"
 											class="control"
 											disabled={reviewPending}
-											onclick={() => (armedReview = null)}>Cancel</button
+											onclick={cancelReviewConfirmation}>Cancel</button
 										>
 									</div>
 								</div>
@@ -1395,7 +1443,7 @@
 	}
 
 	.confirm-panel small {
-		color: var(--mf-fail-fg);
+		color: var(--mf-fg-secondary);
 		font-size: var(--mf-text-xs);
 	}
 

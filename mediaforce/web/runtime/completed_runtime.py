@@ -513,9 +513,9 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
         )
     if event_type == ORIGINALS_REMOVED_EVENT:
         return (
-            "Originals marked removed",
+            "Marked handled",
             "ready",
-            "No files were deleted; this completed folder was marked handled after review.",
+            "The original backups were already gone. Nothing was deleted; this finished folder was marked handled after review.",
             None,
         )
     if event_type == "encoding_completed":

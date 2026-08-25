@@ -353,7 +353,7 @@ describe('settings draft helpers', () => {
 
 		draft.transcode_root = '/Volumes/UnsavedTranscode';
 		expect(archiveCleanupBlockReason(draft, readyPayload)).toBe(
-			'Save the changed Cleanup folder before deleting original backups.'
+			'Save the changed Working folder before deleting original backups from its Cleanup folder.'
 		);
 
 		const emptyPayload = {
@@ -366,7 +366,7 @@ describe('settings draft helpers', () => {
 
 		const unsetPayload = { ...emptyPayload, transcode_root: '' };
 		expect(archiveCleanupBlockReason(draftFromSettings(unsetPayload), unsetPayload)).toBe(
-			'Set a Cleanup folder before deleting original backups.'
+			'Set a Working folder so Mediaforce can locate the Cleanup folder.'
 		);
 	});
 

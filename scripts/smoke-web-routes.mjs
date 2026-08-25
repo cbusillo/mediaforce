@@ -1292,18 +1292,56 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       waitUntil: "domcontentloaded",
       timeout: timeoutMs,
     });
+    let settingsCleanupDeleteRequests = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().includes("/api/archive-cleanup/clear")
+      ) {
+        settingsCleanupDeleteRequests += 1;
+      }
+    });
     await page.waitForFunction(() =>
       document.body.innerText.includes("Original backups"),
     );
-    await page
-      .getByRole("button", { name: "Delete all original backups" })
-      .first()
-      .click();
-    await page.getByText("This cannot be undone.", { exact: true }).waitFor();
-    await page
+    const settingsDeleteTrigger = page
+      .locator(".archive-actions")
+      .getByRole("button", {
+        name: "Delete all original backups",
+        exact: true,
+      });
+    const settingsConfirmDialog = page.getByRole("alertdialog", {
+      name: "Confirm original backup deletion",
+    });
+    await settingsDeleteTrigger.click();
+    const settingsConfirmButton = settingsConfirmDialog.getByRole("button", {
+      name: /Delete [\d,]+ original backups?/,
+    });
+    await settingsConfirmButton.waitFor();
+    if (
+      !(await settingsConfirmButton.evaluate(
+        (button) => button === document.activeElement,
+      ))
+    ) {
+      throw new Error("Settings delete confirmation did not receive focus.");
+    }
+    await settingsConfirmDialog
+      .getByText("This cannot be undone.", { exact: true })
+      .waitFor();
+    await settingsConfirmDialog
       .getByText("Your finished files are not touched.", { exact: true })
       .waitFor();
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await settingsDeleteTrigger.click();
+    await settingsConfirmDialog.waitFor({ state: "hidden" });
+    await settingsDeleteTrigger.click();
+    await settingsConfirmDialog
+      .getByRole("button", { name: "Cancel", exact: true })
+      .click();
+    if (settingsCleanupDeleteRequests !== 0) {
+      throw new Error(
+        "Settings cleanup confirmation sent a delete request before final confirmation.",
+      );
+    }
 
     const completedResponse = await fetch(`${baseUrl}/api/completed`);
     const completedPayload = await completedResponse.json();

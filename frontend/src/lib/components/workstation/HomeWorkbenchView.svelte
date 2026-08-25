@@ -553,7 +553,7 @@
 					<dt>Route</dt>
 					<dd>Completed</dd>
 					<dt>Scope</dt>
-					<dd>Archived originals</dd>
+					<dd>Original backups</dd>
 					<dt>Action</dt>
 					<dd><a href={resolve('/completed')}>Review cleanup</a></dd>
 				</dl>

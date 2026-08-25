@@ -1945,6 +1945,34 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["history"][0]["prefix"], "tv/Example Show/Season 1")
         self.assertEqual(payload["history"][0]["tone"], "ready")
 
+    def test_completed_page_payload_uses_mark_handled_history_copy(self) -> None:
+        from mediaforce.web import app as web_app
+
+        self._insert_promoted_artifact(
+            rel_path="tv/Example Show/Season 1/Episode 01.mkv",
+            promoted_at="2026-04-10T10:00:00+00:00",
+            archived_size_bytes=3,
+            bytes_saved=12,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            library_item_id = connection.execute(select(library_items.c.id)).scalar_one()
+            connection.execute(
+                item_events.insert().values(
+                    library_item_id=library_item_id,
+                    created_at="2026-04-10T10:01:00+00:00",
+                    event_type=ORIGINALS_REMOVED_EVENT,
+                    details_json=json.dumps({"prefix": "tv/Example Show/Season 1"}),
+                )
+            )
+            connection.commit()
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(payload["history"][0]["label"], "Marked handled")
+        self.assertEqual(
+            payload["history"][0]["detail"],
+            "The original backups were already gone. Nothing was deleted; this finished folder was marked handled after review.",
+        )
+
     def test_completed_page_payload_truncates_large_failed_history_details(self) -> None:
         from mediaforce.web import app as web_app
 

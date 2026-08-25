@@ -2237,7 +2237,7 @@ const BASIC_ENCODE_STEPS = [
 	},
 	{
 		label: 'Clean up',
-		detail: 'Delete archived originals from Completed.'
+		detail: 'Delete original backups from Finished.'
 	}
 ] as const;
 
@@ -2358,7 +2358,7 @@ function basicEncodeDetail(
 	if (currentStep === 4) return 'Processing finished. Validate the outputs before publishing them.';
 	if (currentStep === 5) return 'Outputs are validated. Promote them into the library.';
 	if (currentStep === 6) {
-		return `This ${noun} is processed. Go to Completed when you are ready to delete archived originals.`;
+		return `This ${noun} is processed. Go to Finished when you are ready to delete original backups.`;
 	}
 	return `Choose one ${noun}, then follow the highlighted step until the ${noun} is complete.`;
 }
