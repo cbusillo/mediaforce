@@ -14,6 +14,7 @@
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import { safeOperatorErrorCopy } from '$lib/operator-copy';
 	import {
+		folderActionResponseCopy,
 		noteAfterPrepareAgain,
 		noteAfterPreview,
 		noteAfterProposalHydration,
@@ -387,9 +388,9 @@
 		});
 	}
 
-	async function approveAndQueue() {
+	async function approveSample() {
 		if (isBrowseOnly || isBusy) return;
-		await runAction('approve-queue', async () => {
+		await runAction('approve-sample', async () => {
 			const response = await postJson<{ ok: boolean; message?: string }>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/save-profile`,
 				{
@@ -398,33 +399,40 @@
 					reviewed_draft_hash: asText(calibration.draft_hash)
 				}
 			);
-			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
-			return `Sample approved. This ${scopeNoun} is waiting to compress.`;
+			if (!response.ok)
+				throw new Error(response.message || 'The sample approval could not be saved.');
+			return 'Sample approved. Choose compression when you are ready.';
 		});
 	}
 
 	async function queueApproved() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('queue-title', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`,
-				{ notes: '', bypass_schedule: false }
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				job?: { item_count?: number | null };
+			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`, {
+				notes: '',
+				bypass_schedule: false
+			});
 			if (!response.ok) throw new Error(response.message || 'The movie work could not be queued.');
-			return `This ${scopeNoun} is waiting to compress.`;
+			const queuedCount =
+				safeCount(response.job?.item_count) ||
+				(exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 0));
+			return exactScope || queuedCount === 1
+				? 'This movie file is waiting to compress.'
+				: `${queuedCount} movie files are waiting to compress.`;
 		});
 	}
 
 	async function validateOutputs() {
-		await folderAction('validate-outputs', 'Checked the compressed movie file.');
+		await folderAction('validate-outputs');
 	}
 
 	async function promoteOutputs() {
 		if (conflicts.length) return;
-		await folderAction(
-			'promote-outputs',
-			'Installed the checked replacement and kept a backup of the original.'
-		);
+		await folderAction('promote-outputs');
 	}
 
 	async function retryEncode() {
@@ -451,7 +459,7 @@
 		});
 	}
 
-	async function folderAction(endpoint: 'validate-outputs' | 'promote-outputs', fallback: string) {
+	async function folderAction(endpoint: 'validate-outputs' | 'promote-outputs') {
 		if (isBrowseOnly || isBusy) return;
 		await runAction(endpoint, async () => {
 			const response = await postJson<{
@@ -459,10 +467,15 @@
 				message?: string;
 				conflicts?: Array<Record<string, unknown>>;
 				target_prefix?: string;
+				validated_count?: number | null;
+				failed_count?: number | null;
+				item_count?: number | null;
+				promoted_count?: number | null;
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/${endpoint}`, {});
 			if (!response.ok) throw new Error(response.message || 'The movie action could not run.');
+			const result = folderActionResponseCopy(endpoint, response);
 			return {
-				message: fallback,
+				...result,
 				targetPrefix: endpoint === 'promote-outputs' ? response.target_prefix : undefined
 			};
 		});
@@ -652,6 +665,11 @@
 
 	function asText(value: unknown): string {
 		return typeof value === 'string' ? value.trim() : '';
+	}
+
+	function safeCount(value: unknown): number {
+		const count = Number(value);
+		return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
 	}
 
 	function downloadReviewPack() {
@@ -965,8 +983,8 @@
 										<button class="secondary" type="button" onclick={downloadReviewPack}
 											>Compare clips</button
 										>
-										<button class="primary" disabled={isBusy} onclick={approveAndQueue}
-											>Approve sample and compress</button
+										<button class="primary" disabled={isBusy} onclick={approveSample}
+											>Approve sample</button
 										>
 									{/if}
 								{:else if primaryAction() === 'validate'}

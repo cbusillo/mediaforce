@@ -7,6 +7,7 @@ import {
 	calibrationFailureLede,
 	describeHighImpactApprovalGate,
 	encodeStatusTone,
+	folderActionResponseCopy,
 	normalizeReviewArtifacts,
 	noteAfterPreview,
 	noteAfterPrepareAgain,
@@ -18,6 +19,38 @@ import {
 	summarizeVideoTransformPolicy,
 	type ComparisonRow
 } from './studio';
+
+describe('folderActionResponseCopy', () => {
+	it('surfaces partial validation failures as attention', () => {
+		expect(
+			folderActionResponseCopy('validate-outputs', {
+				item_count: 5,
+				validated_count: 2,
+				failed_count: 3
+			})
+		).toEqual({
+			message: 'Checked 5 files: 2 passed, 3 need attention.',
+			attention: true
+		});
+	});
+
+	it('reports successful checks and replacements with returned counts', () => {
+		expect(
+			folderActionResponseCopy('validate-outputs', {
+				item_count: 1,
+				validated_count: 1,
+				failed_count: 0
+			})
+		).toEqual({
+			message: 'Checked 1 compressed file. All checks passed.',
+			attention: false
+		});
+		expect(folderActionResponseCopy('promote-outputs', { promoted_count: 2 })).toEqual({
+			message: 'Replaced 2 original files and kept their backups.',
+			attention: false
+		});
+	});
+});
 
 describe('proposalRecoveryView', () => {
 	it('keeps assistant retry bounded to the stored request and worker', () => {

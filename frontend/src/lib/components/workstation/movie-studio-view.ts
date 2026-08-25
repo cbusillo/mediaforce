@@ -283,14 +283,20 @@ export function movieCurrentWorkView(
 
 function normalizeMovieQueueCopy(value: string): string {
 	return value
-		.replace(/\bencoding\b/g, 'compressing')
-		.replace(/\bEncoding\b/g, 'Compressing')
-		.replace(/\bencode\b/g, 'compression')
-		.replace(/\bEncode\b/g, 'Compression')
-		.replace(/\bprocessing\b/gi, 'compression')
+		.replace(/\bencode queue\b/gi, (match) => matchCase(match, 'compression queue'))
+		.replace(/\bprocessing queue\b/gi, (match) => matchCase(match, 'compression queue'))
+		.replace(/\bencoding\b/gi, (match) => matchCase(match, 'compressing'))
+		.replace(/\bprocessing\b/gi, (match) => matchCase(match, 'compressing'))
+		.replace(/\bencode\b/gi, (match) => matchCase(match, 'compress'))
 		.replace(/\bworkers?\b/gi, (match) =>
 			match.toLowerCase().endsWith('s') ? 'computers' : 'computer'
 		);
+}
+
+function matchCase(source: string, replacement: string): string {
+	return /^[A-Z]/.test(source)
+		? replacement.charAt(0).toUpperCase() + replacement.slice(1)
+		: replacement;
 }
 
 export function movieGoalFactsView(

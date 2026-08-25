@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { FolderWorkflowState, OtherLibraryPayload, OtherWorkUnit } from '$lib/api/types';
 import {
 	mergeOtherLibraryPayloads,
+	otherActionFileCount,
+	otherReadinessBlockerCopy,
 	otherScopeSummary,
 	otherWorkflowDetail,
 	otherWorkflowLabel
@@ -179,12 +181,12 @@ describe('Other workflow presentation', () => {
 
 describe('Other scope presentation', () => {
 	it('states included and untouched file counts', () => {
-		expect(otherScopeSummary(5, 3, 2, true, 250)).toEqual({
+		expect(otherScopeSummary(5, 3, true, 250)).toEqual({
 			included: '3 of 5',
 			untouched: '2 files',
 			confirmation: '3 files will be compressed. 2 files stay untouched.'
 		});
-		expect(otherScopeSummary(1, 1, 0, true, 250)).toEqual({
+		expect(otherScopeSummary(1, 1, true, 250)).toEqual({
 			included: '1 of 1',
 			untouched: 'None',
 			confirmation: '1 file will be compressed. No files are left out.'
@@ -192,10 +194,29 @@ describe('Other scope presentation', () => {
 	});
 
 	it('does not claim complete membership above the safe limit', () => {
-		expect(otherScopeSummary(300, 0, 300, false, 250)).toEqual({
+		expect(otherScopeSummary(300, 0, false, 250)).toEqual({
 			included: 'More than 250 files',
 			untouched: 'Not known until the folder is smaller',
 			confirmation: 'Use one file at a time or split the folder before starting work.'
 		});
+	});
+
+	it('uses the current phase count instead of the whole folder count', () => {
+		expect(otherActionFileCount(workflow('encode', { encode: 4 }), 3, 5)).toBe(3);
+		expect(otherActionFileCount(workflow('validate', { validate: 2 }), 0, 5)).toBe(2);
+		expect(otherActionFileCount(workflow('promote', { promote: 1 }), 0, 5)).toBe(1);
+	});
+
+	it('translates backend readiness recovery into primary operator language', () => {
+		expect(
+			otherReadinessBlockerCopy(
+				'The complete membership cannot be reviewed as one bounded work unit before sampling or queueing this scope.'
+			)
+		).toBe(
+			'The complete membership cannot be reviewed as one folder selection before creating a sample or starting work on this scope.'
+		);
+		expect(otherReadinessBlockerCopy('Choose exact-file grouping before processing.')).toBe(
+			'Choose one-file-at-a-time before compression.'
+		);
 	});
 });

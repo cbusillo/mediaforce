@@ -8,8 +8,7 @@ export interface OtherScopeSummary {
 
 export function otherScopeSummary(
 	itemCount: number,
-	includedItemCount: number,
-	blockedItemCount: number,
+	actionFileCount: number,
 	membershipComplete: boolean,
 	membershipLimit: number
 ): OtherScopeSummary {
@@ -20,19 +19,50 @@ export function otherScopeSummary(
 			confirmation: 'Use one file at a time or split the folder before starting work.'
 		};
 	}
-	const includedNoun = includedItemCount === 1 ? 'file will' : 'files will';
+	const normalizedItemCount = Math.max(0, itemCount);
+	const normalizedActionCount = Math.min(normalizedItemCount, Math.max(0, actionFileCount));
+	const untouchedCount = normalizedItemCount - normalizedActionCount;
+	const includedNoun = normalizedActionCount === 1 ? 'file will' : 'files will';
 	const untouchedCopy =
-		blockedItemCount === 0
+		untouchedCount === 0
 			? 'No files are left out.'
-			: `${blockedItemCount} ${blockedItemCount === 1 ? 'file stays' : 'files stay'} untouched.`;
+			: `${untouchedCount} ${untouchedCount === 1 ? 'file stays' : 'files stay'} untouched.`;
 	return {
-		included: `${includedItemCount} of ${itemCount}`,
+		included: `${normalizedActionCount} of ${normalizedItemCount}`,
 		untouched:
-			blockedItemCount === 0
+			untouchedCount === 0
 				? 'None'
-				: `${blockedItemCount} ${blockedItemCount === 1 ? 'file' : 'files'}`,
-		confirmation: `${includedItemCount} ${includedNoun} be compressed. ${untouchedCopy}`
+				: `${untouchedCount} ${untouchedCount === 1 ? 'file' : 'files'}`,
+		confirmation: `${normalizedActionCount} ${includedNoun} be compressed. ${untouchedCopy}`
 	};
+}
+
+export function otherActionFileCount(
+	workflow: FolderWorkflowState | null | undefined,
+	eligibleItemCount: number,
+	itemCount: number
+): number {
+	switch (workflow?.primary_lane) {
+		case 'encode':
+			return Math.max(0, eligibleItemCount);
+		case 'validate':
+			return laneCount(workflow, 'validate', 0);
+		case 'promote':
+			return laneCount(workflow, 'promote', 0);
+		default:
+			return Math.max(0, itemCount);
+	}
+}
+
+export function otherReadinessBlockerCopy(value: string): string {
+	return value
+		.trim()
+		.replace(/\bexact-file grouping\b/gi, 'one-file-at-a-time')
+		.replace(/\bbounded work units?\b/gi, 'folder selection')
+		.replace(/\bwork units?\b/gi, 'folders or files')
+		.replace(/\bprocessing\b/gi, 'compression')
+		.replace(/\bsampling\b/gi, 'creating a sample')
+		.replace(/\bqueueing\b/gi, 'starting work on');
 }
 
 export function otherWorkflowLabel(

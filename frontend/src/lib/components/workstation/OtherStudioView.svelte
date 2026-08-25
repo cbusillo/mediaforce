@@ -11,9 +11,16 @@
 		OtherMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
+	import { folderActionResponseCopy } from '$lib/folders/studio';
 	import { formatFileSize } from '$lib/format';
 	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
-	import { otherScopeSummary, otherWorkflowDetail, otherWorkflowLabel } from '$lib/other/library';
+	import {
+		otherActionFileCount,
+		otherReadinessBlockerCopy,
+		otherScopeSummary,
+		otherWorkflowDetail,
+		otherWorkflowLabel
+	} from '$lib/other/library';
 	import StateBadge from './StateBadge.svelte';
 
 	let {
@@ -38,6 +45,7 @@
 	let pendingAction = $state('');
 	let actionMessage = $state('');
 	let actionError = $state('');
+	let actionNeedsAttention = $state(false);
 	let confirmedMembershipToken = $state('');
 
 	const context = $derived(folder.other_context ?? null);
@@ -87,14 +95,14 @@
 		folder.media_scope.match === 'exact_item' ? 'One file' : 'Whole folder'
 	);
 	const itemCount = $derived(context?.item_count ?? 0);
+	const eligibleItemCount = $derived(context?.eligible_item_count ?? 0);
 	const blockedItemCount = $derived(context?.blocked_item_count ?? 0);
-	const includedItemCount = $derived(Math.max(0, itemCount - blockedItemCount));
-	const actionFileCount = $derived(includedItemCount);
+	const actionFileCount = $derived(otherActionFileCount(workflow, eligibleItemCount, itemCount));
+	const untouchedFileCount = $derived(Math.max(0, itemCount - actionFileCount));
 	const scopeSummary = $derived(
 		otherScopeSummary(
 			itemCount,
-			includedItemCount,
-			blockedItemCount,
+			actionFileCount,
 			membershipComplete,
 			context?.membership_limit ?? 250
 		)
@@ -106,9 +114,9 @@
 	);
 	const scopeConfirmationDetail = $derived.by(() => {
 		const untouched =
-			blockedItemCount === 0
+			untouchedFileCount === 0
 				? 'No files are left out.'
-				: `${blockedItemCount} ${blockedItemCount === 1 ? 'file stays' : 'files stay'} untouched.`;
+				: `${untouchedFileCount} ${untouchedFileCount === 1 ? 'file stays' : 'files stay'} untouched.`;
 		if (workflow?.primary_lane === 'validate') {
 			return `${actionFileCount} compressed ${actionFileCount === 1 ? 'file will' : 'files will'} be checked. ${untouched}`;
 		}
@@ -135,7 +143,27 @@
 			return 'Compare the original and sample clips. Approval does not replace any files.';
 		if (pendingProposalCanQueue)
 			return 'Nothing has started. Choose Create sample when you are ready.';
+		if (workflow?.primary_lane === 'encode' && !approved)
+			return 'Set up and review a sample before compression begins.';
 		return workflowDetail;
+	});
+	const readinessNotice = $derived.by(() => {
+		if (!membershipComplete) {
+			return {
+				title: 'This folder is too large to confirm safely.',
+				detail: 'Use one file at a time or split the folder before starting work.'
+			};
+		}
+		if (blockedItemCount > 0) {
+			return {
+				title: 'Some files cannot use this compression profile.',
+				detail: `${blockedItemCount} ${blockedItemCount === 1 ? 'file needs' : 'files need'} a compatible profile before work can start.`
+			};
+		}
+		return {
+			title: 'Cannot start yet.',
+			detail: 'Fix the library settings before starting work.'
+		};
 	});
 	const decisionTitle = $derived.by(() => {
 		if (['queued', 'retry_backoff'].includes(sampleWorkStatus)) return 'Sample waiting';
@@ -266,62 +294,66 @@
 	async function queueApproved() {
 		if (!actionReady || isBusy) return;
 		await runAction('queue-work', async () => {
-			const response = await postJson<{ ok: boolean; message?: string }>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`,
-				{
-					notes: '',
-					bypass_schedule: false,
-					scope_membership_token: scopeMembershipToken()
-				}
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				job?: { item_count?: number | null };
+			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/queue-encode`, {
+				notes: '',
+				bypass_schedule: false,
+				scope_membership_token: scopeMembershipToken()
+			});
 			if (!response.ok) throw new Error(response.message || 'This work could not be queued.');
-			return actionFileCount === 1
+			const queuedCount = safeCount(response.job?.item_count) || actionFileCount;
+			return queuedCount === 1
 				? 'This file is waiting to compress.'
-				: `${actionFileCount} files are waiting to compress.`;
+				: `${queuedCount} files are waiting to compress.`;
 		});
 	}
 
 	async function validateOutputs() {
-		await folderAction(
-			'validate-outputs',
-			actionFileCount === 1 ? 'Checked the compressed file.' : 'Checked the compressed files.'
-		);
+		await folderAction('validate-outputs');
 	}
 
 	async function promoteOutputs() {
-		await folderAction(
-			'promote-outputs',
-			actionFileCount === 1
-				? 'Replaced the original file and kept its backup.'
-				: 'Replaced the original files and kept their backups.'
-		);
+		await folderAction('promote-outputs');
 	}
 
-	async function folderAction(action: string, successMessage: string) {
+	async function folderAction(action: 'validate-outputs' | 'promote-outputs') {
 		if (isBusy) return;
 		await runAction(action, async () => {
-			const response = await postJson<{ ok: boolean; message?: string; target_prefix?: string }>(
-				`/api/folders/${folderRoutePrefix(folder.prefix)}/${action}`,
-				{ scope_membership_token: scopeMembershipToken() }
-			);
+			const response = await postJson<{
+				ok: boolean;
+				message?: string;
+				target_prefix?: string;
+				validated_count?: number | null;
+				failed_count?: number | null;
+				item_count?: number | null;
+				promoted_count?: number | null;
+			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/${action}`, {
+				scope_membership_token: scopeMembershipToken()
+			});
 			if (!response.ok) throw new Error(response.message || `${action} failed.`);
+			const result = folderActionResponseCopy(action, response);
 			return {
-				message: successMessage,
+				...result,
 				targetPrefix: action === 'promote-outputs' ? response.target_prefix : undefined
 			};
 		});
 	}
 
-	type ActionResult = string | { message: string; targetPrefix?: string };
+	type ActionResult = string | { message: string; targetPrefix?: string; attention?: boolean };
 
 	async function runAction(action: string, execute: () => Promise<ActionResult>) {
 		pendingAction = action;
 		actionMessage = '';
 		actionError = '';
+		actionNeedsAttention = false;
 		let actionCompleted = false;
 		try {
 			const result = await execute();
 			actionMessage = typeof result === 'string' ? result : result.message;
+			actionNeedsAttention = typeof result === 'string' ? false : result.attention === true;
 			actionCompleted = true;
 			await onMutate(typeof result === 'string' ? undefined : result.targetPrefix);
 		} catch (error) {
@@ -341,6 +373,11 @@
 
 	function asText(value: unknown): string {
 		return typeof value === 'string' ? value : '';
+	}
+
+	function safeCount(value: unknown): number {
+		const count = Number(value);
+		return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
 	}
 
 	function formatBytes(value: number | null | undefined): string {
@@ -375,7 +412,7 @@
 	function sampleState(): string {
 		if (reviewReady) return approved ? 'Sample approved' : 'Ready to review';
 		if (['processing', 'validate', 'promote', 'complete'].includes(workflow?.primary_lane ?? ''))
-			return 'Sample approved';
+			return 'Not needed now';
 		return operatorStateCopy(
 			calibrationJob.status,
 			{
@@ -464,7 +501,7 @@
 	</div>
 
 	{#if loadError}
-		<div class="notice notice--danger" role="status">
+		<div class="notice notice--danger" role="alert">
 			<strong>Studio update failed</strong><span
 				>{safeOperatorErrorCopy(loadError, 'Studio could not load the latest state.')}</span
 			>
@@ -476,8 +513,15 @@
 		</div>
 	{/if}
 	{#if actionMessage}
-		<div class="notice notice--success" role="status">
-			<strong>Updated</strong><span>{actionMessage}</span>
+		<div
+			class:notice--danger={actionNeedsAttention}
+			class:notice--success={!actionNeedsAttention}
+			class="notice"
+			role={actionNeedsAttention ? 'alert' : 'status'}
+		>
+			<strong>{actionNeedsAttention ? 'Check needs attention' : 'Updated'}</strong><span
+				>{actionMessage}</span
+			>
 		</div>
 	{/if}
 	{#if isBrowseOnly}
@@ -488,10 +532,12 @@
 		</div>
 	{:else if readiness?.state === 'blocked'}
 		<div class="notice notice--danger">
-			<strong>{readiness.label}</strong><span>{readiness.detail}</span>
+			<strong>{readinessNotice.title}</strong><span>{readinessNotice.detail}</span>
 			{#if readiness.blockers.length}
 				<ul>
-					{#each readiness.blockers as blocker (blocker)}<li>{blocker}</li>{/each}
+					{#each readiness.blockers as blocker (blocker)}<li>
+							{otherReadinessBlockerCopy(blocker)}
+						</li>{/each}
 				</ul>
 			{/if}
 		</div>
@@ -509,7 +555,7 @@
 
 			<div class="scope-contract">
 				<div>
-					<span>Files included</span><strong>{scopeSummary.included}</strong>
+					<span>Files included now</span><strong>{scopeSummary.included}</strong>
 				</div>
 				<div>
 					<span>Current size</span><strong>{formatBytes(context?.total_size_bytes)}</strong>
@@ -522,7 +568,7 @@
 					>
 				</div>
 				<div>
-					<span>Files left untouched</span><strong>{scopeSummary.untouched}</strong>
+					<span>Files left untouched now</span><strong>{scopeSummary.untouched}</strong>
 				</div>
 			</div>
 
@@ -622,7 +668,7 @@
 							: 'Confirm the included files to enable this action.'}</span
 					>
 				{:else if readiness?.state !== 'ready'}
-					<span class="action-help">Fix the settings problem above before starting work.</span>
+					<span class="action-help">Fix the blocker above before starting work.</span>
 				{:else if showSampleControls && !hostOptions.length && !reviewReady}
 					<span class="action-help">Bring a computer online for samples.</span>
 				{/if}
