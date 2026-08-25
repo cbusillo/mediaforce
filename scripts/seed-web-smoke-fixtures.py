@@ -46,6 +46,7 @@ SHARED_TEST_PREFIX = "tv/Shared Test Show/Season 1"
 SHARED_TEST_SERIES_PREFIX = "tv/Shared Test Show"
 COMPLETED_PREFIX = "movies/Archive Ready"
 BLOCKED_COMPLETED_PREFIX = "movies/Blocked Cleanup"
+MISSING_COMPLETED_PREFIX = "movies/Backups Already Gone"
 REVIEW_READY_PREFIX = "tv/Review Ready/Season 1"
 ABSOLUTE_TARGET_PREFIX = "tv/Absolute Goal/Season 1"
 APPROVED_PREFIX = "tv/Approved Show/Season 1"
@@ -944,6 +945,8 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
     archived_source = archive_root / "movies" / "Archive Ready" / "Feature.mkv"
     archived_source.parent.mkdir(parents=True, exist_ok=True)
     archived_source.write_bytes(b"mediaforce smoke archived original\n")
+    missing_archived_source = archive_root / "movies" / "Backups Already Gone" / "Feature.mkv"
+    missing_archived_source.unlink(missing_ok=True)
 
     with open_db(config.paths.db_path) as connection:
         connection.execute(
@@ -1619,6 +1622,19 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation_reason="Fixture unreachable worker output blocks whole-season promotion.",
             ),
         ]
+        rows.append(
+            _library_item(
+                project_root=project_root,
+                media_root="movies",
+                rel_path="movies/Backups Already Gone/Feature.mkv",
+                size_bytes=6 * 1024**3,
+                status="promoted",
+                video_codec="h264",
+                priority_score=8,
+                recommendation="priority_encode",
+                recommendation_reason="Fixture already-missing original backup state.",
+            )
+        )
         rows.extend(
             _library_item(
                 project_root=project_root,
@@ -1692,8 +1708,17 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
 
         completed_id = inserted_ids[3]
         blocked_completed_id = inserted_ids[6]
-        for item_id, row, archived_path in (
-            (completed_id, rows[3], str(archived_source)),
+        missing_completed_row = rows_by_prefix[MISSING_COMPLETED_PREFIX]
+        missing_completed_id = ids_by_rel_path[str(missing_completed_row["rel_path"])]
+        for item_id, row, archived_path, event_type, prefix, event_error in (
+            (
+                completed_id,
+                rows[3],
+                str(archived_source),
+                "encoding_failed",
+                COMPLETED_PREFIX,
+                "Fixture encode failed before a successful retry.",
+            ),
             (
                 blocked_completed_id,
                 rows[6],
@@ -1702,36 +1727,32 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                         "/tmp/mediaforce-web-smoke-outside/Blocked Cleanup/Feature.mkv"
                     )
                 ),
+                "encoding_stopped",
+                BLOCKED_COMPLETED_PREFIX,
+                "Fixture encode was stopped by operator.",
+            ),
+            (
+                missing_completed_id,
+                missing_completed_row,
+                str(missing_archived_source),
+                "encoding_completed",
+                MISSING_COMPLETED_PREFIX,
+                "Fixture original backup is already gone.",
             ),
         ):
-            if item_id == completed_id:
-                connection.execute(
-                    item_events.insert().values(
-                        library_item_id=item_id,
-                        created_at=timestamp,
-                        event_type="encoding_failed",
-                        details_json=json.dumps(
-                            {
-                                "prefix": COMPLETED_PREFIX,
-                                "error": "Fixture encode failed before a successful retry.",
-                            }
-                        ),
-                    )
+            connection.execute(
+                item_events.insert().values(
+                    library_item_id=item_id,
+                    created_at=timestamp,
+                    event_type=event_type,
+                    details_json=json.dumps(
+                        {
+                            "prefix": prefix,
+                            "error": event_error,
+                        }
+                    ),
                 )
-            else:
-                connection.execute(
-                    item_events.insert().values(
-                        library_item_id=item_id,
-                        created_at=timestamp,
-                        event_type="encoding_stopped",
-                        details_json=json.dumps(
-                            {
-                                "prefix": BLOCKED_COMPLETED_PREFIX,
-                                "error": "Fixture encode was stopped by operator.",
-                            }
-                        ),
-                    )
-                )
+            )
             connection.execute(
                 staged_artifacts.insert().values(
                     library_item_id=item_id,
@@ -1777,9 +1798,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     event_type="promotion_completed",
                     details_json=json.dumps(
                         {
-                            "prefix": COMPLETED_PREFIX
-                            if item_id == completed_id
-                            else BLOCKED_COMPLETED_PREFIX,
+                            "prefix": prefix,
                             "bytes_saved": 4 * 1024**3,
                             "note": "Fixture promoted item for browser QA.",
                         }
@@ -2440,6 +2459,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Completed cleanup fixture",
                 "route": "/completed",
                 "marker": "Blocked Cleanup",
+                "stageMarker": "Backups Already Gone",
             },
             {
                 "label": "Ops unavailable host fixture",

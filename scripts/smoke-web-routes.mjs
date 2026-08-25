@@ -1197,6 +1197,183 @@ async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
   }
 }
 
+async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    await page.goto(`${baseUrl}/completed`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page
+      .locator("strong:visible", { hasText: "Backups ready to delete" })
+      .first()
+      .waitFor();
+    await page
+      .locator("strong:visible", { hasText: "Backups already gone" })
+      .first()
+      .waitFor();
+    await page.waitForFunction(() =>
+      document.body.innerText.includes("Cleanup folder"),
+    );
+    await page
+      .getByText("Select at least one folder with original backups.", {
+        exact: true,
+      })
+      .waitFor();
+    await page
+      .getByText(
+        "Select at least one folder whose original backups are already gone.",
+        {
+          exact: true,
+        },
+      )
+      .waitFor();
+
+    await page
+      .getByLabel(/Select .* to delete its original backups/)
+      .first()
+      .check();
+    await page
+      .getByRole("button", { name: "Delete selected original backups" })
+      .click();
+    await page.getByText("This cannot be undone.", { exact: true }).waitFor();
+    await page
+      .getByText("Your finished files are not touched.", { exact: false })
+      .waitFor();
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    await page
+      .getByRole("button", { name: "Delete all original backups" })
+      .click();
+    await page
+      .getByText(/including folders hidden by your current filters/)
+      .waitFor();
+    await page.getByText("This cannot be undone.", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    await page
+      .getByLabel(/Select .* to mark already-gone original backups handled/)
+      .first()
+      .check();
+    await page
+      .getByRole("button", { name: "Mark backups already gone as handled" })
+      .click();
+    await page.getByText("Nothing is deleted.", { exact: false }).waitFor();
+    if (
+      await page.getByText("This cannot be undone.", { exact: true }).count()
+    ) {
+      throw new Error(
+        "Mark-handled confirmation incorrectly uses the delete warning.",
+      );
+    }
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    await page.setViewportSize(NARROW_VIEWPORT);
+    await page.reload({ waitUntil: "domcontentloaded", timeout: timeoutMs });
+    await page
+      .locator("strong:visible", { hasText: "Backups ready to delete" })
+      .first()
+      .waitFor();
+    const narrowState = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    if (narrowState.scrollWidth > narrowState.clientWidth) {
+      throw new Error(
+        `Finished cleanup overflows horizontally at 390px: ${narrowState.scrollWidth}px > ${narrowState.clientWidth}px`,
+      );
+    }
+
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(`${baseUrl}/settings`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page.waitForFunction(() =>
+      document.body.innerText.includes("Original backups"),
+    );
+    await page
+      .getByRole("button", { name: "Delete all original backups" })
+      .first()
+      .click();
+    await page.getByText("This cannot be undone.", { exact: true }).waitFor();
+    await page
+      .getByText("Your finished files are not touched.", { exact: true })
+      .waitFor();
+    await page.getByRole("button", { name: "Cancel" }).click();
+
+    const completedResponse = await fetch(`${baseUrl}/api/completed`);
+    const completedPayload = await completedResponse.json();
+    const missingFolderPayload = {
+      ...completedPayload,
+      folders_with_backups_count: 0,
+      archive_cleanup: {
+        ...completedPayload.archive_cleanup,
+        archive_root: "",
+        file_count: 0,
+        total_size_bytes: 0,
+        has_cleanup: false,
+      },
+      folders: completedPayload.folders.map((folder) =>
+        folder.archived_backup_count > 0
+          ? {
+              ...folder,
+              cleanup_state: "blocked",
+              cleanup_detail:
+                "Cleanup folder is not set, so Mediaforce cannot find the original backups.",
+            }
+          : folder,
+      ),
+    };
+    const missingPage = await browser.newPage({
+      viewport: { width: 1440, height: 1000 },
+    });
+    await missingPage.route("**/api/completed*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(missingFolderPayload),
+      }),
+    );
+    await missingPage.route("**/api/archive-cleanup*", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(missingFolderPayload.archive_cleanup),
+      }),
+    );
+    await missingPage.goto(`${baseUrl}/completed`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await missingPage
+      .getByText(
+        "Cleanup folder is not set, so Mediaforce cannot find the original backups.",
+        {
+          exact: true,
+        },
+      )
+      .first()
+      .waitFor();
+    await missingPage
+      .getByText(
+        "Set a Cleanup folder in Settings before deleting original backups.",
+        {
+          exact: true,
+        },
+      )
+      .waitFor();
+    await missingPage.close();
+
+    console.log("route ok: Finished cleanup language and confirmations");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let managedServer = null;
@@ -1223,6 +1400,9 @@ async function main() {
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
+    if (fixtures?.folderRoutes?.length) {
+      await checkCompletedCleanupLanguage(targetUrl, args.routeTimeoutMs);
+    }
     if (fixtures?.folderRoutes?.length) {
       const libraryFixture = fixtures.folderRoutes.find((fixtureRoute) =>
         fixtureRoute.route.startsWith("/folders/tv/"),
