@@ -3,11 +3,46 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+skills_home="${CODE_HOME:-${CODEX_HOME:-$HOME/.code}}/skills"
+python_prepare="$skills_home/jetbrains-inspection/scripts/prepare-python-project.py"
 
-(
-	cd "$repo_root"
-	uv sync --locked --python 3.13
-)
+if [[ ! -f "$python_prepare" ]]; then
+	echo "JetBrains inspection preparation helper not found: $python_prepare" >&2
+	exit 1
+fi
+
+uv run "$python_prepare" \
+	--repo "$repo_root" \
+	--python 3.13 \
+	--module-name mediaforce \
+	--test-root tests \
+	--sync
+
+rm -f "$repo_root/.idea/mediaforce@"*.iml
+module_file="$repo_root/.idea/mediaforce.iml"
+node - "$module_file" <<'NODE'
+const fs = require('node:fs');
+
+const moduleFile = process.argv[2];
+const original = fs.readFileSync(moduleFile, 'utf8');
+let normalized = original
+	.replace(
+		'<module type="PYTHON_MODULE"',
+		'<module external.system.id="pyproject.toml" type="PYTHON_MODULE"'
+	)
+	.replace('<content url="file://$MODULE_DIR$">', '<content url="file://$MODULE_DIR$/..">');
+for (const relativePath of ['.mypy_cache', '.system', '.local', '.code', '.venv', 'tests']) {
+	normalized = normalized.replaceAll(
+		`url="file://$MODULE_DIR$/${relativePath}"`,
+		`url="file://$MODULE_DIR$/../${relativePath}"`
+	);
+}
+const frontendExclusion = '      <excludeFolder url="file://$MODULE_DIR$/../frontend" />';
+if (!normalized.includes(frontendExclusion)) {
+	normalized = normalized.replace('    </content>', `${frontendExclusion}\n    </content>`);
+}
+if (normalized !== original) fs.writeFileSync(moduleFile, normalized);
+NODE
 
 frontend_root="$repo_root/frontend"
 dependency_stamp="$frontend_root/node_modules/.mediaforce-dependencies.sha256"
