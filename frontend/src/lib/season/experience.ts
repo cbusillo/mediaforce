@@ -19,9 +19,11 @@ import type {
 	TargetSizeProvenance
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
+import { formatFileSize as formatOperatorFileSize } from '$lib/format';
 
 export type HumanSeasonStateKey =
 	| 'needs_test'
+	| 'sample_waiting'
 	| 'making_test'
 	| 'ready_to_compare'
 	| 'ready_to_make'
@@ -65,54 +67,54 @@ export interface SeasonPromotionIntegrity {
 const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAction: string }> = {
 	promotable: {
 		label: 'Ready to replace',
-		nextAction: 'Finish the season when every other file is also ready.'
+		nextAction: 'Replace the original episodes when every other file is also ready.'
 	},
 	tracked: {
 		label: 'Already in the library',
 		nextAction: 'No action is needed for this file.'
 	},
 	unvalidated: {
-		label: 'Needs a safety check',
-		nextAction: 'Run the file checks before finishing the season.'
+		label: 'Needs a check',
+		nextAction: 'Check the compressed files before replacing any original.'
 	},
 	validation_failed: {
-		label: 'Safety check failed',
-		nextAction: 'Inspect the failed file and make a clean replacement.'
+		label: 'Check failed',
+		nextAction: 'Inspect the failed file and compress a clean replacement.'
 	},
 	missing: {
-		label: 'Working file missing',
-		nextAction: 'Make this episode again before finishing the season.'
+		label: 'Compressed file missing',
+		nextAction: 'Compress this episode again before replacing the originals.'
 	},
 	drifted: {
 		label: 'Changed after checking',
-		nextAction: 'Check the file again or make a fresh replacement.'
+		nextAction: 'Check the file again or compress a fresh replacement.'
 	},
 	orphaned: {
 		label: 'Untracked working file',
 		nextAction: 'Inspect the untracked file; Mediaforce will not adopt it automatically.'
 	},
 	partial_or_temporary: {
-		label: 'Incomplete working file',
+		label: 'Incomplete compressed file',
 		nextAction: 'Wait for active work to finish or remove the abandoned temporary file.'
 	},
 	remote_only_or_unreachable: {
-		label: 'Worker file unavailable',
-		nextAction: 'Restore access to the worker staging folder before finishing.'
+		label: 'File unavailable on the computer',
+		nextAction: 'Restore access to the computer before replacing the originals.'
 	},
 	not_started: {
-		label: 'Not made yet',
-		nextAction: 'Process the remaining episode before finishing the season.'
+		label: 'Not compressed yet',
+		nextAction: 'Compress the remaining episode before replacing the originals.'
 	}
 };
 
 const PROMOTION_BLOCKER_COPY: Record<string, { label: string; nextAction: string }> = {
 	season_active_encode_job: {
-		label: 'Processing still active',
-		nextAction: 'Wait for the current season processing job to finish.'
+		label: 'Compression still active',
+		nextAction: 'Wait for the current compression job to finish.'
 	},
 	season_encode_job_attention: {
-		label: 'Processing needs attention',
-		nextAction: 'Resolve or retry the interrupted season work.'
+		label: 'Compression needs attention',
+		nextAction: 'Resolve or retry the interrupted compression work.'
 	},
 	season_destination_conflict: {
 		label: 'Library file conflict',
@@ -473,7 +475,7 @@ function riskVerdictCopy(verdict: string | null | undefined): string {
 	if (normalized === 'blocked') return 'Needs attention';
 	if (normalized === 'request_comparison') return 'Review recommended';
 	if (normalized === 'needs_operator_review') return 'Your review is needed';
-	if (normalized === 'safe_to_sample') return 'Ready for a test';
+	if (normalized === 'safe_to_sample') return 'Automated checks passed';
 	return 'Review recommended';
 }
 
@@ -490,18 +492,18 @@ function riskAuthority(risk: QualityRiskPayload | null): { value: string; detail
 	if (status === 'rejected') {
 		return {
 			value: 'Not approved',
-			detail: 'This exact test was most recently marked as not acceptable.'
+			detail: 'This exact sample was most recently marked as not acceptable.'
 		};
 	}
 	if (status === 'approved') {
 		return {
 			value: 'Approved',
-			detail: 'A decision has been saved for this exact test.'
+			detail: 'A decision has been saved for this exact sample.'
 		};
 	}
 	return {
 		value: 'Not decided yet',
-		detail: 'No decision has been saved for this test.'
+		detail: 'No decision has been saved for this sample.'
 	};
 }
 
@@ -611,7 +613,7 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		tone: riskTone(risk),
 		title: topRiskCopy?.label ?? riskVerdictCopy(risk.verdict),
 		detail: risk.blocked
-			? 'This test needs attention before it can be approved.'
+			? 'This sample needs attention before it can be approved.'
 			: 'Compare the selected moments before deciding.',
 		topRisk: topRiskCopy?.label ?? 'No specific warning',
 		topRiskLevel: topRisk ? plainRiskLevel(topRisk.level) : 'Review note',
@@ -634,6 +636,14 @@ function jobStatus(job: unknown): string {
 
 function isActiveJob(job: unknown): boolean {
 	return ACTIVE_JOB_STATUSES.has(jobStatus(job));
+}
+
+function isWaitingJob(job: unknown): boolean {
+	return ['queued', 'retry_backoff'].includes(jobStatus(job));
+}
+
+function isRunningJob(job: unknown): boolean {
+	return isActiveJob(job) && !isWaitingJob(job);
 }
 
 function isFailedJob(job: unknown): boolean {
@@ -776,38 +786,11 @@ export function folderHref(prefix: string): `/folders/${string}` {
 }
 
 export function formatFileSize(bytes: number | null | undefined): string {
-	const value = numberValue(bytes);
-	if (value <= 0) return 'Size not available';
-	const units = [
-		{ threshold: 1024 ** 3, suffix: 'GB' },
-		{ threshold: 1024 ** 2, suffix: 'MB' },
-		{ threshold: 1024, suffix: 'KB' }
-	];
-	for (const unit of units) {
-		if (value >= unit.threshold) {
-			const scaled = value / unit.threshold;
-			const digits = scaled >= 10 ? 0 : 1;
-			return `${scaled.toFixed(digits)} ${unit.suffix}`;
-		}
-	}
-	return `${Math.round(value)} bytes`;
+	return formatOperatorFileSize(bytes, 'Size not available');
 }
 
 export function formatDecimalFileSize(bytes: number | null | undefined): string {
-	const value = numberValue(bytes);
-	if (value <= 0) return '0 MB';
-	for (const unit of [
-		{ threshold: 1_000_000_000_000, suffix: 'TB' },
-		{ threshold: 1_000_000_000, suffix: 'GB' },
-		{ threshold: 1_000_000, suffix: 'MB' }
-	]) {
-		if (value >= unit.threshold) {
-			const scaled = value / unit.threshold;
-			const digits = Number.isInteger(scaled) ? 0 : scaled >= 10 ? 1 : 2;
-			return `${scaled.toFixed(digits)} ${unit.suffix}`;
-		}
-	}
-	return `${Math.round(value / 1_000)} KB`;
+	return formatOperatorFileSize(bytes, '0 MB');
 }
 
 export function expectedSizeChange(
@@ -1189,50 +1172,75 @@ export function calibrationStageLabel(job: CalibrationJobPayload | null | undefi
 		preparing_host: 'Starting the computer',
 		preparing_source: 'Preparing the source',
 		inspecting_source: 'Inspecting the picture',
-		searching_target: 'Searching for the size target',
+		searching_target: 'Finding settings that hit the size target',
 		measuring_quality: 'Measuring picture quality',
 		selecting_review_moments: 'Choosing review moments',
 		building_review: 'Building comparison clips',
-		encoding_full_calibration: 'Encoding the full calibration',
-		saving_results: 'Saving test results',
+		encoding_full_calibration: 'Compressing the sample',
+		saving_results: 'Saving sample results',
 		completed: 'Complete'
 	};
 	if (labels[stage]) return labels[stage];
 	if (job?.status === 'queued') return 'Waiting for a computer';
-	if (job?.status === 'running') return 'Making test moments';
-	return job?.status ? job.status.replaceAll('_', ' ') : 'Preparing the test';
+	if (job?.status === 'retry_backoff') return 'Waiting to retry the sample';
+	if (job?.status === 'failed' || job?.status === 'stopped') return 'Sample needs retry';
+	if (job?.status === 'completed' || job?.status === 'pending_review') return 'Ready to review';
+	if (job?.status === 'running') return 'Creating comparison clips';
+	return 'Preparing the sample';
+}
+
+export function calibrationWorkProgress(job: CalibrationJobPayload | null | undefined): {
+	label: string;
+	determinate: boolean;
+} {
+	const work = job?.progress?.work;
+	if (!work || work.total <= 0) return { label: '', determinate: false };
+	const completed = Math.max(0, Math.min(work.completed, work.total));
+	if (job?.progress?.stage === 'searching_target') {
+		return { label: 'Trying size settings', determinate: false };
+	}
+	if (job?.progress?.stage === 'building_review') {
+		return {
+			label: `${completed} of ${work.total} comparison clips built`,
+			determinate: true
+		};
+	}
+	return { label: 'Working', determinate: false };
 }
 
 export function calibrationWorkLabel(job: CalibrationJobPayload | null | undefined): string {
+	return calibrationWorkProgress(job).label;
+}
+
+export function sampleSearchTechnicalDetail(job: CalibrationJobPayload | null | undefined): string {
 	const work = job?.progress?.work;
-	if (!work || work.total <= 0) return '';
+	if (job?.progress?.stage !== 'searching_target' || !work || work.total <= 0) return '';
 	const completed = Math.max(0, Math.min(work.completed, work.total));
-	if (job?.progress?.stage === 'searching_target') {
-		return `${completed} of up to ${work.total} size candidates tested`;
-	}
-	if (job?.progress?.stage === 'building_review') {
-		return `${completed} of ${work.total} comparison steps`;
-	}
-	return `${completed} of ${work.total} steps`;
+	return `${completed} of up to ${work.total} size settings tried`;
 }
 
 export function calibrationLivenessLabel(job: CalibrationJobPayload | null | undefined): string {
-	if (job?.status === 'completed' || job?.status === 'pending_review') return 'Test finished';
-	if (job?.status === 'failed' || job?.status === 'stopped') return 'Test is not running';
+	if (job?.status === 'completed' || job?.status === 'pending_review') return 'Sample finished';
+	if (job?.status === 'failed' || job?.status === 'stopped') return 'Sample is not running';
+	if (job?.status === 'retry_backoff') return 'Waiting before retry';
 	const liveness = job?.progress?.liveness;
 	if (liveness === 'reporting') return 'Computer is reporting normally';
 	if (liveness === 'delayed') return 'Computer updates are arriving slowly';
 	if (liveness === 'not_reporting') return 'Computer has stopped reporting progress';
-	if (liveness === 'queued') return 'Waiting in the test queue';
+	if (liveness === 'queued') return 'Waiting in the sample queue';
 	return 'Waiting for the first progress update';
 }
 
 export function calibrationActivityStatusLabel(
 	job: CalibrationJobPayload | null | undefined
 ): string {
-	if (job?.status === 'queued') return 'Test waiting';
-	if (job?.status === 'starting') return 'Test starting';
-	return 'Test running';
+	if (job?.status === 'queued' || job?.status === 'retry_backoff') return 'Sample waiting';
+	if (job?.status === 'starting') {
+		const stage = job.progress?.stage;
+		if (!stage || /^(preparing_host|preparing_source)$/.test(stage)) return 'Sample starting';
+		return 'Creating sample';
+	}
+	return 'Creating sample';
 }
 
 export function calibrationFreshnessLabel(value: unknown): string {
@@ -1248,7 +1256,7 @@ export function calibrationEtaSummary(
 	if (job?.status === 'completed' || job?.status === 'pending_review') {
 		return {
 			value: 'Finished',
-			detail: 'This test is no longer running.',
+			detail: 'This sample is no longer running.',
 			tone: 'quiet'
 		};
 	}
@@ -1271,14 +1279,14 @@ export function calibrationEtaSummary(
 	if (!estimate) {
 		return {
 			value: 'No estimate yet',
-			detail: 'A remaining-time range appears after three comparable tests have finished.',
+			detail: 'A remaining-time range appears after three comparable samples have finished.',
 			tone: progress?.liveness === 'delayed' ? 'attention' : 'quiet'
 		};
 	}
 	if (estimate.longer_than_recent_runs) {
 		return {
-			value: 'Longer than recent tests',
-			detail: `Comparable tests usually finished within ${coarseDuration(estimate.total_seconds_high)}. The computer can still be reporting normally.`,
+			value: 'Longer than recent samples',
+			detail: `Comparable samples usually finished within ${coarseDuration(estimate.total_seconds_high)}. The computer can still be reporting normally.`,
 			tone: 'attention'
 		};
 	}
@@ -1292,7 +1300,7 @@ export function calibrationEtaSummary(
 				: `${low}–${high} left`;
 	return {
 		value,
-		detail: `Based on ${estimate.sample_size} comparable completed tests; this range is not a guarantee.`,
+		detail: `Based on ${estimate.sample_size} comparable completed samples; this range is not a guarantee.`,
 		tone: progress?.liveness === 'delayed' ? 'attention' : 'quiet'
 	};
 }
@@ -1437,7 +1445,7 @@ export function targetConstraintSummary(
 			kind: 'arithmetic_infeasible',
 			title: 'This size cannot fit the required streams.',
 			detail:
-				'Audio, subtitles, attachments, and container overhead leave no positive video budget at this size. Choose a roomier goal before making another test.',
+				'Audio, subtitles, attachments, and container overhead leave no positive video budget at this size. Choose a roomier goal before creating another sample.',
 			recoveryLabel: 'Choose a size that can fit'
 		};
 	}
@@ -1448,9 +1456,9 @@ export function targetConstraintSummary(
 	) {
 		return {
 			kind: 'bound_exhausted',
-			title: 'The test reached a configured limit.',
+			title: 'The sample reached a configured limit.',
 			detail:
-				'The previous test stopped at an inherited search or source-size limit before it could measure your requested size. Retrying that saved test would repeat the same limit; make a fresh test with updated settings instead.',
+				'The previous sample stopped at an inherited search or source-size limit before it could measure your requested size. Retrying that saved sample would repeat the same limit; create a fresh sample with updated settings instead.',
 			recoveryLabel: 'Review size and settings'
 		};
 	}
@@ -1684,7 +1692,7 @@ export function approvalGuardFromMessage(
 	if (normalized.includes('high-impact')) {
 		return {
 			kind: 'high_impact',
-			title: 'This test changed important picture settings.',
+			title: 'This sample changed important picture settings.',
 			detail:
 				'The comparison you watched reflects those changes. Keep it only if the picture and sound still feel right.',
 			confirmHighImpact: true,
@@ -1699,7 +1707,7 @@ export function approvalGuardFromMessage(
 	) {
 		return {
 			kind: 'size_tradeoff',
-			title: 'This test missed your size goal.',
+			title: 'This sample missed your size goal.',
 			detail:
 				'The result may be larger or smaller than the goal you chose. The expected size shown on this page is the result you would accept.',
 			confirmHighImpact: confirmedHighImpact,
@@ -1720,26 +1728,38 @@ export function librarySeasonState(
 	) {
 		return {
 			key: 'making_season',
-			label: 'Making the season',
-			detail: 'The smaller episodes are being made now.',
+			label: 'Compressing the season',
+			detail: 'The smaller episodes are being compressed now.',
 			tone: 'active'
 		};
 	}
-	if (
-		[...sampleJobs.running, ...sampleJobs.queued].some((job) => matchesPrefix(job, card.prefix))
-	) {
+	if (sampleJobs.running.some((job) => matchesPrefix(job, card.prefix) && isRunningJob(job))) {
 		return {
 			key: 'making_test',
-			label: 'Making a test',
-			detail: 'One episode is being tested now.',
+			label: 'Creating sample',
+			detail: 'One representative episode is being compressed into comparison clips now.',
 			tone: 'active'
+		};
+	}
+	const waitingSampleJob = [...sampleJobs.running, ...sampleJobs.queued].find(
+		(job) => matchesPrefix(job, card.prefix) && isWaitingJob(job)
+	);
+	if (waitingSampleJob) {
+		const retrying = jobStatus(waitingSampleJob) === 'retry_backoff';
+		return {
+			key: 'sample_waiting',
+			label: 'Sample waiting',
+			detail: retrying
+				? 'The last attempt stopped. Mediaforce will retry this sample shortly.'
+				: 'This sample has not started. It is waiting for an available computer.',
+			tone: retrying ? 'attention' : 'quiet'
 		};
 	}
 	if (sampleJobs.ready.some((job) => matchesPrefix(job, card.prefix))) {
 		return {
 			key: 'ready_to_compare',
-			label: 'Test ready',
-			detail: 'Compare the original and new version.',
+			label: 'Ready to review',
+			detail: 'Compare the original and the sample.',
 			tone: 'ready'
 		};
 	}
@@ -1776,7 +1796,7 @@ export function librarySeasonState(
 	if (card.workflow_state?.primary_lane === 'promote') {
 		return {
 			key: 'ready_to_finish',
-			label: 'Ready to finish',
+			label: 'Ready to replace',
 			detail: 'The smaller episodes passed their checks.',
 			tone: 'ready'
 		};
@@ -1784,8 +1804,8 @@ export function librarySeasonState(
 	if (card.workflow_state?.primary_lane === 'processing') {
 		return {
 			key: 'making_season',
-			label: 'Making the season',
-			detail: 'The smaller episodes are being made now.',
+			label: 'Compressing the season',
+			detail: 'The smaller episodes are being compressed now.',
 			tone: 'active'
 		};
 	}
@@ -1794,16 +1814,16 @@ export function librarySeasonState(
 	if (badge.includes('ready to review')) {
 		return {
 			key: 'ready_to_compare',
-			label: 'Test ready',
-			detail: 'Compare the original and new version.',
+			label: 'Ready to review',
+			detail: 'Compare the original and the sample.',
 			tone: 'ready'
 		};
 	}
 	if (badge.includes('approved')) {
 		return {
 			key: 'ready_to_make',
-			label: 'Test approved',
-			detail: 'The rest of the season can be made.',
+			label: 'Sample approved',
+			detail: 'The rest of the season can be compressed.',
 			tone: 'ready'
 		};
 	}
@@ -1826,8 +1846,8 @@ export function librarySeasonState(
 	}
 	return {
 		key: 'needs_test',
-		label: 'Make a test',
-		detail: 'Choose a size, then compare one episode first.',
+		label: 'Needs sample',
+		detail: 'Choose a size, then compare one sample first.',
 		tone: 'quiet'
 	};
 }
@@ -1860,10 +1880,10 @@ export function detailSeasonState(
 	if (isActiveJob(encodeJob) || workflow?.primary_lane === 'processing') {
 		return {
 			key: 'making_season',
-			label: exactEpisode ? 'Making the episode' : 'Making the season',
+			label: exactEpisode ? 'Compressing the episode' : 'Compressing the season',
 			detail: exactEpisode
-				? 'The smaller episode is being made now.'
-				: 'The smaller episodes are being made now.',
+				? 'The smaller episode is being compressed now.'
+				: 'The smaller episodes are being compressed now.',
 			tone: 'active'
 		};
 	}
@@ -1915,7 +1935,7 @@ export function detailSeasonState(
 		}
 		return {
 			key: 'ready_to_finish',
-			label: 'Ready to finish',
+			label: 'Ready to replace',
 			detail: exactEpisode
 				? 'The smaller episode passed its checks.'
 				: 'The smaller episodes passed their checks.',
@@ -1930,19 +1950,32 @@ export function detailSeasonState(
 			tone: 'success'
 		};
 	}
-	if (isActiveJob(sampleJob) || ['queued', 'running'].includes(status.calibration_status)) {
+	if (isWaitingJob(sampleJob) || status.calibration_status === 'queued') {
+		const retrying = jobStatus(sampleJob) === 'retry_backoff';
+		return {
+			key: 'sample_waiting',
+			label: 'Sample waiting',
+			detail: retrying
+				? 'The last attempt stopped. Mediaforce will retry this sample shortly.'
+				: 'This sample has not started. It is waiting for an available computer.',
+			tone: retrying ? 'attention' : 'quiet'
+		};
+	}
+	if (isRunningJob(sampleJob) || status.calibration_status === 'running') {
 		return {
 			key: 'making_test',
-			label: 'Making a test',
-			detail: 'One representative episode is being tested now.',
+			label: 'Creating sample',
+			detail: exactEpisode
+				? 'This episode is being compressed into comparison clips now.'
+				: 'One representative episode is being compressed into comparison clips now.',
 			tone: 'active'
 		};
 	}
 	if (retryableSample || isFailedJob(sampleJob)) {
 		return {
 			key: 'needs_help',
-			label: 'The test stopped',
-			detail: 'Nothing was replaced. You can try the same test again.',
+			label: 'Sample needs retry',
+			detail: 'Nothing was replaced. You can retry the same sample.',
 			tone: 'attention',
 			recoveryKind: 'test'
 		};
@@ -1963,8 +1996,8 @@ export function detailSeasonState(
 	) {
 		return {
 			key: 'needs_help',
-			label: 'The test needs another try',
-			detail: 'The previous test ended before the comparison was ready.',
+			label: 'Sample needs retry',
+			detail: 'The previous sample ended before its comparison clips were ready.',
 			tone: 'attention',
 			recoveryKind: 'test'
 		};
@@ -1972,23 +2005,25 @@ export function detailSeasonState(
 	if (reviewReady && draftHash && !currentDraftIsApproved) {
 		return {
 			key: 'ready_to_compare',
-			label: 'Test ready',
-			detail: 'Compare the original and new version.',
+			label: 'Ready to review',
+			detail: 'Compare the original and the sample.',
 			tone: 'ready'
 		};
 	}
 	if (currentDraftIsApproved) {
 		return {
 			key: 'ready_to_make',
-			label: 'Test approved',
-			detail: exactEpisode ? 'This episode can be made.' : 'The rest of the season can be made.',
+			label: 'Sample approved',
+			detail: exactEpisode
+				? 'This episode can be compressed.'
+				: 'The rest of the season can be compressed.',
 			tone: 'ready'
 		};
 	}
 	return {
 		key: 'needs_test',
-		label: 'Make a test',
-		detail: 'Choose a size, then compare one episode first.',
+		label: 'Needs sample',
+		detail: 'Choose a size, then compare one sample first.',
 		tone: 'quiet'
 	};
 }
@@ -2145,7 +2180,7 @@ export function plainFailureMessage(folder: FolderPayload, status: FolderStatusP
 		(text(reviewGate.status) === 'missing_review_media' ||
 			(text(calibration.job_id) && !text(calibration.draft_hash)))
 	) {
-		return 'The previous test ended before the comparison was ready. Nothing was replaced.';
+		return 'The previous sample ended before its comparison clips were ready. Nothing was replaced.';
 	}
 	if (!raw) return 'The work stopped before it finished. Your completed files are still safe.';
 	if (normalized.includes('restart') || normalized.includes('interrupted')) {
@@ -2156,12 +2191,12 @@ export function plainFailureMessage(folder: FolderPayload, status: FolderStatusP
 	}
 	if (normalized.includes('final output size missed the approved target band')) {
 		if (normalized.includes('status=under_target')) {
-			return 'The finished file was smaller than the approved range. Choose a fresh size or compression goal and make another test.';
+			return 'The finished file was smaller than the approved range. Choose a fresh size or quality preference and create another sample.';
 		}
 		if (normalized.includes('status=over_target')) {
-			return 'The finished file was larger than the approved range. Choose a fresh size or compression goal and make another test.';
+			return 'The finished file was larger than the approved range. Choose a fresh size or quality preference and create another sample.';
 		}
-		return 'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or compression goal and make another test.';
+		return 'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or quality preference and create another sample.';
 	}
 	if (normalized.includes('suitable crf') || normalized.includes('quality target')) {
 		return 'That size goal was too small for this episode. Try a roomier goal.';
@@ -2180,6 +2215,7 @@ export function activeSeasonCards(
 		.map((card) => ({ card, state: librarySeasonState(card, dashboard) }))
 		.filter(({ state }) =>
 			[
+				'sample_waiting',
 				'making_test',
 				'ready_to_compare',
 				'ready_to_make',
@@ -2194,14 +2230,15 @@ export function activeSeasonCards(
 			const order: Record<HumanSeasonStateKey, number> = {
 				making_test: 0,
 				making_season: 1,
-				ready_to_compare: 2,
-				needs_help: 3,
-				finish_blocked: 4,
-				ready_to_make: 5,
-				ready_to_check: 6,
-				ready_to_finish: 7,
-				finished: 8,
-				needs_test: 9
+				sample_waiting: 2,
+				ready_to_compare: 3,
+				needs_help: 4,
+				finish_blocked: 5,
+				ready_to_make: 6,
+				ready_to_check: 7,
+				ready_to_finish: 8,
+				finished: 9,
+				needs_test: 10
 			};
 			return order[left.state.key] - order[right.state.key];
 		});

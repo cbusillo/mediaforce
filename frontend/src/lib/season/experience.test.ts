@@ -26,6 +26,7 @@ import {
 	calibrationLivenessLabel,
 	calibrationStageLabel,
 	calibrationWorkLabel,
+	calibrationWorkProgress,
 	catalogWarningNotice,
 	compareRiskSummary,
 	currentOperatorIntent,
@@ -56,6 +57,7 @@ import {
 	seasonIdentity,
 	seasonPromotionIntegrity,
 	seasonEpisodeOptions,
+	sampleSearchTechnicalDetail,
 	stagedEpisodeLinks,
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
@@ -812,7 +814,7 @@ describe('season experience translation', () => {
 			topRiskDetail:
 				'Check natural texture for waxiness, crawling noise, or an overly smooth look.',
 			authority: 'Not decided yet',
-			authorityDetail: 'No decision has been saved for this test.',
+			authorityDetail: 'No decision has been saved for this sample.',
 			focusMoments: ['Moment 2 needs the closest look.'],
 			picture: {
 				label: 'Texture and grain',
@@ -1125,15 +1127,82 @@ describe('season experience translation', () => {
 	it('does not call a newly discovered season ready to encode', () => {
 		expect(librarySeasonState(card, dashboard)).toMatchObject({
 			key: 'needs_test',
-			label: 'Make a test'
+			label: 'Needs sample'
 		});
+	});
+
+	it('distinguishes a waiting sample from a running sample', () => {
+		const queuedDashboard = {
+			...dashboard,
+			calibration_queue: {
+				...dashboard.calibration_queue,
+				sample: {
+					...dashboard.calibration_queue.sample,
+					queued: [{ job_id: 'sample-queued', prefix: card.prefix, status: 'queued' }],
+					queued_count: 1
+				}
+			}
+		} as DashboardSummaryPayload;
+		const runningDashboard = {
+			...dashboard,
+			calibration_queue: {
+				...dashboard.calibration_queue,
+				sample: {
+					...dashboard.calibration_queue.sample,
+					running: [{ job_id: 'sample-running', prefix: card.prefix, status: 'running' }],
+					running_count: 1
+				}
+			}
+		} as DashboardSummaryPayload;
+		const retryingDashboard = {
+			...dashboard,
+			calibration_queue: {
+				...dashboard.calibration_queue,
+				sample: {
+					...dashboard.calibration_queue.sample,
+					running: [{ job_id: 'sample-retrying', prefix: card.prefix, status: 'retry_backoff' }],
+					running_count: 1
+				}
+			}
+		} as DashboardSummaryPayload;
+
+		expect(librarySeasonState(card, queuedDashboard)).toMatchObject({
+			key: 'sample_waiting',
+			label: 'Sample waiting',
+			detail: 'This sample has not started. It is waiting for an available computer.'
+		});
+		expect(librarySeasonState(card, runningDashboard)).toMatchObject({
+			key: 'making_test',
+			label: 'Creating sample',
+			detail: 'One representative episode is being compressed into comparison clips now.'
+		});
+		expect(librarySeasonState(card, retryingDashboard)).toMatchObject({
+			key: 'sample_waiting',
+			label: 'Sample waiting',
+			detail: 'The last attempt stopped. Mediaforce will retry this sample shortly.',
+			tone: 'attention'
+		});
+	});
+
+	it('keeps technical job nouns out of first-level sample copy', () => {
+		const states = [
+			librarySeasonState(card, dashboard),
+			detailSeasonState(folder(), status),
+			{
+				label: calibrationStageLabel({ job_id: 'sample-1', status: 'running' }),
+				detail: calibrationLivenessLabel({ job_id: 'sample-1', status: 'running' })
+			}
+		];
+		const firstLevelCopy = states.map((state) => `${state.label} ${state.detail}`).join(' ');
+
+		expect(firstLevelCopy).not.toMatch(/\b(calibration|candidate|worker|host|Mac|preview)\b/i);
 	});
 
 	it('keeps finishing states visible on the home screen', () => {
 		const finishingCard = { ...card, workflow_state: workflowState('promote') };
 		expect(librarySeasonState(finishingCard, dashboard)).toMatchObject({
 			key: 'ready_to_finish',
-			label: 'Ready to finish'
+			label: 'Ready to replace'
 		});
 		expect(activeSeasonCards([finishingCard], dashboard)).toHaveLength(1);
 	});
@@ -1187,7 +1256,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Test ready' });
+		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
 	});
 
 	it('shows an interrupted season before an older approved test', () => {
@@ -1269,7 +1338,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Test ready' });
+		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
 	});
 
 	it('recognizes a saved test that never produced comparison media', () => {
@@ -1284,7 +1353,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'needs_help', label: 'The test needs another try' });
+		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
 	});
 
 	it('recognizes a measured test whose review clips are missing', () => {
@@ -1300,7 +1369,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'needs_help', label: 'The test needs another try' });
+		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
 	});
 
 	it('returns an approved sample to review when current evidence is rejected', () => {
@@ -1320,7 +1389,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'ready_to_compare', label: 'Test ready' });
+		).toMatchObject({ key: 'ready_to_compare', label: 'Ready to review' });
 	});
 
 	it('trusts an accepted review gate when non-policy draft metadata changed', () => {
@@ -1341,7 +1410,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'ready_to_make', label: 'Test approved' });
+		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
 	});
 
 	it.each([
@@ -1375,8 +1444,8 @@ describe('season experience translation', () => {
 			{
 				code: 'staged_integrity_not_started',
 				count: 2,
-				label: 'Not made yet',
-				nextAction: 'Process the remaining episode before finishing the season.'
+				label: 'Not compressed yet',
+				nextAction: 'Compress the remaining episode before replacing the originals.'
 			}
 		]);
 		expect(
@@ -1401,7 +1470,7 @@ describe('season experience translation', () => {
 		});
 		expect(
 			detailSeasonState(folder({ workflow_state: workflowState('promote') }), promotionStatus())
-		).toMatchObject({ key: 'ready_to_finish', label: 'Ready to finish' });
+		).toMatchObject({ key: 'ready_to_finish', label: 'Ready to replace' });
 	});
 
 	it('enables exact-item finishing without season-wide promotion applicability', () => {
@@ -1490,7 +1559,7 @@ describe('season experience translation', () => {
 				}),
 				status
 			)
-		).toMatchObject({ key: 'making_season', label: 'Making the season' });
+		).toMatchObject({ key: 'making_season', label: 'Compressing the season' });
 	});
 
 	it('uses the API-resolved runtime-normalized goal instead of rebuilding it from flat policy', () => {
@@ -1729,7 +1798,7 @@ describe('season experience translation', () => {
 		).toMatchObject({
 			kind: 'bound_exhausted',
 			recoveryLabel: 'Review size and settings',
-			detail: expect.stringContaining('Retrying that saved test would repeat the same limit')
+			detail: expect.stringContaining('Retrying that saved sample would repeat the same limit')
 		});
 	});
 
@@ -1745,10 +1814,10 @@ describe('season experience translation', () => {
 
 		expect(targetConstraintSummary(failedFolder, status)).toMatchObject({
 			kind: 'bound_exhausted',
-			title: 'The test reached a configured limit.'
+			title: 'The sample reached a configured limit.'
 		});
 		expect(plainFailureMessage(failedFolder, status)).toContain(
-			'Retrying that saved test would repeat the same limit'
+			'Retrying that saved sample would repeat the same limit'
 		);
 	});
 
@@ -1764,7 +1833,7 @@ describe('season experience translation', () => {
 		});
 
 		expect(plainFailureMessage(failedFolder, status)).toBe(
-			'The finished file was smaller than the approved range. Choose a fresh size or compression goal and make another test.'
+			'The finished file was smaller than the approved range. Choose a fresh size or quality preference and create another sample.'
 		);
 	});
 
@@ -1780,7 +1849,7 @@ describe('season experience translation', () => {
 		});
 
 		expect(plainFailureMessage(failedFolder, status)).toBe(
-			'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or compression goal and make another test.'
+			'Mediaforce could not verify the finished file against the approved size range. Choose a fresh size or quality preference and create another sample.'
 		);
 	});
 
@@ -1807,7 +1876,7 @@ describe('season experience translation', () => {
 		};
 
 		expect(plainFailureMessage(failedFolder, staleSampleStatus)).toBe(
-			'The finished file was smaller than the approved range. Choose a fresh size or compression goal and make another test.'
+			'The finished file was smaller than the approved range. Choose a fresh size or quality preference and create another sample.'
 		);
 	});
 
@@ -2024,7 +2093,7 @@ describe('season experience translation', () => {
 				}
 			} as FolderPayload)
 		).toBe('Show.S02E07.mkv');
-		expect(formatFileSize(1_073_741_824)).toBe('1.0 GB');
+		expect(formatFileSize(1_073_741_824)).toBe('1.07 GB');
 	});
 
 	it('links staged season output to the exact episode workspace', () => {
@@ -2125,7 +2194,7 @@ describe('season experience translation', () => {
 			{
 				itemId: 1,
 				label: 'Episode 1',
-				statusLabel: 'Not made yet',
+				statusLabel: 'Not compressed yet',
 				relPath: 'tv/Show/Season 1/Show.S01E01.mkv',
 				href: '/folders/tv/Show/Season%201/Show.S01E01.mkv'
 			},
@@ -2139,7 +2208,7 @@ describe('season experience translation', () => {
 			{
 				itemId: 10,
 				label: 'Episode 10',
-				statusLabel: 'Not made yet',
+				statusLabel: 'Not compressed yet',
 				relPath: 'tv/Show/Season 1/Show.S01E10.mkv',
 				href: '/folders/tv/Show/Season%201/Show.S01E10.mkv'
 			}
@@ -2248,8 +2317,13 @@ describe('season experience translation', () => {
 		};
 
 		expect(calibrationStageLabel(job)).toBe('Building comparison clips');
-		expect(calibrationWorkLabel(job)).toBe('2 of 3 comparison steps');
+		expect(calibrationWorkLabel(job)).toBe('2 of 3 comparison clips built');
+		expect(calibrationWorkProgress(job)).toEqual({
+			label: '2 of 3 comparison clips built',
+			determinate: true
+		});
 		expect(calibrationLivenessLabel(job)).toBe('Computer is reporting normally');
+		expect(calibrationActivityStatusLabel(job)).toBe('Creating sample');
 	});
 
 	it('keeps queued status and missing heartbeat freshness truthful', () => {
@@ -2259,10 +2333,19 @@ describe('season experience translation', () => {
 				prefix: card.prefix,
 				status: 'queued'
 			})
-		).toBe('Test waiting');
+		).toBe('Sample waiting');
 		expect(calibrationFreshnessLabel(undefined)).toBe('No update yet');
 		expect(calibrationFreshnessLabel(0)).toBe('Updated just now');
 		expect(calibrationFreshnessLabel(75)).toBe('Updated 1 min ago');
+		expect(calibrationActivityStatusLabel({ job_id: 'test-starting', status: 'starting' })).toBe(
+			'Sample starting'
+		);
+		expect(calibrationLivenessLabel({ job_id: 'test-retrying', status: 'retry_backoff' })).toBe(
+			'Waiting before retry'
+		);
+		expect(calibrationStageLabel({ job_id: 'test-failed', status: 'failed' })).toBe(
+			'Sample needs retry'
+		);
 	});
 
 	it('describes bounded target-search candidate progress without implying job completion', () => {
@@ -2277,7 +2360,40 @@ describe('season experience translation', () => {
 					work: { completed: 3, total: 6 }
 				}
 			})
-		).toBe('3 of up to 6 size candidates tested');
+		).toBe('Trying size settings');
+		expect(
+			calibrationWorkProgress({
+				job_id: 'test-search',
+				status: 'running',
+				progress: {
+					schema_version: 1,
+					stage: 'searching_target',
+					work: { completed: 3, total: 6 }
+				}
+			})
+		).toEqual({ label: 'Trying size settings', determinate: false });
+		expect(
+			sampleSearchTechnicalDetail({
+				job_id: 'test-search',
+				status: 'running',
+				progress: {
+					schema_version: 1,
+					stage: 'searching_target',
+					work: { completed: 3, total: 6 }
+				}
+			})
+		).toBe('3 of up to 6 size settings tried');
+		expect(
+			calibrationWorkProgress({
+				job_id: 'sample-measuring',
+				status: 'running',
+				progress: {
+					schema_version: 1,
+					stage: 'measuring_quality',
+					work: { completed: 1, total: 2 }
+				}
+			})
+		).toEqual({ label: 'Working', determinate: false });
 	});
 
 	it('renders historical ETA ranges without false precision', () => {
@@ -2303,7 +2419,7 @@ describe('season experience translation', () => {
 		});
 
 		expect(summary.value).toBe('8 min–20 min left');
-		expect(summary.detail).toContain('5 comparable completed tests');
+		expect(summary.detail).toContain('5 comparable completed samples');
 		expect(summary.tone).toBe('quiet');
 	});
 
@@ -2326,7 +2442,7 @@ describe('season experience translation', () => {
 			progress: { schema_version: 1 as const, liveness: 'not_reporting' as const }
 		};
 
-		expect(calibrationLivenessLabel(completed)).toBe('Test finished');
+		expect(calibrationLivenessLabel(completed)).toBe('Sample finished');
 		expect(calibrationEtaSummary(completed)).toMatchObject({ value: 'Finished', tone: 'quiet' });
 	});
 });

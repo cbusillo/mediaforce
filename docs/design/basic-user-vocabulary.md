@@ -9,7 +9,7 @@ implementation nouns.
 
 - Name the user's next decision before naming the subsystem.
 - Prefer short labels that describe work state: `Ready to review`, `Waiting for
-worker`, `Needs sample`, `Safe to delete`.
+a computer`, `Needs sample`, `Safe to delete`.
 - Keep implementation terms available in advanced settings, logs, tooltips, or
   metadata rows when they help diagnosis.
 - Do not use different names for the same state across routes.
@@ -21,21 +21,22 @@ worker`, `Needs sample`, `Safe to delete`.
 
 - Bench: use `Review assistant` in Folder Studio chat, sample requests, and
   revision requests.
-- Calibration: use `Sample` in Folder Studio, Ops sample queue, and route
+- Calibration: use `Sample` in Folder Studio, Activity sample queue, and route
   summaries.
-- Calibration queue: use `Sample queue` in Ops and global status strips.
-- Proof: use `Sample check` or `review evidence` in Ops history and Folder
-  Studio status.
-- Host: use `Worker` in Queue, Ops, and Folder Studio capacity summaries.
-- Remote host: use `Remote worker` in Settings and worker setup.
-- SSH host: use `SSH address` in advanced worker settings only.
+- Calibration queue: use `Sample queue` in Activity and global status strips.
+- Proof: use `Comparison clips` for the media the operator watches. Keep
+  `proof`, `review evidence`, and analyzer terminology in Technical details.
+- Host: use `Computer` in Library, Activity, Folder Studio, and Settings.
+- Remote host: use `Remote computer` in Settings and computer setup.
+- SSH host: use `SSH address` in advanced computer settings only.
 - Policy: use `Settings` or `proposed settings` in Folder Studio proposal rows
   and approval copy.
 - Draft: use `Proposal` in user-visible review and approval copy.
 - Pending proposal: use `Proposal ready for review` in Folder Studio decision
   state.
-- Encode: use `Process` for basic route summaries; keep `encode` in technical
-  job tables.
+- Encode: use `Compress` for operator actions and exact-scope progress. Use
+  `Processing` only for a mixed-media running-state summary; keep `encode` in
+  technical job tables.
 - Exact TV item: use singular `episode` language through recovery, processing,
   checking, finishing, and completed states. Do not reuse season-wide copy for
   a route that targets one episode.
@@ -49,21 +50,59 @@ worker`, `Needs sample`, `Safe to delete`.
   `validate outputs` and `validated output` on the primary operator path.
 - Movie promotion: use `Replace original now` when the checked replacement is
   ready. State beside the action that it runs immediately and that Mediaforce
-  keeps a backup of the original first.
+  keeps an original backup first.
+- Other scope: use `One file` or `Whole folder` as the high-level choice, then
+  show `Files included` and `Files left untouched` before sample or production
+  actions. `Whole folder` includes supported files in the folder and its
+  subfolders; unsupported or excluded files remain untouched.
+- Other membership: require confirmation only when Mediaforce can show the
+  complete file list. If the folder exceeds the safe membership limit, direct
+  the operator to one-file-at-a-time work or a smaller source folder instead of
+  offering an all-files confirmation.
+- Other replacement: use `Replace original file` or `Replace original files`.
+  State before the action that it runs immediately, original backups go to the
+  cleanup folder first, and files left out remain untouched.
 - Transcode root: use `Working folder` in the Settings storage section.
-- Archive cleanup: use `Delete archived originals` for Completed and Settings
-  destructive actions.
+- Archive cleanup: use `Delete original backup` or `Delete original backups`
+  for Completed and Settings destructive actions. The final confirmation must
+  say `This cannot be undone` beside the final delete control.
 - Archive root: use `Cleanup folder` in Completed and Settings storage copy.
-- Cleanup: use `Delete`, `clear`, or `mark handled`, matching the user's actual
-  consequence.
+- Cleanup: use `Delete` for files that still exist and `Mark handled` when the
+  original backups are already gone. Mark-handled confirmation must say
+  `Nothing is deleted`.
 - Missing sample: use `Needs sample` in Queue and Folder Studio blockers.
 - Polling: use `Checking for updates` in loading and refresh states.
 - Scheduler: use `Work schedule` in Ops and Settings.
 - Schedule profile: use `Work window` in Settings basic labels.
-- Staging root: use `Worker staging folder` in advanced worker settings.
+- Staging root: use `Computer staging folder` in advanced computer settings.
 
 Use the internal term only when the user is editing a technical setting,
-debugging a worker, or comparing logs against backend output.
+debugging a computer, or comparing logs against backend output.
+
+## Global Phase Language
+
+Use this sequence across TV, Movie, Other, Activity, Finished, and Settings.
+Scope nouns may change (`episode`, `movie`, `file`, or `files`), but the phase
+verb does not.
+
+| Phase                    | Primary action              | Waiting or running                   | Ready state              |
+| ------------------------ | --------------------------- | ------------------------------------ | ------------------------ |
+| Safe representative work | `Create sample`             | `Sample waiting` / `Creating sample` | `Ready to review`        |
+| Human review media       | `Compare clips`             | —                                    | `Comparison clips ready` |
+| Production compression   | `Compress …`                | `Compressing …`                      | `Ready to check`         |
+| Machine validation       | `Check compressed file(s)`  | `Checking …`                         | `Ready to replace`       |
+| Installation             | `Replace original(s)`       | `Replacing …`                        | `Replaced`               |
+| Cleanup                  | `Delete original backup(s)` | `Deleting …`                         | `Deleted`                |
+
+Use `Set up sample` only when the product genuinely saves a plan without
+opening media or queueing work. Do not use `preview` for this workflow; preview
+already names unrelated media and payload concepts. Multi-file replacement must
+name the consequence (`Replace original episodes` or `Replace original files`),
+not soften it to `Finish`.
+
+Operator-facing size copy uses decimal `KB`, `MB`, `GB`, and `TB` consistently.
+Use `Current size`, `Estimated output`, and `Estimated space saved`; keep exact
+bytes in Technical details.
 
 ## Workflow State Names
 
@@ -71,8 +110,8 @@ debugging a worker, or comparing logs against backend output.
 
 - No sample exists: `Needs sample`. Mediaforce needs one representative file
   before settings can be approved.
-- Sample is queued: `Sample waiting`. A worker has not started the sample yet.
-- Sample is running: `Sampling`. Review evidence is being created.
+- Sample is queued: `Sample waiting`. A computer has not started the sample yet.
+- Sample is running: `Creating sample`. Comparison clips are being created.
 - Sample failed but can retry: `Sample needs retry`. The next safe action is
   retrying the sample.
 - Review media exists: `Ready to review`. Download or inspect evidence before
@@ -87,8 +126,8 @@ debugging a worker, or comparing logs against backend output.
   before approving.
 - Proposal accepted: `Approved`. The folder settings are accepted, and that
   visual approval remains authoritative evidence for future tuning.
-- Encode queued or running: `Processing`. Folder-wide work is underway.
-- Encode failed or stopped: `Processing needs attention`. The user must inspect
+- Compression queued or running: `Compressing`. Scope-wide work is underway.
+- Compression failed or stopped: `Compression needs attention`. The user must inspect
   or retry from the route that owns recovery.
 - Quality memory has no prior observation: `No memory yet`.
 - Quality memory lacks enough compatible runs: `Sparse memory`.
@@ -100,10 +139,10 @@ unavailable`.
 confidence`. Always pair these states with `quality floors and saved policy
 remain unchanged` while memory is observation-only.
 
-### Ops
+### Activity
 
 - Activity answers three questions in order: what needs the operator, what is
-  working now, and what finished recently. Catalog, analysis, worker, and
+  working now, and what finished recently. Catalog, analysis, computer, and
   schedule maintenance stay behind explicit disclosures.
 - Every attention count maps to one visible review row and an exact owning
   route. Do not summarize several unresolved items behind a global retry or a
@@ -116,7 +155,7 @@ remain unchanged` while memory is observation-only.
   representative-test band. Do not present the short test bytes as an episode
   result.
 - Show a progress percentage only for a bounded stage with measurable work.
-  Label historical ETA as an estimate, and keep worker health, heartbeat
+  Label historical ETA as an estimate, and keep computer health, heartbeat
   freshness, and elapsed time visible as separate facts rather than blending
   them into false precision.
 - When a sample finishes, suppress only the transitional encode row whose
@@ -125,12 +164,12 @@ remain unchanged` while memory is observation-only.
   attention list and remove it from current work. If review media is
   unavailable, retain one non-actionable completed row for diagnosis without a
   review link.
-- Worker available: `Ready`. This worker can accept work now.
-- Worker schedule closed: `Off schedule`. This is normal and not a failure if
-  other workers are ready.
-- Worker window open with a known close: `Open` when idle and `Working` while
+- Computer available: `Ready`. This computer can accept work now.
+- Computer schedule closed: `Off schedule`. This is normal and not a failure if
+  other computers are ready.
+- Computer window open with a known close: `Open` when idle and `Working` while
   processing. Show the exact host-local close time beside the state.
-- Worker has time left but no queued episode safely fits: `Draining`. Work
+- Computer has time left but no queued episode safely fits: `Draining`. Work
   resumes automatically in the next compatible full window.
 - Episode stopped at a schedule boundary: `Paused by schedule`. Explain that
   the whole episode restarts automatically and no failure attempt was used.
@@ -140,7 +179,7 @@ remain unchanged` while memory is observation-only.
   may continue past the normal close time.
 - Episode longer than every compatible work window: `Window too short`. Route
   the operator to widen a work window or intentionally bypass the schedule.
-- Worker setup missing: `Needs setup`. The worker needs preparation before it
+- Computer setup missing: `Needs setup`. The computer needs setup before it
   can run work.
 - Queue paused: `Paused`. Mediaforce will not start new processing work.
 - Stop requested: `Stopping`. Existing work is being stopped or prevented from
@@ -165,7 +204,7 @@ remain unchanged` while memory is observation-only.
 - The source root is unavailable: `Source unavailable`.
 - A bounded evidence batch finished cleanly: `Complete`.
 - A bounded evidence batch has failures: `Needs attention`.
-- No catalog or evidence work is active: `Quiet`. Do not imply a worker is
+- No catalog or evidence work is active: `Quiet`. Do not imply a computer is
   polling in the background.
 
 ### Completed
@@ -174,15 +213,19 @@ remain unchanged` while memory is observation-only.
   checking, and promotion events. Use `Season` only for a folder-level summary,
   not for every TV item event.
 
-- Archived originals exist: `Originals ready to delete`. Files can be removed
-  from the cleanup folder after review.
-- Selected folder is safe: `Selected originals ready`. The selected completed
+- Original backups exist: `Original backups ready to delete`. Files can be
+  removed from the cleanup folder after review.
+- Selected folder is safe: `Selected backups ready`. The selected completed
   folder is eligible for deletion.
 - Cleanup folder missing: `Cleanup folder missing`. Mediaforce cannot verify or
-  delete archived originals.
+  delete original backups.
+- Backup outside the Cleanup folder: `Check before deleting`. Mediaforce will
+  not delete original backups outside the configured Cleanup folder.
 - Folder state unknown: `Check before deleting`. The user should not remove
   originals until Mediaforce can verify scope.
-- Cleanup already handled: `Nothing to delete`. No archived originals are
+- Original backups already gone: `Backups already gone`. After checking the
+  finished files, the operator can `Mark handled`; nothing is deleted.
+- Cleanup already handled: `Nothing to delete`. No original backups are
   waiting in the cleanup folder.
 
 ### Settings
@@ -190,9 +233,9 @@ remain unchanged` while memory is observation-only.
 - Unsaved settings draft: `Unsaved changes`. Edits are local until saved.
 - Transcode root missing: `Working folder missing`. Mediaforce cannot store
   processing files.
-- Remote host unavailable: `Worker unavailable`. A configured worker cannot
+- Remote host unavailable: `Computer unavailable`. A configured computer cannot
   accept work right now.
-- Host trust reset supported: `Reset trust`. Advanced worker recovery is
+- Host trust reset supported: `Reset trust`. Advanced computer recovery is
   available.
 - Archive cleanup target changed: `Save before deleting`. The cleanup target
   changed and deletion must wait for saved settings.
@@ -200,7 +243,7 @@ remain unchanged` while memory is observation-only.
 ## Route Copy Direction
 
 - Queue/Home should lead with `worklist`, `folder`, `sample`, `review`,
-  `worker`, and `next action`. Avoid `calibration`, `proof`, and `host` in
+  `computer`, and `next action`. Avoid `calibration`, `proof`, and `host` in
   basic table columns.
 - Folder Studio should say `Review assistant`, `sample`, `proposal`, `approved`,
   `processing`, and `quality memory`. Use `measured production run` for what
@@ -213,38 +256,45 @@ remain unchanged` while memory is observation-only.
 - Movie Library should lead with `Recommended next`, `Next step`, and plain
   descriptions of the work. Its only primary Studio action must visibly name
   the selected movie; one-file titles must not expose a second equivalent route.
-  Show main-feature runtime, current size, expected output, and expected
-  savings when known, and state honestly when an estimate is unavailable. Movie
+  Show main-feature runtime, current size, estimated output, and estimated space
+  saved when known, and state honestly when an estimate is unavailable. Movie
   Studio should use
-  `Current size`, `Expected output`, `Expected savings`,
+  `Current size`, `Estimated output`, `Estimated space saved`,
   `Why it has not started`, `What happens next`, `checked file`, and
   `Replace original now` rather than backend workflow nouns.
-- Ops may expose more technical detail, but first-level headings should still
-  use `workers`, `sample queue`, `processing queue`, and `retry available`.
-- Completed should use destructive language directly: `Delete archived
-originals`, `selected originals`, `cleanup folder`, and `safe to delete`.
+- Other Library should say `folders and files`, `One file`, `Whole folder`,
+  `Files included`, and `Files left untouched`. Keep `work unit`, `semantics`,
+  `inference`, and raw workflow labels out of primary copy. Other Studio should
+  distinguish `Set up sample` from `Create sample`, use `Compare clips` and
+  `Approve sample`, and follow the shared compress/check/replace phase verbs.
+- Activity may expose more technical detail, but first-level headings should
+  still use `computers`, `sample queue`, `compression queue`, and `retry available`.
+- Completed should use destructive language directly: `Delete original
+backups`, `selected original backups`, `Cleanup folder`, and `ready to delete`.
   Its global headings and lists must remain media-neutral because movie, episode,
   season, and file rows can appear together.
 - Settings should split basic labels from advanced fields. `Working folder`,
-  `cleanup folder`, `remote workers`, and `work windows` should be visible
+  `cleanup folder`, `remote computers`, and `work windows` should be visible
   before `transcode root`, `archive root`, `SSH host`, or `staging root`.
 
 ## Dangerous Actions
 
 Destructive or broad actions need three pieces of copy near the control:
 
-- Scope: selected folders, all archived originals, all running work, or one
-  worker.
+- Scope: selected folders, all original backups, all running work, or one
+  computer.
 - Consequence: delete files, stop processing, pause new work, or reset trust.
 - Recovery expectation: reversible, retryable, or permanent.
 
 Preferred labels:
 
-- `Delete selected originals`
-- `Delete all archived originals`
+- `Delete selected original backups`
+- `Delete all original backups`
+- `Mark handled` for already-missing original backups; this is not destructive
+  and must say `Nothing is deleted`.
 - `Stop processing`
 - `Stop samples`
-- `Reset worker trust`
+- `Reset computer trust`
 
 Avoid vague labels such as `Clear`, `Cleanup`, `Stop encode`, or `Trust` when
 they appear without adjacent scope and consequence.
@@ -254,8 +304,8 @@ they appear without adjacent scope and consequence.
 Disabled action titles and inline blockers should use this pattern:
 
 - `Start a sample before approving this folder.`
-- `Choose an available worker before sending.`
-- `Save the working folder before deleting originals.`
+- `Choose an available computer before sending.`
+- `Save the changed Working folder before deleting original backups from its Cleanup folder.`
 - `Review evidence is not ready yet.`
 - `No retryable processing jobs are available.`
 

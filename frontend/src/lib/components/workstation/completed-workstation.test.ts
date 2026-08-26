@@ -4,6 +4,10 @@ import {
 	buildCompletedHistoryRows,
 	buildCompletedReadinessSummary,
 	buildCompletedStatusTiles,
+	buildDeleteConfirmCopy,
+	buildMarkHandledConfirmCopy,
+	cleanupActionBlockers,
+	cleanupDetail,
 	cleanupState,
 	completedHistoryDetail,
 	completedHistoryLabel,
@@ -69,9 +73,9 @@ describe('Completed workstation mapping', () => {
 		);
 
 		expect(tiles).toMatchObject([
-			{ label: 'Completed folders', tone: 'ready' },
-			{ label: 'Delete queue', tone: 'wait' },
-			{ label: 'Space ready', tone: 'ready' },
+			{ label: 'Finished folders', tone: 'ready' },
+			{ label: 'Backups to delete', tone: 'wait' },
+			{ label: 'Space to reclaim', tone: 'ready' },
 			{ label: 'Review needed', value: '1 / 1', tone: 'fail' },
 			{ label: 'Cleanup folder', tone: 'ready' }
 		]);
@@ -81,7 +85,7 @@ describe('Completed workstation mapping', () => {
 		expect(buildCompletedReadinessSummary(null, null)).toMatchObject({
 			tone: 'idle',
 			title: 'Finished media is loading',
-			detail: 'Opening finished media and its original-file status.'
+			detail: 'Opening finished media and its original-backup status.'
 		});
 
 		expect(
@@ -91,15 +95,15 @@ describe('Completed workstation mapping', () => {
 			)
 		).toMatchObject({
 			tone: 'ready',
-			title: 'Originals are waiting',
-			detail: '1 finished item has originals waiting for your decision.',
-			metricLabel: 'Waiting',
+			title: 'Original backups are ready to delete',
+			detail: '1 finished item has original backups waiting in the Cleanup folder.',
+			metricLabel: 'Ready to delete',
 			metricValue: '1'
 		});
 
 		expect(buildCompletedReadinessSummary(payload([folder({})]), null)).toMatchObject({
 			tone: 'idle',
-			title: 'Everything is settled',
+			title: 'Nothing to delete',
 			detail: '1 finished item is settled. Recent changes remain available in History.',
 			metricLabel: 'Finished',
 			metricValue: '1'
@@ -118,10 +122,10 @@ describe('Completed workstation mapping', () => {
 		);
 
 		expect(options.map((option) => option.label)).toEqual([
-			'Originals waiting',
-			'Check settings',
-			'Originals already gone',
-			'Finished'
+			'Backups ready to delete',
+			'Check before deleting',
+			'Backups already gone',
+			'Nothing to delete'
 		]);
 		expect(options.map((option) => option.key)).toEqual(['ready', 'blocked', 'unknown', 'cleaned']);
 	});
@@ -236,6 +240,83 @@ describe('Completed workstation mapping', () => {
 			source: 'api' as const
 		};
 
-		expect(completedHistoryLabel(event)).toBe('Originals removed');
+		expect(completedHistoryLabel(event)).toBe('Marked handled');
+	});
+
+	it('keeps delete and mark-handled confirmations semantically separate', () => {
+		expect(
+			buildDeleteConfirmCopy('selected', {
+				folderCount: 2,
+				backupCount: 3,
+				backupSizeBytes: 4096,
+				archiveRoot: '/runtime/archive'
+			})
+		).toEqual({
+			title: 'Delete original backups for 2 selected folders?',
+			scope: 'Deletes 3 files (4.1 KB) from /runtime/archive.',
+			safety:
+				'Your finished files are not touched. Only the original backups in the Cleanup folder are deleted.',
+			warning: 'This cannot be undone.',
+			confirmLabel: 'Delete 3 original backups'
+		});
+		expect(
+			buildDeleteConfirmCopy('global', {
+				folderCount: 2,
+				backupCount: 4,
+				backupSizeBytes: 4096,
+				archiveRoot: '/runtime/archive'
+			}).scope
+		).toContain('including folders hidden by your current filters');
+		expect(
+			buildMarkHandledConfirmCopy({
+				folderCount: 1,
+				backupCount: 2,
+				archiveRoot: '/runtime/archive'
+			})
+		).toEqual({
+			title: 'Mark 1 folder as handled?',
+			scope: '2 original backups are already gone from /runtime/archive.',
+			safety: 'Nothing is deleted. This only clears these folders from review.',
+			confirmLabel: 'Mark handled'
+		});
+	});
+
+	it('provides visible reasons for disabled cleanup actions', () => {
+		expect(
+			cleanupActionBlockers({
+				completedAvailable: true,
+				archive,
+				selectedFolderCount: 0,
+				reviewFolderCount: 0,
+				cleanupPending: false,
+				reviewPending: false
+			})
+		).toEqual({
+			selected: 'Select at least one folder with original backups.',
+			global: null,
+			review: 'Select at least one folder whose original backups are already gone.'
+		});
+		expect(
+			cleanupActionBlockers({
+				completedAvailable: true,
+				archive: { ...archive, archive_root: '', has_cleanup: false, file_count: 0 },
+				selectedFolderCount: 1,
+				reviewFolderCount: 1,
+				cleanupPending: false,
+				reviewPending: false
+			}).global
+		).toBe('Set a Cleanup folder in Settings before deleting original backups.');
+	});
+
+	it('explains each cleanup state with canonical backup language', () => {
+		expect(cleanupDetail(folder({ archived_backup_count: 1 }), archive)).toContain(
+			'Original backups are in the Cleanup folder'
+		);
+		expect(cleanupDetail(folder({ missing_backup_count: 1 }), archive)).toContain(
+			'Nothing will be deleted'
+		);
+		expect(cleanupDetail(folder({ outside_archive_root_count: 2 }), archive)).toBe(
+			'2 original backups sit outside the Cleanup folder, so Mediaforce will not delete them here.'
+		);
 	});
 });

@@ -1,6 +1,38 @@
-export function formatGiB(bytes: number | null | undefined, digits = 1): string {
-	if (!bytes) return '0 GiB';
-	return `${(bytes / 1024 ** 3).toFixed(digits)} GiB`;
+const FILE_SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
+const BINARY_FILE_SIZE_FACTORS: Readonly<Record<string, number>> = {
+	KiB: 1024,
+	MiB: 1024 ** 2,
+	GiB: 1024 ** 3,
+	TiB: 1024 ** 4
+};
+
+export function formatFileSize(value: unknown, unavailable = '—'): string {
+	const bytes = Number(value);
+	if (!Number.isFinite(bytes) || bytes <= 0) return unavailable;
+
+	let scaled = bytes;
+	let unitIndex = 0;
+	while (scaled >= 1000 && unitIndex < FILE_SIZE_UNITS.length - 1) {
+		scaled /= 1000;
+		unitIndex += 1;
+	}
+
+	const maximumFractionDigits = Number.isInteger(scaled)
+		? 0
+		: scaled >= 100
+			? 0
+			: scaled >= 10
+				? 1
+				: 2;
+	return `${scaled.toLocaleString('en-US', { maximumFractionDigits })} ${FILE_SIZE_UNITS[unitIndex]}`;
+}
+
+export function normalizeFileSizeCopy(value: string): string {
+	return value.replace(
+		/\b(\d+(?:\.\d+)?)\s*(KiB|MiB|GiB|TiB)\b/g,
+		(_match, amount: string, unit: string) =>
+			formatFileSize(Number(amount) * BINARY_FILE_SIZE_FACTORS[unit])
+	);
 }
 
 export function formatCounts(mapping: Record<string, number> | null | undefined): string {

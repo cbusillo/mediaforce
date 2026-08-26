@@ -4,6 +4,7 @@ import type {
 	OperatorEvidenceState,
 	OperatorWorkPayload
 } from '$lib/api/types';
+import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
 
 export type OperatorStateTone = 'active' | 'ready' | 'wait' | 'fail' | 'idle';
 
@@ -150,7 +151,7 @@ export function evidenceStateView(
 export function evidenceKindLabel(kind: string): string {
 	if (kind === 'cadence_analysis') return 'Motion pattern';
 	if (kind === 'media_fingerprint') return 'Media fingerprint';
-	return humanize(kind);
+	return 'Other analysis';
 }
 
 export function evidenceStateLabel(state: string, decisionStatus: string | null = null): string {
@@ -160,7 +161,7 @@ export function evidenceStateLabel(state: string, decisionStatus: string | null 
 	if (state === 'current') return 'Current';
 	if (state === 'analysis_required') return 'Needs analysis';
 	if (state === 'classification_required') return 'Needs update';
-	return humanize(state);
+	return operatorStateCopy(state);
 }
 
 export function evidenceStateTone(
@@ -273,7 +274,7 @@ export function evidenceWorkStatusView(row: OperatorEvidenceBacklogRow): Operato
 	if (status === 'completed') {
 		return { label: 'Complete', tone: 'ready', detail: 'Saved evidence is current.' };
 	}
-	return { label: humanize(status), tone: 'idle', detail: 'Stored work state.' };
+	return { label: operatorStateCopy(status), tone: 'idle', detail: 'Stored work state.' };
 }
 
 export function operatorRefreshInterval(
@@ -304,10 +305,6 @@ export function formatTimestamp(value: string | null | undefined): string {
 	}).format(parsed);
 }
 
-function humanize(value: string): string {
-	return value.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
 function friendlyFailureCopy(value: string | null | undefined, fallback: string): string {
 	const detail = value?.trim();
 	if (!detail) return fallback;
@@ -317,6 +314,5 @@ function friendlyFailureCopy(value: string | null | undefined, fallback: string)
 	if (/non-current result:\s*unknown/i.test(detail)) {
 		return 'Analysis did not produce a usable result.';
 	}
-	if (/^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):/.test(detail)) return fallback;
-	return detail;
+	return safeOperatorErrorCopy(detail, fallback);
 }

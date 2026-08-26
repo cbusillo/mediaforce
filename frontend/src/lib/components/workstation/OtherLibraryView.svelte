@@ -3,6 +3,8 @@
 
 	import type { OtherLibraryPayload, OtherWorkUnit } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { formatFileSize } from '$lib/format';
+	import { otherWorkflowLabel } from '$lib/other/library';
 	import LibraryModeNav from './LibraryModeNav.svelte';
 
 	let {
@@ -55,9 +57,6 @@
 	const totalSize = $derived(
 		payload.work_units.reduce((total, unit) => total + unit.total_size_bytes, 0)
 	);
-	const readyCount = $derived(
-		payload.work_units.filter((unit) => unit.profile_readiness.state === 'ready').length
-	);
 	const projectedReclaim = $derived(
 		payload.work_units.reduce((total, unit) => total + (unit.projected_reclaim_bytes ?? 0), 0)
 	);
@@ -68,6 +67,20 @@
 		payload.work_units.some(
 			(unit) => unit.projected_reclaim_bytes == null || (unit.estimate_unavailable_count ?? 0) > 0
 		)
+	);
+	const totalOutputLabel = $derived(
+		detailsPending
+			? '…'
+			: reclaimCoverage === 0
+				? 'No estimate'
+				: `${reclaimHasUnknowns ? 'At most ' : ''}${formatBytes(Math.max(0, totalSize - projectedReclaim))}`
+	);
+	const totalReclaimLabel = $derived(
+		detailsPending
+			? '…'
+			: reclaimCoverage === 0
+				? 'No estimate'
+				: `${reclaimHasUnknowns ? 'At least ' : ''}${formatBytes(projectedReclaim)}`
 	);
 
 	$effect(() => {
@@ -84,16 +97,7 @@
 	}
 
 	function formatBytes(value: number | null | undefined): string {
-		if (value == null) return 'Pending';
-		if (value < 1024) return `${value} B`;
-		const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
-		let current = value / 1024;
-		let unit = 0;
-		while (current >= 1024 && unit < units.length - 1) {
-			current /= 1024;
-			unit += 1;
-		}
-		return `${current >= 10 ? current.toFixed(0) : current.toFixed(1)} ${units[unit]}`;
+		return formatFileSize(value, 'Pending');
 	}
 
 	function workflowTone(unit: OtherWorkUnit): string {
@@ -108,7 +112,17 @@
 
 	function statusLabel(unit: OtherWorkUnit): string {
 		if (unit.profile_readiness.state !== 'ready') return unit.profile_readiness.label;
-		return unit.workflow_state?.label ?? (unit.details_loading ? 'Loading details' : 'Ready');
+		return otherWorkflowLabel(unit.workflow_state, unit.details_loading);
+	}
+
+	function estimatedOutput(unit: OtherWorkUnit): number | null {
+		return unit.projected_reclaim_bytes == null
+			? null
+			: Math.max(0, unit.total_size_bytes - unit.projected_reclaim_bytes);
+	}
+
+	function formatEstimate(unit: OtherWorkUnit, value: number | null | undefined): string {
+		return unit.details_loading ? 'Estimating…' : formatFileSize(value, 'No estimate');
 	}
 </script>
 
@@ -121,15 +135,14 @@
 
 	<header class="page-heading">
 		<div class="page-heading__copy">
-			<span class="eyebrow">Library workstation</span>
 			<h1>Other Library</h1>
-			<p>Bounded folders and files use explicit profiles without guessed media semantics.</p>
+			<p>Files and folders you choose directly. Mediaforce never guesses what they are.</p>
 		</div>
 		<div class="library-totals" aria-label="Other library totals">
-			<div><strong>{payload.work_units.length}</strong><span>Work units</span></div>
-			<div><strong>{totalFiles}</strong><span>Files</span></div>
-			<div><strong>{formatBytes(totalSize)}</strong><span>Stored</span></div>
-			<div><strong>{readyCount}</strong><span>Profile ready</span></div>
+			<div><strong>{payload.work_units.length} scopes</strong><span>{totalFiles} files</span></div>
+			<div><strong>{formatBytes(totalSize)}</strong><span>Current size</span></div>
+			<div><strong>{totalOutputLabel}</strong><span>Estimated output</span></div>
+			<div><strong>{totalReclaimLabel}</strong><span>Estimated space saved</span></div>
 		</div>
 	</header>
 
@@ -148,14 +161,14 @@
 		<div class="notice" role="status">
 			<strong>Safe catalog window reached</strong>
 			<span
-				>Showing at most {payload.catalog_work_unit_limit} work units from the first {payload.catalog_item_limit.toLocaleString()}
+				>Showing at most {payload.catalog_work_unit_limit} folders and files from the first {payload.catalog_item_limit.toLocaleString()}
 				indexed items. Narrow the configured roots to expose more bounded work; hidden items cannot be
 				queued from this view.</span
 			>
 		</div>
 	{/if}
 
-	<section class="library-workstation" aria-label="Other library work units">
+	<section class="library-workstation" aria-label="Other library folders and files">
 		<div class="toolbar">
 			<label class="search-field">
 				<span class="sr-only">Search folders and files</span>
@@ -184,21 +197,21 @@
 				<span>Sort</span>
 				<select bind:value={sortMode}>
 					<option value="name">Name</option>
-					<option value="size">Stored size</option>
+					<option value="size">Current size</option>
 					<option value="files">File count</option>
-					<option value="reclaim">Projected reclaim</option>
+					<option value="reclaim">Estimated space saved</option>
 				</select>
 			</label>
 		</div>
 
 		{#if structurePending && payload.work_units.length === 0}
 			<div class="empty-state" role="status">
-				<strong>Reading Other roots</strong>
-				<span>Building bounded folder and exact-file work units.</span>
+				<strong>Loading Other Library…</strong>
+				<span>Folders and files appear first; workflow details follow.</span>
 			</div>
 		{:else if payload.catalog_empty || payload.work_units.length === 0}
 			<div class="empty-state">
-				<strong>No Other media is indexed</strong>
+				<strong>No Other media found.</strong>
 				<span
 					>Add or scan an Other root in Settings. Root-level files and nested folders will appear
 					here.</span
@@ -207,14 +220,14 @@
 			</div>
 		{:else if workUnits.length === 0}
 			<div class="empty-state">
-				<strong>No work units match these filters</strong>
+				<strong>No Other folders or files match these filters.</strong>
 				<span>Clear search or choose a broader state and library filter.</span>
 			</div>
 		{:else}
 			<div class="workbench">
-				<div class="unit-list" aria-label="Other work units">
+				<div class="unit-list" aria-label="Other folders and files">
 					<div class="unit-list__head" aria-hidden="true">
-						<span>Scope</span><span>Files</span><span>Stored</span><span>Workflow</span>
+						<span>Scope</span><span>Files</span><span>Current size</span><span>Workflow</span>
 					</div>
 					{#each workUnits as unit (unit.prefix)}
 						<button
@@ -227,12 +240,14 @@
 							<span class="unit-identity">
 								<strong>{unit.title}</strong>
 								<small
-									>{unit.scope_mode === 'exact_file' ? 'Exact file' : 'Bounded folder'} · {unit.library_label}</small
+									>{unit.scope_mode === 'exact_file' ? 'One file' : 'Whole folder'} · {unit.library_label}</small
 								>
 							</span>
 							<span data-label="Files"><span class="sr-only">Files: </span>{unit.item_count}</span>
-							<span data-label="Stored"
-								><span class="sr-only">Stored: </span>{formatBytes(unit.total_size_bytes)}</span
+							<span data-label="Current size"
+								><span class="sr-only">Current size: </span>{formatBytes(
+									unit.total_size_bytes
+								)}</span
 							>
 							<span class="state-badge" data-tone={workflowTone(unit)}>{statusLabel(unit)}</span>
 						</button>
@@ -260,24 +275,31 @@
 								>
 							</div>
 							<div>
-								<span>Stored</span><strong>{formatBytes(selectedUnit.total_size_bytes)}</strong>
-							</div>
-							<div>
-								<span>Projected reclaim</span><strong
-									>{formatBytes(selectedUnit.projected_reclaim_bytes)}</strong
+								<span>Current size</span><strong
+									>{formatBytes(selectedUnit.total_size_bytes)}</strong
 								>
 							</div>
 							<div>
-								<span>Work unit</span><strong
+								<span>Estimated output</span><strong
+									>{formatEstimate(selectedUnit, estimatedOutput(selectedUnit))}</strong
+								>
+							</div>
+							<div>
+								<span>Estimated space saved</span><strong
+									>{formatEstimate(selectedUnit, selectedUnit.projected_reclaim_bytes)}</strong
+								>
+							</div>
+							<div>
+								<span>What is included</span><strong
 									>{selectedUnit.scope_mode === 'exact_file'
-										? 'Exact file'
-										: 'Folder descendants'}</strong
+										? 'Only this file'
+										: 'Files in this folder and its subfolders'}</strong
 								>
 							</div>
 						</div>
 
 						<section class="readiness" data-state={selectedUnit.profile_readiness.state}>
-							<span>Processing profile</span>
+							<span>Compression profile</span>
 							<strong>{selectedUnit.profile_readiness.profile_label}</strong>
 							<p>{selectedUnit.profile_readiness.detail}</p>
 							{#if selectedUnit.profile_readiness.blockers.length}
@@ -292,20 +314,19 @@
 						<div class="policy-strip" aria-label="Other library policy">
 							<span
 								>{selectedUnit.scope_mode === 'exact_file'
-									? 'Exact-file grouping'
-									: 'Folder grouping'}</span
+									? 'One file at a time'
+									: 'Whole folder together'}</span
 							>
-							<span>No inferred media semantics</span>
 							{#if selectedUnit.membership_requires_confirmation}<span
-									>Membership confirmation required</span
+									>Needs your confirmation before work starts</span
 								>{/if}
 						</div>
 
 						<footer class="inspector-actions">
 							<a class="primary-link" href={resolve(folderRoutePath(selectedUnit.prefix))}>
-								Open {selectedUnit.scope_mode === 'exact_file' ? 'File' : 'Folder'} Studio
+								Open {selectedUnit.title}
 							</a>
-							<span>Studio lists exact membership before sampling or queueing.</span>
+							<span>Studio lists every included and untouched file before work starts.</span>
 						</footer>
 					</aside>
 				{/if}
@@ -313,11 +334,11 @@
 		{/if}
 
 		<footer class="workstation-footer">
-			<span>{workUnits.length} of {payload.work_units.length} work units shown</span>
+			<span>{workUnits.length} of {payload.work_units.length} shown</span>
 			<span
 				>{detailsPending || reclaimCoverage === 0
 					? 'Refreshing workflow details…'
-					: `${formatBytes(projectedReclaim)} projected reclaim${reclaimHasUnknowns ? ' · lower bound' : ''}`}</span
+					: `${formatBytes(projectedReclaim)} estimated space saved${reclaimHasUnknowns ? ' · lower bound' : ''}`}</span
 			>
 		</footer>
 	</section>

@@ -6,10 +6,13 @@ import {
 	movieCurrentWorkView,
 	movieGoalContractView,
 	movieGoalFactsView,
+	movieRetryResponseCopy,
 	movieReviewStatusLabel,
+	movieSampleSetupResult,
 	movieSizeCapBlockView,
 	parseServerTimestamp,
-	parentSampleAppliesToExactItem
+	parentSampleAppliesToExactItem,
+	sampleStopResponseCopy
 } from './movie-studio-view';
 import type {
 	PlannedStreamPayload,
@@ -180,6 +183,46 @@ describe('canRetrySampleJob', () => {
 	});
 });
 
+describe('movie queue action responses', () => {
+	it('does not call a nonqueueable sample setup ready', () => {
+		expect(movieSampleSetupResult(true, 'Sample setup is ready.')).toEqual({
+			message: 'The sample setup needs another request. Nothing was queued.',
+			attention: true,
+			attentionTitle: 'Sample setup needs attention.'
+		});
+		expect(movieSampleSetupResult(false, 'Sample setup is ready.')).toEqual({
+			message: 'Sample setup is ready.',
+			attention: false
+		});
+	});
+
+	it('does not claim a retry when no work was queued', () => {
+		expect(
+			movieRetryResponseCopy(
+				0,
+				'Choose a fresh size or compression goal for movies/title before retrying.',
+				'movie title'
+			)
+		).toEqual({
+			message: 'Choose a fresh size or compression goal before trying again.',
+			attention: true
+		});
+		expect(movieRetryResponseCopy(1, 'Retried one folder.', 'movie file')).toEqual({
+			message: 'This movie file is waiting to try compression again.',
+			attention: false
+		});
+	});
+
+	it('keeps an already-idle sample queue neutral', () => {
+		expect(sampleStopResponseCopy('Calibration queue was already idle.')).toBe(
+			'Sample work was already stopped.'
+		);
+		expect(sampleStopResponseCopy('Stopped and cleaned the calibration queue.')).toBe(
+			'Stopped waiting and running sample work.'
+		);
+	});
+});
+
 describe('movieSizeCapBlockView', () => {
 	it('uses the configured cap instead of assuming 80 percent', () =>
 		expect(
@@ -281,7 +324,8 @@ describe('parentSampleAppliesToExactItem', () => {
 describe('movieReviewStatusLabel', () => {
 	it('uses operator-facing copy for approval-ready and missing samples', () => {
 		expect(movieReviewStatusLabel('needs_approval')).toBe('Ready to review');
-		expect(movieReviewStatusLabel('missing_sample')).toBe('Not prepared');
+		expect(movieReviewStatusLabel('missing_sample')).toBe('Needs sample');
+		expect(movieReviewStatusLabel('accepted')).toBe('Sample approved');
 	});
 
 	it('directs inherited samples back to the title workspace', () =>
@@ -289,7 +333,7 @@ describe('movieReviewStatusLabel', () => {
 });
 
 describe('movieCurrentWorkView', () => {
-	it('explains a paused queue with no available worker', () => {
+	it('explains a paused queue with no available computer', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',
@@ -308,17 +352,17 @@ describe('movieCurrentWorkView', () => {
 			queuePosition: '1 of 1',
 			worker: 'Not assigned',
 			availableWorkers: 'None ready',
-			blockers: ['The processing queue is paused.', 'No processing worker is ready.']
+			blockers: ['The compression queue is paused.', 'No computer is ready for compression.']
 		});
 		expect(view?.elapsed).toBeUndefined();
 		expect(view?.speed).toBeUndefined();
 		expect(view?.eta).toBeUndefined();
 		expect(view?.nextCondition).toBe(
-			'This movie starts automatically after the global processing queue is resumed and a processing worker becomes available.'
+			'This movie starts automatically after the global compression queue is resumed and a computer becomes available.'
 		);
 	});
 
-	it('blocks queued work while the processing queue is stopping', () => {
+	it('blocks queued work while the compression queue is stopping', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',
@@ -335,8 +379,9 @@ describe('movieCurrentWorkView', () => {
 			label: 'Queue stopping',
 			headline: 'Queued, but not able to start',
 			detail: 'Clear the conditions below and Mediaforce starts this movie automatically.',
-			blockers: ['The processing queue is stopping and will not start new work.'],
-			nextCondition: 'This movie starts automatically after the global processing queue is resumed.'
+			blockers: ['The compression queue is stopping and will not start new work.'],
+			nextCondition:
+				'This movie starts automatically after the global compression queue is resumed.'
 		});
 	});
 
@@ -356,11 +401,26 @@ describe('movieCurrentWorkView', () => {
 
 		expect(view).toMatchObject({
 			headline: 'Queued 2 of 4',
-			detail: 'Ready when a worker is free.',
+			detail: 'Ready when a computer is free.',
 			blockers: [],
 			queuePosition: '2 of 4',
 			eta: undefined
 		});
+	});
+
+	it('translates backend encode-host copy to the computer vocabulary', () => {
+		const view = movieCurrentWorkView(
+			{
+				job_id: 'encode-1',
+				prefix: 'movies/title',
+				status: 'queued',
+				scheduler_status_copy: 'Waiting for an available encode host.'
+			},
+			{ is_paused: false, stop_requested: false },
+			1
+		);
+
+		expect(view?.detail).toBe('Waiting for an available computer.');
 	});
 
 	it('treats a queued host as preferred rather than assigned', () => {
@@ -382,7 +442,7 @@ describe('movieCurrentWorkView', () => {
 		});
 	});
 
-	it('shows running progress, worker, speed, elapsed time, and ETA', () => {
+	it('shows running progress, computer, speed, elapsed time, and ETA', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',
@@ -404,8 +464,8 @@ describe('movieCurrentWorkView', () => {
 		);
 
 		expect(view).toMatchObject({
-			headline: 'Processing movie.mkv',
-			detail: 'Encoding',
+			headline: 'Compressing movie.mkv',
+			detail: 'Compressing',
 			percentComplete: 42.4,
 			worker: 'Studio Mac',
 			availableWorkers: '1 ready',
@@ -415,7 +475,7 @@ describe('movieCurrentWorkView', () => {
 		});
 	});
 
-	it('does not borrow the preferred host when a running worker is not reported', () => {
+	it('does not borrow the preferred computer when a running computer is not reported', () => {
 		const view = movieCurrentWorkView(
 			{
 				job_id: 'encode-1',

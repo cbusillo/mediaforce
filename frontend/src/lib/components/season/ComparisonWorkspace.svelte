@@ -34,25 +34,27 @@
 		selectedMoment,
 		audioChoice,
 		episodeLabel,
-		originalSizeLabel,
-		newSizeLabel,
-		canMakeSoundTest,
-		soundTestDisabled,
+		originalClipLabel,
+		sampleClipLabel,
+		episodeEstimateLabel,
+		canCreateSoundSample,
+		soundSampleDisabled,
 		onMomentChange,
 		onAudioChange,
-		onRequestSoundTest
+		onRequestSoundSample
 	}: {
 		pairs: ReviewPair[];
 		selectedMoment: number;
 		audioChoice: ComparisonSide;
 		episodeLabel: string;
-		originalSizeLabel: string;
-		newSizeLabel: string;
-		canMakeSoundTest: boolean;
-		soundTestDisabled: boolean;
+		originalClipLabel: string;
+		sampleClipLabel: string;
+		episodeEstimateLabel: string;
+		canCreateSoundSample: boolean;
+		soundSampleDisabled: boolean;
 		onMomentChange: (index: number) => void;
 		onAudioChange: (side: ComparisonSide) => void;
-		onRequestSoundTest: () => void;
+		onRequestSoundSample: () => void;
 	} = $props();
 
 	let workspaceElement = $state<HTMLElement | null>(null);
@@ -642,7 +644,7 @@
 			style={workspaceStyle}
 			role={isOpen ? 'dialog' : 'group'}
 			aria-modal={isOpen ? 'true' : undefined}
-			aria-label={isOpen ? workspaceTitle : 'Original and new video comparison'}
+			aria-label={isOpen ? workspaceTitle : 'Original and sample comparison'}
 			onkeydown={handleWorkspaceKeydown}
 		>
 			{#if isOpen}
@@ -651,7 +653,7 @@
 						<span class="workspace-kicker">{episodeLabel}</span>
 						<h2>{workspaceTitle}</h2>
 					</div>
-					<div class="workspace-moments" role="group" aria-label="Test moments">
+					<div class="workspace-moments" role="group" aria-label="Comparison clips">
 						{#each pairs as pair, index (`${pair.source.path}-${index}`)}
 							<button
 								type="button"
@@ -702,7 +704,7 @@
 								type="button"
 								class:active={visibleSide === 'new'}
 								onclick={() => (visibleSide = 'new')}
-								aria-pressed={visibleSide === 'new'}>New</button
+								aria-pressed={visibleSide === 'new'}>Sample</button
 							>
 						</div>
 					{/if}
@@ -732,7 +734,7 @@
 				>
 					<div class="media-label">
 						<div><strong>Original</strong><span>what you have now</span></div>
-						<small>{originalSizeLabel}</small>
+						<small>{originalClipLabel}</small>
 					</div>
 					<div class="media-frame" style={sourceFrameStyle}>
 						<video
@@ -741,7 +743,7 @@
 							muted={warming || comparisonSideMuted('original', audioChoice, hasSound)}
 							playsinline
 							preload="auto"
-							aria-label="Original test moment"
+							aria-label="Original clip"
 							tabindex="-1"
 							onloadedmetadata={(event) => {
 								handleSourceMetadata();
@@ -772,8 +774,8 @@
 					onscroll={(event) => syncPaneScroll(event.currentTarget, sourcePane)}
 				>
 					<div class="media-label">
-						<div><strong>New</strong><span>the test version</span></div>
-						<small>{newSizeLabel}</small>
+						<div><strong>Sample</strong><span>what compression would look like</span></div>
+						<small>{sampleClipLabel}</small>
 					</div>
 					<div class="media-frame" style={previewFrameStyle}>
 						<video
@@ -782,7 +784,7 @@
 							muted={warming || comparisonSideMuted('new', audioChoice, hasSound)}
 							playsinline
 							preload="auto"
-							aria-label="New test moment"
+							aria-label="Sample clip"
 							tabindex="-1"
 							onloadedmetadata={(event) => {
 								handlePreviewMetadata();
@@ -810,14 +812,18 @@
 							>
 						{:else if previewError}
 							<span class="media-loading media-loading--error" role="alert"
-								>New clip could not load.</span
+								>Sample clip could not load.</span
 							>
 						{:else if !previewReady}
-							<span class="media-loading" aria-live="polite">Loading new picture…</span>
+							<span class="media-loading" aria-live="polite">Loading sample picture…</span>
 						{/if}
 					</div>
 				</div>
 			</div>
+			<p class="clip-size-caption">
+				Clip sizes only.{#if episodeEstimateLabel}
+					Estimated episode output: {episodeEstimateLabel}.{/if}
+			</p>
 
 			<footer class="workspace-controls" aria-label="Comparison playback controls">
 				<div class="playback-primary">
@@ -869,7 +875,7 @@
 							type="button"
 							class:active={audioChoice === 'new'}
 							onclick={() => chooseSound('new')}
-							aria-pressed={audioChoice === 'new'}>New</button
+							aria-pressed={audioChoice === 'new'}>Sample</button
 						>
 					</div>
 				{:else}
@@ -881,7 +887,7 @@
 
 		<div class="comparison-entry">
 			{#if pairs.length > 1}
-				<div class="inline-moments" role="group" aria-label="Test moments">
+				<div class="inline-moments" role="group" aria-label="Comparison clips">
 					{#each pairs as pair, index (`${pair.source.path}-${index}`)}
 						<button
 							type="button"
@@ -902,13 +908,13 @@
 		{#if !hasSound}
 			<div class="sound-unavailable">
 				<p>
-					{canMakeSoundTest
-						? 'These clips show picture only. A new test is needed to compare sound.'
+					{canCreateSoundSample
+						? 'These clips show picture only. Another sample is needed to compare sound.'
 						: 'This episode does not have sound to compare.'}
 				</p>
-				{#if canMakeSoundTest}
-					<button type="button" onclick={onRequestSoundTest} disabled={soundTestDisabled}>
-						Make a new test with sound
+				{#if canCreateSoundSample}
+					<button type="button" onclick={onRequestSoundSample} disabled={soundSampleDisabled}>
+						Create a sample with sound
 					</button>
 				{/if}
 			</div>
@@ -1042,6 +1048,13 @@
 		gap: 10px;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		min-height: 0;
+	}
+
+	.clip-size-caption {
+		color: #a9b2b9;
+		font-size: 0.78rem;
+		margin: 0;
+		text-align: center;
 	}
 
 	.is-open .comparison-media {

@@ -137,7 +137,7 @@ def list_completed_folders(
                 total_bytes_saved=0,
                 latest_promoted_at=None,
                 cleanup_state="cleaned",
-                cleanup_detail="No archived originals are waiting for cleanup.",
+                cleanup_detail="No original backups are waiting in the Cleanup folder.",
                 missing_backup_count=0,
                 outside_archive_root_count=0,
                 originals_removed_count=0,
@@ -260,7 +260,7 @@ def confirm_originals_removed_action(
                     {
                         "prefix": group[0],
                         "archived_source_path": archived_source_path,
-                        "note": "Operator confirmed the originals were already removed after checking the promoted files.",
+                        "note": "Operator marked already-missing original backups handled after checking the finished files.",
                     }
                 ),
             )
@@ -272,10 +272,10 @@ def confirm_originals_removed_action(
     if resolved_count > 0:
         connection.commit()
     message = (
-        f"Marked {len(resolved_prefixes)} completed folder"
-        f"{'s' if len(resolved_prefixes) != 1 else ''} as already handled. No files were deleted."
+        f"Marked {len(resolved_prefixes)} finished folder"
+        f"{'s' if len(resolved_prefixes) != 1 else ''} as handled. Nothing was deleted."
         if resolved_count > 0
-        else "No missing originals needed to be marked resolved. No files were deleted."
+        else "No missing original backups needed to be marked handled. Nothing was deleted."
     )
     return {
         "ok": True,
@@ -380,7 +380,7 @@ def clear_completed_backups_action(
     if archive_root is None:
         return {
             "ok": True,
-            "message": "No archived originals are waiting for cleanup.",
+            "message": "No original backups are waiting in the Cleanup folder.",
             "removed_count": 0,
             "removed_size_bytes": 0,
             "removed_prefix_count": 0,
@@ -389,7 +389,7 @@ def clear_completed_backups_action(
     if not archive_root.exists():
         return {
             "ok": True,
-            "message": "No archived originals are waiting for cleanup.",
+            "message": "No original backups are waiting in the Cleanup folder.",
             "removed_count": 0,
             "removed_size_bytes": 0,
             "removed_prefix_count": 0,
@@ -419,18 +419,18 @@ def clear_completed_backups_action(
     if removed_count <= 0:
         return {
             "ok": True,
-            "message": "No archived originals matched the selected completed folders.",
+            "message": "No original backups matched the selected finished folders.",
             "removed_count": 0,
             "removed_size_bytes": 0,
             "removed_prefix_count": 0,
         }
 
     if normalized_prefixes is None:
-        message = f"Removed {removed_count} archived original{'s' if removed_count != 1 else ''}."
+        message = f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''}."
     else:
         message = (
-            f"Removed {removed_count} archived original{'s' if removed_count != 1 else ''} "
-            f"from {len(removed_prefixes)} completed folder{'s' if len(removed_prefixes) != 1 else ''}."
+            f"Deleted {removed_count} original backup{'s' if removed_count != 1 else ''} "
+            f"from {len(removed_prefixes)} finished folder{'s' if len(removed_prefixes) != 1 else ''}."
         )
     return {
         "ok": True,
@@ -468,16 +468,16 @@ def _configured_archive_root(config: MediaforceConfig) -> Path | None:
 
 def _folder_cleanup_state(folder: CompletedFolder, *, archive_root_configured: bool) -> tuple[str, str]:
     if not archive_root_configured and folder.missing_backup_count > 0:
-        return "blocked", "Mediaforce cannot check the originals because the originals folder is not set."
+        return "blocked", "Cleanup folder is not set, so Mediaforce cannot find the original backups."
     if folder.outside_archive_root_count > 0:
-        return "blocked", "Some originals are outside the folder Mediaforce is allowed to clean."
+        return "blocked", "Some original backups are outside the Cleanup folder, so Mediaforce will not delete them here."
     if folder.missing_backup_count > 0:
-        return "unknown", "The originals are already gone. Check the new files, then mark this handled."
+        return "unknown", "The original backups are already gone from the Cleanup folder. Nothing will be deleted; you can mark this handled."
     if folder.archived_backup_count > 0:
-        return "ready", "Originals are waiting and can be removed when you are ready."
+        return "ready", "Original backups are in the Cleanup folder and can be deleted when you are ready."
     if folder.originals_removed_count > 0:
-        return "cleaned", "Originals were already removed and marked handled after review."
-    return "cleaned", "No originals are waiting to be removed."
+        return "cleaned", "Already-missing original backups were marked handled after review."
+    return "cleaned", "No original backups are waiting in the Cleanup folder."
 
 
 def _confirmed_originals_removed_item_ids(connection: DBClient) -> set[int]:
@@ -513,9 +513,9 @@ def _history_event_copy(event_type: str, details: dict[str, Any]) -> tuple[str, 
         )
     if event_type == ORIGINALS_REMOVED_EVENT:
         return (
-            "Originals marked removed",
+            "Marked handled",
             "ready",
-            "No files were deleted; this completed folder was marked handled after review.",
+            "The original backups were already gone. Nothing was deleted; this finished folder was marked handled after review.",
             None,
         )
     if event_type == "encoding_completed":

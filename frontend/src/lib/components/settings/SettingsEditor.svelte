@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { invalidateAll } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { tick } from 'svelte';
 	import { postJson } from '$lib/api/client';
 	import type {
 		ArchiveCleanupPayload,
@@ -13,13 +14,16 @@
 		SettingsLibrary,
 		SettingsPayload
 	} from '$lib/api/types';
-	import { hostRuntimeBadgeState } from '$lib/hosts/runtime';
+	import { formatFileSize } from '$lib/format';
+	import { hostRuntimeBadgeState, isPendingHostRuntime } from '$lib/hosts/runtime';
+	import { workScheduleSummaryCopy } from '$lib/hosts/schedule';
 	import {
 		SCHEDULE_DAY_OPTIONS,
 		addHostDraft,
 		addLibraryDraft,
 		addScheduleDraft,
 		applyLibraryTypeChange,
+		archiveCleanupBlockReason,
 		archiveCleanupTargetDirty,
 		buildArchiveCleanupClearPayload,
 		buildSettingsSavePayload,
@@ -70,10 +74,14 @@
 	let {
 		settings,
 		hosts,
+		archiveCleanup: loadedArchiveCleanup,
+		archiveCleanupError,
 		loadError
 	}: {
 		settings: SettingsPayload | null;
 		hosts: HostsPayload | null;
+		archiveCleanup: ArchiveCleanupPayload | null;
+		archiveCleanupError: string | null;
 		loadError: string | null;
 	} = $props();
 
@@ -125,6 +133,10 @@
 	let saveError = $state('');
 	let clearArchivePending = $state(false);
 	let clearArchiveArmed = $state(false);
+	let clearArchiveTrigger = $state<HTMLButtonElement | null>(null);
+	let clearArchiveConfirm = $state<HTMLButtonElement | null>(null);
+	let archiveStatusMessage = $state<HTMLParagraphElement | null>(null);
+	let archiveCleanupOverride = $state<ArchiveCleanupPayload | null | undefined>(undefined);
 	let archiveMessage = $state('');
 	let archiveError = $state('');
 	let pendingTypeChange = $state<PendingTypeChange | null>(null);
@@ -163,16 +175,36 @@
 	);
 	const runtimeHosts = $derived(hosts?.hosts ?? []);
 	const readyHostCount = $derived(runtimeHosts.filter((host) => host.available).length);
-	const archiveCleanup = $derived(savedSettings?.archive_cleanup ?? null);
+	const archiveCleanup = $derived(
+		archiveCleanupOverride === undefined ? loadedArchiveCleanup : archiveCleanupOverride
+	);
+	const cleanupSettings = $derived(
+		savedSettings ? { ...savedSettings, archive_cleanup: archiveCleanup } : null
+	);
 	const dirty = $derived(savedSettings ? settingsDraftIsDirty(draft, savedSettings) : false);
-	const savedArchiveRootCopy = $derived(savedSettings?.archive_root || 'unset');
+	const savedArchiveRootCopy = $derived(savedSettings?.archive_root || 'Not set');
 	const defaultMetricCopy = $derived(metricDefaultsCopy(draft.video_defaults));
 	const cleanupTargetDirty = $derived(
 		savedSettings ? archiveCleanupTargetDirty(draft, savedSettings) : false
 	);
+	const archiveCleanupBlocker = $derived(
+		clearArchivePending
+			? 'Deleting original backups…'
+			: archiveCleanupError
+				? 'Original backup status is unavailable. Reload Settings to try again.'
+				: !archiveCleanup
+					? 'Checking the Cleanup folder for original backups…'
+					: cleanupSettings
+						? archiveCleanupBlockReason(draft, cleanupSettings)
+						: 'Settings are unavailable.'
+	);
+	$effect(() => {
+		if (!clearArchiveArmed || clearArchivePending || archiveCleanupBlocker === null) return;
+		clearArchiveArmed = false;
+	});
 	const draftScheduleOptions = $derived([
-		{ key: 'always', label: 'Always', summary: 'Runs anytime.' },
-		{ key: 'never', label: 'Never', summary: 'Never starts queued processing.' },
+		{ key: 'always', label: 'Always', summary: 'Work runs anytime.' },
+		{ key: 'never', label: 'Never', summary: 'Work schedule is off.' },
 		...configuredProfiles.map((profile) => ({
 			key: profile.key.trim(),
 			label: profile.label.trim() || profile.key.trim(),
@@ -196,9 +228,9 @@
 			mono: true
 		},
 		{
-			label: 'Workers',
+			label: 'Computers',
 			value: `${readyHostCount}/${configuredHosts.length}`,
-			detail: loadError || 'Ready workers from latest status check',
+			detail: loadError || 'Ready computers from latest status check',
 			tone: (loadError ? 'fail' : readyHostCount > 0 ? 'ready' : 'idle') as BadgeTone,
 			mono: true
 		},
@@ -229,8 +261,7 @@
 	}
 
 	function formatStorage(bytes: number): string {
-		if (!Number.isFinite(bytes) || bytes <= 0) return '0 GB';
-		return `${(bytes / 1024 ** 3).toLocaleString('en-US', { maximumFractionDigits: 1 })} GB`;
+		return formatFileSize(bytes, '0 GB');
 	}
 
 	function selectValue(event: Event): string {
@@ -448,6 +479,7 @@
 			} else {
 				if (response.settings) {
 					savedSettings = response.settings;
+					archiveCleanupOverride = response.settings.archive_cleanup;
 					lastSettingsKey = settingsKey(response.settings);
 					draft = draftFromSettings(response.settings);
 				}
@@ -461,15 +493,24 @@
 		}
 	}
 
-	async function clearArchiveCleanup() {
-		if (!savedSettings || clearArchivePending) return;
+	async function toggleArchiveCleanupConfirmation() {
 		archiveMessage = '';
 		archiveError = '';
-		if (!clearArchiveArmed) {
-			clearArchiveArmed = true;
-			archiveMessage = `Confirm removal of waiting originals in ${savedArchiveRootCopy} with a second click.`;
-			return;
-		}
+		clearArchiveArmed = !clearArchiveArmed;
+		await tick();
+		(clearArchiveArmed ? clearArchiveConfirm : clearArchiveTrigger)?.focus();
+	}
+
+	async function cancelArchiveCleanupConfirmation() {
+		clearArchiveArmed = false;
+		await tick();
+		clearArchiveTrigger?.focus();
+	}
+
+	async function clearArchiveCleanup() {
+		if (!savedSettings || clearArchivePending || !clearArchiveArmed) return;
+		archiveMessage = '';
+		archiveError = '';
 		clearArchivePending = true;
 		try {
 			const response = await postJson<ArchiveClearResponse>(
@@ -477,19 +518,22 @@
 				buildArchiveCleanupClearPayload(savedSettings)
 			);
 			if (!response.ok) {
-				archiveError = response.message || 'Original removal failed.';
+				archiveError = response.message || 'Deleting original backups failed.';
 			} else {
 				if (response.archive_cleanup) {
 					savedSettings = { ...savedSettings, archive_cleanup: response.archive_cleanup };
+					archiveCleanupOverride = response.archive_cleanup;
 				}
-				archiveMessage = response.message || 'Waiting originals removed.';
+				archiveMessage = response.message || 'Original backups deleted.';
 				clearArchiveArmed = false;
 				await invalidateAll();
 			}
 		} catch (error) {
-			archiveError = error instanceof Error ? error.message : 'Original removal failed.';
+			archiveError = error instanceof Error ? error.message : 'Deleting original backups failed.';
 		} finally {
 			clearArchivePending = false;
+			await tick();
+			(clearArchiveArmed ? clearArchiveConfirm : archiveStatusMessage)?.focus();
 		}
 	}
 </script>
@@ -648,7 +692,7 @@
 						<strong>{defaultMetricCopy}</strong>
 					</a>
 					<a href="#settings-schedules">
-						<span>Schedule</span>
+						<span>Work schedule</span>
 						<strong>{(configuredProfiles.length + 2).toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-workers">
@@ -656,8 +700,8 @@
 						<strong>{configuredHosts.length.toLocaleString('en-US')}</strong>
 					</a>
 					<a href="#settings-danger">
-						<span>Old originals</span>
-						<strong>{archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}</strong>
+						<span>Original backups</span>
+						<strong>{archiveCleanup?.has_cleanup ? 'Waiting' : 'Nothing waiting'}</strong>
 					</a>
 				</div>
 
@@ -706,24 +750,27 @@
 									/>
 								</label>
 								<div class="storage-readout">
-									<span>Original backup area</span>
+									<span>Cleanup folder</span>
 									<strong class="mf-path">{savedArchiveRootCopy}</strong>
 									{#if cleanupTargetDirty}
-										<small>Save settings before deleting from a changed cleanup folder.</small>
+										<small
+											>Save the changed Working folder before deleting original backups from its
+											Cleanup folder.</small
+										>
 									{/if}
 								</div>
 								<div class="storage-readout">
-									<span>Old originals waiting</span>
+									<span>Original backups waiting</span>
 									<strong>{archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} files</strong>
 									<small>{formatStorage(archiveCleanup?.total_size_bytes ?? 0)}</small>
 								</div>
 								<div class="storage-readout">
-									<span>Backup area</span>
+									<span>Cleanup folder state</span>
 									<StateBadge
 										tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
-										label={archiveCleanup?.has_cleanup ? 'Waiting' : 'Clear'}
+										label={archiveCleanup?.has_cleanup ? 'Backups waiting' : 'Nothing waiting'}
 									/>
-									<small>Old originals stay here until you choose to remove them below.</small>
+									<small>Original backups stay here until you delete them below.</small>
 								</div>
 							</div>
 						</WorkstationPanel>
@@ -909,7 +956,7 @@
 									>
 									<small>
 										Scaled to each episode runtime · ±{draft.video_defaults
-											.sample_projection_tolerance_percent}% test · ±{draft.video_defaults
+											.sample_projection_tolerance_percent}% sample · ±{draft.video_defaults
 											.final_output_tolerance_percent}% final
 									</small>
 								</div>
@@ -931,9 +978,11 @@
 					<header class="settings-section__head">
 						<div>
 							<span class="mf-eyebrow">Advanced setup</span>
-							<h2 id="settings-advanced-title">Metadata, computers, and schedule</h2>
+							<h2 id="settings-advanced-title">Metadata, computers, and work schedule</h2>
 						</div>
-						<p>Connect catalog metadata, add machines, and control when processing work may run.</p>
+						<p>
+							Connect catalog metadata, add computers, and control when Mediaforce work may run.
+						</p>
 					</header>
 
 					<div id="settings-metadata" class="settings-anchor">
@@ -1006,26 +1055,26 @@
 
 					<div id="settings-schedules" class="settings-anchor">
 						<WorkstationPanel
-							eyebrow="Schedule"
-							title="Schedule"
+							eyebrow="Work schedule"
+							title="Work schedule"
 							meta={`${configuredProfiles.length.toLocaleString('en-US')} custom`}
 						>
 							<div class="schedule-list">
 								<div class="schedule-row schedule-row--builtin">
 									<StateBadge compact tone="ready" label="Built in" />
 									<strong>Always</strong>
-									<span>Runs anytime</span>
+									<span>Work runs anytime</span>
 								</div>
 								<div class="schedule-row schedule-row--builtin">
 									<StateBadge compact tone="idle" label="Built in" />
 									<strong>Never</strong>
-									<span>Never starts queued processing</span>
+									<span>Work schedule is off</span>
 								</div>
 								{#each draft.schedule_profiles as profile, index (`schedule-${profile.index}-${index}`)}
 									<div class="schedule-row">
 										<div class="schedule-row__fields">
 											<label>
-												<span>Window key</span>
+												<span>Work window key</span>
 												<input
 													class="field"
 													value={profile.key}
@@ -1072,7 +1121,7 @@
 												onclick={() =>
 													(draft.schedule_profiles = removeAtIndex(draft.schedule_profiles, index))}
 											>
-												Remove window
+												Remove work window
 											</button>
 										</div>
 										<div
@@ -1148,12 +1197,16 @@
 											<strong>{host.label || host.host || `Computer ${index + 1}`}</strong>
 										</div>
 										<span
-											>{runtime?.schedule_detail ||
+											>{workScheduleSummaryCopy(runtime?.schedule_detail) ||
 												runtime?.schedule_profile_label ||
 												'No computer status yet'}</span
 										>
 										<small
-											>{runtime?.message || runtime?.active_reason || 'Status check pending'}</small
+											>{isPendingHostRuntime(runtime)
+												? 'Checking this computer now.'
+												: runtime?.message ||
+													runtime?.active_reason ||
+													'Status check pending'}</small
 										>
 									</div>
 								{:else}
@@ -1173,9 +1226,11 @@
 												/>
 												<strong>{host.label || host.host || `Computer ${index + 1}`}</strong>
 												<span
-													>{runtime?.message ||
-														runtime?.active_reason ||
-														'Status check pending'}</span
+													>{isPendingHostRuntime(runtime)
+														? 'Checking this computer now.'
+														: runtime?.message ||
+															runtime?.active_reason ||
+															'Status check pending'}</span
 												>
 											</div>
 											<button
@@ -1393,14 +1448,14 @@
 				>
 					<header class="settings-section__head">
 						<div>
-							<span class="mf-eyebrow">Old originals</span>
-							<h2 id="settings-danger-title">Remove old originals</h2>
+							<span class="mf-eyebrow">Original backups</span>
+							<h2 id="settings-danger-title">Delete original backups</h2>
 						</div>
-						<p>Deletes waiting originals from the cleanup folder after a second confirmation.</p>
+						<p>Deletes the original backups stored in the Cleanup folder after you confirm.</p>
 					</header>
 
 					<div id="settings-danger" class="settings-anchor">
-						<WorkstationPanel eyebrow="Danger zone" title="Delete archived originals">
+						<WorkstationPanel eyebrow="Danger zone" title="Delete original backups">
 							<div class="danger-zone">
 								<div>
 									<span>Cleanup folder</span>
@@ -1414,32 +1469,84 @@
 								<div class="archive-actions">
 									<StateBadge
 										tone={archiveCleanup?.has_cleanup ? 'wait' : 'ready'}
-										label={archiveCleanup?.has_cleanup ? 'Originals waiting' : 'Nothing waiting'}
+										label={archiveCleanup?.has_cleanup ? 'Backups waiting' : 'Nothing waiting'}
 									/>
 									<button
 										type="button"
 										class="control control--danger"
 										class:control--armed={clearArchiveArmed}
-										disabled={!archiveCleanup?.has_cleanup ||
-											clearArchivePending ||
-											cleanupTargetDirty}
-										onclick={clearArchiveCleanup}
-										title={cleanupTargetDirty
-											? 'Save the changed cleanup folder before deleting archived originals.'
-											: undefined}
-									>
-										{clearArchivePending
-											? 'Removing originals'
-											: clearArchiveArmed
-												? 'Confirm delete originals'
-												: 'Delete waiting originals'}
+										disabled={archiveCleanupBlocker !== null}
+										aria-expanded={clearArchiveArmed}
+										aria-controls="archive-cleanup-confirm"
+										aria-describedby={archiveCleanupBlocker ? 'archive-cleanup-blocker' : undefined}
+										bind:this={clearArchiveTrigger}
+										onclick={toggleArchiveCleanupConfirmation}
+										>Delete all original backups
 									</button>
 								</div>
 							</div>
+							{#if archiveCleanupBlocker}
+								<p id="archive-cleanup-blocker" class="control-note">{archiveCleanupBlocker}</p>
+							{/if}
+							{#if clearArchiveArmed}
+								<div
+									id="archive-cleanup-confirm"
+									class="danger-confirm"
+									role="alertdialog"
+									aria-label="Confirm original backup deletion"
+									tabindex="-1"
+									onkeydown={(event) => {
+										if (event.key === 'Escape' && !clearArchivePending) {
+											event.preventDefault();
+											void cancelArchiveCleanupConfirmation();
+										}
+									}}
+								>
+									<div>
+										<strong
+											>Delete all {archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} original
+											backups?</strong
+										>
+										<span
+											>{formatStorage(archiveCleanup?.total_size_bytes ?? 0)} will be deleted from {savedArchiveRootCopy}.</span
+										>
+										<small>Your finished files are not touched.</small>
+									</div>
+									<div class="danger-confirm__actions">
+										<strong>This cannot be undone.</strong>
+										<button
+											type="button"
+											class="control control--danger control--armed"
+											disabled={clearArchivePending}
+											bind:this={clearArchiveConfirm}
+											onclick={clearArchiveCleanup}
+											>{clearArchivePending
+												? 'Deleting…'
+												: `Delete ${archiveCleanup?.file_count.toLocaleString('en-US') ?? '0'} original ${archiveCleanup?.file_count === 1 ? 'backup' : 'backups'}`}</button
+										>
+										<button
+											type="button"
+											class="control"
+											disabled={clearArchivePending}
+											onclick={cancelArchiveCleanupConfirmation}>Cancel</button
+										>
+									</div>
+								</div>
+							{/if}
 							{#if archiveError}
-								<p class="action-error">{archiveError}</p>
+								<p class="action-error" role="alert" tabindex="-1" bind:this={archiveStatusMessage}>
+									{archiveError}
+								</p>
 							{:else if archiveMessage}
-								<p class="action-message">{archiveMessage}</p>
+								<p
+									class="action-message"
+									role="status"
+									aria-live="polite"
+									tabindex="-1"
+									bind:this={archiveStatusMessage}
+								>
+									{archiveMessage}
+								</p>
 							{/if}
 						</WorkstationPanel>
 					</div>
@@ -1479,9 +1586,9 @@
 					<a href="#settings-libraries">Library folders</a>
 					<a href="#settings-storage">Working space</a>
 					<a href="#settings-assistant-defaults">Default size</a>
-					<a href="#settings-schedules">Schedule</a>
+					<a href="#settings-schedules">Work schedule</a>
 					<a href="#settings-workers">Computers</a>
-					<a href="#settings-danger">Old originals</a>
+					<a href="#settings-danger">Original backups</a>
 				</nav>
 				<WorkstationPanel eyebrow="Scope" title="Machine-local settings">
 					<div class="rail-list">
@@ -2577,6 +2684,47 @@
 		color: var(--mf-fg-on-accent);
 	}
 
+	.control-note {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		margin: 8px 12px 0;
+	}
+
+	.danger-confirm {
+		align-items: center;
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-fail-line);
+		border-radius: var(--mf-radius-3);
+		display: grid;
+		gap: 16px;
+		grid-template-columns: minmax(0, 1fr) auto;
+		margin-top: 10px;
+		padding: 16px;
+	}
+
+	.danger-confirm > div:first-child {
+		display: grid;
+		gap: 4px;
+	}
+
+	.danger-confirm span,
+	.danger-confirm small {
+		color: var(--mf-fg-secondary);
+		overflow-wrap: anywhere;
+	}
+
+	.danger-confirm__actions {
+		align-items: center;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+
+	.danger-confirm__actions > strong {
+		color: var(--mf-fail-fg);
+		font-size: var(--mf-text-xs);
+	}
+
 	.settings-section--danger {
 		border: 0;
 		padding: 0;
@@ -2640,6 +2788,20 @@
 
 		.settings-header__actions.has-changes :global(.state-badge) {
 			flex-basis: 100%;
+		}
+
+		.danger-confirm {
+			grid-template-columns: 1fr;
+		}
+
+		.danger-confirm__actions {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.danger-confirm__actions .control {
+			white-space: normal;
+			width: 100%;
 		}
 	}
 </style>

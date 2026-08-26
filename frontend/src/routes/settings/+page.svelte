@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { fetchJson } from '$lib/api/client';
-	import type { HostsPayload, SettingsPayload } from '$lib/api/types';
+	import type { ArchiveCleanupPayload, HostsPayload, SettingsPayload } from '$lib/api/types';
 	import SettingsEditor from '$lib/components/settings/SettingsEditor.svelte';
 	import { hostsStatusPending } from '$lib/hosts/runtime';
 
@@ -9,6 +9,8 @@
 
 	let settings = $state<SettingsPayload | null>(null);
 	let hosts = $state<HostsPayload | null>(null);
+	let archiveCleanup = $state<ArchiveCleanupPayload | null>(null);
+	let archiveCleanupError = $state<string | null>(null);
 	let loadError = $state<string | null>(null);
 	const HOST_STATUS_POLL_INTERVAL_MS = 1_500;
 	const HOST_STATUS_POLL_LIMIT = 40;
@@ -43,6 +45,9 @@
 		}
 
 		async function loadSettings() {
+			const archiveCleanupPayload = settle(
+				fetchJson<ArchiveCleanupPayload>('/api/archive-cleanup')
+			);
 			const [settingsPayload, hostsPayload] = await Promise.all([
 				settle(fetchJson<SettingsPayload>('/api/settings?include_archive_cleanup=0')),
 				settle(fetchJson<HostsPayload>('/api/hosts?compact=1'))
@@ -54,6 +59,11 @@
 			if (hostsPayload.data && hostsStatusPending(hostsPayload.data)) {
 				hostPollTimer = window.setTimeout(() => void refreshHosts(1), HOST_STATUS_POLL_INTERVAL_MS);
 			}
+			void archiveCleanupPayload.then((result) => {
+				if (disposed) return;
+				archiveCleanup = result.data;
+				archiveCleanupError = result.error;
+			});
 		}
 
 		void loadSettings();
@@ -68,4 +78,4 @@
 	<title>Settings · Mediaforce</title>
 </svelte:head>
 
-<SettingsEditor {settings} {hosts} {loadError} />
+<SettingsEditor {settings} {hosts} {archiveCleanup} {archiveCleanupError} {loadError} />

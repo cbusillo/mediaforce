@@ -548,12 +548,12 @@
 				</div>
 			</WorkstationPanel>
 
-			<WorkstationPanel eyebrow="Completed" title="Cleanup review">
+			<WorkstationPanel eyebrow="Finished" title="Cleanup review">
 				<dl class="kv">
 					<dt>Route</dt>
-					<dd>Completed</dd>
+					<dd>Finished</dd>
 					<dt>Scope</dt>
-					<dd>Archived originals</dd>
+					<dd>Original backups</dd>
 					<dt>Action</dt>
 					<dd><a href={resolve('/completed')}>Review cleanup</a></dd>
 				</dl>

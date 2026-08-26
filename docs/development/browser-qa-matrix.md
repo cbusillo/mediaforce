@@ -26,8 +26,9 @@ stuck, open a fresh tab against the same base URL before treating the local
 server as down.
 
 After the non-empty fixture pass, the managed smoke reseeds the same runtime with
-the `empty` profile and reloads the main route family. This proves the UI does
-not only work when the current live library has rows.
+the `empty` profile and reloads the TV, Movie, Other, Activity, and Finished
+route family. This proves the UI does not only work when the current live
+library has rows.
 
 ## Seeded Fixture States
 
@@ -66,7 +67,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   must outrank a stale 314.6 MB season result without pretending the job belongs
   to the season route.
 - Retryable state: `/folders/tv/Retry%20Show/Season%201`, with a failed sample
-  job that shows the immutable saved target/settings, `Retry same test`, and a
+  job that shows the immutable saved target/settings, `Retry sample`, and a
   separate path to choose different settings.
 - Search-limit state: `/folders/tv/Search%20Limit/Season%201`, with a
   deterministic target-search-bound failure that explains why the saved retry
@@ -83,7 +84,7 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   `/folders/tv/Quality%20Conflict/Season%201`, proving arithmetic impossibility
   is explained separately from a measured quality-floor conflict.
 - Approved state: `/folders/tv/Approved%20Show/Season%201`, where approval is
-  complete but production remains unqueued until `Make the season` is chosen.
+  complete but production remains unqueued until `Compress the season` is chosen.
 - Protected approved state: `/folders/tv/Protected%20Ready/Season%202`, where an
   accepted test is ready but the current/recent season requires the explicit
   lifecycle override dialog before queueing.
@@ -188,6 +189,18 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Validation%20Ready/Season%201`: validation-ready state.
 - `/folders/tv/Promotion%20Ready/Season%201`: promotion-ready state.
 - `/folders/tv/Finished%20Show/Season%201`: completed state.
+- `/movies`: Movie Library priority, scope, and replacement-conflict language.
+- `/folders/movies/Editions%20Showcase`: Movie Studio sample setup and whole-title scope.
+- `/folders/movies/Loose%20Feature.mkv`: Movie Studio sample-waiting and one-file scope.
+- `/folders/movies/Review%20Ready`: Movie Studio comparison-clips-ready state.
+- `/folders/movies/Validation%20Ready`: Movie Studio check-ready state.
+- `/folders/movies/Replacement%20Ready%20Large`: Movie Studio replacement-ready state.
+- `/other`: Other Library folder/file language and mapped workflow states.
+- `/folders/other/Field%20Notes`: Other Studio sample setup and inclusion state.
+- `/folders/other/Sampling%20Folder`: Other Studio sample-waiting state.
+- `/folders/other/Review%20Ready`: Other Studio comparison-clips-ready state.
+- `/folders/other/Validation%20Ready`: Other Studio check-ready state.
+- `/folders/other/Promotion%20Ready`: Other Studio replacement-ready state.
 - `/ops`: blockers, worker readiness, queues, and collapsed history.
 - `/completed`: no-action history and cleanup-ready work.
 - `/settings`: basic, advanced, and danger-zone settings sections.
@@ -238,11 +251,11 @@ same-target measured test the primary action, and require an explicit warning
 that accepting the tradeoff saves the profile and queues the full folder encode.
 
 When review media is ready, `Compare in full screen` must open paused in `Side by
-side` and `Fit`. `One at a time` must switch between `Original` and `New` without
+side` and `Fit`. `One at a time` must switch between `Original` and `Sample` without
 changing the selected moment, playback position, or picture position. Sound
 controls appear only when both clips carry trustworthy sound metadata; legacy or
 silent clips must say they show picture only and offer a plain-language path to
-make a new test when the source has sound. The normal UI must not expose codec,
+create another sample when the source has sound. The normal UI must not expose codec,
 quality-score, synchronization, or other implementation vocabulary.
 
 Playback uses the new clip as the comparison clock. Dragging the timeline may
