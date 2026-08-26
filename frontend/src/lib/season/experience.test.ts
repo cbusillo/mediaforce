@@ -55,6 +55,7 @@ import {
 	reviewSampleSizes,
 	scopedEncodeProgress,
 	seasonIdentity,
+	seasonEpisodeNavigationUnavailable,
 	seasonPromotionIntegrity,
 	seasonEpisodeOptions,
 	sampleSearchTechnicalDetail,
@@ -2140,7 +2141,7 @@ describe('season experience translation', () => {
 	});
 
 	it('lists every catalog episode for exact-item navigation in numeric order', () => {
-		const options = seasonEpisodeOptions({
+		const episodeStatus: FolderStatusPayload = {
 			...status,
 			staged_integrity: {
 				scope: status.media_scope,
@@ -2148,7 +2149,7 @@ describe('season experience translation', () => {
 				blocker_count: 3,
 				blockers: [],
 				database_truncated: false,
-				discovery: { requested: true, truncated: false, entries_scanned: 4 },
+				discovery: { requested: true, truncated: true, entries_scanned: 4 },
 				records: [
 					{
 						disposition: 'not_started',
@@ -2188,7 +2189,8 @@ describe('season experience translation', () => {
 					}
 				]
 			}
-		});
+		};
+		const options = seasonEpisodeOptions(episodeStatus);
 
 		expect(options).toEqual([
 			{
@@ -2213,6 +2215,22 @@ describe('season experience translation', () => {
 				href: '/folders/tv/Show/Season%201/Show.S01E10.mkv'
 			}
 		]);
+		expect(seasonEpisodeNavigationUnavailable(episodeStatus)).toBe(false);
+		expect(
+			seasonEpisodeNavigationUnavailable({
+				...episodeStatus,
+				staged_integrity: { ...episodeStatus.staged_integrity!, database_truncated: true }
+			})
+		).toBe(true);
+		expect(
+			seasonEpisodeNavigationUnavailable({
+				...episodeStatus,
+				staged_integrity: {
+					...episodeStatus.staged_integrity!,
+					load_error: 'Could not load episode inventory.'
+				}
+			})
+		).toBe(true);
 	});
 
 	it('formats operator-facing target totals with decimal units', () => {

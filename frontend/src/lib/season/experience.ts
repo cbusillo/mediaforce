@@ -733,6 +733,12 @@ export interface SeasonEpisodeOption {
 	href: `/folders/${string}`;
 }
 
+export function seasonEpisodeNavigationUnavailable(status: FolderStatusPayload): boolean {
+	return Boolean(
+		status.staged_integrity?.load_error || status.staged_integrity?.database_truncated
+	);
+}
+
 export function seasonEpisodeOptions(status: FolderStatusPayload): SeasonEpisodeOption[] {
 	const options = new Map<string, SeasonEpisodeOption>();
 	for (const record of status.staged_integrity?.records ?? []) {

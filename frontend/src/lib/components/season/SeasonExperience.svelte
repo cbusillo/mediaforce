@@ -56,6 +56,7 @@
 		reviewSampleSizes,
 		scopedEncodeProgress,
 		seasonIdentity,
+		seasonEpisodeNavigationUnavailable,
 		seasonPromotionIntegrity,
 		seasonEpisodeOptions,
 		stagedEpisodeLinks,
@@ -154,6 +155,7 @@
 	let revisionPaneOpen = $state(false);
 	let revisionMode = $state<RevisionMode>('same_target');
 	let revisionPanePrefix = $state('');
+	let selectedEpisodeHref = $state('');
 	let episodeNavigationPending = $state(false);
 	let goalButtons = $state<HTMLButtonElement[]>([]);
 	let compressionIntentButtons = $state<HTMLButtonElement[]>([]);
@@ -220,14 +222,11 @@
 	const humanState = $derived(detailSeasonState(folder, status));
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
 	const episodeOptions = $derived(seasonEpisodeOptions(status));
-	const encodedEpisodeLinks = $derived(stagedEpisodeLinks(status));
-	const episodeNavigationUnavailable = $derived(
-		Boolean(
-			status.staged_integrity?.load_error ||
-			status.staged_integrity?.database_truncated ||
-			status.staged_integrity?.discovery.truncated
-		)
+	const selectedEpisode = $derived(
+		episodeOptions.find((option) => option.href === selectedEpisodeHref) ?? null
 	);
+	const encodedEpisodeLinks = $derived(stagedEpisodeLinks(status));
+	const episodeNavigationUnavailable = $derived(seasonEpisodeNavigationUnavailable(status));
 	const parentScope = $derived(folder.media_scope?.parent ?? null);
 	const backHref = $derived(
 		isExactItemScope && parentScope?.prefix
@@ -1377,13 +1376,11 @@
 		selectedMoment = index;
 	}
 
-	async function openEpisode(event: Event) {
-		const select = event.currentTarget as HTMLSelectElement;
-		const episode = episodeOptions.find((option) => option.href === select.value);
-		if (!episode || episodeNavigationPending) return;
+	async function openEpisode() {
+		if (!selectedEpisode || episodeNavigationPending) return;
 		episodeNavigationPending = true;
 		try {
-			await goto(resolve(episode.href), { keepFocus: true, noScroll: true });
+			await goto(resolve(selectedEpisode.href), { keepFocus: true, noScroll: true });
 		} finally {
 			episodeNavigationPending = false;
 		}
@@ -1504,23 +1501,32 @@
 						Episode list unavailable. Refresh this workspace to load every episode.
 					</p>
 				{:else if episodeOptions.length > 0}
-					<label class="episode-selector__control">
-						<span
-							>{episodeOptions.length} {episodeOptions.length === 1 ? 'episode' : 'episodes'}</span
+					<div class="episode-selector__actions">
+						<label class="episode-selector__control">
+							<span
+								>{episodeOptions.length}
+								{episodeOptions.length === 1 ? 'episode' : 'episodes'}</span
+							>
+							<select
+								aria-label="Choose an episode"
+								bind:value={selectedEpisodeHref}
+								disabled={episodeNavigationPending}
+							>
+								<option value="">Select an episode…</option>
+								{#each episodeOptions as episode (episode.itemId)}
+									<option value={episode.href}>{episode.label} — {episode.statusLabel}</option>
+								{/each}
+							</select>
+						</label>
+						<button
+							class="secondary-button episode-selector__open"
+							type="button"
+							disabled={!selectedEpisode || episodeNavigationPending}
+							onclick={() => void openEpisode()}
 						>
-						<select
-							aria-label="Choose an episode"
-							disabled={episodeNavigationPending}
-							onchange={openEpisode}
-						>
-							<option value="">
-								{episodeNavigationPending ? 'Opening episode…' : 'Select an episode…'}
-							</option>
-							{#each episodeOptions as episode (episode.itemId)}
-								<option value={episode.href}>{episode.label} — {episode.statusLabel}</option>
-							{/each}
-						</select>
-					</label>
+							{episodeNavigationPending ? 'Opening episode…' : 'Open episode'}
+						</button>
+					</div>
 				{:else}
 					<p class="episode-selector__status">No catalog episodes found.</p>
 				{/if}
@@ -4790,6 +4796,11 @@
 		gap: 6px;
 	}
 
+	.episode-selector__actions {
+		display: grid;
+		gap: 8px;
+	}
+
 	.episode-selector__control > span {
 		color: var(--mf-fg-tertiary);
 		font-size: 10px;
@@ -4814,6 +4825,10 @@
 	.episode-selector__control select:disabled {
 		cursor: wait;
 		opacity: 0.65;
+	}
+
+	.episode-selector__open {
+		width: 100%;
 	}
 
 	.loading-room,
