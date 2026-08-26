@@ -29,15 +29,8 @@ let normalized = original
 	.replace(
 		'<module type="PYTHON_MODULE"',
 		'<module external.system.id="pyproject.toml" type="PYTHON_MODULE"'
-	)
-	.replace('<content url="file://$MODULE_DIR$">', '<content url="file://$MODULE_DIR$/..">');
-for (const relativePath of ['.mypy_cache', '.system', '.local', '.code', '.venv', 'tests']) {
-	normalized = normalized.replaceAll(
-		`url="file://$MODULE_DIR$/${relativePath}"`,
-		`url="file://$MODULE_DIR$/../${relativePath}"`
 	);
-}
-const frontendExclusion = '      <excludeFolder url="file://$MODULE_DIR$/../frontend" />';
+const frontendExclusion = '      <excludeFolder url="file://$MODULE_DIR$/frontend" />';
 if (!normalized.includes(frontendExclusion)) {
 	normalized = normalized.replace('    </content>', `${frontendExclusion}\n    </content>`);
 }

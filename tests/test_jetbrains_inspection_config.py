@@ -174,9 +174,10 @@ def test_shared_profile_is_bounded_and_generated_state_is_ignored() -> None:
     if generated_module.exists():
         module_xml = generated_module.read_text()
         assert '<module external.system.id="pyproject.toml" type="PYTHON_MODULE" version="4">' in module_xml
-        assert '<content url="file://$MODULE_DIR$/..">' in module_xml
-        assert '<excludeFolder url="file://$MODULE_DIR$/../frontend" />' in module_xml
-        assert '<sourceFolder url="file://$MODULE_DIR$/../tests" isTestSource="true" />' in module_xml
+        assert '<content url="file://$MODULE_DIR$">' in module_xml
+        assert '<excludeFolder url="file://$MODULE_DIR$/frontend" />' in module_xml
+        assert '<sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />' in module_xml
+        assert 'file://$MODULE_DIR$/..' not in module_xml
 
     prepare_script = ROOT / "scripts" / "prepare-jetbrains-inspection.sh"
     assert os.access(prepare_script, os.X_OK)
