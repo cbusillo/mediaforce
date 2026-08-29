@@ -1445,6 +1445,23 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
 	});
 
+	it('requires a fresh sample when legacy approval no longer matches review media', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: false
+					},
+					review_gate: { status: 'missing_review_media', can_confirm_full: false }
+				}),
+				status
+			)
+		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
+	});
+
 	it.each([
 		['validate', 'ready_to_check'],
 		['promote', 'finish_blocked'],

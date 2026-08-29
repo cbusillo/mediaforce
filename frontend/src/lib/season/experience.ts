@@ -1977,6 +1977,7 @@ export function detailSeasonState(
 		['rejected', 'needs_operator_review'].includes(currentRiskStatus);
 	const currentDraftIsApproved =
 		!currentRiskBlocksApproval &&
+		reviewGateStatus !== 'missing_review_media' &&
 		(booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash));
 	if (currentDraftIsApproved) {
 		return {

@@ -102,6 +102,12 @@
 	const reviewSectionLabel = $derived(
 		folder.media_scope.match === 'exact_item' ? 'File comparison' : 'Folder comparison'
 	);
+	const reviewRecovery = $derived(
+		!approved &&
+			!sampleWorkActive &&
+			!['processing', 'validate', 'promote', 'complete'].includes(workflow?.primary_lane ?? '') &&
+			review.recovery
+	);
 	const itemCount = $derived(context?.item_count ?? 0);
 	const eligibleItemCount = $derived(context?.eligible_item_count ?? 0);
 	const blockedItemCount = $derived(context?.blocked_item_count ?? 0);
@@ -567,9 +573,9 @@
 			{/if}
 		</div>
 	{/if}
-	{#if review.recovery}
+	{#if reviewRecovery}
 		<div class="notice notice--danger" role="alert">
-			<strong>{review.recovery.title}</strong><span>{review.recovery.detail}</span>
+			<strong>{reviewRecovery.title}</strong><span>{reviewRecovery.detail}</span>
 			{#if !isBrowseOnly}
 				<button
 					class="secondary review-download"

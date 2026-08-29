@@ -165,6 +165,13 @@
 	const reviewEstimatedOutput = $derived(
 		movieGoalFacts.expectedOutput === 'Unknown' ? '' : `about ${movieGoalFacts.expectedOutput}`
 	);
+	const reviewRecovery = $derived(
+		!isComplete &&
+			reviewGate.status !== 'accepted' &&
+			!sampleWorkActive &&
+			!currentWork &&
+			review.recovery
+	);
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
@@ -817,9 +824,9 @@
 			{/each}
 		</div>
 	{/if}
-	{#if review.recovery}
+	{#if reviewRecovery}
 		<div class="notice notice--danger" role="alert">
-			<strong>{review.recovery.title}</strong><span>{review.recovery.detail}</span>
+			<strong>{reviewRecovery.title}</strong><span>{reviewRecovery.detail}</span>
 			{#if !isBrowseOnly}
 				<button
 					class="secondary"
