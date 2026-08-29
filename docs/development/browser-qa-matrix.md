@@ -46,8 +46,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   featurette, an uncertain nested file, active processing, completed titles,
   validation-ready work, two replacement-ready titles with different measured
   savings and playable checked-output previews, and a preflight promotion
-  conflict. Unmeasured titles show
-  `No estimate` rather than inheriting TV codec-history savings.
+  conflict. A title with current completed sampled evidence for every included
+  movie file shows its sampled output and savings; incomplete, stale, or
+  incompatible evidence remains `No estimate` rather than inheriting TV
+  codec-history savings. Mixed known and unknown titles show lower-bound
+  library totals while every title stays reachable.
 - Movie Studio: `/folders/movies/Loose%20Feature.mkv`,
   `/folders/movies/Editions%20Showcase`,
   `/folders/movies/Waiting%20Encode`, and

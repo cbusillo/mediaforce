@@ -2109,6 +2109,22 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             _ = item_id, row
             connection.execute(calibration_jobs.insert().values(**job))
 
+        movie_review_row = rows_by_prefix[MOVIE_REVIEW_READY_PREFIX]
+        movie_review_sample_item = build_manifest_item(movie_review_row, config)
+        connection.execute(
+            calibration_jobs.insert().values(
+                **_job(
+                    job_id="web-smoke-movie-review-ready",
+                    prefix=MOVIE_REVIEW_READY_PREFIX,
+                    status="completed",
+                    sample_item=movie_review_sample_item,
+                    result={"sample_result": {"predicted_total_size_bytes": 3_900_000_000}},
+                    started_at=timestamp,
+                    finished_at=timestamp,
+                )
+            )
+        )
+
         sampling_sample_item = {
             "library_item_id": inserted_ids[4],
             **rows[4],

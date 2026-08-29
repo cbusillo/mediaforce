@@ -4,6 +4,7 @@ import type { MovieLibraryPayload, MovieTitle } from '$lib/api/types';
 import {
 	mergeMovieLibraryPayloads,
 	movieCompositionDetail,
+	movieEstimatedOutputTotalIsLowerBound,
 	movieExpectedOutputBytes,
 	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
@@ -216,6 +217,33 @@ describe('movie decision facts', () => {
 				known_saved_bytes: 35
 			})
 		).toBeNull();
+	});
+
+	it('uses the stored sampled output instead of recalculating it from title size', () => {
+		expect(
+			movieExpectedOutputBytes({
+				...title,
+				total_size_bytes: 100,
+				projected_reclaim_bytes: 35,
+				estimated_output_bytes: 70,
+				estimate_provenance: 'sampled_calibration'
+			})
+		).toBe(70);
+	});
+
+	it('marks aggregate output as a lower bound when any title is unavailable', () => {
+		expect(
+			movieEstimatedOutputTotalIsLowerBound([
+				{ ...title, estimated_output_bytes: 6, details_loading: false },
+				{ ...title, prefix: 'films/Unknown', estimated_output_bytes: null, details_loading: false }
+			])
+		).toBe(true);
+		expect(
+			movieEstimatedOutputTotalIsLowerBound([
+				{ ...title, estimated_output_bytes: 6, details_loading: false },
+				{ ...title, prefix: 'films/Also known', estimated_output_bytes: 4, details_loading: false }
+			])
+		).toBe(false);
 	});
 
 	it('uses the exact member route as the one action for one-file titles', () => {

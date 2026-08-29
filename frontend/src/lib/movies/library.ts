@@ -56,9 +56,14 @@ export function movieTitleRuntimeSeconds(title: MovieTitle): number | null {
 }
 
 export function movieExpectedOutputBytes(title: MovieTitle): number | null {
+	if (title.estimated_output_bytes != null) return title.estimated_output_bytes;
 	return title.projected_reclaim_bytes == null
 		? null
 		: Math.max(0, title.total_size_bytes - title.projected_reclaim_bytes);
+}
+
+export function movieEstimatedOutputTotalIsLowerBound(titles: MovieTitle[]): boolean {
+	return titles.some((title) => movieExpectedOutputBytes(title) == null);
 }
 
 export function moviePrimaryStudioPrefix(title: MovieTitle): string {
