@@ -90,6 +90,14 @@ export function reviewSourceHasAudio(folder: FolderPayload): boolean {
 	);
 }
 
+export function reviewSourceLabel(folder: FolderPayload, fallback: string): string {
+	const calibration = record(folder.calibration);
+	const sampleItem = record(folder.sample_item);
+	const calibrationSampleItem = record(calibration.sample_item);
+	const relPath = text(sampleItem.rel_path) || text(calibrationSampleItem.rel_path);
+	return relPath.split('/').at(-1) || fallback;
+}
+
 function record(value: unknown): Record<string, unknown> {
 	return value && typeof value === 'object' && !Array.isArray(value)
 		? (value as Record<string, unknown>)

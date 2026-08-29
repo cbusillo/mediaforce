@@ -15,7 +15,7 @@
 	import { formatFileSize } from '$lib/format';
 	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
 	import { reviewAvailability } from '$lib/review/availability';
-	import { reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
+	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import {
 		otherActionFileCount,
@@ -93,10 +93,14 @@
 	const reviewReady = $derived(review.isBrowserReady);
 	const reviewSample = $derived(reviewSampleSizes(folder));
 	const reviewSourceHasSound = $derived(reviewSourceHasAudio(folder));
+	const reviewLabel = $derived(reviewSourceLabel(folder, folder.media_scope.title));
 	const approved = $derived(Boolean(calibration.accepted_at));
 	const scopeNoun = $derived(folder.media_scope.match === 'exact_item' ? 'file' : 'folder');
 	const scopeLabel = $derived(
 		folder.media_scope.match === 'exact_item' ? 'One file' : 'Whole folder'
+	);
+	const reviewSectionLabel = $derived(
+		folder.media_scope.match === 'exact_item' ? 'File comparison' : 'Folder comparison'
 	);
 	const itemCount = $derived(context?.item_count ?? 0);
 	const eligibleItemCount = $derived(context?.eligible_item_count ?? 0);
@@ -564,8 +568,16 @@
 		</div>
 	{/if}
 	{#if review.recovery}
-		<div class="notice notice--danger" role="status">
+		<div class="notice notice--danger" role="alert">
 			<strong>{review.recovery.title}</strong><span>{review.recovery.detail}</span>
+			{#if !isBrowseOnly}
+				<button
+					class="secondary review-download"
+					type="button"
+					disabled={isBusy || !hostOptions.length}
+					onclick={prepareSample}>Prepare another sample</button
+				>
+			{/if}
 			{#if review.canDownload}
 				<button class="secondary review-download" type="button" onclick={downloadReviewPack}
 					>Download combined comparison</button
@@ -573,13 +585,13 @@
 			{/if}
 		</div>
 	{/if}
-	{#if reviewReady && !approved}
-		<section class="review-workspace" aria-label="File comparison">
+	{#if reviewReady}
+		<section class="review-workspace" aria-label={reviewSectionLabel}>
 			<ComparisonWorkspace
 				pairs={review.pairs}
 				selectedMoment={selectedReviewMoment}
 				audioChoice={reviewAudioChoice}
-				reviewScopeLabel={folder.media_scope.title}
+				reviewScopeLabel={reviewLabel}
 				originalClipLabel={reviewSample.original
 					? `${formatBytes(reviewSample.original)} clip`
 					: 'Clip size unavailable'}

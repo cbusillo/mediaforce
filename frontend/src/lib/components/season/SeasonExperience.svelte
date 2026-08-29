@@ -16,7 +16,7 @@
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
 	import { clampMomentIndex, reviewPairHasSound } from '$lib/review/comparison';
-	import { normalizeReviewPairs, reviewSampleSizes } from '$lib/review/pairs';
+	import { normalizeReviewPairs, reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
@@ -273,9 +273,7 @@
 		((folder.sample_host_options ?? []) as HostOption[]).filter((host) => host.key)
 	);
 	const sampleItem = $derived(asRecord(folder.sample_item));
-	const sampleHasAudio = $derived(
-		Array.isArray(sampleItem.audio_summary) && sampleItem.audio_summary.length > 0
-	);
+	const sampleHasAudio = $derived(reviewSourceHasAudio(folder));
 	const sampleEpisode = $derived(episodeLabel(asText(sampleItem.rel_path)));
 	const reviewPairs = $derived(normalizeReviewPairs(folder));
 	const displayedMoment = $derived(clampMomentIndex(selectedMoment, reviewPairs.length));

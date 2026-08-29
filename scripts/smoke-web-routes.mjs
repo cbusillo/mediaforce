@@ -1273,12 +1273,23 @@ async function checkSharedComparisonWorkspace(
       timeout: timeoutMs,
     });
     const reviewSection = page.getByLabel(sectionLabel);
-    await reviewSection
-      .getByRole("button", { name: "Compare clips", exact: true })
-      .click({ timeout: timeoutMs });
+    const openButton = reviewSection.getByRole("button", {
+      name: "Compare clips",
+      exact: true,
+    });
+    await openButton.click({ timeout: timeoutMs });
     const workspace = page.getByRole("dialog", { name: /Compare picture/ });
     await workspace.waitFor({ state: "visible", timeout: timeoutMs });
     await workspace.getByRole("button", { name: "Close comparison" }).click();
+    await page.waitForFunction(
+      () => document.activeElement?.textContent?.includes("Compare clips"),
+      undefined,
+      { timeout: timeoutMs },
+    );
+    const bodyOverflow = await page.evaluate(() => document.body.style.overflow);
+    if (bodyOverflow) {
+      throw new Error(`${label} comparison left body scrolling locked`);
+    }
     await reviewSection
       .getByRole("button", {
         name: "Download combined comparison",
@@ -1764,7 +1775,7 @@ async function main() {
       );
       for (const [label, route, sectionLabel] of [
         ["Movie Studio", "/folders/movies/Review%20Ready", "Movie comparison"],
-        ["Other Studio", "/folders/other/Review%20Ready", "File comparison"],
+        ["Other Studio", "/folders/other/Review%20Ready", "Folder comparison"],
       ]) {
         await checkSharedComparisonWorkspace(
           targetUrl,

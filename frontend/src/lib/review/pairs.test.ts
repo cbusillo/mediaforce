@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { FolderPayload } from '$lib/api/types';
 
 import { reviewAvailability } from './availability';
-import { normalizeReviewPairs, reviewSampleSizes, reviewSourceHasAudio } from './pairs';
+import {
+	normalizeReviewPairs,
+	reviewSampleSizes,
+	reviewSourceHasAudio,
+	reviewSourceLabel
+} from './pairs';
 
 function folder(calibration: Record<string, unknown>): FolderPayload {
 	return {
@@ -70,6 +75,16 @@ describe('shared review pairs', () => {
 		).toBe(true);
 		expect(reviewSourceHasAudio(folder({}))).toBe(false);
 	});
+
+	it('labels review clips with the sampled file', () => {
+		expect(
+			reviewSourceLabel(
+				folder({ sample_item: { rel_path: 'movies/Example Feature/Edition A.mkv' } }),
+				'Example Feature'
+			)
+		).toBe('Edition A.mkv');
+		expect(reviewSourceLabel(folder({}), 'Example Feature')).toBe('Example Feature');
+	});
 });
 
 describe('review availability', () => {
@@ -105,6 +120,18 @@ describe('review availability', () => {
 		).toMatchObject({
 			isBrowserReady: false,
 			canDownload: false,
+			recovery: { kind: 'purged' }
+		});
+		expect(
+			reviewAvailability(
+				folder({
+					compare_clips_purged: true,
+					compare_clips: [{ path: '/review/compare.mov' }]
+				})
+			)
+		).toMatchObject({
+			isBrowserReady: false,
+			canDownload: true,
 			recovery: { kind: 'purged' }
 		});
 		expect(reviewAvailability(folder({ browser_review_ready: true }))).toMatchObject({

@@ -14,7 +14,7 @@
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import { safeOperatorErrorCopy } from '$lib/operator-copy';
 	import { reviewAvailability } from '$lib/review/availability';
-	import { reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
+	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import {
 		folderActionResponseCopy,
@@ -161,6 +161,10 @@
 	const reviewReady = $derived(review.isBrowserReady);
 	const reviewSample = $derived(reviewSampleSizes(folder));
 	const reviewSourceHasSound = $derived(reviewSourceHasAudio(folder));
+	const reviewLabel = $derived(reviewSourceLabel(folder, title));
+	const reviewEstimatedOutput = $derived(
+		movieGoalFacts.expectedOutput === 'Unknown' ? '' : `about ${movieGoalFacts.expectedOutput}`
+	);
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
@@ -814,8 +818,16 @@
 		</div>
 	{/if}
 	{#if review.recovery}
-		<div class="notice notice--danger" role="status">
+		<div class="notice notice--danger" role="alert">
 			<strong>{review.recovery.title}</strong><span>{review.recovery.detail}</span>
+			{#if !isBrowseOnly}
+				<button
+					class="secondary"
+					type="button"
+					disabled={isBusy || !hostOptions.length}
+					onclick={prepareSample}>Prepare another sample</button
+				>
+			{/if}
 			{#if review.canDownload}
 				<button class="secondary" type="button" onclick={downloadReviewPack}
 					>Download combined comparison</button
@@ -842,20 +854,20 @@
 			</div>
 		{/if}
 	</section>
-	{#if reviewReady && reviewGate.status !== 'accepted'}
+	{#if reviewReady}
 		<section class="review-workspace" aria-label="Movie comparison">
 			<ComparisonWorkspace
 				pairs={review.pairs}
 				selectedMoment={selectedReviewMoment}
 				audioChoice={reviewAudioChoice}
-				reviewScopeLabel={title}
+				reviewScopeLabel={reviewLabel}
 				originalClipLabel={reviewSample.original
 					? `${formatMovieBytes(reviewSample.original)} clip`
 					: 'Clip size unavailable'}
 				sampleClipLabel={reviewSample.smaller
 					? `${formatMovieBytes(reviewSample.smaller)} clip`
 					: 'Clip size unavailable'}
-				estimatedOutputLabel={movieGoalFacts.expectedOutput}
+				estimatedOutputLabel={reviewEstimatedOutput}
 				canCreateSoundSample={reviewSourceHasSound}
 				soundSampleDisabled={isBrowseOnly || isBusy || !hostOptions.length}
 				soundSampleActionLabel="Prepare a sample with sound"

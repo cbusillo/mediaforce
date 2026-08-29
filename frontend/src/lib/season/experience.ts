@@ -1978,6 +1978,16 @@ export function detailSeasonState(
 	const currentDraftIsApproved =
 		!currentRiskBlocksApproval &&
 		(booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash));
+	if (currentDraftIsApproved) {
+		return {
+			key: 'ready_to_make',
+			label: 'Sample approved',
+			detail: exactEpisode
+				? 'This episode can be compressed.'
+				: 'The rest of the season can be compressed.',
+			tone: 'ready'
+		};
+	}
 	if (
 		review.recovery ||
 		reviewGateStatus === 'missing_review_media' ||
@@ -1998,16 +2008,6 @@ export function detailSeasonState(
 			key: 'ready_to_compare',
 			label: 'Ready to review',
 			detail: 'Compare the original and the sample.',
-			tone: 'ready'
-		};
-	}
-	if (currentDraftIsApproved) {
-		return {
-			key: 'ready_to_make',
-			label: 'Sample approved',
-			detail: exactEpisode
-				? 'This episode can be compressed.'
-				: 'The rest of the season can be compressed.',
 			tone: 'ready'
 		};
 	}

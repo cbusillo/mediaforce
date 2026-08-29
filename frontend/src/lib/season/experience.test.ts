@@ -1427,6 +1427,24 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
 	});
 
+	it('keeps an approved sample ready when only legacy review media remains', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: true,
+						compare_clips: [{ path: '/review/compare.mov' }]
+					},
+					review_gate: { status: 'accepted', can_confirm_full: true }
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
+	});
+
 	it.each([
 		['validate', 'ready_to_check'],
 		['promote', 'finish_blocked'],

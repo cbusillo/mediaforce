@@ -35,11 +35,11 @@ export function reviewAvailability(folder: FolderPayload): ReviewAvailability {
 		return {
 			pairs,
 			isBrowserReady: false,
-			canDownload: false,
+			canDownload: downloadReady,
 			recovery: {
 				kind: 'purged',
-				title: 'Comparison clips were cleaned up',
-				detail: 'Create another sample before reviewing it in the browser.'
+				title: 'Browser comparison clips were cleaned up',
+				detail: 'Prepare another sample before reviewing it in the browser.'
 			}
 		};
 	}

@@ -917,7 +917,7 @@
 				<p>
 					{canCreateSoundSample
 						? 'These clips show picture only. Another sample is needed to compare sound.'
-						: 'These comparison clips do not include trustworthy sound.'}
+						: 'These clips do not include sound you can compare.'}
 				</p>
 				{#if canCreateSoundSample}
 					<button type="button" onclick={onRequestSoundSample} disabled={soundSampleDisabled}>
