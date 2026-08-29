@@ -14,6 +14,9 @@
 	import { folderActionResponseCopy } from '$lib/folders/studio';
 	import { formatFileSize } from '$lib/format';
 	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
+	import { reviewAvailability } from '$lib/review/availability';
+	import { reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
+	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import {
 		otherActionFileCount,
 		otherReadinessBlockerCopy,
@@ -49,6 +52,8 @@
 	let actionNeedsAttention = $state(false);
 	let actionAttentionTitle = $state('');
 	let confirmedMembershipToken = $state('');
+	let selectedReviewMoment = $state(0);
+	let reviewAudioChoice = $state<'original' | 'new'>('new');
 
 	const context = $derived(folder.other_context ?? null);
 	const workflow = $derived(status.workflow_state ?? folder.workflow_state ?? null);
@@ -84,13 +89,10 @@
 	);
 	const isBusy = $derived(Boolean(pendingAction));
 	const activeWorkerCount = $derived(hosts.hosts.filter((host) => host.available).length);
-	const reviewReady = $derived(
-		Boolean(
-			calibration.review_media_ready ||
-			calibration.browser_review_ready ||
-			calibration.compare_clips
-		)
-	);
+	const review = $derived(reviewAvailability(folder));
+	const reviewReady = $derived(review.isBrowserReady);
+	const reviewSample = $derived(reviewSampleSizes(folder));
+	const reviewSourceHasSound = $derived(reviewSourceHasAudio(folder));
 	const approved = $derived(Boolean(calibration.accepted_at));
 	const scopeNoun = $derived(folder.media_scope.match === 'exact_item' ? 'file' : 'folder');
 	const scopeLabel = $derived(
@@ -291,7 +293,7 @@
 		});
 	}
 
-	function openReviewPack() {
+	function downloadReviewPack() {
 		window.location.assign(reviewPackHref);
 	}
 
@@ -561,6 +563,44 @@
 			{/if}
 		</div>
 	{/if}
+	{#if review.recovery}
+		<div class="notice notice--danger" role="status">
+			<strong>{review.recovery.title}</strong><span>{review.recovery.detail}</span>
+			{#if review.canDownload}
+				<button class="secondary review-download" type="button" onclick={downloadReviewPack}
+					>Download combined comparison</button
+				>
+			{/if}
+		</div>
+	{/if}
+	{#if reviewReady && !approved}
+		<section class="review-workspace" aria-label="File comparison">
+			<ComparisonWorkspace
+				pairs={review.pairs}
+				selectedMoment={selectedReviewMoment}
+				audioChoice={reviewAudioChoice}
+				reviewScopeLabel={folder.media_scope.title}
+				originalClipLabel={reviewSample.original
+					? `${formatBytes(reviewSample.original)} clip`
+					: 'Clip size unavailable'}
+				sampleClipLabel={reviewSample.smaller
+					? `${formatBytes(reviewSample.smaller)} clip`
+					: 'Clip size unavailable'}
+				estimatedOutputLabel=""
+				canCreateSoundSample={reviewSourceHasSound}
+				soundSampleDisabled={isBrowseOnly || isBusy || !hostOptions.length}
+				soundSampleActionLabel="Prepare a sample with sound"
+				onMomentChange={(index) => (selectedReviewMoment = index)}
+				onAudioChange={(side) => (reviewAudioChoice = side)}
+				onRequestSoundSample={() => void prepareSample()}
+			/>
+			{#if review.canDownload}
+				<button class="secondary review-download" type="button" onclick={downloadReviewPack}
+					>Download combined comparison</button
+				>
+			{/if}
+		</section>
+	{/if}
 
 	<div class="studio-grid">
 		<section class="decision-panel">
@@ -655,7 +695,6 @@
 						>{actionFileCount === 1 ? 'Replace original file' : 'Replace original files'}</button
 					>
 				{:else if reviewReady && !approved}
-					<button class="secondary" type="button" onclick={openReviewPack}>Compare clips</button>
 					<button class="primary" disabled={!actionReady || isBusy} onclick={approveSample}
 						>Approve sample</button
 					>
@@ -752,6 +791,15 @@
 		margin: 0 auto;
 		max-width: 1440px;
 		padding: 24px 28px 54px;
+	}
+
+	.review-workspace {
+		margin-top: 18px;
+	}
+
+	.review-download {
+		display: inline-flex;
+		margin-top: 10px;
 	}
 
 	h1,

@@ -4,7 +4,7 @@
 	import { onMount, tick } from 'svelte';
 
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
-	import ComparisonWorkspace from '$lib/components/season/ComparisonWorkspace.svelte';
+	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import type {
 		CompressionIntentLevel,
@@ -15,7 +15,8 @@
 		QualityRiskTag
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { clampMomentIndex, reviewPairHasSound } from '$lib/season/comparison';
+	import { clampMomentIndex, reviewPairHasSound } from '$lib/review/comparison';
+	import { normalizeReviewPairs, reviewSampleSizes } from '$lib/review/pairs';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
@@ -43,7 +44,6 @@
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
 		measuredFollowupRequest,
-		normalizeReviewPairs,
 		overlappingCalibrationActivity,
 		plainFailureMessage,
 		predictedEpisodeSize,
@@ -53,7 +53,6 @@
 		reviewFeedbackRequest,
 		reviewAdjustmentIntent,
 		reviewSizeAdjustment,
-		reviewSampleSizes,
 		scopedEncodeProgress,
 		seasonIdentity,
 		seasonEpisodeNavigationUnavailable,
@@ -2063,14 +2062,14 @@
 						pairs={reviewPairs}
 						selectedMoment={displayedMoment}
 						{audioChoice}
-						episodeLabel={sampleEpisode}
+						reviewScopeLabel={sampleEpisode}
 						originalClipLabel={actualSampleSizes.original
 							? `${formatDecimalFileSize(actualSampleSizes.original)} clip`
 							: 'Clip size unavailable'}
 						sampleClipLabel={actualSampleSizes.smaller
 							? `${formatDecimalFileSize(actualSampleSizes.smaller)} clip`
 							: 'Clip size unavailable'}
-						episodeEstimateLabel={expectedEpisodeBytes
+						estimatedOutputLabel={expectedEpisodeBytes
 							? `about ${formatDecimalFileSize(expectedEpisodeBytes)}`
 							: ''}
 						canCreateSoundSample={sampleHasAudio}
