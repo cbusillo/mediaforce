@@ -62,7 +62,20 @@ export function movieExpectedOutputBytes(title: MovieTitle): number | null {
 }
 
 export function moviePrimaryStudioPrefix(title: MovieTitle): string {
-	return title.members.length === 1 && title.members[0] ? title.members[0].prefix : title.prefix;
+	return title.members.length === 1 && title.members[0] && !movieTitleOwnsActiveWork(title)
+		? title.members[0].prefix
+		: title.prefix;
+}
+
+export function movieTitleOwnsActiveWork(
+	title: Pick<MovieTitle, 'workflow_state' | 'review_badge'>
+): boolean {
+	if (title.review_badge?.label?.trim()) return true;
+	const workflow = title.workflow_state;
+	if (!workflow) return false;
+	return ['processing', 'validate', 'promote', 'mixed', 'attention', 'blocked'].includes(
+		workflow.primary_lane ?? ''
+	);
 }
 
 export function movieCompositionDetail(title: MovieTitle): string | null {

@@ -543,12 +543,18 @@
 									{/if}
 								</p>
 							</div>
-							<a
-								class="primary-link"
-								href={resolve(folderRoutePath(moviePrimaryStudioPrefix(selectedTitle)))}
-							>
-								Open {selectedTitle.title} in Studio
-							</a>
+							{#if selectedTitle.details_loading}
+								<span class="primary-link primary-link--disabled" aria-disabled="true">
+									Loading Studio route…
+								</span>
+							{:else}
+								<a
+									class="primary-link"
+									href={resolve(folderRoutePath(moviePrimaryStudioPrefix(selectedTitle)))}
+								>
+									Open {selectedTitle.title} in Studio
+								</a>
+							{/if}
 						</div>
 
 						<div class="inspector-facts">
@@ -631,11 +637,12 @@
 											>
 										{/if}
 									</div>
-									{#if selectedTitle.members.length > 1}
-										<a class="member-link" href={resolve(folderRoutePath(member.prefix))}
-											>Open file in Studio</a
-										>
-									{/if}
+									<a
+										class="member-link"
+										href={resolve(folderRoutePath(member.prefix))}
+										aria-label={`Open ${memberLabel(member)} as an exact file in Studio`}
+										>Open exact file in Studio</a
+									>
 								</div>
 							{/each}
 						</section>
@@ -1067,6 +1074,13 @@
 		overflow-wrap: anywhere;
 		text-align: center;
 		white-space: normal;
+	}
+
+	.selection-command .primary-link--disabled {
+		background: var(--mf-bg-muted);
+		border-color: var(--mf-line);
+		color: var(--mf-fg-tertiary);
+		cursor: wait;
 	}
 
 	.inspector-facts {

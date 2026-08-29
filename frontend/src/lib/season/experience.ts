@@ -286,6 +286,12 @@ export interface ExpectedSizeChange {
 	bytes: number;
 }
 
+export interface ExactReviewSizeFacts {
+	currentSizeBytes: number;
+	estimatedOutputBytes: number | null;
+	estimatedSpaceSavedBytes: number | null;
+}
+
 export interface CompareRiskSummary {
 	verdict: string;
 	blocked: boolean;
@@ -298,6 +304,7 @@ export interface CompareRiskSummary {
 	topRiskDetail: string;
 	authority: string;
 	authorityDetail: string;
+	hasSavedDecision: boolean;
 	focusMoments: string[];
 	picture: CompareRiskFact;
 	sound: CompareRiskFact;
@@ -468,24 +475,31 @@ function riskTone(risk: QualityRiskPayload | null): HumanSeasonTone {
 	return 'quiet';
 }
 
-function riskAuthority(risk: QualityRiskPayload | null): { value: string; detail: string } {
+function riskAuthority(risk: QualityRiskPayload | null): {
+	value: string;
+	detail: string;
+	hasSavedDecision: boolean;
+} {
 	const decision = record(risk?.operator_decision);
 	const status = text(decision.status).toLowerCase();
 	if (status === 'rejected') {
 		return {
 			value: 'Not approved',
-			detail: 'This exact sample was most recently marked as not acceptable.'
+			detail: 'This exact sample was most recently marked as not acceptable.',
+			hasSavedDecision: true
 		};
 	}
 	if (status === 'approved') {
 		return {
 			value: 'Approved',
-			detail: 'A decision has been saved for this exact sample.'
+			detail: 'A decision has been saved for this exact sample.',
+			hasSavedDecision: true
 		};
 	}
 	return {
 		value: 'Not decided yet',
-		detail: 'No decision has been saved for this sample.'
+		detail: 'No decision has been saved for this sample.',
+		hasSavedDecision: false
 	};
 }
 
@@ -602,6 +616,7 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		topRiskDetail: topRiskCopy?.detail ?? 'Compare the selected moments before deciding.',
 		authority: authority.value,
 		authorityDetail: authority.detail,
+		hasSavedDecision: authority.hasSavedDecision,
 		focusMoments,
 		picture,
 		sound
@@ -789,6 +804,20 @@ export function expectedSizeChange(
 	if (deltaBytes > 0) return { direction: 'smaller', bytes: deltaBytes };
 	if (deltaBytes < 0) return { direction: 'larger', bytes: Math.abs(deltaBytes) };
 	return { direction: 'unchanged', bytes: 0 };
+}
+
+export function exactReviewSizeFacts(
+	currentBytes: number | null | undefined,
+	estimatedOutputBytes: number | null | undefined
+): ExactReviewSizeFacts {
+	const currentSizeBytes = numberValue(currentBytes);
+	const outputBytes = numberValue(estimatedOutputBytes);
+	const hasEstimate = outputBytes > 0;
+	return {
+		currentSizeBytes,
+		estimatedOutputBytes: hasEstimate ? outputBytes : null,
+		estimatedSpaceSavedBytes: hasEstimate ? Math.max(0, currentSizeBytes - outputBytes) : null
+	};
 }
 
 function formatQualityMemoryNumber(value: number | null | undefined): string {

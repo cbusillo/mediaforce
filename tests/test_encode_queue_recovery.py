@@ -9491,6 +9491,22 @@ raise SystemExit(0)
             {"label": "Refresh review", "tone": "warning"},
         )
 
+    def test_folder_review_badge_marks_pending_sample_plan_with_scope_neutral_copy(self) -> None:
+        web_app._save_pending_proposal(
+            self.config,
+            "tv/show-plan",
+            {"status": "pending_confirmation", "can_queue": True},
+        )
+
+        self.assertEqual(
+            web_app._folder_review_badge(self.config, "tv/show-plan"),
+            {
+                "label": "Sample plan ready",
+                "tone": "attention",
+                "detail": "A sample plan is waiting for review.",
+            },
+        )
+
     def test_folder_review_badge_prioritizes_active_sample_job(self) -> None:
         ready_dir = self.config.paths.review_dir / "run-active-sample" / "item-00"
         ready_dir.mkdir(parents=True, exist_ok=True)

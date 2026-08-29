@@ -1302,6 +1302,105 @@ async function checkSharedComparisonWorkspace(
   }
 }
 
+async function checkMovieTitleReviewRecovery(baseUrl, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
+    await page.goto(
+      `${baseUrl}/folders/movies/Review%20Ready/Feature.mkv`,
+      {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs,
+      },
+    );
+    const reviewAction = page.getByRole("link", {
+      name: "Review title sample",
+      exact: true,
+    });
+    await reviewAction.waitFor({ state: "visible", timeout: timeoutMs });
+    if ((await reviewAction.count()) !== 1) {
+      throw new Error("Exact-file recovery did not expose one title-review action.");
+    }
+    const duplicateActions = [
+      "Create sample",
+      "Set up sample",
+      "Set up another sample",
+    ];
+    const visibleDuplicateActions = await page.evaluate((labels) =>
+      Array.from(document.querySelectorAll("button"))
+        .filter((element) => {
+          const label = String(element.textContent ?? "").trim();
+          const rect = element.getBoundingClientRect();
+          return labels.includes(label) && rect.width > 0 && rect.height > 0;
+        })
+        .map((element) => String(element.textContent ?? "").trim()),
+      duplicateActions,
+    );
+    if (visibleDuplicateActions.length > 0) {
+      throw new Error(
+        `Exact-file recovery exposed duplicate sample actions: ${visibleDuplicateActions.join(", ")}`,
+      );
+    }
+    await reviewAction.click();
+    await page.waitForURL(/\/folders\/movies\/Review%20Ready(?:\?.*)?$/, {
+      timeout: timeoutMs,
+    });
+    await page
+      .getByRole("heading", { name: "Review Ready", exact: true })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+
+    for (const recovery of [
+      {
+        route: "/folders/movies/Validation%20Ready/Feature.mkv",
+        status: "Ready to check",
+      },
+      {
+        route: "/folders/movies/Replacement%20Ready%20Large/Feature.mkv",
+        status: "Ready to replace",
+      },
+    ]) {
+      await page.goto(`${baseUrl}${recovery.route}`, {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs,
+      });
+      await page
+        .getByText(recovery.status, { exact: true })
+        .first()
+        .waitFor({ state: "visible", timeout: timeoutMs });
+      await page
+        .getByRole("link", { name: "Open title workspace", exact: true })
+        .waitFor({ state: "visible", timeout: timeoutMs });
+      if (
+        (await page
+          .getByRole("link", { name: "Review title sample", exact: true })
+          .count()) > 0
+      ) {
+        throw new Error(
+          `${recovery.route} mislabeled non-review title work as sample review.`,
+        );
+      }
+    }
+
+    await page.goto(`${baseUrl}/folders/movies/Blocked%20Cleanup/Feature.mkv`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page
+      .getByText("The checked replacement is installed.", { exact: false })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    for (const staleAction of ["Review title sample", "Open title workspace"]) {
+      if ((await page.getByRole("link", { name: staleAction, exact: true }).count()) > 0) {
+        throw new Error(`Completed exact-file route exposed stale action: ${staleAction}`);
+      }
+    }
+    console.log("route ok: Movie exact-file recovery returns to title review");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -1785,6 +1884,7 @@ async function main() {
           args.routeTimeoutMs,
         );
       }
+      await checkMovieTitleReviewRecovery(targetUrl, args.routeTimeoutMs);
     }
     if (args.narrow) {
       await checkNarrowRoutes(

@@ -12,9 +12,11 @@ import {
 	movieSizeCapBlockView,
 	parseServerTimestamp,
 	parentSampleAppliesToExactItem,
+	parentTitleWorkView,
 	sampleStopResponseCopy
 } from './movie-studio-view';
 import type {
+	MovieTitle,
 	PlannedStreamPayload,
 	ResolvedOperatorIntentPayload,
 	StreamBudgetLedgerPayload
@@ -319,6 +321,197 @@ describe('parentSampleAppliesToExactItem', () => {
 				sample_item: { rel_path: 'movies/title/movie.mkv' }
 			})
 		).toBe(false));
+});
+
+describe('parentTitleWorkView', () => {
+	function parentTitle(overrides: Partial<MovieTitle> = {}, memberCount = 1): MovieTitle {
+		const member = {
+			item_id: 1,
+			prefix: 'movies/Example/Example.mkv',
+			rel_path: 'movies/Example/Example.mkv',
+			root: 'movies',
+			title_prefix: 'movies/Example',
+			title: 'Example',
+			scope_mode: 'title_folder' as const,
+			role: 'feature' as const,
+			label: 'Example',
+			status: 'discovered',
+			size_bytes: 10,
+			included_by_default: true,
+			exact_action_available: true,
+			promotion_conflicts: [],
+			details_loading: false
+		};
+		return {
+			prefix: 'movies/Example',
+			root: 'movies',
+			library_label: 'Movies',
+			availability: 'production',
+			policy: {},
+			title: 'Example',
+			scope_mode: 'title_folder',
+			item_count: memberCount,
+			feature_count: memberCount,
+			edition_count: memberCount,
+			extra_count: 0,
+			uncertain_count: 0,
+			included_item_count: memberCount,
+			total_size_bytes: memberCount * 10,
+			included_size_bytes: memberCount * 10,
+			savings_confidence: 'unavailable',
+			promotion_conflicts: [],
+			members: Array.from({ length: memberCount }, (_, index) => ({
+				...member,
+				item_id: index + 1,
+				prefix: index ? `movies/Example/Edition ${index + 1}.mkv` : member.prefix,
+				rel_path: index ? `movies/Example/Edition ${index + 1}.mkv` : member.rel_path
+			})),
+			details_loading: false,
+			...overrides
+		};
+	}
+
+	it.each([
+		[
+			'proposal',
+			{ review_badge: { label: 'Sample plan ready' } },
+			{ actionLabel: 'Open title workspace', statusLabel: 'Sample plan ready', reviewSample: false }
+		],
+		[
+			'pending review',
+			{ review_badge: { label: 'Review pending' } },
+			{
+				actionLabel: 'Review title sample',
+				statusLabel: 'Review at title level',
+				reviewSample: true
+			}
+		],
+		[
+			'accepted encode',
+			{ review_badge: { label: 'Approved draft' } },
+			{ actionLabel: 'Open title workspace', statusLabel: 'Approved draft', reviewSample: false }
+		],
+		[
+			'processing',
+			{
+				workflow_state: {
+					prefix: 'movies/Example',
+					state: 'processing',
+					primary_lane: 'processing',
+					label: '',
+					tone: 'active',
+					detail: '',
+					counts: {},
+					lane_counts: {},
+					state_counts: {},
+					next_action: {
+						kind: 'monitor_encode',
+						label: '',
+						enabled: true,
+						target_prefix: 'movies/Example'
+					},
+					blockers: []
+				}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Compressing', reviewSample: false }
+		],
+		[
+			'validate',
+			{
+				workflow_state: {
+					prefix: 'movies/Example',
+					state: 'ready_to_validate',
+					primary_lane: 'validate',
+					label: '',
+					tone: 'ready',
+					detail: '',
+					counts: {},
+					lane_counts: {},
+					state_counts: {},
+					next_action: {
+						kind: 'validate_outputs',
+						label: '',
+						enabled: true,
+						target_prefix: 'movies/Example'
+					},
+					blockers: []
+				}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Ready to check', reviewSample: false }
+		],
+		[
+			'promote',
+			{
+				workflow_state: {
+					prefix: 'movies/Example',
+					state: 'ready_to_promote',
+					primary_lane: 'promote',
+					label: '',
+					tone: 'ready',
+					detail: '',
+					counts: {},
+					lane_counts: {},
+					state_counts: {},
+					next_action: {
+						kind: 'promote_outputs',
+						label: '',
+						enabled: true,
+						target_prefix: 'movies/Example'
+					},
+					blockers: []
+				}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Ready to replace', reviewSample: false }
+		]
+	] as const)(
+		'routes applicable parent %s work to truthful title-level copy',
+		(_state, overrides, expected) => {
+			expect(
+				parentTitleWorkView(
+					'movies/Example/Example.mkv',
+					parentTitle(overrides as Partial<MovieTitle>),
+					false
+				)
+			).toMatchObject(expected);
+		}
+	);
+
+	it('keeps idle, completed, and unrelated multi-file title work on the exact-file route', () => {
+		expect(parentTitleWorkView('movies/Example/Example.mkv', parentTitle(), false)).toBeNull();
+		expect(
+			parentTitleWorkView(
+				'movies/Example/Example.mkv',
+				parentTitle({
+					workflow_state: {
+						prefix: 'movies/Example',
+						state: 'complete',
+						primary_lane: 'complete',
+						label: 'Finished',
+						tone: 'success',
+						detail: '',
+						counts: {},
+						lane_counts: {},
+						state_counts: {},
+						next_action: {
+							kind: 'none',
+							label: '',
+							enabled: false,
+							target_prefix: 'movies/Example'
+						},
+						blockers: []
+					}
+				}),
+				false
+			)
+		).toBeNull();
+		expect(
+			parentTitleWorkView(
+				'movies/Example/Example.mkv',
+				parentTitle({ review_badge: { label: 'Review pending' } }, 2),
+				false
+			)
+		).toBeNull();
+	});
 });
 
 describe('movieReviewStatusLabel', () => {
