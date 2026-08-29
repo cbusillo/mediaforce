@@ -4,7 +4,7 @@
 	import { onMount, tick } from 'svelte';
 
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
-	import ComparisonWorkspace from '$lib/components/season/ComparisonWorkspace.svelte';
+	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import type {
 		CompressionIntentLevel,
@@ -15,7 +15,9 @@
 		QualityRiskTag
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
-	import { clampMomentIndex, reviewPairHasSound } from '$lib/season/comparison';
+	import { reviewAvailability } from '$lib/review/availability';
+	import { clampMomentIndex, reviewPairHasSound } from '$lib/review/comparison';
+	import { reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
@@ -43,7 +45,6 @@
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
 		measuredFollowupRequest,
-		normalizeReviewPairs,
 		overlappingCalibrationActivity,
 		plainFailureMessage,
 		predictedEpisodeSize,
@@ -53,7 +54,6 @@
 		reviewFeedbackRequest,
 		reviewAdjustmentIntent,
 		reviewSizeAdjustment,
-		reviewSampleSizes,
 		scopedEncodeProgress,
 		seasonIdentity,
 		seasonEpisodeNavigationUnavailable,
@@ -274,11 +274,10 @@
 		((folder.sample_host_options ?? []) as HostOption[]).filter((host) => host.key)
 	);
 	const sampleItem = $derived(asRecord(folder.sample_item));
-	const sampleHasAudio = $derived(
-		Array.isArray(sampleItem.audio_summary) && sampleItem.audio_summary.length > 0
-	);
+	const sampleHasAudio = $derived(reviewSourceHasAudio(folder));
 	const sampleEpisode = $derived(episodeLabel(asText(sampleItem.rel_path)));
-	const reviewPairs = $derived(normalizeReviewPairs(folder));
+	const review = $derived(reviewAvailability(folder));
+	const reviewPairs = $derived(review.pairs);
 	const displayedMoment = $derived(clampMomentIndex(selectedMoment, reviewPairs.length));
 	const currentPair = $derived(reviewPairs[displayedMoment]);
 	const reviewHasSound = $derived(reviewPairHasSound(currentPair));
@@ -2063,14 +2062,14 @@
 						pairs={reviewPairs}
 						selectedMoment={displayedMoment}
 						{audioChoice}
-						episodeLabel={sampleEpisode}
+						reviewScopeLabel={sampleEpisode}
 						originalClipLabel={actualSampleSizes.original
 							? `${formatDecimalFileSize(actualSampleSizes.original)} clip`
 							: 'Clip size unavailable'}
 						sampleClipLabel={actualSampleSizes.smaller
 							? `${formatDecimalFileSize(actualSampleSizes.smaller)} clip`
 							: 'Clip size unavailable'}
-						episodeEstimateLabel={expectedEpisodeBytes
+						estimatedOutputLabel={expectedEpisodeBytes
 							? `about ${formatDecimalFileSize(expectedEpisodeBytes)}`
 							: ''}
 						canCreateSoundSample={sampleHasAudio}
@@ -2081,8 +2080,16 @@
 					/>
 				{:else}
 					<div class="missing-media">
-						<h2>The sample finished, but the comparison clips are missing.</h2>
-						<p>Nothing was replaced. Create the sample again to rebuild the comparison.</p>
+						<h2>{review.recovery?.title ?? 'The comparison clips are unavailable'}</h2>
+						<p>
+							{review.recovery?.detail ??
+								'Nothing was replaced. Create the sample again to rebuild the comparison.'}
+						</p>
+						{#if review.canDownload}
+							<button class="detail-download" type="button" onclick={downloadComparison}>
+								Download combined comparison
+							</button>
+						{/if}
 					</div>
 				{/if}
 
@@ -3032,7 +3039,7 @@
 							>
 						</div>{/if}
 				</div>
-				{#if reviewPairs.length}
+				{#if review.canDownload}
 					<button class="detail-download" type="button" onclick={downloadComparison}>
 						Download the combined comparison
 					</button>

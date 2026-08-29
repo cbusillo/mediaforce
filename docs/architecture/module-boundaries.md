@@ -474,6 +474,15 @@ Guidance:
 - `frontend/src/lib/components/settings/SettingsEditor.svelte`
   - split further only if settings UI grows again
 
+### Shared review workspace
+
+- `frontend/src/lib/review/`
+  - scope-neutral review-pair normalization, availability/recovery derivation,
+    sample-size summaries, and synchronized comparison helpers
+- `frontend/src/lib/components/review/ComparisonWorkspace.svelte`
+  - shared browser comparison surface for TV, Movies, and Other
+  - receives scope-neutral labels and callbacks; owns synchronized media playback
+
 ## Extraction heuristics
 
 Consider extracting a file when any of these is true:

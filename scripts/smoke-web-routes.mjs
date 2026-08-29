@@ -1044,9 +1044,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       waitUntil: "domcontentloaded",
       timeout: timeoutMs,
     });
-    const openButton = page.getByRole("button", {
-      name: "Compare in full screen",
-    });
+    const openButton = page.getByRole("button", { name: "Compare clips" });
     await openButton.waitFor({ state: "visible", timeout: timeoutMs });
     await openButton.click();
     const workspace = page.getByRole("dialog", {
@@ -1080,7 +1078,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
     for (const expectedText of [
       "Sample",
       "Clip sizes only.",
-      "Estimated episode output:",
+      "Estimated output:",
     ]) {
       if (!state.text.includes(expectedText)) {
         throw new Error(`Comparison workspace omitted: ${expectedText}`);
@@ -1093,8 +1091,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
     }
     await workspace.getByRole("button", { name: "Close comparison" }).click();
     await page.waitForFunction(
-      () =>
-        document.activeElement?.textContent?.includes("Compare in full screen"),
+      () => document.activeElement?.textContent?.includes("Compare clips"),
       undefined,
       { timeout: timeoutMs },
     );
@@ -1254,6 +1251,52 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       );
     }
     console.log("route ok: Full-screen comparison workspace");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkSharedComparisonWorkspace(
+  baseUrl,
+  route,
+  label,
+  sectionLabel,
+  timeoutMs,
+) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
+    await page.goto(`${baseUrl}${route}`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    const reviewSection = page.getByLabel(sectionLabel);
+    const openButton = reviewSection.getByRole("button", {
+      name: "Compare clips",
+      exact: true,
+    });
+    await openButton.click({ timeout: timeoutMs });
+    const workspace = page.getByRole("dialog", { name: /Compare picture/ });
+    await workspace.waitFor({ state: "visible", timeout: timeoutMs });
+    await workspace.getByRole("button", { name: "Close comparison" }).click();
+    await page.waitForFunction(
+      () => document.activeElement?.textContent?.includes("Compare clips"),
+      undefined,
+      { timeout: timeoutMs },
+    );
+    const bodyOverflow = await page.evaluate(() => document.body.style.overflow);
+    if (bodyOverflow) {
+      throw new Error(`${label} comparison left body scrolling locked`);
+    }
+    await reviewSection
+      .getByRole("button", {
+        name: "Download combined comparison",
+        exact: true,
+      })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    console.log(`route ok: ${label} inline comparison workspace`);
   } finally {
     await browser.close();
   }
@@ -1730,6 +1773,18 @@ async function main() {
         reviewReadyFixture.route,
         args.routeTimeoutMs,
       );
+      for (const [label, route, sectionLabel] of [
+        ["Movie Studio", "/folders/movies/Review%20Ready", "Movie comparison"],
+        ["Other Studio", "/folders/other/Review%20Ready", "Folder comparison"],
+      ]) {
+        await checkSharedComparisonWorkspace(
+          targetUrl,
+          route,
+          label,
+          sectionLabel,
+          args.routeTimeoutMs,
+        );
+      }
     }
     if (args.narrow) {
       await checkNarrowRoutes(

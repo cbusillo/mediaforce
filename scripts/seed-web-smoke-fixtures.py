@@ -2393,7 +2393,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio review-ready fixture",
                 "route": "/folders/movies/Review%20Ready",
                 "marker": "Review Ready",
-                "stageMarker": "Download comparison clips",
+                "stageMarker": "Compare clips",
             },
             {
                 "label": "Movie Studio promotion-conflict fixture",

@@ -42,7 +42,6 @@ import {
 	isSizeGoalSelectionConfirmed,
 	measuredFollowupRequest,
 	librarySeasonState,
-	normalizeReviewPairs,
 	normalizedSizePaceBytes,
 	overlappingCalibrationActivity,
 	plainFailureMessage,
@@ -52,7 +51,6 @@ import {
 	reviewFeedbackRequest,
 	reviewAdjustmentIntent,
 	reviewSizeAdjustment,
-	reviewSampleSizes,
 	scopedEncodeProgress,
 	seasonIdentity,
 	seasonEpisodeNavigationUnavailable,
@@ -68,6 +66,7 @@ import {
 	technicalVideoPolicy,
 	withCompressionIntent
 } from './experience';
+import { normalizeReviewPairs, reviewSampleSizes } from '$lib/review/pairs';
 
 const card: FolderCard = {
 	prefix: 'tv/Big Brother (US)/Season 19',
@@ -344,6 +343,15 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 		},
 		...overrides
 	};
+}
+
+function browserReadyReviewPairs(): Array<Record<string, unknown>> {
+	return [
+		{
+			source_clip: { path: '/review/source.mp4', duration_seconds: 8, size_bytes: 100 },
+			preview_clip: { path: '/review/preview.mp4', duration_seconds: 8, size_bytes: 25 }
+		}
+	];
 }
 
 function qualityMemoryPayload(): FolderQualityMemoryPayload {
@@ -1234,7 +1242,8 @@ describe('season experience translation', () => {
 					calibration: {
 						draft_hash: 'draft-1',
 						accepted_draft_hash: null,
-						browser_review_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					workflow_state: {
 						prefix: card.prefix,
@@ -1267,7 +1276,8 @@ describe('season experience translation', () => {
 					calibration: {
 						draft_hash: 'draft-1',
 						accepted_draft_hash: 'draft-1',
-						browser_review_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					encode_job: {
 						job_id: 'job-1',
@@ -1320,7 +1330,8 @@ describe('season experience translation', () => {
 						job_id: 'sample-new',
 						draft_hash: 'draft-new',
 						accepted_draft_hash: null,
-						browser_review_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					calibration_job: {
 						job_id: 'sample-new',
@@ -1381,7 +1392,8 @@ describe('season experience translation', () => {
 						job_id: 'sample-1',
 						draft_hash: 'draft-1',
 						accepted_draft_hash: 'draft-1',
-						review_media_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					review_gate: { status: 'accepted', can_confirm_full: true },
 					quality_risk: {
@@ -1401,7 +1413,8 @@ describe('season experience translation', () => {
 						job_id: 'sample-1',
 						draft_hash: 'draft-with-refreshed-metadata',
 						accepted_draft_hash: 'original-draft',
-						review_media_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					review_gate: { status: 'accepted', can_confirm_full: true },
 					quality_risk: {
@@ -1412,6 +1425,41 @@ describe('season experience translation', () => {
 				status
 			)
 		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
+	});
+
+	it('keeps an approved sample ready when only legacy review media remains', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: true,
+						compare_clips: [{ path: '/review/compare.mov' }]
+					},
+					review_gate: { status: 'accepted', can_confirm_full: true }
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
+	});
+
+	it('requires a fresh sample when legacy approval no longer matches review media', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: false
+					},
+					review_gate: { status: 'missing_review_media', can_confirm_full: false }
+				}),
+				status
+			)
+		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
 	});
 
 	it.each([

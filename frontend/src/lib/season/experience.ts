@@ -20,6 +20,7 @@ import type {
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
 import { formatFileSize as formatOperatorFileSize } from '$lib/format';
+import { reviewAvailability } from '$lib/review/availability';
 
 export type HumanSeasonStateKey =
 	| 'needs_test'
@@ -283,25 +284,6 @@ export interface SizeTargetAnalysis {
 export interface ExpectedSizeChange {
 	direction: 'smaller' | 'larger' | 'unchanged';
 	bytes: number;
-}
-
-export interface ReviewClip {
-	path: string;
-	timestampSeconds: number;
-	durationSeconds: number;
-	sizeBytes: number;
-	audio: ReviewAudio | null;
-}
-
-export interface ReviewAudio {
-	trustworthy: boolean;
-	role: 'original' | 'new' | '';
-}
-
-export interface ReviewPair {
-	source: ReviewClip;
-	preview: ReviewClip;
-	comparePath: string;
 }
 
 export interface CompareRiskSummary {
@@ -1986,8 +1968,8 @@ export function detailSeasonState(
 			recoveryKind: 'test'
 		};
 	}
-	const reviewReady =
-		booleanValue(calibration.browser_review_ready) || booleanValue(calibration.review_media_ready);
+	const review = reviewAvailability(folder);
+	const reviewReady = review.isBrowserReady;
 	const currentRisk = qualityRisk(folder);
 	const currentRiskStatus = text(record(currentRisk?.operator_decision).status).toLowerCase();
 	const currentRiskBlocksApproval =
@@ -1995,15 +1977,29 @@ export function detailSeasonState(
 		['rejected', 'needs_operator_review'].includes(currentRiskStatus);
 	const currentDraftIsApproved =
 		!currentRiskBlocksApproval &&
+		reviewGateStatus !== 'missing_review_media' &&
 		(booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash));
+	if (currentDraftIsApproved) {
+		return {
+			key: 'ready_to_make',
+			label: 'Sample approved',
+			detail: exactEpisode
+				? 'This episode can be compressed.'
+				: 'The rest of the season can be compressed.',
+			tone: 'ready'
+		};
+	}
 	if (
+		review.recovery ||
 		reviewGateStatus === 'missing_review_media' ||
 		(priorTestJobId && !draftHash && !reviewReady)
 	) {
 		return {
 			key: 'needs_help',
 			label: 'Sample needs retry',
-			detail: 'The previous sample ended before its comparison clips were ready.',
+			detail:
+				review.recovery?.detail ??
+				'The previous sample ended before its comparison clips were ready.',
 			tone: 'attention',
 			recoveryKind: 'test'
 		};
@@ -2016,66 +2012,12 @@ export function detailSeasonState(
 			tone: 'ready'
 		};
 	}
-	if (currentDraftIsApproved) {
-		return {
-			key: 'ready_to_make',
-			label: 'Sample approved',
-			detail: exactEpisode
-				? 'This episode can be compressed.'
-				: 'The rest of the season can be compressed.',
-			tone: 'ready'
-		};
-	}
 	return {
 		key: 'needs_test',
 		label: 'Needs sample',
 		detail: 'Choose a size, then compare one sample first.',
 		tone: 'quiet'
 	};
-}
-
-export function normalizeReviewPairs(folder: FolderPayload): ReviewPair[] {
-	const calibration = record(folder.calibration);
-	return records(calibration.review_pairs)
-		.map((pair) => {
-			const source = record(pair.source_clip);
-			const preview = record(pair.preview_clip);
-			const compare = record(pair.compare_clip);
-			const sourceAudio = record(source.audio);
-			const previewAudio = record(preview.audio);
-			return {
-				source: {
-					path: text(source.path),
-					timestampSeconds: numberValue(source.timestamp_seconds),
-					durationSeconds: numberValue(source.duration_seconds),
-					sizeBytes: numberValue(source.size_bytes),
-					audio: Object.keys(sourceAudio).length
-						? {
-								trustworthy: booleanValue(sourceAudio.trustworthy),
-								role: reviewAudioRole(sourceAudio.role)
-							}
-						: null
-				},
-				preview: {
-					path: text(preview.path),
-					timestampSeconds: numberValue(preview.timestamp_seconds),
-					durationSeconds: numberValue(preview.duration_seconds),
-					sizeBytes: numberValue(preview.size_bytes),
-					audio: Object.keys(previewAudio).length
-						? {
-								trustworthy: booleanValue(previewAudio.trustworthy),
-								role: reviewAudioRole(previewAudio.role)
-							}
-						: null
-				},
-				comparePath: text(compare.path)
-			};
-		})
-		.filter((pair) => pair.source.path && pair.preview.path);
-}
-
-function reviewAudioRole(value: unknown): ReviewAudio['role'] {
-	return value === 'original' || value === 'new' ? value : '';
 }
 
 export function predictedEpisodeSize(folder: FolderPayload): number {
@@ -2101,26 +2043,6 @@ export function folderSizeTargetAnalysis(folder: FolderPayload): SizeTargetAnaly
 		lowerBoundBytes: numberValue(analysis.lower_bound_bytes),
 		upperBoundBytes: numberValue(analysis.upper_bound_bytes),
 		predictedToBudgetRatio: numberValue(analysis.predicted_to_budget_ratio)
-	};
-}
-
-export function reviewSampleSizes(folder: FolderPayload): {
-	original: number;
-	smaller: number;
-	durationSeconds: number;
-	ratioPercent: number;
-} {
-	const totals = normalizeReviewPairs(folder).reduce(
-		(total, pair) => ({
-			original: total.original + pair.source.sizeBytes,
-			smaller: total.smaller + pair.preview.sizeBytes,
-			durationSeconds: total.durationSeconds + pair.source.durationSeconds
-		}),
-		{ original: 0, smaller: 0, durationSeconds: 0 }
-	);
-	return {
-		...totals,
-		ratioPercent: totals.original > 0 ? Math.round((totals.smaller / totals.original) * 100) : 0
 	};
 }
 

@@ -13,6 +13,9 @@
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
 	import { safeOperatorErrorCopy } from '$lib/operator-copy';
+	import { reviewAvailability } from '$lib/review/availability';
+	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
+	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import {
 		folderActionResponseCopy,
 		noteAfterPrepareAgain,
@@ -72,6 +75,8 @@
 	let checkedPreviewError = $state('');
 	let checkedPreviewVideoReady = $state(false);
 	let checkedPreviewRequestId = 0;
+	let selectedReviewMoment = $state(0);
+	let reviewAudioChoice = $state<'original' | 'new'>('new');
 
 	const context = $derived(folder.movie_context ?? null);
 	const title = $derived(
@@ -152,12 +157,20 @@
 	);
 	const isBusy = $derived(Boolean(pendingAction));
 	const conflicts = $derived(context?.promotion_conflicts ?? []);
-	const reviewReady = $derived(
-		Boolean(
-			calibration.review_media_ready ||
-			calibration.browser_review_ready ||
-			calibration.compare_clips
-		)
+	const review = $derived(reviewAvailability(folder));
+	const reviewReady = $derived(review.isBrowserReady);
+	const reviewSample = $derived(reviewSampleSizes(folder));
+	const reviewSourceHasSound = $derived(reviewSourceHasAudio(folder));
+	const reviewLabel = $derived(reviewSourceLabel(folder, title));
+	const reviewEstimatedOutput = $derived(
+		movieGoalFacts.expectedOutput === 'Unknown' ? '' : `about ${movieGoalFacts.expectedOutput}`
+	);
+	const reviewRecovery = $derived(
+		!isComplete &&
+			reviewGate.status !== 'accepted' &&
+			!sampleWorkActive &&
+			!currentWork &&
+			review.recovery
 	);
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
@@ -811,6 +824,24 @@
 			{/each}
 		</div>
 	{/if}
+	{#if reviewRecovery}
+		<div class="notice notice--danger" role="alert">
+			<strong>{reviewRecovery.title}</strong><span>{reviewRecovery.detail}</span>
+			{#if !isBrowseOnly}
+				<button
+					class="secondary"
+					type="button"
+					disabled={isBusy || !hostOptions.length}
+					onclick={prepareSample}>Prepare another sample</button
+				>
+			{/if}
+			{#if review.canDownload}
+				<button class="secondary" type="button" onclick={downloadReviewPack}
+					>Download combined comparison</button
+				>
+			{/if}
+		</div>
+	{/if}
 
 	<section class:movie-facts--limited={isComplete} class="movie-facts" aria-label="Movie facts">
 		<div><span>Runtime</span><strong>{movieGoalFacts.duration}</strong></div>
@@ -830,6 +861,36 @@
 			</div>
 		{/if}
 	</section>
+	{#if reviewReady}
+		<section class="review-workspace" aria-label="Movie comparison">
+			<ComparisonWorkspace
+				pairs={review.pairs}
+				selectedMoment={selectedReviewMoment}
+				audioChoice={reviewAudioChoice}
+				reviewScopeLabel={reviewLabel}
+				originalClipLabel={reviewSample.original
+					? `${formatMovieBytes(reviewSample.original)} clip`
+					: 'Clip size unavailable'}
+				sampleClipLabel={reviewSample.smaller
+					? `${formatMovieBytes(reviewSample.smaller)} clip`
+					: 'Clip size unavailable'}
+				estimatedOutputLabel={reviewEstimatedOutput}
+				canCreateSoundSample={reviewSourceHasSound}
+				soundSampleDisabled={isBrowseOnly || isBusy || !hostOptions.length}
+				soundSampleActionLabel="Prepare a sample with sound"
+				onMomentChange={(index) => (selectedReviewMoment = index)}
+				onAudioChange={(side) => (reviewAudioChoice = side)}
+				onRequestSoundSample={() => void prepareSample()}
+			/>
+			{#if review.canDownload}
+				<button
+					class="secondary review-workspace__download"
+					type="button"
+					onclick={downloadReviewPack}>Download combined comparison</button
+				>
+			{/if}
+		</section>
+	{/if}
 
 	<div class="studio-grid">
 		<div class="studio-grid__main">
@@ -999,9 +1060,6 @@
 											>{exactScope ? 'Compress this file' : 'Compress the whole title'}</button
 										>
 									{:else}
-										<button class="secondary" type="button" onclick={downloadReviewPack}
-											>Compare clips</button
-										>
 										<button class="primary" disabled={isBusy} onclick={approveSample}
 											>Approve sample</button
 										>
@@ -1243,11 +1301,6 @@
 											? 'Set up revised sample'
 											: 'Set up sample'}</button
 								>
-								{#if reviewReady}
-									<button class="secondary" type="button" onclick={downloadReviewPack}
-										>Download comparison clips</button
-									>
-								{/if}
 							</div>
 						</div>
 					</details>
@@ -1316,6 +1369,14 @@
 		margin: 0 auto;
 		max-width: 1360px;
 		padding: 24px 28px 56px;
+	}
+
+	.review-workspace {
+		margin-top: 18px;
+	}
+
+	.review-workspace__download {
+		margin-top: 10px;
 	}
 
 	.breadcrumb {

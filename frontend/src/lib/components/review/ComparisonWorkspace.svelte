@@ -22,8 +22,8 @@
 		type ComparisonLayout,
 		type ComparisonScale,
 		type ComparisonSide
-	} from '$lib/season/comparison';
-	import type { ReviewPair } from '$lib/season/experience';
+	} from '$lib/review/comparison';
+	import type { ReviewPair } from '$lib/review/pairs';
 
 	const DECODER_WARMUP_MS = 350;
 	const MEDIA_PLAYING_TIMEOUT_MS = 1200;
@@ -33,12 +33,13 @@
 		pairs,
 		selectedMoment,
 		audioChoice,
-		episodeLabel,
+		reviewScopeLabel,
 		originalClipLabel,
 		sampleClipLabel,
-		episodeEstimateLabel,
+		estimatedOutputLabel,
 		canCreateSoundSample,
 		soundSampleDisabled,
+		soundSampleActionLabel = 'Create a sample with sound',
 		onMomentChange,
 		onAudioChange,
 		onRequestSoundSample
@@ -46,12 +47,13 @@
 		pairs: ReviewPair[];
 		selectedMoment: number;
 		audioChoice: ComparisonSide;
-		episodeLabel: string;
+		reviewScopeLabel: string;
 		originalClipLabel: string;
 		sampleClipLabel: string;
-		episodeEstimateLabel: string;
+		estimatedOutputLabel: string;
 		canCreateSoundSample: boolean;
 		soundSampleDisabled: boolean;
+		soundSampleActionLabel?: string;
 		onMomentChange: (index: number) => void;
 		onAudioChange: (side: ComparisonSide) => void;
 		onRequestSoundSample: () => void;
@@ -88,6 +90,7 @@
 	let sourceError = $state(false);
 	let previewError = $state(false);
 	let previousBodyOverflow = '';
+	let returnScrollY = 0;
 	let scrollSyncPending = false;
 	let mediaGeneration = 0;
 	let playbackSequence = 0;
@@ -182,6 +185,8 @@
 
 	function openWorkspace(event: MouseEvent) {
 		returnFocus = event.currentTarget as HTMLElement;
+		returnScrollY = window.scrollY;
+		workspaceElement?.scrollIntoView({ block: 'start', inline: 'nearest' });
 		layout = 'side_by_side';
 		visibleSide = 'new';
 		scale = 'fit';
@@ -218,7 +223,10 @@
 		isOpen = false;
 		nativeFullscreen = false;
 		document.body.style.overflow = previousBodyOverflow;
-		void tick().then(() => returnFocus?.focus());
+		void tick().then(() => {
+			returnFocus?.focus({ preventScroll: true });
+			window.scrollTo({ top: returnScrollY });
+		});
 	}
 
 	async function togglePlayback() {
@@ -650,7 +658,7 @@
 			{#if isOpen}
 				<header class="workspace-header">
 					<div>
-						<span class="workspace-kicker">{episodeLabel}</span>
+						<span class="workspace-kicker">{reviewScopeLabel}</span>
 						<h2>{workspaceTitle}</h2>
 					</div>
 					<div class="workspace-moments" role="group" aria-label="Comparison clips">
@@ -821,8 +829,7 @@
 				</div>
 			</div>
 			<p class="clip-size-caption">
-				Clip sizes only.{#if episodeEstimateLabel}
-					Estimated episode output: {episodeEstimateLabel}.{/if}
+				Clip sizes only.{#if estimatedOutputLabel}&nbsp;Estimated output: {estimatedOutputLabel}.{/if}
 			</p>
 
 			<footer class="workspace-controls" aria-label="Comparison playback controls">
@@ -901,7 +908,7 @@
 				</div>
 			{/if}
 			<div class="entry-action">
-				<button type="button" onclick={openWorkspace}>Compare in full screen</button>
+				<button type="button" onclick={openWorkspace}>Compare clips</button>
 				<small>Opens side by side, paused. Nothing is changed.</small>
 			</div>
 		</div>
@@ -910,11 +917,11 @@
 				<p>
 					{canCreateSoundSample
 						? 'These clips show picture only. Another sample is needed to compare sound.'
-						: 'This episode does not have sound to compare.'}
+						: 'These clips do not include sound you can compare.'}
 				</p>
 				{#if canCreateSoundSample}
 					<button type="button" onclick={onRequestSoundSample} disabled={soundSampleDisabled}>
-						Create a sample with sound
+						{soundSampleActionLabel}
 					</button>
 				{/if}
 			</div>

@@ -74,7 +74,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   would repeat and routes the operator to a fresh settings review.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
   review media, explicit target/band/sample-byte facts, picture/sound risk, and
-  trustworthy sound metadata for the focused comparison workspace.
+  trustworthy sound metadata for the shared review comparison workspace. Verify
+  the same inline `Compare clips` control on a review-ready Movie and Other
+  fixture; the combined comparison remains a separately labeled download.
 - Absolute-target state: `/folders/tv/Absolute%20Goal/Season%201`, proving an
   explicit 225 MB episode goal remains 225 MB for an 88-minute episode.
 - Under- and over-target states: `/folders/tv/Undershoot%20Show/Season%201` and
@@ -191,11 +193,14 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Promotion%20Ready/Season%201`: promotion-ready state.
 - `/folders/tv/Finished%20Show/Season%201`: completed state.
 - `/movies`: Movie Library priority, scope, and replacement-conflict language.
-- `/folders/movies/Editions%20Showcase`: Movie Studio sample setup and whole-title scope.
-- `/folders/movies/Loose%20Feature.mkv`: Movie Studio sample-waiting and one-file scope.
+- `/folders/movies/Editions%20Showcase`: Movie Studio sample setup and
+  whole-title scope.
+- `/folders/movies/Loose%20Feature.mkv`: Movie Studio sample-waiting and
+  one-file scope.
 - `/folders/movies/Review%20Ready`: Movie Studio comparison-clips-ready state.
 - `/folders/movies/Validation%20Ready`: Movie Studio check-ready state.
-- `/folders/movies/Replacement%20Ready%20Large`: Movie Studio replacement-ready state.
+- `/folders/movies/Replacement%20Ready%20Large`: Movie Studio
+  replacement-ready state.
 - `/other`: Other Library folder/file language and mapped workflow states.
 - `/folders/other/Field%20Notes`: Other Studio sample setup and inclusion state.
 - `/folders/other/Sampling%20Folder`: Other Studio sample-waiting state.
@@ -251,13 +256,16 @@ distinguish review-clip byte savings from the full-episode estimate, make anothe
 same-target measured test the primary action, and require an explicit warning
 that accepting the tradeoff saves the profile and queues the full folder encode.
 
-When review media is ready, `Compare in full screen` must open paused in `Side by
-side` and `Fit`. `One at a time` must switch between `Original` and `Sample` without
-changing the selected moment, playback position, or picture position. Sound
-controls appear only when both clips carry trustworthy sound metadata; legacy or
-silent clips must say they show picture only and offer a plain-language path to
-create another sample when the source has sound. The normal UI must not expose codec,
-quality-score, synchronization, or other implementation vocabulary.
+When valid browser-ready review pairs are available, `Compare clips` must open
+paused in `Side by side` and `Fit`. `One at a time` must switch between
+`Original` and `Sample` without changing the selected moment, playback position,
+or picture position. Sound controls appear only when both clips carry trustworthy
+sound metadata; legacy or silent clips must say they show picture only and offer
+a plain-language path to create another sample when the source has sound. Purged,
+missing, and legacy-download-only review media must explain that inline comparison
+is unavailable instead of treating `review_media_ready` as browser authority. The
+normal UI must not expose codec, quality-score, synchronization, or other
+implementation vocabulary.
 
 Playback uses the new clip as the comparison clock. Dragging the timeline may
 preview the requested position, but each committed seek must update both clips
