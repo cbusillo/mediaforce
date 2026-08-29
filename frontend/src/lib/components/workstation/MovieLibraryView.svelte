@@ -631,11 +631,9 @@
 											>
 										{/if}
 									</div>
-									{#if selectedTitle.members.length > 1}
-										<a class="member-link" href={resolve(folderRoutePath(member.prefix))}
-											>Open file in Studio</a
-										>
-									{/if}
+									<a class="member-link" href={resolve(folderRoutePath(member.prefix))}
+										>Open exact file in Studio</a
+									>
 								</div>
 							{/each}
 						</section>

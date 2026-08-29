@@ -2,6 +2,7 @@ import type {
 	CalibrationJobPayload,
 	EncodeQueueJob,
 	EncodeQueueSummary,
+	MovieTitle,
 	QualityRiskPayload,
 	RepresentativeSampleItemPayload,
 	ResolvedOperatorIntentPayload,
@@ -9,6 +10,7 @@ import type {
 	StreamBudgetLedgerPayload
 } from '$lib/api/types';
 import { formatFileSize } from '$lib/format';
+import { movieTitleOwnsActiveWork } from '$lib/movies/library';
 
 export interface MovieCurrentWorkView {
 	label: string;
@@ -130,6 +132,19 @@ export function parentSampleAppliesToExactItem(
 	}
 	const sampleItem = overlappingJob.sample_item;
 	return sampleItem?.rel_path === exactPrefix;
+}
+
+export function parentTitleReviewActionApplies(
+	exactPrefix: string,
+	parentTitle: MovieTitle | null | undefined,
+	inheritedParentSample: boolean
+): boolean {
+	return Boolean(
+		parentTitle &&
+		parentTitle.prefix !== exactPrefix &&
+		movieTitleOwnsActiveWork(parentTitle) &&
+		(parentTitle.members.length === 1 || inheritedParentSample)
+	);
 }
 
 export function movieReviewStatusLabel(status: unknown, inheritedParentSample = false): string {

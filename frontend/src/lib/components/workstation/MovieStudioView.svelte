@@ -36,6 +36,7 @@
 		movieSampleSetupResult,
 		movieSizeCapBlockView,
 		parentSampleAppliesToExactItem,
+		parentTitleReviewActionApplies,
 		sampleStopResponseCopy
 	} from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
@@ -181,9 +182,14 @@
 		)
 	);
 	const exactScope = $derived(folder.media_scope.match === 'exact_item');
-	const parentTitlePrefix = $derived(asText(folder.media_scope.parent?.prefix));
+	const parentTitlePrefix = $derived(
+		asText(context?.prefix) || asText(folder.media_scope.parent?.prefix)
+	);
 	const parentTitleHref = $derived(
 		parentTitlePrefix ? resolve(folderRoutePath(parentTitlePrefix)) : resolve('/movies')
+	);
+	const parentTitleReviewAction = $derived(
+		exactScope && parentTitleReviewActionApplies(folder.prefix, context, inheritedParentSample)
 	);
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
@@ -195,7 +201,8 @@
 			reviewGate.status !== 'accepted' &&
 			!reviewReady &&
 			!pendingProposalCanQueue &&
-			!sampleWorkActive
+			!sampleWorkActive &&
+			!parentTitleReviewAction
 	);
 	const workflowDisplayLabel = $derived(
 		isComplete
@@ -212,16 +219,18 @@
 							? 'Sample plan is out of date'
 							: pendingProposalCanQueue
 								? 'Sample plan ready'
-								: reviewReady && reviewGate.status !== 'accepted'
-									? 'Ready to review'
-									: needsReviewSample
-										? 'Needs a sample'
-										: movieWorkflowLabel({
-												workflow_state: workflow,
-												promotion_conflicts: conflicts,
-												details_loading: folderPending,
-												availability: context?.availability ?? 'production'
-											})
+								: parentTitleReviewAction
+									? 'Review at title level'
+									: reviewReady && reviewGate.status !== 'accepted'
+										? 'Ready to review'
+										: needsReviewSample
+											? 'Needs a sample'
+											: movieWorkflowLabel({
+													workflow_state: workflow,
+													promotion_conflicts: conflicts,
+													details_loading: folderPending,
+													availability: context?.availability ?? 'production'
+												})
 	);
 
 	$effect(() => {
@@ -548,6 +557,7 @@
 		| 'current-work'
 		| 'complete'
 		| 'none' {
+		if (parentTitleReviewAction) return 'review-title-sample';
 		if (isComplete) return 'complete';
 		if (isBrowseOnly) return 'none';
 		if (currentWork) return 'current-work';
@@ -559,9 +569,6 @@
 		if (workflow?.next_action.kind === 'promote_outputs') return 'promote';
 		if (pendingProposalIsStale) return 'prepare-again';
 		if (hasPendingProposal && pendingProposalCanQueue) return 'start';
-		if (inheritedParentSample && asText(calibrationJob.status) === 'completed') {
-			return 'review-title-sample';
-		}
 		if (reviewGate.status === 'accepted') return 'queue';
 		if (reviewReady) return 'queue';
 		if (isWorkflowBlocked) return 'none';
@@ -582,6 +589,9 @@
 	function workflowSummary(): string {
 		const fileCount = exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 1);
 		const fileWord = fileCount === 1 ? 'file' : 'files';
+		if (parentTitleReviewAction) {
+			return 'Title-scoped review and workflow work is active for this file.';
+		}
 		if (isComplete) return 'This movie is finished.';
 		if (conflicts.length) {
 			return 'A file already exists where this movie would be placed. Review the conflict before replacing anything.';
@@ -676,7 +686,7 @@
 	}
 
 	function reviewStatusLabel(): string {
-		return movieReviewStatusLabel(reviewGate.status, inheritedParentSample);
+		return movieReviewStatusLabel(reviewGate.status, parentTitleReviewAction);
 	}
 
 	function memberRole(member: MovieMember): string {
@@ -713,7 +723,7 @@
 				<span>{label}</span>
 				<strong>Resolved movie goals</strong>
 			</div>
-			{#if showChangeAction && canChangeGoals && movieGoalContract.status === 'ready'}
+			{#if showChangeAction && canChangeGoals && !parentTitleReviewAction && movieGoalContract.status === 'ready'}
 				<button class="secondary" type="button" onclick={editRequest}>Change goals</button>
 			{/if}
 		</div>
@@ -978,8 +988,8 @@
 									</small>
 								{:else if primaryAction() === 'review-title-sample'}
 									<p>
-										The completed title sample was prepared from this file. Review or approve it in
-										the title workspace; this page stays scoped to only this file.
+										This file belongs to active title-level work. Review it in the title workspace;
+										this page stays scoped to only this file.
 									</p>
 								{:else if primaryAction() === 'complete'}
 									<p>

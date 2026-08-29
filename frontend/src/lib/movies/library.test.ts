@@ -8,6 +8,7 @@ import {
 	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
 	movieReclaimTotalIsLowerBound,
+	movieTitleOwnsActiveWork,
 	movieTitleNeedsAction,
 	movieTitleRuntimeSeconds,
 	movieWorkflowIsComplete,
@@ -218,7 +219,7 @@ describe('movie decision facts', () => {
 		).toBeNull();
 	});
 
-	it('uses the exact member route as the one action for one-file titles', () => {
+	it('uses the exact member route for idle one-file titles', () => {
 		expect(moviePrimaryStudioPrefix(title)).toBe('films/Example/Example.mkv');
 		expect(
 			moviePrimaryStudioPrefix({
@@ -231,6 +232,42 @@ describe('movie decision facts', () => {
 			})
 		).toBe(title.prefix);
 	});
+
+	it.each([
+		['proposal', { label: 'Sample plan ready' }, null],
+		['pending review', { label: 'Review pending' }, null],
+		['accepted encode', { label: 'Approved draft' }, 'encode'],
+		['processing', null, 'processing'],
+		['validate', null, 'validate'],
+		['promote', null, 'promote'],
+		['complete', null, 'complete']
+	] as const)(
+		'opens the title route when one-file title work is active: %s',
+		(_state, reviewBadge, primaryLane) => {
+			const activeTitle: MovieTitle = {
+				...title,
+				review_badge: reviewBadge,
+				workflow_state: primaryLane
+					? {
+							prefix: title.prefix,
+							state: primaryLane === 'complete' ? 'complete' : `${primaryLane}_candidates`,
+							primary_lane: primaryLane,
+							label: primaryLane,
+							tone: primaryLane === 'processing' ? 'active' : 'ready',
+							detail: '',
+							counts: {},
+							lane_counts: {},
+							state_counts: {},
+							next_action: { kind: 'none', label: '', enabled: false, target_prefix: title.prefix },
+							blockers: []
+						}
+					: null
+			};
+
+			expect(movieTitleOwnsActiveWork(activeTitle)).toBe(true);
+			expect(moviePrimaryStudioPrefix(activeTitle)).toBe(title.prefix);
+		}
+	);
 
 	it('only calls out exceptional file composition', () => {
 		expect(movieCompositionDetail(title)).toBeNull();

@@ -37,6 +37,7 @@
 		detailSeasonState,
 		episodeLabel,
 		exactItemFilename,
+		exactReviewSizeFacts,
 		expectedSizeChange,
 		folderSizeTargetAnalysis,
 		formatDecimalFileSize,
@@ -313,6 +314,7 @@
 	const exactExpectedSizeChange = $derived(
 		expectedSizeChange(originalSeasonSize, expectedEpisodeBytes)
 	);
+	const exactReviewFacts = $derived(exactReviewSizeFacts(originalSeasonSize, expectedEpisodeBytes));
 	const exactApprovedRangeLabel = $derived(
 		targetSummary
 			? `${formatDecimalFileSize(targetSummary.finalLowerBoundBytes)}–${formatDecimalFileSize(targetSummary.finalUpperBoundBytes)}`
@@ -1979,14 +1981,30 @@
 
 				<section class="review-contract" aria-label="Episode size comparison">
 					<dl>
+						{#if isExactItemScope}
+							<div>
+								<dt>Current size</dt>
+								<dd>{formatDecimalFileSize(exactReviewFacts.currentSizeBytes)}</dd>
+							</div>
+						{/if}
 						<div>
-							<dt>Estimated episode output</dt>
+							<dt>{isExactItemScope ? 'Estimated output' : 'Estimated episode output'}</dt>
 							<dd>
-								{expectedEpisodeBytes
-									? formatDecimalFileSize(expectedEpisodeBytes)
+								{exactReviewFacts.estimatedOutputBytes
+									? formatDecimalFileSize(exactReviewFacts.estimatedOutputBytes)
 									: 'No usable estimate'}
 							</dd>
 						</div>
+						{#if isExactItemScope}
+							<div>
+								<dt>Estimated space saved</dt>
+								<dd>
+									{exactReviewFacts.estimatedSpaceSavedBytes !== null
+										? formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
+										: 'No usable estimate'}
+								</dd>
+							</div>
+						{/if}
 						<div>
 							<dt>Episode target</dt>
 							<dd>{sizeTargetLabel}</dd>
@@ -2109,11 +2127,13 @@
 							<strong>{riskSummary.sound.label}</strong>
 							<small>{riskSummary.sound.level} · {riskSummary.sound.detail}</small>
 						</div>
-						<div class="risk-summary__fact">
-							<span>Decision</span>
-							<strong>{riskSummary.authority}</strong>
-							<small>{riskSummary.authorityDetail}</small>
-						</div>
+						{#if riskSummary.hasSavedDecision}
+							<div class="risk-summary__fact">
+								<span>Decision</span>
+								<strong>{riskSummary.authority}</strong>
+								<small>{riskSummary.authorityDetail}</small>
+							</div>
+						{/if}
 						<p class="risk-summary__detail">{riskSummary.detail}</p>
 						{#if riskSummary.focusMoments.length}
 							<p class="risk-summary__focus">Review focus: {riskSummary.focusMoments[0]}</p>

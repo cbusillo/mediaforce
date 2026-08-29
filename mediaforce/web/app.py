@@ -3140,6 +3140,13 @@ def _folder_review_badge(
             if badge is not None:
                 return badge
 
+    if _load_pending_proposal(config, prefix) is not None:
+        return {
+            "label": "Sample plan ready",
+            "tone": "attention",
+            "detail": "A title-scoped sample plan is waiting for review.",
+        }
+
     calibration = _load_calibration_state(config, prefix)
     if calibration is None:
         return {"label": None, "tone": None}

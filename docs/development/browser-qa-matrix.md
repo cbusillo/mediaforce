@@ -57,6 +57,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   shows `Cannot start`, explains the configured source-size cap, keeps current
   size, expected output, and expected savings visible, and disables
   sample/queue work.
+  For one-file titles with title-scoped sample, review, encode, validation,
+  promotion, or completed work, the Movie Library opens the title route. The
+  title inspector still exposes `Open exact file in Studio`; that exact route
+  offers only `Review title sample` while applicable title work owns the file.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
@@ -77,6 +81,10 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   trustworthy sound metadata for the shared review comparison workspace. Verify
   the same inline `Compare clips` control on a review-ready Movie and Other
   fixture; the combined comparison remains a separately labeled download.
+  An exact-item review-ready TV route also keeps `Current size`, `Estimated
+  output`, and `Estimated space saved` in its decision facts, separate from the
+  comparison clip byte labels. Risk guidance remains visible, but no empty
+  `Decision` placeholder is shown before a decision exists.
 - Absolute-target state: `/folders/tv/Absolute%20Goal/Season%201`, proving an
   explicit 225 MB episode goal remains 225 MB for an 88-minute episode.
 - Under- and over-target states: `/folders/tv/Undershoot%20Show/Season%201` and
