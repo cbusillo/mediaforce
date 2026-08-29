@@ -215,12 +215,12 @@
 						: 'Creating sample'
 					: canRetrySample
 						? 'Sample needs retry'
-						: pendingProposalIsStale
-							? 'Sample plan is out of date'
-							: pendingProposalCanQueue
-								? 'Sample plan ready'
-								: parentTitleReviewAction
-									? 'Review at title level'
+						: parentTitleReviewAction
+							? 'Review at title level'
+							: pendingProposalIsStale
+								? 'Sample plan is out of date'
+								: pendingProposalCanQueue
+									? 'Sample plan ready'
 									: reviewReady && reviewGate.status !== 'accepted'
 										? 'Ready to review'
 										: needsReviewSample
@@ -1189,7 +1189,8 @@
 				hidden={primaryAction() === 'complete' ||
 					Boolean(currentWork) ||
 					isSizeCapBlock ||
-					sampleWorkActive}
+					sampleWorkActive ||
+					parentTitleReviewAction}
 				meta={reviewReady
 					? 'Ready to review'
 					: inheritedParentSample

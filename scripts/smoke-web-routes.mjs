@@ -1302,6 +1302,60 @@ async function checkSharedComparisonWorkspace(
   }
 }
 
+async function checkMovieTitleReviewRecovery(baseUrl, timeoutMs) {
+  const browser = await chromium.launch({ channel: "chromium" });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1440, height: 900 },
+    });
+    await page.goto(
+      `${baseUrl}/folders/movies/Review%20Ready/Feature.mkv`,
+      {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs,
+      },
+    );
+    const reviewAction = page.getByRole("link", {
+      name: "Review title sample",
+      exact: true,
+    });
+    await reviewAction.waitFor({ state: "visible", timeout: timeoutMs });
+    if ((await reviewAction.count()) !== 1) {
+      throw new Error("Exact-file recovery did not expose one title-review action.");
+    }
+    const duplicateActions = [
+      "Create sample",
+      "Set up sample",
+      "Set up another sample",
+    ];
+    const visibleDuplicateActions = await page.evaluate((labels) =>
+      Array.from(document.querySelectorAll("button"))
+        .filter((element) => {
+          const label = String(element.textContent ?? "").trim();
+          const rect = element.getBoundingClientRect();
+          return labels.includes(label) && rect.width > 0 && rect.height > 0;
+        })
+        .map((element) => String(element.textContent ?? "").trim()),
+      duplicateActions,
+    );
+    if (visibleDuplicateActions.length > 0) {
+      throw new Error(
+        `Exact-file recovery exposed duplicate sample actions: ${visibleDuplicateActions.join(", ")}`,
+      );
+    }
+    await reviewAction.click();
+    await page.waitForURL(/\/folders\/movies\/Review%20Ready(?:\?.*)?$/, {
+      timeout: timeoutMs,
+    });
+    await page
+      .getByRole("heading", { name: "Review Ready", exact: true })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    console.log("route ok: Movie exact-file recovery returns to title review");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -1785,6 +1839,7 @@ async function main() {
           args.routeTimeoutMs,
         );
       }
+      await checkMovieTitleReviewRecovery(targetUrl, args.routeTimeoutMs);
     }
     if (args.narrow) {
       await checkNarrowRoutes(
