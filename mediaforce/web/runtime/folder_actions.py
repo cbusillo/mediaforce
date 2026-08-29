@@ -76,12 +76,106 @@ QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 ValidateScopeActionFn: TypeAlias = Callable[[DBClient, str], ActionPayload | None]
 
 _SEASON_GATE_ATTENTION_JOB_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
+_PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION = 1
+_FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
+_FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
+    "The latest production encode missed its approved final-size target under the same reviewed settings. "
+    "Run and approve a fresh representative sample with a changed size, compression, quality, resolution, "
+    "or retained-stream contract before retrying."
+)
 
 
 def _calibration_policy_hash(payload: ActionPayload) -> str:
     policy_payload = object_dict(payload.get("policy"))
     encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _production_approval_contract(calibration: ActionPayload) -> ActionPayload | None:
+    sample_job_id = str(calibration.get("accepted_sample_job_id") or "").strip()
+    policy_hash = str(calibration.get("accepted_policy_hash") or "").strip()
+    sample_item = object_dict(calibration.get("sample_item"))
+    operator_intent = object_dict(sample_item.get("resolved_operator_intent"))
+    request = object_dict(operator_intent.get("request"))
+    if not request:
+        policy = object_dict(calibration.get("policy"))
+        intent = operator_intent_from_policy(
+            object_dict(policy.get("video")),
+            audio_policy=object_dict(policy.get("audio")),
+            subtitle_policy=object_dict(policy.get("subtitle")),
+        )
+        if intent.requires_confirmation:
+            return None
+        request = intent.request_payload()
+    if not sample_job_id or not policy_hash or not request:
+        return None
+    return {
+        "schema_version": _PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION,
+        "sample_job_id": sample_job_id,
+        "policy_hash": policy_hash,
+        "operator_intent_hash": f"sha256:{stable_json_hash(request)}",
+        "operator_intent": request,
+    }
+
+
+def _valid_production_approval_contract(payload: Mapping[str, Any] | None) -> ActionPayload | None:
+    contract = object_dict(payload)
+    request = object_dict(contract.get("operator_intent"))
+    if (
+            int_value(contract.get("schema_version")) != _PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION
+            or not str(contract.get("sample_job_id") or "").strip()
+            or not str(contract.get("policy_hash") or "").strip()
+            or not request
+    ):
+        return None
+    expected_hash = f"sha256:{stable_json_hash(request)}"
+    if str(contract.get("operator_intent_hash") or "").strip() != expected_hash:
+        return None
+    return contract
+
+
+def _terminal_production_approval_contract(job: JobPayload) -> ActionPayload | None:
+    manifest_value = str(job.get("manifest_path") or "").strip()
+    if not manifest_value:
+        return None
+    manifest_path = Path(manifest_value)
+    try:
+        manifest = object_dict(json.loads(manifest_path.read_text()))
+    except (OSError, json.JSONDecodeError):
+        return None
+    selection = object_dict(manifest.get("selection"))
+    return _valid_production_approval_contract(selection.get("production_approval_contract"))
+
+
+def _final_size_requeue_contract_blocker(
+        job: JobPayload | None,
+        current_contract: ActionPayload | None,
+) -> ActionPayload | None:
+    job_payload = object_dict(job)
+    failure_analysis = object_dict(object_dict(job_payload.get("progress")).get("failure_analysis"))
+    if str(failure_analysis.get("kind") or "") != "final_size_target_miss":
+        return None
+    previous_contract = _terminal_production_approval_contract(job_payload)
+    current = _valid_production_approval_contract(current_contract)
+    changed_sample = bool(
+        previous_contract
+        and current
+        and str(previous_contract.get("sample_job_id")) != str(current.get("sample_job_id"))
+    )
+    changed_intent = bool(
+        previous_contract
+        and current
+        and str(previous_contract.get("operator_intent_hash")) != str(current.get("operator_intent_hash"))
+    )
+    if changed_sample and changed_intent:
+        return None
+    return {
+        "ok": False,
+        "code": _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
+        "message": _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE,
+        "retry_strategy": "fresh_goal_required",
+        "queued_count": 0,
+    }
 
 
 def _normalized_number(value: Any) -> float | None:
@@ -332,6 +426,7 @@ def queue_folder_encode_action(
             raise HTTPException(status_code=400, detail="Run a sampled calibration first.")
         calibration_payload = object_dict(calibration)
         calibration_policy = object_dict(calibration_payload.get("policy"))
+        production_approval_contract = _production_approval_contract(calibration_payload)
         calibration_video = object_dict(calibration_policy.get("video"))
         calibration_intent = operator_intent_from_policy(
             calibration_video,
@@ -646,6 +741,16 @@ def queue_folder_encode_action(
                 status_code=400,
                 detail=f"No encode candidates were found for this folder. Next action: {action_label}.",
             )
+        final_size_requeue_blocker = _final_size_requeue_contract_blocker(
+            latest_encode_job,
+            production_approval_contract,
+        )
+        if final_size_requeue_blocker is not None:
+            return final_size_requeue_blocker
+        if production_approval_contract is not None:
+            selection = object_dict(manifest.get("selection"))
+            selection["production_approval_contract"] = production_approval_contract
+            manifest["selection"] = selection
         if older_season_selection is not None and older_season_cadence_partition is not None:
             manifest_item_ids = {
                 int(item.get("library_item_id") or 0)

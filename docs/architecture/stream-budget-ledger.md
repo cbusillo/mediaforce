@@ -115,6 +115,15 @@ failure. This telemetry never authorizes another retry, changes the one-retry
 budget, extrapolates outside measured candidates, or alters targets, CRF bounds,
 sample cadence, source caps, or quality floors.
 
+A terminal final-size miss also blocks every production queue entrypoint from
+reusing the same reviewed contract. Queue admission records the approved sample
+identity and a normalized operator-intent contract covering size, compression,
+quality, resolution, and retained streams. Recovery requires both a new
+representative sample and a changed operator-intent contract; a new approval
+timestamp, unrelated policy edit, lifecycle override, schedule bypass, or raw
+policy-hash change is not sufficient. Missing or malformed historical contract
+evidence fails closed and requires another sampled review.
+
 ## Fallbacks and migration
 
 When container overhead is not measured, reserve the greater of 4,000,000
