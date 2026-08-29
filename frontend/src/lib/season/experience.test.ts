@@ -33,6 +33,7 @@ import {
 	detailSeasonState,
 	episodeLabel,
 	exactItemFilename,
+	exactReviewSizeFacts,
 	expectedSizeChange,
 	folderSizeTargetAnalysis,
 	formatDecimalFileSize,
@@ -824,6 +825,7 @@ describe('season experience translation', () => {
 				'Check natural texture for waxiness, crawling noise, or an overly smooth look.',
 			authority: 'Not decided yet',
 			authorityDetail: 'No decision has been saved for this sample.',
+			hasSavedDecision: false,
 			focusMoments: ['Moment 2 needs the closest look.'],
 			picture: {
 				label: 'Texture and grain',
@@ -835,6 +837,20 @@ describe('season experience translation', () => {
 				level: 'No specific warning',
 				detail: 'Listen for clear dialogue, balanced sound, and anything distracting.'
 			}
+		});
+	});
+
+	it('keeps exact-item review facts separate from comparison clip measurements', () => {
+		expect(exactReviewSizeFacts(1_200_000_000, 480_000_000)).toEqual({
+			currentSizeBytes: 1_200_000_000,
+			estimatedOutputBytes: 480_000_000,
+			estimatedSpaceSavedBytes: 720_000_000
+		});
+		expect(exactReviewSizeFacts(480_000_000, 600_000_000).estimatedSpaceSavedBytes).toBe(0);
+		expect(exactReviewSizeFacts(480_000_000, null)).toEqual({
+			currentSizeBytes: 480_000_000,
+			estimatedOutputBytes: null,
+			estimatedSpaceSavedBytes: null
 		});
 	});
 

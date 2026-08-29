@@ -48,6 +48,7 @@ COMPLETED_PREFIX = "movies/Archive Ready"
 BLOCKED_COMPLETED_PREFIX = "movies/Blocked Cleanup"
 MISSING_COMPLETED_PREFIX = "movies/Backups Already Gone"
 REVIEW_READY_PREFIX = "tv/Review Ready/Season 1"
+REVIEW_READY_EXACT_PREFIX = "tv/Review Ready/Season 1/Episode 01.mkv"
 ABSOLUTE_TARGET_PREFIX = "tv/Absolute Goal/Season 1"
 APPROVED_PREFIX = "tv/Approved Show/Season 1"
 MISSED_TARGET_PREFIX = "tv/Overshoot Show/Season 1"
@@ -801,6 +802,15 @@ def _write_review_states(config: Any, rows_by_prefix: dict[str, dict[str, Any]])
         prefix=REVIEW_READY_PREFIX,
         job_id="web-smoke-review-ready",
         review_slug="web-smoke-review-ready",
+        predicted_total_size_bytes=398_000_000,
+        quality_score=96.2,
+    )
+    _write_review_sample_state(
+        config,
+        rows_by_prefix,
+        prefix=REVIEW_READY_EXACT_PREFIX,
+        job_id="web-smoke-review-ready-exact",
+        review_slug="web-smoke-review-ready-exact",
         predicted_total_size_bytes=398_000_000,
         quality_score=96.2,
     )
@@ -1684,6 +1694,9 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
             )
         )
         rows_by_prefix = {str(row["parent_dir"]): row for row in rows}
+        rows_by_prefix[REVIEW_READY_EXACT_PREFIX] = next(
+            row for row in rows if row["rel_path"] == REVIEW_READY_EXACT_PREFIX
+        )
         rows_by_prefix[PROTECTED_READY_SERIES_PREFIX] = rows_by_prefix[PROTECTED_READY_PREFIX]
         ids_by_rel_path = {
             str(row["rel_path"]): item_id
@@ -2412,6 +2425,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "stageMarker": "Compare clips",
             },
             {
+                "label": "Movie Studio exact-file title-review fixture",
+                "route": "/folders/movies/Review%20Ready/Feature.mkv",
+                "marker": "Review Ready",
+                "stageMarker": "Review title sample",
+            },
+            {
                 "label": "Movie Studio promotion-conflict fixture",
                 "route": "/folders/movies/Promotion%20Conflict",
                 "marker": "Promotion Conflict",
@@ -2487,6 +2506,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Review%20Ready/Season%201",
                 "marker": "Review Ready",
                 "stageMarker": "Ready to review",
+            },
+            {
+                "label": "Folder Studio exact-item review-ready fixture",
+                "route": "/folders/tv/Review%20Ready/Season%201/Episode%2001.mkv",
+                "marker": "Review Ready",
+                "stageMarker": "ESTIMATED SPACE SAVED",
             },
             {
                 "label": "Folder Studio absolute-target fixture",
