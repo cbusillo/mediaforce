@@ -15,8 +15,9 @@
 		QualityRiskTag
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { reviewAvailability } from '$lib/review/availability';
 	import { clampMomentIndex, reviewPairHasSound } from '$lib/review/comparison';
-	import { normalizeReviewPairs, reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
+	import { reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
 	import {
 		REVIEW_CONCERNS,
 		approvalGuardFromMessage,
@@ -275,7 +276,8 @@
 	const sampleItem = $derived(asRecord(folder.sample_item));
 	const sampleHasAudio = $derived(reviewSourceHasAudio(folder));
 	const sampleEpisode = $derived(episodeLabel(asText(sampleItem.rel_path)));
-	const reviewPairs = $derived(normalizeReviewPairs(folder));
+	const review = $derived(reviewAvailability(folder));
+	const reviewPairs = $derived(review.pairs);
 	const displayedMoment = $derived(clampMomentIndex(selectedMoment, reviewPairs.length));
 	const currentPair = $derived(reviewPairs[displayedMoment]);
 	const reviewHasSound = $derived(reviewPairHasSound(currentPair));
@@ -2078,8 +2080,16 @@
 					/>
 				{:else}
 					<div class="missing-media">
-						<h2>The sample finished, but the comparison clips are missing.</h2>
-						<p>Nothing was replaced. Create the sample again to rebuild the comparison.</p>
+						<h2>{review.recovery?.title ?? 'The comparison clips are unavailable'}</h2>
+						<p>
+							{review.recovery?.detail ??
+								'Nothing was replaced. Create the sample again to rebuild the comparison.'}
+						</p>
+						{#if review.canDownload}
+							<button class="detail-download" type="button" onclick={downloadComparison}>
+								Download combined comparison
+							</button>
+						{/if}
 					</div>
 				{/if}
 
@@ -3029,7 +3039,7 @@
 							>
 						</div>{/if}
 				</div>
-				{#if reviewPairs.length}
+				{#if review.canDownload}
 					<button class="detail-download" type="button" onclick={downloadComparison}>
 						Download the combined comparison
 					</button>
