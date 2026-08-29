@@ -3144,7 +3144,7 @@ def _folder_review_badge(
         return {
             "label": "Sample plan ready",
             "tone": "attention",
-            "detail": "A title-scoped sample plan is waiting for review.",
+            "detail": "A sample plan is waiting for review.",
         }
 
     calibration = _load_calibration_state(config, prefix)

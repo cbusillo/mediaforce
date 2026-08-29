@@ -2000,7 +2000,9 @@
 								<dt>Estimated space saved</dt>
 								<dd>
 									{exactReviewFacts.estimatedSpaceSavedBytes !== null
-										? formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
+										? exactExpectedSizeChange.direction === 'larger'
+											? `None · grows by ${formatDecimalFileSize(exactExpectedSizeChange.bytes)}`
+											: formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
 										: 'No usable estimate'}
 								</dd>
 							</div>

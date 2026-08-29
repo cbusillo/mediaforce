@@ -12,7 +12,7 @@ import {
 	movieSizeCapBlockView,
 	parseServerTimestamp,
 	parentSampleAppliesToExactItem,
-	parentTitleReviewActionApplies,
+	parentTitleWorkView,
 	sampleStopResponseCopy
 } from './movie-studio-view';
 import type {
@@ -323,7 +323,7 @@ describe('parentSampleAppliesToExactItem', () => {
 		).toBe(false));
 });
 
-describe('parentTitleReviewActionApplies', () => {
+describe('parentTitleWorkView', () => {
 	function parentTitle(overrides: Partial<MovieTitle> = {}, memberCount = 1): MovieTitle {
 		const member = {
 			item_id: 1,
@@ -372,9 +372,25 @@ describe('parentTitleReviewActionApplies', () => {
 	}
 
 	it.each([
-		['proposal', { review_badge: { label: 'Sample plan ready' } }],
-		['pending review', { review_badge: { label: 'Review pending' } }],
-		['accepted encode', { review_badge: { label: 'Approved draft' } }],
+		[
+			'proposal',
+			{ review_badge: { label: 'Sample plan ready' } },
+			{ actionLabel: 'Open title workspace', statusLabel: 'Sample plan ready', reviewSample: false }
+		],
+		[
+			'pending review',
+			{ review_badge: { label: 'Review pending' } },
+			{
+				actionLabel: 'Review title sample',
+				statusLabel: 'Review at title level',
+				reviewSample: true
+			}
+		],
+		[
+			'accepted encode',
+			{ review_badge: { label: 'Approved draft' } },
+			{ actionLabel: 'Open title workspace', statusLabel: 'Approved draft', reviewSample: false }
+		],
 		[
 			'processing',
 			{
@@ -396,7 +412,8 @@ describe('parentTitleReviewActionApplies', () => {
 					},
 					blockers: []
 				}
-			}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Compressing', reviewSample: false }
 		],
 		[
 			'validate',
@@ -419,7 +436,8 @@ describe('parentTitleReviewActionApplies', () => {
 					},
 					blockers: []
 				}
-			}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Ready to check', reviewSample: false }
 		],
 		[
 			'promote',
@@ -442,50 +460,57 @@ describe('parentTitleReviewActionApplies', () => {
 					},
 					blockers: []
 				}
-			}
-		],
-		[
-			'complete',
-			{
-				workflow_state: {
-					prefix: 'movies/Example',
-					state: 'complete',
-					primary_lane: 'complete',
-					label: '',
-					tone: 'success',
-					detail: '',
-					counts: {},
-					lane_counts: {},
-					state_counts: {},
-					next_action: { kind: 'none', label: '', enabled: false, target_prefix: 'movies/Example' },
-					blockers: []
-				}
-			}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Ready to replace', reviewSample: false }
 		]
 	] as const)(
-		'routes applicable parent %s work to the title review action',
-		(_state, overrides) => {
+		'routes applicable parent %s work to truthful title-level copy',
+		(_state, overrides, expected) => {
 			expect(
-				parentTitleReviewActionApplies(
+				parentTitleWorkView(
 					'movies/Example/Example.mkv',
 					parentTitle(overrides as Partial<MovieTitle>),
 					false
 				)
-			).toBe(true);
+			).toMatchObject(expected);
 		}
 	);
 
-	it('keeps idle and unrelated multi-file title work on the exact-file route', () => {
-		expect(parentTitleReviewActionApplies('movies/Example/Example.mkv', parentTitle(), false)).toBe(
-			false
-		);
+	it('keeps idle, completed, and unrelated multi-file title work on the exact-file route', () => {
+		expect(parentTitleWorkView('movies/Example/Example.mkv', parentTitle(), false)).toBeNull();
 		expect(
-			parentTitleReviewActionApplies(
+			parentTitleWorkView(
+				'movies/Example/Example.mkv',
+				parentTitle({
+					workflow_state: {
+						prefix: 'movies/Example',
+						state: 'complete',
+						primary_lane: 'complete',
+						label: 'Finished',
+						tone: 'success',
+						detail: '',
+						counts: {},
+						lane_counts: {},
+						state_counts: {},
+						next_action: {
+							kind: 'none',
+							label: '',
+							enabled: false,
+							target_prefix: 'movies/Example'
+						},
+						blockers: []
+					}
+				}),
+				false
+			)
+		).toBeNull();
+		expect(
+			parentTitleWorkView(
 				'movies/Example/Example.mkv',
 				parentTitle({ review_badge: { label: 'Review pending' } }, 2),
 				false
 			)
-		).toBe(false);
+		).toBeNull();
 	});
 });
 

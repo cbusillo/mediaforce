@@ -1350,6 +1350,51 @@ async function checkMovieTitleReviewRecovery(baseUrl, timeoutMs) {
     await page
       .getByRole("heading", { name: "Review Ready", exact: true })
       .waitFor({ state: "visible", timeout: timeoutMs });
+
+    for (const recovery of [
+      {
+        route: "/folders/movies/Validation%20Ready/Feature.mkv",
+        status: "Ready to check",
+      },
+      {
+        route: "/folders/movies/Replacement%20Ready%20Large/Feature.mkv",
+        status: "Ready to replace",
+      },
+    ]) {
+      await page.goto(`${baseUrl}${recovery.route}`, {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs,
+      });
+      await page
+        .getByText(recovery.status, { exact: true })
+        .first()
+        .waitFor({ state: "visible", timeout: timeoutMs });
+      await page
+        .getByRole("link", { name: "Open title workspace", exact: true })
+        .waitFor({ state: "visible", timeout: timeoutMs });
+      if (
+        (await page
+          .getByRole("link", { name: "Review title sample", exact: true })
+          .count()) > 0
+      ) {
+        throw new Error(
+          `${recovery.route} mislabeled non-review title work as sample review.`,
+        );
+      }
+    }
+
+    await page.goto(`${baseUrl}/folders/movies/Blocked%20Cleanup/Feature.mkv`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
+    await page
+      .getByText("The checked replacement is installed.", { exact: false })
+      .waitFor({ state: "visible", timeout: timeoutMs });
+    for (const staleAction of ["Review title sample", "Open title workspace"]) {
+      if ((await page.getByRole("link", { name: staleAction, exact: true }).count()) > 0) {
+        throw new Error(`Completed exact-file route exposed stale action: ${staleAction}`);
+      }
+    }
     console.log("route ok: Movie exact-file recovery returns to title review");
   } finally {
     await browser.close();

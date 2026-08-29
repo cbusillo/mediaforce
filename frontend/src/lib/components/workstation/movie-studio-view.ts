@@ -10,7 +10,7 @@ import type {
 	StreamBudgetLedgerPayload
 } from '$lib/api/types';
 import { formatFileSize } from '$lib/format';
-import { movieTitleOwnsActiveWork } from '$lib/movies/library';
+import { movieTitleOwnsActiveWork, movieWorkflowLabel } from '$lib/movies/library';
 
 export interface MovieCurrentWorkView {
 	label: string;
@@ -134,17 +134,60 @@ export function parentSampleAppliesToExactItem(
 	return sampleItem?.rel_path === exactPrefix;
 }
 
-export function parentTitleReviewActionApplies(
+export interface ParentTitleWorkView {
+	actionLabel: string;
+	statusLabel: string;
+	detail: string;
+	reviewSample: boolean;
+}
+
+export function parentTitleWorkView(
 	exactPrefix: string,
 	parentTitle: MovieTitle | null | undefined,
 	inheritedParentSample: boolean
-): boolean {
-	return Boolean(
-		parentTitle &&
-		parentTitle.prefix !== exactPrefix &&
-		movieTitleOwnsActiveWork(parentTitle) &&
-		(parentTitle.members.length === 1 || inheritedParentSample)
-	);
+): ParentTitleWorkView | null {
+	if (
+		!parentTitle ||
+		parentTitle.prefix === exactPrefix ||
+		!movieTitleOwnsActiveWork(parentTitle) ||
+		(parentTitle.members.length > 1 && !inheritedParentSample)
+	) {
+		return null;
+	}
+	const badgeLabel = parentTitle.review_badge?.label?.trim() ?? '';
+	const reviewSample =
+		inheritedParentSample ||
+		['ready to review', 'review pending'].includes(badgeLabel.toLowerCase());
+	if (reviewSample) {
+		return {
+			actionLabel: 'Review title sample',
+			statusLabel: 'Review at title level',
+			detail:
+				'This file belongs to a title-level sample that is ready for review. Continue in the title workspace.',
+			reviewSample: true
+		};
+	}
+	const workflowLabel = movieWorkflowLabel({
+		workflow_state: parentTitle.workflow_state,
+		promotion_conflicts: parentTitle.promotion_conflicts,
+		details_loading: parentTitle.details_loading,
+		availability: parentTitle.availability
+	});
+	const workflowOwnsStatus = [
+		'processing',
+		'validate',
+		'promote',
+		'mixed',
+		'attention',
+		'blocked'
+	].includes(parentTitle.workflow_state?.primary_lane ?? '');
+	return {
+		actionLabel: 'Open title workspace',
+		statusLabel: workflowOwnsStatus ? workflowLabel : badgeLabel || workflowLabel,
+		detail:
+			'This file belongs to active title-level work. Continue in the title workspace to take the next step.',
+		reviewSample: false
+	};
 }
 
 export function movieReviewStatusLabel(status: unknown, inheritedParentSample = false): string {

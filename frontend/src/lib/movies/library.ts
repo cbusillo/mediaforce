@@ -73,11 +73,8 @@ export function movieTitleOwnsActiveWork(
 	if (title.review_badge?.label?.trim()) return true;
 	const workflow = title.workflow_state;
 	if (!workflow) return false;
-	return (
-		workflow.state === 'complete' ||
-		['processing', 'validate', 'promote', 'mixed', 'attention', 'complete'].includes(
-			workflow.primary_lane ?? ''
-		)
+	return ['processing', 'validate', 'promote', 'mixed', 'attention', 'blocked'].includes(
+		workflow.primary_lane ?? ''
 	);
 }
 

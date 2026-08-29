@@ -36,7 +36,7 @@
 		movieSampleSetupResult,
 		movieSizeCapBlockView,
 		parentSampleAppliesToExactItem,
-		parentTitleReviewActionApplies,
+		parentTitleWorkView,
 		sampleStopResponseCopy
 	} from './movie-studio-view';
 	import StateBadge from './StateBadge.svelte';
@@ -166,13 +166,6 @@
 	const reviewEstimatedOutput = $derived(
 		movieGoalFacts.expectedOutput === 'Unknown' ? '' : `about ${movieGoalFacts.expectedOutput}`
 	);
-	const reviewRecovery = $derived(
-		!isComplete &&
-			reviewGate.status !== 'accepted' &&
-			!sampleWorkActive &&
-			!currentWork &&
-			review.recovery
-	);
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
@@ -188,8 +181,16 @@
 	const parentTitleHref = $derived(
 		parentTitlePrefix ? resolve(folderRoutePath(parentTitlePrefix)) : resolve('/movies')
 	);
-	const parentTitleReviewAction = $derived(
-		exactScope && parentTitleReviewActionApplies(folder.prefix, context, inheritedParentSample)
+	const parentTitleWork = $derived(
+		exactScope ? parentTitleWorkView(folder.prefix, context, inheritedParentSample) : null
+	);
+	const reviewRecovery = $derived(
+		!isComplete &&
+			reviewGate.status !== 'accepted' &&
+			!sampleWorkActive &&
+			!currentWork &&
+			!parentTitleWork &&
+			review.recovery
 	);
 	const scopeNoun = $derived(exactScope ? 'movie file' : 'movie title');
 	const scopeDisplay = $derived(exactScope ? 'Only this file' : 'The whole title');
@@ -202,7 +203,7 @@
 			!reviewReady &&
 			!pendingProposalCanQueue &&
 			!sampleWorkActive &&
-			!parentTitleReviewAction
+			!parentTitleWork
 	);
 	const workflowDisplayLabel = $derived(
 		isComplete
@@ -215,8 +216,8 @@
 						: 'Creating sample'
 					: canRetrySample
 						? 'Sample needs retry'
-						: parentTitleReviewAction
-							? 'Review at title level'
+						: parentTitleWork
+							? parentTitleWork.statusLabel
 							: pendingProposalIsStale
 								? 'Sample plan is out of date'
 								: pendingProposalCanQueue
@@ -549,7 +550,7 @@
 		| 'start'
 		| 'monitor-sample'
 		| 'retry-sample'
-		| 'review-title-sample'
+		| 'open-title-workspace'
 		| 'queue'
 		| 'validate'
 		| 'promote'
@@ -557,9 +558,9 @@
 		| 'current-work'
 		| 'complete'
 		| 'none' {
-		if (parentTitleReviewAction) return 'review-title-sample';
 		if (isComplete) return 'complete';
 		if (isBrowseOnly) return 'none';
+		if (parentTitleWork) return 'open-title-workspace';
 		if (currentWork) return 'current-work';
 		if (sampleWorkActive) return 'monitor-sample';
 		if (canRetrySample) return 'retry-sample';
@@ -589,8 +590,8 @@
 	function workflowSummary(): string {
 		const fileCount = exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 1);
 		const fileWord = fileCount === 1 ? 'file' : 'files';
-		if (parentTitleReviewAction) {
-			return 'Title-scoped review and workflow work is active for this file.';
+		if (parentTitleWork) {
+			return parentTitleWork.detail;
 		}
 		if (isComplete) return 'This movie is finished.';
 		if (conflicts.length) {
@@ -686,7 +687,7 @@
 	}
 
 	function reviewStatusLabel(): string {
-		return movieReviewStatusLabel(reviewGate.status, parentTitleReviewAction);
+		return parentTitleWork?.statusLabel ?? movieReviewStatusLabel(reviewGate.status);
 	}
 
 	function memberRole(member: MovieMember): string {
@@ -723,7 +724,7 @@
 				<span>{label}</span>
 				<strong>Resolved movie goals</strong>
 			</div>
-			{#if showChangeAction && canChangeGoals && !parentTitleReviewAction && movieGoalContract.status === 'ready'}
+			{#if showChangeAction && canChangeGoals && !parentTitleWork && movieGoalContract.status === 'ready'}
 				<button class="secondary" type="button" onclick={editRequest}>Change goals</button>
 			{/if}
 		</div>
@@ -885,7 +886,7 @@
 					? `${formatMovieBytes(reviewSample.smaller)} clip`
 					: 'Clip size unavailable'}
 				estimatedOutputLabel={reviewEstimatedOutput}
-				canCreateSoundSample={reviewSourceHasSound}
+				canCreateSoundSample={reviewSourceHasSound && !parentTitleWork}
 				soundSampleDisabled={isBrowseOnly || isBusy || !hostOptions.length}
 				soundSampleActionLabel="Prepare a sample with sound"
 				onMomentChange={(index) => (selectedReviewMoment = index)}
@@ -986,10 +987,9 @@
 									<small class="decision-note">
 										Retry uses the same file, request, and computer. No full movie work was queued.
 									</small>
-								{:else if primaryAction() === 'review-title-sample'}
+								{:else if primaryAction() === 'open-title-workspace'}
 									<p>
-										This file belongs to active title-level work. Review it in the title workspace;
-										this page stays scoped to only this file.
+										{parentTitleWork?.detail} This page stays scoped to only this file.
 									</p>
 								{:else if primaryAction() === 'complete'}
 									<p>
@@ -1062,8 +1062,10 @@
 									<button class="primary" disabled={isBusy} onclick={retrySample}>
 										{pendingAction === 'retry-sample' ? 'Retrying…' : 'Retry sample'}
 									</button>
-								{:else if primaryAction() === 'review-title-sample'}
-									<a class="primary" href={parentTitleHref}>Review title sample</a>
+								{:else if primaryAction() === 'open-title-workspace'}
+									<a class="primary" href={parentTitleHref}
+										>{parentTitleWork?.actionLabel ?? 'Open title workspace'}</a
+									>
 								{:else if primaryAction() === 'queue'}
 									{#if reviewGate.status === 'accepted'}
 										<button class="primary" disabled={isBusy} onclick={queueApproved}
@@ -1190,7 +1192,7 @@
 					Boolean(currentWork) ||
 					isSizeCapBlock ||
 					sampleWorkActive ||
-					parentTitleReviewAction}
+					Boolean(parentTitleWork)}
 				meta={reviewReady
 					? 'Ready to review'
 					: inheritedParentSample
