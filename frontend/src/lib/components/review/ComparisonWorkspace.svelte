@@ -90,6 +90,7 @@
 	let sourceError = $state(false);
 	let previewError = $state(false);
 	let previousBodyOverflow = '';
+	let returnScrollY = 0;
 	let scrollSyncPending = false;
 	let mediaGeneration = 0;
 	let playbackSequence = 0;
@@ -184,6 +185,8 @@
 
 	function openWorkspace(event: MouseEvent) {
 		returnFocus = event.currentTarget as HTMLElement;
+		returnScrollY = window.scrollY;
+		workspaceElement?.scrollIntoView({ block: 'start', inline: 'nearest' });
 		layout = 'side_by_side';
 		visibleSide = 'new';
 		scale = 'fit';
@@ -220,7 +223,10 @@
 		isOpen = false;
 		nativeFullscreen = false;
 		document.body.style.overflow = previousBodyOverflow;
-		void tick().then(() => returnFocus?.focus());
+		void tick().then(() => {
+			returnFocus?.focus({ preventScroll: true });
+			window.scrollTo({ top: returnScrollY });
+		});
 	}
 
 	async function togglePlayback() {
@@ -823,8 +829,7 @@
 				</div>
 			</div>
 			<p class="clip-size-caption">
-				Clip sizes only.{#if estimatedOutputLabel}
-					Estimated output: {estimatedOutputLabel}.{/if}
+				Clip sizes only.{#if estimatedOutputLabel}&nbsp;Estimated output: {estimatedOutputLabel}.{/if}
 			</p>
 
 			<footer class="workspace-controls" aria-label="Comparison playback controls">
