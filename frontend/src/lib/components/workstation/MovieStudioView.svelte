@@ -988,9 +988,7 @@
 										Retry uses the same file, request, and computer. No full movie work was queued.
 									</small>
 								{:else if primaryAction() === 'open-title-workspace'}
-									<p>
-										{parentTitleWork?.detail} This page stays scoped to only this file.
-									</p>
+									<p>This page stays scoped to only this file.</p>
 								{:else if primaryAction() === 'complete'}
 									<p>
 										The checked replacement is installed. The original remains in Completed until

@@ -57,10 +57,12 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   shows `Cannot start`, explains the configured source-size cap, keeps current
   size, expected output, and expected savings visible, and disables
   sample/queue work.
-  For one-file titles with title-scoped sample, review, encode, validation,
-  promotion, or completed work, the Movie Library opens the title route. The
-  title inspector still exposes `Open exact file in Studio`; that exact route
-  offers only `Review title sample` while applicable title work owns the file.
+  For one-file titles with title-scoped sample, review, encode, validation, or
+  promotion work, the Movie Library opens the title route. Completed and idle
+  one-file titles keep their exact-file route. The title inspector still exposes
+  `Open exact file in Studio`; that exact route offers `Review title sample` for
+  pending review and `Open title workspace` for other applicable title work,
+  without exposing a duplicate sample action.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
