@@ -501,6 +501,42 @@ async function readRouteState(page, expectation, inspectNarrowLayout = false) {
   );
 }
 
+async function checkMovieEstimateCoverage(page, timeoutMs, label) {
+  await page.waitForFunction(
+    () => {
+      const totals =
+        document.querySelector(".library-totals")?.textContent ?? "";
+      return (
+        /Estimated output\s*·\s*\d+ of \d+ titles/.test(totals) &&
+        /Estimated space saved\s*·\s*\d+ of \d+ titles/.test(totals)
+      );
+    },
+    undefined,
+    { timeout: timeoutMs },
+  );
+  await page.locator('[data-movie-title-row="movies/Review Ready"]').click();
+  await page.waitForFunction(
+    () =>
+      (document.querySelector(".title-inspector")?.textContent ?? "").includes(
+        "Estimated from completed samples for every included movie file.",
+      ),
+    undefined,
+    { timeout: timeoutMs },
+  );
+  const inspectorText = await page.locator(".title-inspector").innerText();
+  const normalizedInspectorText = inspectorText.toLocaleLowerCase();
+  if (
+    !normalizedInspectorText.includes("review ready") ||
+    !normalizedInspectorText.includes("estimated output") ||
+    !normalizedInspectorText.includes("estimated space saved") ||
+    normalizedInspectorText.includes("no estimate")
+  ) {
+    throw new Error(
+      `${label} did not expose the sampled title estimate: ${JSON.stringify(inspectorText)}`,
+    );
+  }
+}
+
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -547,6 +583,9 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         throw new Error(
           `${label} raised browser errors: ${pageErrors.join(" | ")}`,
         );
+      }
+      if (route === "/movies" && label === "Movie Library") {
+        await checkMovieEstimateCoverage(page, timeoutMs, label);
       }
       if (route === "/ops" && label === "Activity") {
         const requiredCopies = ["Computers", "Stop processing", "Stop samples"];
@@ -1456,6 +1495,9 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         throw new Error(
           `${label} raised browser errors in narrow layout: ${pageErrors.join(" | ")}`,
         );
+      }
+      if (route === "/movies" && label === "Movie Library") {
+        await checkMovieEstimateCoverage(page, timeoutMs, `${label} narrow`);
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`narrow route ok: ${label} ${elapsedMs}ms`);

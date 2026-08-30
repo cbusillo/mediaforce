@@ -49,8 +49,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   conflict. A title with current completed sampled evidence for every included
   movie file shows its sampled output and savings; incomplete, stale, or
   incompatible evidence remains `No estimate` rather than inheriting TV
-  codec-history savings. Mixed known and unknown titles show lower-bound
-  library totals while every title stays reachable.
+  codec-history savings. Mixed known and unknown titles show explicit coverage,
+  a lower bound for known output, and a partial known savings total while every
+  title stays reachable.
 - Movie Studio: `/folders/movies/Loose%20Feature.mkv`,
   `/folders/movies/Editions%20Showcase`,
   `/folders/movies/Waiting%20Encode`, and
