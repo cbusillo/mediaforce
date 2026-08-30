@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -11,14 +12,224 @@ from sqlalchemy import or_, outerjoin, select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items, plex_item_metadata, staged_artifacts
-from mediaforce.core.type_defs import mapping_dict, object_dict
+from mediaforce.core.type_defs import int_value, mapping_dict, object_dict
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.library.candidate_selection import CandidateDecision, project_candidates, workflow_eligibility
 from mediaforce.library.media_scopes import resolve_media_scope, resolve_media_scopes, scope_rel_path_filter
 from mediaforce.library.movie_workflow import MovieMembership, classify_movie_path, movie_item_included
+from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.workflow_state import EncodeEligibility, build_folder_workflow_states, derive_item_workflow_state
+from mediaforce.tuning.calibration_jobs import load_completed_sample_jobs_for_prefixes
 
 MovieMetrics = Mapping[str, Mapping[str, Any]]
+
+
+def _sampled_calibration_estimates(
+        connection: DBClient,
+        config: MediaforceConfig,
+        grouped_rows: Mapping[str, list[tuple[dict[str, Any], MovieMembership]]],
+) -> dict[str, dict[str, Any]]:
+    members_by_title, candidates_by_member = _current_movie_members(grouped_rows, config)
+    job_prefixes = {
+        prefix
+        for title_prefix, members in members_by_title.items()
+        for prefix in (title_prefix, *(member["rel_path"] for member in members))
+    }
+    evidence_by_member: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for job in load_completed_sample_jobs_for_prefixes(connection, sorted(job_prefixes)):
+        sample_item = object_dict(job.get("sample_item"))
+        predicted_output_bytes = _positive_int(
+            object_dict(object_dict(job.get("result")).get("sample_result")).get("predicted_total_size_bytes")
+        )
+        if predicted_output_bytes is None:
+            continue
+        for member in candidates_by_member.get(int_value(sample_item.get("library_item_id")), []):
+            if not _sampled_evidence_matches_member(job, member):
+                continue
+            evidence_by_member[member["item_id"]].append(
+                {
+                    "output_bytes": predicted_output_bytes,
+                    "finished_at": str(job.get("finished_at") or ""),
+                    "created_at": str(job.get("created_at") or ""),
+                }
+            )
+
+    estimates: dict[str, dict[str, Any]] = {}
+    for title_prefix, included_members in members_by_title.items():
+        if not included_members:
+            continue
+        selected_evidence = [
+            _latest_sampled_evidence(evidence_by_member.get(member["item_id"], []))
+            for member in included_members
+        ]
+        covered_member_count = sum(evidence is not None for evidence in selected_evidence)
+        coverage = {
+            "covered_member_count": covered_member_count,
+            "required_member_count": len(included_members),
+            "complete": covered_member_count == len(included_members),
+        }
+        if not coverage["complete"]:
+            estimates[title_prefix] = coverage
+            continue
+        predicted_output_bytes = sum(int(evidence["output_bytes"]) for evidence in selected_evidence if evidence is not None)
+        source_size_bytes = sum(int(member["source_size_bytes"]) for member in included_members)
+        estimates[title_prefix] = {
+            **coverage,
+            "estimated_included_output_bytes": predicted_output_bytes,
+            "projected_reclaim_bytes": source_size_bytes - predicted_output_bytes,
+            "estimated_savings_bytes": source_size_bytes - predicted_output_bytes,
+        }
+    return estimates
+
+
+def _current_movie_members(
+        grouped_rows: Mapping[str, list[tuple[dict[str, Any], MovieMembership]]],
+        config: MediaforceConfig,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[int, list[dict[str, Any]]]]:
+    members_by_title: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    members_by_item_id: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for title_prefix, members in grouped_rows.items():
+        for row, membership in members:
+            current_member = _current_movie_member(row, membership, config)
+            if current_member is not None:
+                current_member = {
+                    **current_member,
+                    "title_prefix": title_prefix,
+                }
+                members_by_title[title_prefix].append(current_member)
+                members_by_item_id[current_member["item_id"]].append(current_member)
+    return members_by_title, members_by_item_id
+
+
+def _current_movie_member(
+        row: dict[str, Any],
+        membership: MovieMembership,
+        config: MediaforceConfig,
+) -> dict[str, Any] | None:
+    library = _movie_library_for_membership(config, membership)
+    included, _blocker = _production_inclusion(library, membership)
+    if not included:
+        return None
+    try:
+        manifest_item = build_manifest_item(row, config)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {
+        "item_id": int(row["item_id"]),
+        "media_root": str(row.get("media_root") or ""),
+        "rel_path": str(row.get("rel_path") or ""),
+        "source_path": str(row.get("source_path") or ""),
+        "source_fingerprint": str(row.get("fingerprint") or ""),
+        "content_version_fingerprint": row.get("content_version_fingerprint"),
+        "source_size_bytes": max(0, int(row.get("size_bytes") or 0)),
+        "source_height": max(0, int(row.get("height") or 0)),
+        "output_container": str(manifest_item.get("output_container") or ""),
+        "resolved_policy": object_dict(manifest_item.get("resolved_policy")),
+        "title_prefix": membership.title_prefix,
+    }
+
+
+def _movie_library_for_membership(config: MediaforceConfig, membership: MovieMembership) -> dict[str, Any]:
+    return next(
+        library
+        for library in _movie_libraries(config)
+        if str(library["key"]) == membership.root
+    )
+
+
+def _sampled_evidence_matches_member(
+        job: dict[str, Any],
+        member: dict[str, Any],
+) -> bool:
+    sample_item = object_dict(job.get("sample_item"))
+    if str(job.get("prefix") or "") not in {member["title_prefix"], member["rel_path"]}:
+        return False
+    if not _sample_item_matches_member(sample_item, member):
+        return False
+    return (
+        _prediction_policy_matches(
+            sample_item.get("resolved_policy"),
+            member["resolved_policy"],
+            source_height=member["source_height"],
+        )
+        and _prediction_policy_matches(
+            job.get("policy"),
+            member["resolved_policy"],
+            source_height=member["source_height"],
+        )
+        and str(sample_item.get("output_container") or "") == member["output_container"]
+    )
+
+
+def _sample_item_matches_member(sample_item: Mapping[str, Any], member: Mapping[str, Any]) -> bool:
+    return (
+        _same_int(sample_item.get("library_item_id"), member["item_id"])
+        and str(sample_item.get("media_root") or "") == member["media_root"]
+        and str(sample_item.get("rel_path") or "") == member["rel_path"]
+        and str(sample_item.get("source_path") or "") == member["source_path"]
+        and str(sample_item.get("source_fingerprint") or "") == member["source_fingerprint"]
+        and sample_item.get("content_version_fingerprint") == member["content_version_fingerprint"]
+    )
+
+
+def _same_int(value: object, expected: int) -> bool:
+    return int_value(value) == expected
+
+
+def _prediction_policy_matches(
+        stored_policy: object,
+        current_policy: Mapping[str, Any],
+        *,
+        source_height: int,
+) -> bool:
+    return _prediction_policy_identity(stored_policy, source_height) == _prediction_policy_identity(
+        current_policy,
+        source_height,
+    )
+
+
+def _prediction_policy_identity(policy: object, source_height: int) -> dict[str, Any]:
+    normalized = deepcopy(object_dict(policy))
+    normalized.pop("planning", None)
+    video = object_dict(normalized.get("video"))
+    for key in ("sample_duration", "sample_every"):
+        video.pop(key, None)
+    if str(video.get("black_bar_handling") or "").strip().lower() == "off":
+        video.pop("black_bar_detect_samples", None)
+        video.pop("black_bar_detect_seconds", None)
+    if source_height > 0:
+        max_height = int_value(video.get("max_height"))
+        video["max_height"] = source_height if max_height <= 0 else min(source_height, max_height)
+    normalized["video"] = video
+    return normalized
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _latest_sampled_evidence(evidence: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return max(
+        evidence,
+        key=lambda candidate: (
+            _timestamp_value(candidate["finished_at"]),
+            _timestamp_value(candidate["created_at"]),
+        ),
+        default=None,
+    )
+
+
+def _timestamp_value(value: object) -> float:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return float("-inf")
 
 
 def load_movie_library_payload(
@@ -110,6 +321,7 @@ def load_movie_library_payload(
         else {}
     )
     metrics = metrics_by_prefix or {}
+    sampled_estimates = _sampled_calibration_estimates(connection, config, grouped_rows) if include_details else {}
     titles = [
         _title_payload(
             prefix,
@@ -120,6 +332,7 @@ def load_movie_library_payload(
             workflow=workflows.get(prefix),
             metrics=object_dict(metrics.get(prefix)),
             metrics_available=prefix in metrics,
+            sampled_estimate=sampled_estimates.get(prefix),
             config=config,
             include_details=include_details,
         )
@@ -240,6 +453,7 @@ def _title_payload(
         workflow: Any,
         metrics: dict[str, Any],
         metrics_available: bool,
+        sampled_estimate: dict[str, Any] | None,
         config: MediaforceConfig,
         include_details: bool,
 ) -> dict[str, Any]:
@@ -288,6 +502,20 @@ def _title_payload(
         if estimate_unavailable_count > 0
         else int(metrics.get("estimated_savings_bytes") or 0)
     )
+    sampled_complete = bool(sampled_estimate and sampled_estimate.get("complete"))
+    use_sampled_estimate = sampled_complete and estimate_unavailable_count > 0
+    sampled_coverage = sampled_estimate or {}
+    total_size_bytes = sum(int(member["size_bytes"]) for member in members)
+    included_size_bytes = sum(int(member["size_bytes"]) for member in included_members)
+    sampled_output = None
+    if use_sampled_estimate and sampled_estimate is not None:
+        sampled_output = (
+            int(sampled_estimate["estimated_included_output_bytes"])
+            + total_size_bytes
+            - included_size_bytes
+        )
+        projected_reclaim = int(sampled_estimate["projected_reclaim_bytes"])
+        estimated_savings = int(sampled_estimate["estimated_savings_bytes"])
     workflow_payload = workflow.to_payload() if workflow is not None else None
     workflow_payload = adapt_movie_workflow_payload(workflow_payload, library=library, members=members)
     return {
@@ -304,17 +532,30 @@ def _title_payload(
         "extra_count": role_counts["extra"],
         "uncertain_count": role_counts["uncertain"],
         "included_item_count": len(included_members),
-        "total_size_bytes": sum(int(member["size_bytes"]) for member in members),
-        "included_size_bytes": sum(int(member["size_bytes"]) for member in included_members),
+        "total_size_bytes": total_size_bytes,
+        "included_size_bytes": included_size_bytes,
         "projected_reclaim_bytes": projected_reclaim if include_details else None,
         "known_saved_bytes": known_saved if include_details else None,
         "estimated_savings_bytes": estimated_savings if include_details else None,
+        "estimated_output_bytes": sampled_output if include_details else None,
         "savings_confidence": (
-            "unavailable" if estimate_unavailable_count > 0
+            "estimated" if use_sampled_estimate
+            else "unavailable" if estimate_unavailable_count > 0
             else "measured" if known_saved > 0 and estimated_savings == 0
             else "estimated" if projected_reclaim and projected_reclaim > 0
             else "unavailable"
         ) if include_details else "pending",
+        "estimate_provenance": (
+            "sampled_calibration" if use_sampled_estimate
+            else "measured" if known_saved > 0 and estimated_savings == 0
+            else "projected" if estimate_unavailable_count == 0
+            else "unavailable"
+        ) if include_details else "pending",
+        "estimate_coverage": {
+            "covered_included_members": int(sampled_coverage.get("covered_member_count") or 0),
+            "required_included_members": int(sampled_coverage.get("required_member_count") or len(included_members)),
+            "complete": sampled_complete,
+        } if include_details else None,
         "age": title_age if include_details else None,
         "workflow_state": workflow_payload if include_details else None,
         "review_badge": {

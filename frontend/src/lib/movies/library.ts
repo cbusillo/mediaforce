@@ -56,9 +56,27 @@ export function movieTitleRuntimeSeconds(title: MovieTitle): number | null {
 }
 
 export function movieExpectedOutputBytes(title: MovieTitle): number | null {
+	if (title.estimated_output_bytes != null) return title.estimated_output_bytes;
 	return title.projected_reclaim_bytes == null
 		? null
 		: Math.max(0, title.total_size_bytes - title.projected_reclaim_bytes);
+}
+
+export function movieEstimatedOutputTotalIsLowerBound(titles: MovieTitle[]): boolean {
+	return titles.some((title) => movieExpectedOutputBytes(title) == null);
+}
+
+export function movieEstimateEvidence(title: MovieTitle): string | null {
+	if (title.estimate_provenance === 'sampled_calibration') {
+		return 'Estimated from completed samples for every included movie file.';
+	}
+	const coverage = title.estimate_coverage;
+	return title.estimate_provenance === 'unavailable' &&
+		coverage &&
+		!coverage.complete &&
+		coverage.required_included_members > 1
+		? 'No title estimate until every included movie file has its own current sample.'
+		: null;
 }
 
 export function moviePrimaryStudioPrefix(title: MovieTitle): string {

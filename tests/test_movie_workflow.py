@@ -18,8 +18,10 @@ from mediaforce.library.candidate_selection import candidate_rank_key, project_c
 from mediaforce.library.media_scopes import ScopeDomain, media_group_scope_for_rel_path, resolve_media_scope
 from mediaforce.library.movie_library import load_movie_library_payload, load_movie_scope_payload
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
+from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import load_representative_selection
 from mediaforce.library.workflow_state import build_folder_workflow_state
+from mediaforce.tuning.calibration_jobs import save_job
 from mediaforce.web.runtime.folder_actions import _promotion_conflict_response, _promotion_refresh_prefix
 from mediaforce.web.runtime.folder_actions import _reset_stale_prefix_encoding_items_for_requeue
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action, queue_folder_encode_action, \
@@ -356,6 +358,284 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["savings_confidence"], "unavailable")
         self.assertIsNotNone(payload_without_metrics)
         self.assertIsNone(payload_without_metrics["projected_reclaim_bytes"])
+
+    def test_movie_library_uses_current_completed_sampled_calibration_for_single_file_title(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "films/Loose Feature.mkv", size_bytes=1_000)
+            self._record_sampled_calibration(connection, item_id=item_id, predicted_total_size_bytes=400)
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertEqual(title["estimated_output_bytes"], 400)
+        self.assertEqual(title["projected_reclaim_bytes"], 600)
+        self.assertEqual(title["estimated_savings_bytes"], 600)
+        self.assertEqual(title["savings_confidence"], "estimated")
+        self.assertEqual(title["estimate_provenance"], "sampled_calibration")
+        self.assertEqual(
+            title["estimate_coverage"],
+            {"covered_included_members": 1, "required_included_members": 1, "complete": True},
+        )
+
+    def test_movie_library_keeps_sampled_growth_and_zero_savings_as_known_estimates(self) -> None:
+        for title_name, predicted_size, expected_reclaim in (
+            ("Growth", 1_200, -200),
+            ("No Savings", 1_000, 0),
+        ):
+            with self.subTest(title=title_name), open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_item(
+                    connection,
+                    f"films/{title_name}/{title_name}.mkv",
+                    size_bytes=1_000,
+                )
+                self._record_sampled_calibration(
+                    connection,
+                    item_id=item_id,
+                    predicted_total_size_bytes=predicted_size,
+                    job_id=f"{title_name.lower().replace(' ', '-')}-job",
+                )
+                payload = load_movie_library_payload(
+                    connection,
+                    self.config,
+                    include_details=True,
+                    prefixes=[f"films/{title_name}"],
+                )
+
+            title = payload["titles"][0]
+            self.assertEqual(title["estimated_output_bytes"], predicted_size)
+            self.assertEqual(title["projected_reclaim_bytes"], expected_reclaim)
+            self.assertEqual(title["savings_confidence"], "estimated")
+            self.assertEqual(title["estimate_provenance"], "sampled_calibration")
+
+    def test_movie_library_rejects_sampled_calibration_with_stale_source_fingerprint(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "films/Example/Example.mkv", size_bytes=1_000)
+            self._record_sampled_calibration(
+                connection,
+                item_id=item_id,
+                predicted_total_size_bytes=400,
+                sample_overrides={"source_fingerprint": "stale-fingerprint"},
+            )
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertIsNone(title["estimated_output_bytes"])
+        self.assertIsNone(title["projected_reclaim_bytes"])
+        self.assertEqual(title["savings_confidence"], "unavailable")
+
+    def test_movie_library_rejects_sampled_calibration_with_incompatible_policy_or_container(self) -> None:
+        for description, sample_overrides, policy_overrides in (
+            ("container", {"output_container": "mp4"}, {}),
+            ("policy", {}, {"video": {"preset": 4}}),
+        ):
+            with self.subTest(description=description), open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_item(connection, f"films/{description}/Movie.mkv", size_bytes=1_000)
+                self._record_sampled_calibration(
+                    connection,
+                    item_id=item_id,
+                    predicted_total_size_bytes=400,
+                    sample_overrides=sample_overrides,
+                    policy_overrides=policy_overrides,
+                    job_id=f"{description}-job",
+                )
+                payload = load_movie_library_payload(
+                    connection,
+                    self.config,
+                    include_details=True,
+                    prefixes=[f"films/{description}"],
+                )
+
+            title = payload["titles"][0]
+            self.assertIsNone(title["estimated_output_bytes"])
+            self.assertIsNone(title["projected_reclaim_bytes"])
+
+    def test_movie_library_accepts_prediction_compatible_sample_policy_changes(self) -> None:
+        config = self._config(
+            extras="exclude",
+            video={"sample_every": "8m", "sample_duration": "20s", "max_height": 1080},
+        )
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(
+                connection,
+                "films/Compatible/Compatible.mkv",
+                size_bytes=1_000,
+                height=800,
+            )
+            row = dict(
+                connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            )
+            stored_video = dict(build_manifest_item(row, config)["resolved_policy"]["video"])
+            stored_video.update({"sample_every": "4m", "sample_duration": "30s", "max_height": 0})
+            self._record_sampled_calibration(
+                connection,
+                item_id=item_id,
+                predicted_total_size_bytes=400,
+                config=config,
+                policy_overrides={"video": stored_video},
+            )
+            payload = load_movie_library_payload(connection, config, include_details=True)
+
+        self.assertEqual(payload["titles"][0]["estimated_output_bytes"], 400)
+
+    def test_movie_library_rejects_sample_policy_with_effective_resolution_change(self) -> None:
+        config = self._config(extras="exclude", video={"max_height": 1080})
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(
+                connection,
+                "films/Resolution Change/Resolution Change.mkv",
+                size_bytes=1_000,
+                height=2160,
+            )
+            row = dict(
+                connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            )
+            stored_video = dict(build_manifest_item(row, config)["resolved_policy"]["video"])
+            stored_video["max_height"] = 0
+            self._record_sampled_calibration(
+                connection,
+                item_id=item_id,
+                predicted_total_size_bytes=400,
+                config=config,
+                policy_overrides={"video": stored_video},
+            )
+            payload = load_movie_library_payload(connection, config, include_details=True)
+
+        self.assertIsNone(payload["titles"][0]["estimated_output_bytes"])
+
+    def test_movie_library_rejects_failed_superseded_and_invalid_sampled_evidence(self) -> None:
+        for description, status, predicted_total_size_bytes in (
+            ("Failed", "failed", 400),
+            ("Superseded", "superseded", 400),
+            ("Invalid", "completed", 0),
+        ):
+            with self.subTest(description=description), open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_item(connection, f"films/{description}/{description}.mkv", size_bytes=1_000)
+                self._record_sampled_calibration(
+                    connection,
+                    item_id=item_id,
+                    predicted_total_size_bytes=predicted_total_size_bytes,
+                    status=status,
+                    job_id=f"{description.lower()}-job",
+                )
+                payload = load_movie_library_payload(
+                    connection,
+                    self.config,
+                    include_details=True,
+                    prefixes=[f"films/{description}"],
+                )
+
+            title = payload["titles"][0]
+            self.assertIsNone(title["estimated_output_bytes"])
+            self.assertIsNone(title["projected_reclaim_bytes"])
+
+    def test_movie_library_requires_complete_included_member_sample_coverage(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            first_id = self._insert_item(connection, "films/Versions/Feature.mkv", size_bytes=1_000)
+            self._insert_item(connection, "films/Versions/Feature - Director's Cut.mkv", size_bytes=2_000)
+            self._record_sampled_calibration(connection, item_id=first_id, predicted_total_size_bytes=400)
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertIsNone(title["estimated_output_bytes"])
+        self.assertIsNone(title["projected_reclaim_bytes"])
+        self.assertEqual(
+            title["estimate_coverage"],
+            {"covered_included_members": 1, "required_included_members": 2, "complete": False},
+        )
+
+    def test_movie_library_handles_titles_without_default_included_members(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Extras Only/Featurettes/Making Of.mkv", size_bytes=300)
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertEqual(title["included_item_count"], 0)
+        self.assertIsNone(title["estimated_output_bytes"])
+        self.assertEqual(
+            title["estimate_coverage"],
+            {"covered_included_members": 0, "required_included_members": 0, "complete": False},
+        )
+
+    def test_movie_library_keeps_excluded_extras_in_sampled_title_output(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            feature_id = self._insert_item(connection, "films/With Extras/With Extras.mkv", size_bytes=1_000)
+            self._insert_item(connection, "films/With Extras/Featurettes/Making Of.mkv", size_bytes=300)
+            self._record_sampled_calibration(connection, item_id=feature_id, predicted_total_size_bytes=400)
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertEqual(title["total_size_bytes"], 1_300)
+        self.assertEqual(title["included_size_bytes"], 1_000)
+        self.assertEqual(title["estimated_output_bytes"], 700)
+        self.assertEqual(title["projected_reclaim_bytes"], 600)
+
+    def test_movie_library_keeps_complete_projection_over_sampled_fallback(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "films/Projected/Projected.mkv", size_bytes=1_000)
+            self._record_sampled_calibration(connection, item_id=item_id, predicted_total_size_bytes=400)
+            payload = load_movie_library_payload(
+                connection,
+                self.config,
+                include_details=True,
+                metrics_by_prefix={
+                    "films/Projected": {
+                        "projected_reclaim_bytes": 250,
+                        "estimated_savings_bytes": 250,
+                        "estimate_unavailable_count": 0,
+                    }
+                },
+            )
+
+        title = payload["titles"][0]
+        self.assertIsNone(title["estimated_output_bytes"])
+        self.assertEqual(title["projected_reclaim_bytes"], 250)
+        self.assertEqual(title["estimate_provenance"], "projected")
+
+    def test_movie_library_keeps_no_partial_and_complete_sample_coverage_distinct(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/No Evidence/No Evidence.mkv", size_bytes=1_000)
+            partial_id = self._insert_item(connection, "films/Partial/Feature.mkv", size_bytes=1_000)
+            self._insert_item(connection, "films/Partial/Feature - Director's Cut.mkv", size_bytes=2_000)
+            complete_id = self._insert_item(connection, "films/Complete/Complete.mkv", size_bytes=1_000)
+            self._record_sampled_calibration(connection, item_id=partial_id, predicted_total_size_bytes=400)
+            self._record_sampled_calibration(connection, item_id=complete_id, predicted_total_size_bytes=500)
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        titles = {title["title"]: title for title in payload["titles"]}
+        self.assertIsNone(titles["No Evidence"]["estimated_output_bytes"])
+        self.assertIsNone(titles["Partial"]["estimated_output_bytes"])
+        self.assertEqual(titles["Partial"]["estimate_coverage"]["covered_included_members"], 1)
+        self.assertEqual(titles["Complete"]["estimated_output_bytes"], 500)
+        self.assertEqual(titles["Complete"]["projected_reclaim_bytes"], 500)
+
+    def test_movie_library_ignores_tv_sampled_evidence(self) -> None:
+        config = self._config(
+            extras="exclude",
+            additional_libraries=[
+                {
+                    "key": "shows",
+                    "label": "TV",
+                    "path": str(self.root / "shows"),
+                    "type": "tv",
+                    "availability": "production",
+                    "default_profile": "tv_balanced",
+                    "policy": {},
+                },
+            ],
+        )
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Example/Example.mkv", size_bytes=1_000)
+            tv_item_id = self._insert_item(connection, "shows/Example/Season 1/Example S01E01.mkv", size_bytes=1_000)
+            self._record_sampled_calibration(
+                connection,
+                item_id=tv_item_id,
+                predicted_total_size_bytes=100,
+                config=config,
+            )
+            payload = load_movie_library_payload(connection, config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertIsNone(title["estimated_output_bytes"])
+        self.assertIsNone(title["projected_reclaim_bytes"])
 
     def test_tv_folder_cards_ignore_movie_codec_history(self) -> None:
         config = self._config(
@@ -1064,6 +1344,60 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertIn(extra_prefix, str(raised.exception.detail))
         self.assertEqual(prepared, [])
 
+    def _record_sampled_calibration(
+            self,
+            connection: DBClient,
+            *,
+            item_id: int,
+            predicted_total_size_bytes: int,
+            config: MediaforceConfig | None = None,
+            status: str = "completed",
+            job_id: str | None = None,
+            sample_overrides: dict[str, object] | None = None,
+            policy_overrides: dict[str, object] | None = None,
+    ) -> None:
+        active_config = config or self.config
+        resolved_job_id = job_id or f"sampled-movie-job-{item_id}"
+        row = dict(
+            connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+        )
+        manifest_item = build_manifest_item(row, active_config)
+        policy = dict(manifest_item["resolved_policy"])
+        policy.update(policy_overrides or {})
+        sample_item = {
+            "library_item_id": item_id,
+            "media_root": row["media_root"],
+            "rel_path": row["rel_path"],
+            "source_path": row["source_path"],
+            "source_fingerprint": row["fingerprint"],
+            "content_version_fingerprint": row["content_version_fingerprint"],
+            "output_container": manifest_item["output_container"],
+            "resolved_policy": policy,
+        }
+        sample_item.update(sample_overrides or {})
+        timestamp = "2026-08-29T12:00:00+00:00"
+        job = {
+            "job_id": resolved_job_id,
+            "prefix": "/".join(Path(str(row["rel_path"])).parts[:2]),
+            "status": status,
+            "lane": "sample",
+            "action": "baseline",
+            "host": {},
+            "notes": "Movie estimate fixture.",
+            "policy": policy,
+            "sample_item": sample_item,
+            "result": {
+                "mode": "sample",
+                "sample_result": {"predicted_total_size_bytes": predicted_total_size_bytes},
+            },
+            "error": "Calibration failed." if status == "failed" else None,
+            "created_at": timestamp,
+            "started_at": timestamp,
+            "finished_at": timestamp,
+            "updated_at": timestamp,
+        }
+        save_job(connection, job)
+
     def _config(
             self,
             *,
@@ -1141,6 +1475,8 @@ class MovieWorkflowTests(unittest.TestCase):
             size_bytes: int = 1024,
             status: str = "discovered",
             duration_seconds: float = 7_200.0,
+            width: int = 1920,
+            height: int = 1080,
     ) -> int:
         timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
         path = Path(rel_path)
@@ -1157,6 +1493,8 @@ class MovieWorkflowTests(unittest.TestCase):
                 fingerprint=f"movie-{rel_path}",
                 duration_seconds=duration_seconds,
                 video_codec="h264",
+                width=width,
+                height=height,
                 audio_summary_json="[]",
                 subtitle_summary_json="[]",
                 status=status,

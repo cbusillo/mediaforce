@@ -157,6 +157,14 @@ export interface FolderCard {
 export type MovieMemberRole = 'feature' | 'extra' | 'uncertain';
 export type MovieScopeMode = 'single_file' | 'title_folder';
 export type MovieSavingsConfidence = 'pending' | 'measured' | 'estimated' | 'unavailable';
+export type MovieEstimateProvenance =
+	'pending' | 'measured' | 'projected' | 'sampled_calibration' | 'unavailable';
+
+export interface MovieEstimateCoverage {
+	covered_included_members: number;
+	required_included_members: number;
+	complete: boolean;
+}
 
 export interface MovieAgeEvidence {
 	timestamp: string | null;
@@ -232,7 +240,10 @@ export interface MovieTitle {
 	projected_reclaim_bytes?: number | null;
 	known_saved_bytes?: number | null;
 	estimated_savings_bytes?: number | null;
+	estimated_output_bytes?: number | null;
 	savings_confidence: MovieSavingsConfidence;
+	estimate_provenance?: MovieEstimateProvenance;
+	estimate_coverage?: MovieEstimateCoverage | null;
 	age?: MovieAgeEvidence | null;
 	workflow_state?: FolderWorkflowState | null;
 	review_badge?: { label?: string | null; tone?: string | null; detail?: string | null } | null;
