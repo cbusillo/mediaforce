@@ -5220,7 +5220,7 @@
 	.compression-intent__options {
 		display: grid;
 		gap: 7px;
-		grid-template-columns: repeat(4, minmax(0, 1fr));
+		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 
 	.compression-intent__options button {
@@ -6537,6 +6537,20 @@
 		white-space: nowrap;
 	}
 
+	@media (max-width: 950px) {
+		.goal-contract {
+			grid-template-columns: 1fr;
+		}
+
+		.goal-contract > div:nth-child(n) {
+			border-left: 0;
+		}
+
+		.goal-contract > div:nth-child(n + 2) {
+			border-top: 1px solid var(--mf-line-muted);
+		}
+	}
+
 	.target-provenance-blocker {
 		background: var(--mf-fail-bg);
 		border: 1px solid var(--mf-fail-line);
@@ -7037,18 +7051,6 @@
 
 		.compression-intent__options {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.goal-contract {
-			grid-template-columns: 1fr;
-		}
-
-		.goal-contract > div:nth-child(n) {
-			border-left: 0;
-		}
-
-		.goal-contract > div:nth-child(n + 2) {
-			border-top: 1px solid var(--mf-line-muted);
 		}
 
 		.active-facts,
