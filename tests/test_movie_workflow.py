@@ -376,6 +376,36 @@ class MovieWorkflowTests(unittest.TestCase):
             {"covered_included_members": 1, "required_included_members": 1, "complete": True},
         )
 
+    def test_movie_library_keeps_sampled_growth_and_zero_savings_as_known_estimates(self) -> None:
+        for title_name, predicted_size, expected_reclaim in (
+            ("Growth", 1_200, -200),
+            ("No Savings", 1_000, 0),
+        ):
+            with self.subTest(title=title_name), open_db(self.config.paths.db_path) as connection:
+                item_id = self._insert_item(
+                    connection,
+                    f"films/{title_name}/{title_name}.mkv",
+                    size_bytes=1_000,
+                )
+                self._record_sampled_calibration(
+                    connection,
+                    item_id=item_id,
+                    predicted_total_size_bytes=predicted_size,
+                    job_id=f"{title_name.lower().replace(' ', '-')}-job",
+                )
+                payload = load_movie_library_payload(
+                    connection,
+                    self.config,
+                    include_details=True,
+                    prefixes=[f"films/{title_name}"],
+                )
+
+            title = payload["titles"][0]
+            self.assertEqual(title["estimated_output_bytes"], predicted_size)
+            self.assertEqual(title["projected_reclaim_bytes"], expected_reclaim)
+            self.assertEqual(title["savings_confidence"], "estimated")
+            self.assertEqual(title["estimate_provenance"], "sampled_calibration")
+
     def test_movie_library_rejects_sampled_calibration_with_stale_source_fingerprint(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_item(connection, "films/Example/Example.mkv", size_bytes=1_000)

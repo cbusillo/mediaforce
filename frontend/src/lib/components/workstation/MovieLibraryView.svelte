@@ -6,6 +6,7 @@
 	import { formatFileSize } from '$lib/format';
 	import {
 		movieCompositionDetail,
+		movieEstimateEvidence,
 		movieEstimatedOutputTotalIsLowerBound,
 		movieExpectedOutputBytes,
 		moviePrimaryStudioPrefix,
@@ -62,16 +63,9 @@
 	});
 
 	const selectedTitle = $derived(selectMovieTitle(titles, selectedPrefix));
-	const selectedEstimateEvidence = $derived.by(() => {
-		if (!selectedTitle) return null;
-		if (selectedTitle.estimate_provenance === 'sampled_calibration') {
-			return 'Estimated from completed samples for every included movie file.';
-		}
-		const coverage = selectedTitle.estimate_coverage;
-		return coverage && !coverage.complete && coverage.required_included_members > 1
-			? 'No title estimate until every included movie file has its own current sample.'
-			: null;
-	});
+	const selectedEstimateEvidence = $derived(
+		selectedTitle ? movieEstimateEvidence(selectedTitle) : null
+	);
 	const leadTitle = $derived(selectMovieLeadTitle(titles, sortMode, query));
 	const totalSize = $derived(
 		payload.titles.reduce((total, title) => total + title.total_size_bytes, 0)
@@ -105,7 +99,11 @@
 				? 'No estimate'
 				: totalReclaim < 0
 					? `${reclaimHasUnknowns ? 'Known net growth ' : 'Grows by '}${formatBytes(Math.abs(totalReclaim))}`
-					: `${reclaimHasUnknowns ? 'Known ' : ''}${formatBytes(totalReclaim)}`
+					: totalReclaim === 0
+						? reclaimHasUnknowns
+							? 'Known titles net to 0 B'
+							: 'No savings'
+						: `${reclaimHasUnknowns ? 'Known ' : ''}${formatBytes(totalReclaim)}`
 	);
 	const outputCoverageLabel = $derived(
 		outputCoverage > 0 && outputHasUnknowns
@@ -153,6 +151,7 @@
 		const lowerBound = movieReclaimLowerBound(title);
 		if (lowerBound == null) return 'No estimate';
 		if (lowerBound < 0) return `Grows by about ${formatBytes(Math.abs(lowerBound))}`;
+		if (lowerBound === 0) return 'None';
 		if (title.projected_reclaim_bytes == null) return `At least ${formatBytes(lowerBound)}`;
 		if (title.savings_confidence === 'estimated') return `About ${formatBytes(lowerBound)}`;
 		return formatBytes(lowerBound);
@@ -179,6 +178,7 @@
 		const lowerBound = movieReclaimLowerBound(title);
 		if (lowerBound == null) return 'No savings estimate';
 		if (lowerBound < 0) return `Grows by about ${formatBytes(Math.abs(lowerBound))}`;
+		if (lowerBound === 0) return 'No estimated savings';
 		if (title.projected_reclaim_bytes == null) return `Save at least ${formatBytes(lowerBound)}`;
 		if (title.savings_confidence === 'estimated') return `Save about ${formatBytes(lowerBound)}`;
 		return `Save ${formatBytes(lowerBound)}`;
@@ -212,6 +212,12 @@
 		}
 		const reclaim = movieReclaimLowerBound(title);
 		if (reclaim == null) return `${stageReason} Savings are not measured, so A–Z breaks the tie.`;
+		if (reclaim < 0) {
+			return `${stageReason} Its estimate shows growth of ${formatBytes(Math.abs(reclaim))}, so larger savings rank ahead of it.`;
+		}
+		if (reclaim === 0) {
+			return `${stageReason} Its estimate shows no space saved, so larger savings rank ahead of it.`;
+		}
 		if (title.projected_reclaim_bytes == null) {
 			return `${stageReason} Its known savings of at least ${formatBytes(reclaim)} rank highest at this step.`;
 		}

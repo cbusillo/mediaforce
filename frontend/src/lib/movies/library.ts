@@ -66,6 +66,19 @@ export function movieEstimatedOutputTotalIsLowerBound(titles: MovieTitle[]): boo
 	return titles.some((title) => movieExpectedOutputBytes(title) == null);
 }
 
+export function movieEstimateEvidence(title: MovieTitle): string | null {
+	if (title.estimate_provenance === 'sampled_calibration') {
+		return 'Estimated from completed samples for every included movie file.';
+	}
+	const coverage = title.estimate_coverage;
+	return title.estimate_provenance === 'unavailable' &&
+		coverage &&
+		!coverage.complete &&
+		coverage.required_included_members > 1
+		? 'No title estimate until every included movie file has its own current sample.'
+		: null;
+}
+
 export function moviePrimaryStudioPrefix(title: MovieTitle): string {
 	return title.members.length === 1 && title.members[0] && !movieTitleOwnsActiveWork(title)
 		? title.members[0].prefix
