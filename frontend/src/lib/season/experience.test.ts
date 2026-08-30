@@ -662,12 +662,12 @@ function sizeOption(
 }
 
 function compressionIntentOptions(): CompressionIntentOptionPayload[] {
-	return (['reference', 'transparent', 'balanced', 'perceptual_floor'] as const).map((level) => ({
+	return (['reference', 'balanced', 'perceptual_floor'] as const).map((level) => ({
 		key: level,
 		title: level,
 		detail: level,
 		selected: level === 'balanced',
-		accepts_under_target_result: level === 'transparent' || level === 'perceptual_floor',
+		accepts_under_target_result: level === 'perceptual_floor',
 		compression_intent: {
 			schema_version: 1,
 			level,
@@ -709,12 +709,6 @@ describe('season experience translation', () => {
 			qualityLabel: 'Highest measured fidelity',
 			finalHeadline: 'Final result must meet the final band.'
 		});
-		expect(contracts.transparent).toMatchObject({
-			sizeLabel: 'Size ceiling',
-			searchLabel: 'Smallest indistinguishable result',
-			qualityLabel: 'Source-indistinguishable',
-			finalHeadline: 'A smaller final result may pass.'
-		});
 		expect(contracts.balanced).toMatchObject({
 			sizeLabel: 'Size target',
 			searchLabel: 'Closest result in the band',
@@ -727,7 +721,20 @@ describe('season experience translation', () => {
 			qualityLabel: 'Measured acceptability floor',
 			finalHeadline: 'A smaller final result may pass.'
 		});
-		expect(contracts.transparent.qualityRule).not.toBe(contracts.perceptual_floor.qualityRule);
+		const legacyTransparent = compressionIntentContract({
+			key: 'transparent',
+			title: 'No visible difference',
+			detail: 'Legacy option',
+			selected: false,
+			accepts_under_target_result: true,
+			compression_intent: { schema_version: 1, level: 'transparent', confirmed: true }
+		});
+		expect(legacyTransparent).toMatchObject({
+			sizeLabel: contracts.perceptual_floor.sizeLabel,
+			searchLabel: contracts.perceptual_floor.searchLabel,
+			qualityLabel: contracts.perceptual_floor.qualityLabel,
+			finalHeadline: contracts.perceptual_floor.finalHeadline
+		});
 	});
 
 	it('parses a human show and season identity', () => {

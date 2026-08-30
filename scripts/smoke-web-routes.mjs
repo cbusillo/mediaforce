@@ -552,12 +552,6 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
       "A smaller final result may pass.",
     ],
     [
-      "No visible difference",
-      "Size ceiling",
-      "Smallest indistinguishable result",
-      "A smaller final result may pass.",
-    ],
-    [
       "Preserve the reference",
       "Size limit",
       "High fidelity first",
@@ -604,11 +598,22 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
       });
     const announcement =
       (await page.locator('p.sr-only[aria-live="polite"]').textContent()) ?? "";
-    if (!announcement.includes(title) || !announcement.includes(sizeLabel)) {
+    if (
+      !announcement.includes(title) ||
+      !announcement.includes(sizeLabel) ||
+      !/\d+ MB/.test(announcement)
+    ) {
       throw new Error(
         `${label} did not announce the ${title} contract: ${JSON.stringify(announcement)}`,
       );
     }
+  }
+  if (
+    (await page
+      .getByRole("radio", { name: "No visible difference", exact: false })
+      .count()) > 0
+  ) {
+    throw new Error(`${label} exposed the behaviorally duplicate transparent option.`);
   }
   const contractText = await page.locator(".goal-contract").innerText();
   for (const requiredCopy of [

@@ -1415,46 +1415,32 @@ export function compressionIntentContract(
 					finalRule:
 						'Outside-band results stop after the bounded correction path instead of silently passing.'
 				}
-			: option.key === 'transparent'
+			: option.key === 'transparent' || option.key === 'perceptual_floor'
 				? {
 						sizeLabel: 'Size ceiling',
-						sizeRule: 'Smaller is acceptable when the stricter measured bar holds.',
-						searchLabel: 'Smallest indistinguishable result',
+						sizeRule: 'Smaller is acceptable while measured quality remains good.',
+						searchLabel: 'Low end first',
 						searchRule:
-							'Searches toward the low end while measurements remain indistinguishable from the source.',
-						qualityLabel: 'Source-indistinguishable',
+							'Searches toward the bottom of the sample band while the measured quality floor holds.',
+						qualityLabel: 'Measured acceptability floor',
 						qualityRule:
-							'Uses the stricter source-indistinguishability rule rather than the general acceptability floor.',
+							'Chooses the smallest candidate that still clears the measured quality floor.',
 						finalHeadline: 'A smaller final result may pass.',
 						finalRule:
-							'Under-target is accepted while that stricter measured bar holds; larger or unverified results stop.'
+							'Under-target is accepted while the measured floor holds; larger or below-floor results stop.'
 					}
-				: option.key === 'perceptual_floor'
-					? {
-							sizeLabel: 'Size ceiling',
-							sizeRule: 'Smaller is acceptable while measured quality remains good.',
-							searchLabel: 'Low end first',
-							searchRule:
-								'Searches toward the bottom of the sample band while the measured quality floor holds.',
-							qualityLabel: 'Measured acceptability floor',
-							qualityRule:
-								'Chooses the smallest candidate that still clears the measured quality floor.',
-							finalHeadline: 'A smaller final result may pass.',
-							finalRule:
-								'Under-target is accepted while the measured floor holds; larger or below-floor results stop.'
-						}
-					: {
-							sizeLabel: 'Size target',
-							sizeRule: 'The result closest to the selected size wins.',
-							searchLabel: 'Closest result in the band',
-							searchRule:
-								'Searches around the target and ranks the nearest candidate after quality clears.',
-							qualityLabel: 'Measured quality floor',
-							qualityRule: 'Picture and sound still have to clear the measured floor.',
-							finalHeadline: 'Final result must meet the final band.',
-							finalRule:
-								'Outside-band results stop after the bounded correction path instead of silently passing.'
-						};
+				: {
+						sizeLabel: 'Size target',
+						sizeRule: 'The result closest to the selected size wins.',
+						searchLabel: 'Closest result in the band',
+						searchRule:
+							'Searches around the target and ranks the nearest candidate after quality clears.',
+						qualityLabel: 'Measured quality floor',
+						qualityRule: 'Picture and sound still have to clear the measured floor.',
+						finalHeadline: 'Final result must meet the final band.',
+						finalRule:
+							'Outside-band results stop after the bounded correction path instead of silently passing.'
+					};
 	return {
 		...contract,
 		announcement: `${option.title}. ${contract.sizeLabel}. ${contract.searchRule} ${contract.finalHeadline}`

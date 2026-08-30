@@ -428,6 +428,11 @@
 				)
 			: 0
 	);
+	const selectedCompressionIntentAnnouncement = $derived(
+		selectedGoal && selectedCompressionIntent && selectedCompressionIntentContract
+			? `${selectedCompressionIntentContract.announcement} Selected size ${formatDecimalFileSize(selectedGoal.targetSizeBytes)}. Sample search band ${formatDecimalFileSize(selectedGoalSampleLower)} to ${formatDecimalFileSize(selectedGoalSampleUpper)}. ${selectedCompressionIntent.accepts_under_target_result ? `Final size ceiling ${formatDecimalFileSize(selectedGoalFinalUpper)}; smaller results may pass.` : `Final acceptance band ${formatDecimalFileSize(selectedGoalFinalLower)} to ${formatDecimalFileSize(selectedGoalFinalUpper)}.`}`
+			: ''
+	);
 	const crfLimitReached = $derived(
 		asNumber(sampleResult.chosen_crf) > 0 &&
 			asNumber(technicalVideo.max_crf) > 0 &&
@@ -1708,9 +1713,12 @@
 						</button>
 					{/each}
 				</div>
+				<p class="sr-only" aria-live="polite" aria-atomic="true">
+					{selectedCompressionIntentAnnouncement}
+				</p>
 
 				<div class="compression-intent">
-					<div class="compression-intent__heading" aria-live="polite" aria-atomic="true">
+					<div class="compression-intent__heading">
 						<div>
 							<span>Quality preference</span>
 							<strong>{selectedCompressionIntent?.title ?? 'Choose a goal'}</strong>
@@ -1754,9 +1762,6 @@
 				</div>
 
 				{#if selectedGoal && selectedCompressionIntentContract}
-					<p class="sr-only" aria-live="polite" aria-atomic="true">
-						{selectedCompressionIntentContract.announcement}
-					</p>
 					<div class="goal-contract">
 						<div class="goal-contract__size">
 							<span>{selectedCompressionIntentContract.sizeLabel}</span>
@@ -1775,16 +1780,25 @@
 							>
 						</div>
 						<div>
-							<span>Final acceptance band</span>
-							<strong
-								>{formatDecimalFileSize(selectedGoalFinalLower)}–{formatDecimalFileSize(
-									selectedGoalFinalUpper
-								)}</strong
+							<span
+								>{selectedCompressionIntent?.accepts_under_target_result
+									? 'Final size ceiling'
+									: 'Final acceptance band'}</span
 							>
-							<small
-								>±{selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}% after the
-								full encode</small
-							>
+							{#if selectedCompressionIntent?.accepts_under_target_result}
+								<strong>Up to {formatDecimalFileSize(selectedGoalFinalUpper)}</strong>
+								<small>Smaller outputs may pass when the measured quality rule still holds.</small>
+							{:else}
+								<strong
+									>{formatDecimalFileSize(selectedGoalFinalLower)}–{formatDecimalFileSize(
+										selectedGoalFinalUpper
+									)}</strong
+								>
+								<small
+									>±{selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}% after
+									the full encode</small
+								>
+							{/if}
 						</div>
 						<div>
 							<span>Quality rule</span>
@@ -6487,8 +6501,13 @@
 		padding: 13px 14px;
 	}
 
-	.goal-contract > div + div {
+	.goal-contract > div:nth-child(2),
+	.goal-contract > div:nth-child(4) {
 		border-left: 1px solid var(--mf-line-muted);
+	}
+
+	.goal-contract > div:nth-child(n + 3) {
+		border-top: 1px solid var(--mf-line-muted);
 	}
 
 	.goal-contract span,
@@ -7018,6 +7037,18 @@
 
 		.compression-intent__options {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.goal-contract {
+			grid-template-columns: 1fr;
+		}
+
+		.goal-contract > div:nth-child(n) {
+			border-left: 0;
+		}
+
+		.goal-contract > div:nth-child(n + 2) {
+			border-top: 1px solid var(--mf-line-muted);
 		}
 
 		.active-facts,
