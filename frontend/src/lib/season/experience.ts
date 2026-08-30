@@ -264,6 +264,18 @@ export interface SizeGoal {
 	requiresExplicitSelection: boolean;
 }
 
+export interface CompressionIntentContract {
+	sizeLabel: string;
+	sizeRule: string;
+	searchLabel: string;
+	searchRule: string;
+	qualityLabel: string;
+	qualityRule: string;
+	finalHeadline: string;
+	finalRule: string;
+	announcement: string;
+}
+
 export type ReviewSizeAdjustmentDirection = 'smaller' | 'higher_quality';
 
 export interface ReviewSizeAdjustment {
@@ -1384,6 +1396,55 @@ export function sizeGoals(folder: FolderPayload): SizeGoal[] {
 			}
 		];
 	});
+}
+
+export function compressionIntentContract(
+	option: CompressionIntentOptionPayload
+): CompressionIntentContract {
+	const contract: Omit<CompressionIntentContract, 'announcement'> =
+		option.key === 'reference'
+			? {
+					sizeLabel: 'Size limit',
+					sizeRule: 'Highest measured fidelity wins as long as it fits.',
+					searchLabel: 'High fidelity first',
+					searchRule:
+						'Tests higher-fidelity candidates and only moves smaller as needed to fit the limit.',
+					qualityLabel: 'Highest measured fidelity',
+					qualityRule: 'Measured fidelity outranks extra savings.',
+					finalHeadline: 'Final result must meet the final band.',
+					finalRule:
+						'Outside-band results stop after the bounded correction path instead of silently passing.'
+				}
+			: option.key === 'transparent' || option.key === 'perceptual_floor'
+				? {
+						sizeLabel: 'Size ceiling',
+						sizeRule: 'Smaller is acceptable while measured quality remains good.',
+						searchLabel: 'Low end first',
+						searchRule:
+							'Searches toward the bottom of the sample band while the measured quality floor holds.',
+						qualityLabel: 'Measured acceptability floor',
+						qualityRule:
+							'Chooses the smallest candidate that still clears the measured quality floor.',
+						finalHeadline: 'A smaller final result may pass.',
+						finalRule:
+							'Under-target is accepted while the measured floor holds; larger or below-floor results stop.'
+					}
+				: {
+						sizeLabel: 'Size target',
+						sizeRule: 'The result closest to the selected size wins.',
+						searchLabel: 'Closest result in the band',
+						searchRule:
+							'Searches around the target and ranks the nearest candidate after quality clears.',
+						qualityLabel: 'Measured quality floor',
+						qualityRule: 'Picture and sound still have to clear the measured floor.',
+						finalHeadline: 'Final result must meet the final band.',
+						finalRule:
+							'Outside-band results stop after the bounded correction path instead of silently passing.'
+					};
+	return {
+		...contract,
+		announcement: `${option.title}. ${contract.sizeLabel}. ${contract.searchRule} ${contract.finalHeadline}`
+	};
 }
 
 export function resolvedTargetSummary(folder: FolderPayload): ResolvedTargetSummary | null {

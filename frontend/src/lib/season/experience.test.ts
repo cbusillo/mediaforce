@@ -29,6 +29,7 @@ import {
 	calibrationWorkProgress,
 	catalogWarningNotice,
 	compareRiskSummary,
+	compressionIntentContract,
 	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
@@ -661,12 +662,12 @@ function sizeOption(
 }
 
 function compressionIntentOptions(): CompressionIntentOptionPayload[] {
-	return (['reference', 'transparent', 'balanced', 'perceptual_floor'] as const).map((level) => ({
+	return (['reference', 'balanced', 'perceptual_floor'] as const).map((level) => ({
 		key: level,
 		title: level,
 		detail: level,
 		selected: level === 'balanced',
-		accepts_under_target_result: level === 'transparent' || level === 'perceptual_floor',
+		accepts_under_target_result: level === 'perceptual_floor',
 		compression_intent: {
 			schema_version: 1,
 			level,
@@ -697,6 +698,45 @@ function workflowState(primaryLane: WorkflowLane, state = primaryLane): FolderWo
 }
 
 describe('season experience translation', () => {
+	it('describes the size, search, quality, and final contract for every quality preference', () => {
+		const contracts = Object.fromEntries(
+			compressionIntentOptions().map((option) => [option.key, compressionIntentContract(option)])
+		);
+
+		expect(contracts.reference).toMatchObject({
+			sizeLabel: 'Size limit',
+			searchLabel: 'High fidelity first',
+			qualityLabel: 'Highest measured fidelity',
+			finalHeadline: 'Final result must meet the final band.'
+		});
+		expect(contracts.balanced).toMatchObject({
+			sizeLabel: 'Size target',
+			searchLabel: 'Closest result in the band',
+			qualityLabel: 'Measured quality floor',
+			finalHeadline: 'Final result must meet the final band.'
+		});
+		expect(contracts.perceptual_floor).toMatchObject({
+			sizeLabel: 'Size ceiling',
+			searchLabel: 'Low end first',
+			qualityLabel: 'Measured acceptability floor',
+			finalHeadline: 'A smaller final result may pass.'
+		});
+		const legacyTransparent = compressionIntentContract({
+			key: 'transparent',
+			title: 'No visible difference',
+			detail: 'Legacy option',
+			selected: false,
+			accepts_under_target_result: true,
+			compression_intent: { schema_version: 1, level: 'transparent', confirmed: true }
+		});
+		expect(legacyTransparent).toMatchObject({
+			sizeLabel: contracts.perceptual_floor.sizeLabel,
+			searchLabel: contracts.perceptual_floor.searchLabel,
+			qualityLabel: contracts.perceptual_floor.qualityLabel,
+			finalHeadline: contracts.perceptual_floor.finalHeadline
+		});
+	});
+
 	it('parses a human show and season identity', () => {
 		expect(seasonIdentity(card.prefix)).toEqual({
 			library: 'tv',
