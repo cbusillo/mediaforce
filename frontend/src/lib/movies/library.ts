@@ -17,7 +17,7 @@ export interface MovieWorkflowDisplayState {
 
 export interface MoviePendingReviewBadge {
 	label: string;
-	tone?: string | null;
+	tone: 'active' | 'attention' | 'ready';
 	detail?: string | null;
 }
 
@@ -116,7 +116,8 @@ export function moviePendingReviewBadge(
 	) {
 		return null;
 	}
-	return { label, tone: badge?.tone, detail: badge?.detail };
+	const tone = badge?.tone === 'active' || badge?.tone === 'ready' ? badge.tone : 'attention';
+	return { label, tone, detail: badge?.detail };
 }
 
 export function movieCompositionDetail(title: MovieTitle): string | null {

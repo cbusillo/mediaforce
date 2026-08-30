@@ -244,7 +244,7 @@
 		if (title.promotion_conflicts.length) return 'attention';
 		if (movieWorkflowIsComplete(title.workflow_state)) return 'success';
 		const pendingReview = moviePendingReviewBadge(title);
-		if (pendingReview) return pendingReview.tone ?? 'attention';
+		if (pendingReview) return pendingReview.tone;
 		return title.workflow_state?.tone ?? 'idle';
 	}
 

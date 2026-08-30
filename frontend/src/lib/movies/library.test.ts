@@ -7,6 +7,7 @@ import {
 	movieEstimateEvidence,
 	movieEstimatedOutputTotalIsLowerBound,
 	movieExpectedOutputBytes,
+	moviePendingReviewBadge,
 	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
 	movieReclaimTotalIsLowerBound,
@@ -434,6 +435,12 @@ describe('movie action discoverability', () => {
 
 		expect(movieWorkflowLabel(reviewTitle)).toBe('Ready to review');
 		expect(movieTitleNeedsAction(reviewTitle)).toBe(true);
+		expect(
+			moviePendingReviewBadge({
+				...reviewTitle,
+				review_badge: { ...reviewTitle.review_badge, tone: 'warning' }
+			})?.tone
+		).toBe('attention');
 		expect(
 			selectMovieLeadTitle(
 				sortMovieTitles([plainEncodeTitle, reviewTitle], 'priority'),
