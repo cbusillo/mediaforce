@@ -4411,14 +4411,8 @@
 			grid-template-columns: 1fr;
 		}
 
-		.goal-contract,
 		.review-feedback-fields {
 			grid-template-columns: 1fr;
-		}
-
-		.goal-contract > div + div {
-			border-left: 0;
-			border-top: 1px solid var(--mf-line-muted);
 		}
 
 		.comparison-ledger,
@@ -7050,7 +7044,7 @@
 		}
 
 		.compression-intent__options {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+			grid-template-columns: 1fr;
 		}
 
 		.active-facts,
