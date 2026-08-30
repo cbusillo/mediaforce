@@ -29,6 +29,7 @@ import {
 	calibrationWorkProgress,
 	catalogWarningNotice,
 	compareRiskSummary,
+	compressionIntentContract,
 	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
@@ -697,6 +698,38 @@ function workflowState(primaryLane: WorkflowLane, state = primaryLane): FolderWo
 }
 
 describe('season experience translation', () => {
+	it('describes the size, search, quality, and final contract for every quality preference', () => {
+		const contracts = Object.fromEntries(
+			compressionIntentOptions().map((option) => [option.key, compressionIntentContract(option)])
+		);
+
+		expect(contracts.reference).toMatchObject({
+			sizeLabel: 'Size limit',
+			searchLabel: 'High fidelity first',
+			qualityLabel: 'Highest measured fidelity',
+			finalHeadline: 'Final result must meet the final band.'
+		});
+		expect(contracts.transparent).toMatchObject({
+			sizeLabel: 'Size ceiling',
+			searchLabel: 'Smallest indistinguishable result',
+			qualityLabel: 'Source-indistinguishable',
+			finalHeadline: 'A smaller final result may pass.'
+		});
+		expect(contracts.balanced).toMatchObject({
+			sizeLabel: 'Size target',
+			searchLabel: 'Closest result in the band',
+			qualityLabel: 'Measured quality floor',
+			finalHeadline: 'Final result must meet the final band.'
+		});
+		expect(contracts.perceptual_floor).toMatchObject({
+			sizeLabel: 'Size ceiling',
+			searchLabel: 'Low end first',
+			qualityLabel: 'Measured acceptability floor',
+			finalHeadline: 'A smaller final result may pass.'
+		});
+		expect(contracts.transparent.qualityRule).not.toBe(contracts.perceptual_floor.qualityRule);
+	});
+
 	it('parses a human show and season identity', () => {
 		expect(seasonIdentity(card.prefix)).toEqual({
 			library: 'tv',

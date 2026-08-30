@@ -537,6 +537,95 @@ async function checkMovieEstimateCoverage(page, timeoutMs, label) {
   }
 }
 
+async function checkCompressionIntentContract(page, timeoutMs, label) {
+  const states = [
+    [
+      "Balance size and detail",
+      "Size target",
+      "Closest result in the band",
+      "Final result must meet the final band.",
+    ],
+    [
+      "Smallest that still looks good",
+      "Size ceiling",
+      "Low end first",
+      "A smaller final result may pass.",
+    ],
+    [
+      "No visible difference",
+      "Size ceiling",
+      "Smallest indistinguishable result",
+      "A smaller final result may pass.",
+    ],
+    [
+      "Preserve the reference",
+      "Size limit",
+      "High fidelity first",
+      "Final result must meet the final band.",
+    ],
+  ];
+  for (const [title, sizeLabel, searchLabel, finalHeadline] of states) {
+    const option = page.getByRole("radio", { name: title, exact: false });
+    const optionText = await option.innerText();
+    if (optionText.trim().length <= title.length + 10) {
+      throw new Error(`${label} hid the differentiating detail for ${title}.`);
+    }
+    await option.click();
+    await page
+      .waitForFunction(
+        ({ expectedSize, expectedSearch, expectedFinal }) => {
+          const contract =
+            document.querySelector(".goal-contract")?.innerText ?? "";
+          return (
+            contract.includes(expectedSize) &&
+            contract.includes(expectedSearch) &&
+            contract.includes(expectedFinal)
+          );
+        },
+        {
+          expectedSize: sizeLabel,
+          expectedSearch: searchLabel,
+          expectedFinal: finalHeadline,
+        },
+        { timeout: timeoutMs },
+      )
+      .catch(async (error) => {
+        const state = await page.evaluate(() => ({
+          contract: document.querySelector(".goal-contract")?.innerText ?? "",
+          selected: Array.from(document.querySelectorAll('[role="radio"]'))
+            .filter(
+              (element) => element.getAttribute("aria-checked") === "true",
+            )
+            .map((element) => String(element.textContent ?? "").trim()),
+        }));
+        throw new Error(
+          `${label} did not render the ${title} contract: ${JSON.stringify(state)} (${error.message})`,
+        );
+      });
+    const announcement =
+      (await page.locator('p.sr-only[aria-live="polite"]').textContent()) ?? "";
+    if (!announcement.includes(title) || !announcement.includes(sizeLabel)) {
+      throw new Error(
+        `${label} did not announce the ${title} contract: ${JSON.stringify(announcement)}`,
+      );
+    }
+  }
+  const contractText = await page.locator(".goal-contract").innerText();
+  for (const requiredCopy of [
+    "Sample search band",
+    "Final acceptance band",
+    "Quality rule",
+    "Final acceptance",
+  ]) {
+    if (!contractText.includes(requiredCopy)) {
+      throw new Error(`${label} omitted ${requiredCopy}.`);
+    }
+  }
+  if (contractText.includes("Size is the target.")) {
+    throw new Error(`${label} retained the static size-target sentence.`);
+  }
+}
+
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   const browser = await chromium.launch({ channel: "chromium" });
   try {
@@ -586,6 +675,9 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
       }
       if (route === "/movies" && label === "Movie Library") {
         await checkMovieEstimateCoverage(page, timeoutMs, label);
+      }
+      if (route === "/folders/tv/Example%20Show/Season%201") {
+        await checkCompressionIntentContract(page, timeoutMs, label);
       }
       if (route === "/ops" && label === "Activity") {
         const requiredCopies = ["Computers", "Stop processing", "Stop samples"];
@@ -1498,6 +1590,13 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
       }
       if (route === "/movies" && label === "Movie Library") {
         await checkMovieEstimateCoverage(page, timeoutMs, `${label} narrow`);
+      }
+      if (route === "/folders/tv/Example%20Show/Season%201") {
+        await checkCompressionIntentContract(
+          page,
+          timeoutMs,
+          `${label} narrow`,
+        );
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`narrow route ok: ${label} ${elapsedMs}ms`);

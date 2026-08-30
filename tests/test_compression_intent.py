@@ -69,6 +69,16 @@ class CompressionIntentTests(unittest.TestCase):
         ])
         self.assertEqual([option["key"] for option in options if option["selected"]], ["transparent"])
         self.assertEqual(options[1]["compression_intent"]["level"], "transparent")
+        self.assertEqual(
+            {option["key"]: option["accepts_under_target_result"] for option in options},
+            {
+                "reference": False,
+                "transparent": True,
+                "balanced": False,
+                "perceptual_floor": True,
+            },
+        )
+        self.assertIn("source-indistinguishability", options[1]["detail"])
 
     def test_legacy_options_do_not_preselect_a_named_intent(self) -> None:
         options = compression_intent_options(CompressionIntentV1("legacy_unconfirmed", "legacy", False))

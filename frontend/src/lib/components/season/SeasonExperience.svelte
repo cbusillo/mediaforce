@@ -33,6 +33,7 @@
 		calibrationWorkLabel,
 		calibrationWorkProgress,
 		compareRiskSummary,
+		compressionIntentContract,
 		currentOperatorIntent,
 		detailSeasonState,
 		episodeLabel,
@@ -256,6 +257,9 @@
 	const selectedCompressionIntent = $derived(
 		compressionIntentOptions.find((option) => option.key === activeCompressionIntentLevel) ?? null
 	);
+	const selectedCompressionIntentContract = $derived(
+		selectedCompressionIntent ? compressionIntentContract(selectedCompressionIntent) : null
+	);
 	const compressionIntentConfirmed = $derived(Boolean(selectedCompressionIntent));
 	const selectedOperatorIntent = $derived(
 		selectedGoal && selectedCompressionIntent
@@ -405,6 +409,22 @@
 			? Math.round(
 					selectedGoal.targetSizeBytes *
 						(1 + selectedGoal.operatorIntent.size_goal.sample_projection_tolerance_percent / 100)
+				)
+			: 0
+	);
+	const selectedGoalFinalLower = $derived(
+		selectedGoal
+			? Math.round(
+					selectedGoal.targetSizeBytes *
+						(1 - selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent / 100)
+				)
+			: 0
+	);
+	const selectedGoalFinalUpper = $derived(
+		selectedGoal
+			? Math.round(
+					selectedGoal.targetSizeBytes *
+						(1 + selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent / 100)
 				)
 			: 0
 	);
@@ -1721,7 +1741,10 @@
 									? 0
 									: -1}
 							>
-								<span>{option.title}</span>
+								<span class="compression-intent__option-copy">
+									<strong>{option.title}</strong>
+									<small>{option.detail}</small>
+								</span>
 							</button>
 						{/each}
 					</div>
@@ -1730,27 +1753,48 @@
 					>
 				</div>
 
-				{#if selectedGoal}
-					<div class="goal-contract" aria-live="polite">
-						<div>
-							<span>Whole-episode target</span>
+				{#if selectedGoal && selectedCompressionIntentContract}
+					<p class="sr-only" aria-live="polite" aria-atomic="true">
+						{selectedCompressionIntentContract.announcement}
+					</p>
+					<div class="goal-contract">
+						<div class="goal-contract__size">
+							<span>{selectedCompressionIntentContract.sizeLabel}</span>
 							<strong>{formatDecimalFileSize(selectedGoal.targetSizeBytes)}</strong>
+							<small>{selectedCompressionIntentContract.sizeRule}</small>
 						</div>
 						<div>
-							<span>Sample band</span>
+							<span>Sample search band</span>
 							<strong
 								>{formatDecimalFileSize(selectedGoalSampleLower)}–{formatDecimalFileSize(
 									selectedGoalSampleUpper
 								)}</strong
 							>
 							<small
-								>±{selectedGoal.operatorIntent.size_goal.sample_projection_tolerance_percent}% while
-								testing</small
+								>{selectedCompressionIntentContract.searchLabel}. {selectedCompressionIntentContract.searchRule}</small
 							>
 						</div>
+						<div>
+							<span>Final acceptance band</span>
+							<strong
+								>{formatDecimalFileSize(selectedGoalFinalLower)}–{formatDecimalFileSize(
+									selectedGoalFinalUpper
+								)}</strong
+							>
+							<small
+								>±{selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}% after the
+								full encode</small
+							>
+						</div>
+						<div>
+							<span>Quality rule</span>
+							<strong>{selectedCompressionIntentContract.qualityLabel}</strong>
+							<small>{selectedCompressionIntentContract.qualityRule}</small>
+						</div>
 						<div class="goal-contract__truth">
-							<strong>Size is the target.</strong>
-							<span>Picture and sound decide whether that size is worth keeping.</span>
+							<span>Final acceptance</span>
+							<strong>{selectedCompressionIntentContract.finalHeadline}</strong>
+							<small>{selectedCompressionIntentContract.finalRule}</small>
 							{#if isExactItemScope && targetProvenance}
 								<small>Target source: {targetProvenance}</small>
 							{/if}
@@ -5172,9 +5216,31 @@
 		color: var(--mf-fg-secondary);
 		font-size: 12px;
 		font-weight: 650;
-		min-height: 38px;
-		padding: 8px 10px;
-		text-align: center;
+		min-height: 92px;
+		padding: 10px 11px;
+		text-align: left;
+	}
+
+	.compression-intent__option-copy {
+		display: grid;
+		gap: 5px;
+	}
+
+	.compression-intent__option-copy strong {
+		color: inherit;
+		font-size: 12px;
+		line-height: 1.25;
+	}
+
+	.compression-intent__option-copy small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 500;
+		line-height: 1.35;
+	}
+
+	.compression-intent__options button.selected .compression-intent__option-copy small {
+		color: var(--mf-fg-secondary);
 	}
 
 	.compression-intent__options button:hover {
@@ -6412,7 +6478,7 @@
 		border: 1px solid var(--mf-line-muted);
 		border-radius: var(--mf-radius-3);
 		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
+		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
 
 	.goal-contract > div {
@@ -6438,6 +6504,18 @@
 
 	.goal-contract__truth {
 		background: var(--mf-active-bg);
+		grid-column: 1 / -1;
+	}
+
+	.sr-only {
+		height: 1px;
+		margin: -1px;
+		overflow: hidden;
+		padding: 0;
+		position: absolute;
+		width: 1px;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
 	}
 
 	.target-provenance-blocker {

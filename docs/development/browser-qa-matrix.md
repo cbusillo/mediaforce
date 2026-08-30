@@ -70,6 +70,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
+- Quality contract: `/folders/tv/Absolute%20Goal/Season%201` exposes visible
+  detail on every quality option. Selecting reference, transparent, balanced,
+  or perceptual-floor intent immediately changes the size target/ceiling, sample
+  search direction, quality rule, final band, under-target policy, and live
+  screen-reader announcement on desktop and narrow viewports.
 - Sampling state: `/folders/tv/Sampling%20Show/Season%201`, with persisted stage,
   heartbeat, bounded review-step progress, and a historical ETA range.
 - Shared-scope sampling state:
