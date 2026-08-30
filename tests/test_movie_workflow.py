@@ -418,6 +418,59 @@ class MovieWorkflowTests(unittest.TestCase):
             self.assertIsNone(title["estimated_output_bytes"])
             self.assertIsNone(title["projected_reclaim_bytes"])
 
+    def test_movie_library_accepts_prediction_compatible_sample_policy_changes(self) -> None:
+        config = self._config(
+            extras="exclude",
+            video={"sample_every": "8m", "sample_duration": "20s", "max_height": 1080},
+        )
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(
+                connection,
+                "films/Compatible/Compatible.mkv",
+                size_bytes=1_000,
+                height=800,
+            )
+            row = dict(
+                connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            )
+            stored_video = dict(build_manifest_item(row, config)["resolved_policy"]["video"])
+            stored_video.update({"sample_every": "4m", "sample_duration": "30s", "max_height": 0})
+            self._record_sampled_calibration(
+                connection,
+                item_id=item_id,
+                predicted_total_size_bytes=400,
+                config=config,
+                policy_overrides={"video": stored_video},
+            )
+            payload = load_movie_library_payload(connection, config, include_details=True)
+
+        self.assertEqual(payload["titles"][0]["estimated_output_bytes"], 400)
+
+    def test_movie_library_rejects_sample_policy_with_effective_resolution_change(self) -> None:
+        config = self._config(extras="exclude", video={"max_height": 1080})
+        with open_db(config.paths.db_path) as connection:
+            item_id = self._insert_item(
+                connection,
+                "films/Resolution Change/Resolution Change.mkv",
+                size_bytes=1_000,
+                height=2160,
+            )
+            row = dict(
+                connection.execute(select(library_items).where(library_items.c.id == item_id)).mappings().one()
+            )
+            stored_video = dict(build_manifest_item(row, config)["resolved_policy"]["video"])
+            stored_video["max_height"] = 0
+            self._record_sampled_calibration(
+                connection,
+                item_id=item_id,
+                predicted_total_size_bytes=400,
+                config=config,
+                policy_overrides={"video": stored_video},
+            )
+            payload = load_movie_library_payload(connection, config, include_details=True)
+
+        self.assertIsNone(payload["titles"][0]["estimated_output_bytes"])
+
     def test_movie_library_rejects_failed_superseded_and_invalid_sampled_evidence(self) -> None:
         for description, status, predicted_total_size_bytes in (
             ("Failed", "failed", 400),
@@ -457,6 +510,19 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(
             title["estimate_coverage"],
             {"covered_included_members": 1, "required_included_members": 2, "complete": False},
+        )
+
+    def test_movie_library_handles_titles_without_default_included_members(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_item(connection, "films/Extras Only/Featurettes/Making Of.mkv", size_bytes=300)
+            payload = load_movie_library_payload(connection, self.config, include_details=True)
+
+        title = payload["titles"][0]
+        self.assertEqual(title["included_item_count"], 0)
+        self.assertIsNone(title["estimated_output_bytes"])
+        self.assertEqual(
+            title["estimate_coverage"],
+            {"covered_included_members": 0, "required_included_members": 0, "complete": False},
         )
 
     def test_movie_library_keeps_excluded_extras_in_sampled_title_output(self) -> None:
@@ -1379,6 +1445,8 @@ class MovieWorkflowTests(unittest.TestCase):
             size_bytes: int = 1024,
             status: str = "discovered",
             duration_seconds: float = 7_200.0,
+            width: int = 1920,
+            height: int = 1080,
     ) -> int:
         timestamp = datetime.now(tz=UTC).isoformat(timespec="seconds")
         path = Path(rel_path)
@@ -1395,6 +1463,8 @@ class MovieWorkflowTests(unittest.TestCase):
                 fingerprint=f"movie-{rel_path}",
                 duration_seconds=duration_seconds,
                 video_codec="h264",
+                width=width,
+                height=height,
                 audio_summary_json="[]",
                 subtitle_summary_json="[]",
                 status=status,

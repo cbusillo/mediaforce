@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -121,6 +122,7 @@ def _current_movie_member(
         "source_fingerprint": str(row.get("fingerprint") or ""),
         "content_version_fingerprint": row.get("content_version_fingerprint"),
         "source_size_bytes": max(0, int(row.get("size_bytes") or 0)),
+        "source_height": max(0, int(row.get("height") or 0)),
         "output_container": str(manifest_item.get("output_container") or ""),
         "resolved_policy": object_dict(manifest_item.get("resolved_policy")),
         "title_prefix": membership.title_prefix,
@@ -145,8 +147,16 @@ def _sampled_evidence_matches_member(
     if not _sample_item_matches_member(sample_item, member):
         return False
     return (
-        sample_item.get("resolved_policy") == member["resolved_policy"]
-        and object_dict(job.get("policy")) == member["resolved_policy"]
+        _prediction_policy_matches(
+            sample_item.get("resolved_policy"),
+            member["resolved_policy"],
+            source_height=member["source_height"],
+        )
+        and _prediction_policy_matches(
+            job.get("policy"),
+            member["resolved_policy"],
+            source_height=member["source_height"],
+        )
         and str(sample_item.get("output_container") or "") == member["output_container"]
     )
 
@@ -164,6 +174,34 @@ def _sample_item_matches_member(sample_item: Mapping[str, Any], member: Mapping[
 
 def _same_int(value: object, expected: int) -> bool:
     return int_value(value) == expected
+
+
+def _prediction_policy_matches(
+        stored_policy: object,
+        current_policy: Mapping[str, Any],
+        *,
+        source_height: int,
+) -> bool:
+    return _prediction_policy_identity(stored_policy, source_height) == _prediction_policy_identity(
+        current_policy,
+        source_height,
+    )
+
+
+def _prediction_policy_identity(policy: object, source_height: int) -> dict[str, Any]:
+    normalized = deepcopy(object_dict(policy))
+    normalized.pop("planning", None)
+    video = object_dict(normalized.get("video"))
+    for key in ("sample_duration", "sample_every"):
+        video.pop(key, None)
+    if str(video.get("black_bar_handling") or "").strip().lower() == "off":
+        video.pop("black_bar_detect_samples", None)
+        video.pop("black_bar_detect_seconds", None)
+    if source_height > 0:
+        max_height = int_value(video.get("max_height"))
+        video["max_height"] = source_height if max_height <= 0 else min(source_height, max_height)
+    normalized["video"] = video
+    return normalized
 
 
 def _positive_int(value: object) -> int | None:
@@ -466,6 +504,7 @@ def _title_payload(
     )
     sampled_complete = bool(sampled_estimate and sampled_estimate.get("complete"))
     use_sampled_estimate = sampled_complete and estimate_unavailable_count > 0
+    sampled_coverage = sampled_estimate or {}
     total_size_bytes = sum(int(member["size_bytes"]) for member in members)
     included_size_bytes = sum(int(member["size_bytes"]) for member in included_members)
     sampled_output = None
@@ -513,8 +552,8 @@ def _title_payload(
             else "unavailable"
         ) if include_details else "pending",
         "estimate_coverage": {
-            "covered_included_members": int(sampled_estimate.get("covered_member_count") or 0),
-            "required_included_members": int(sampled_estimate.get("required_member_count") or len(included_members)),
+            "covered_included_members": int(sampled_coverage.get("covered_member_count") or 0),
+            "required_included_members": int(sampled_coverage.get("required_member_count") or len(included_members)),
             "complete": sampled_complete,
         } if include_details else None,
         "age": title_age if include_details else None,
