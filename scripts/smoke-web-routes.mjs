@@ -47,6 +47,10 @@ const FIXTURE_REQUIRED_COPY = new Map([
     ],
   ],
   [
+    "/folders/movies/Review%20Ready",
+    ["Ready to review", "Estimated output", "Current sample estimate"],
+  ],
+  [
     "/folders/other/Field%20Notes",
     [
       "Files included now",
@@ -527,6 +531,8 @@ async function checkMovieEstimateCoverage(page, timeoutMs, label) {
   const normalizedInspectorText = inspectorText.toLocaleLowerCase();
   if (
     !normalizedInspectorText.includes("review ready") ||
+    !normalizedInspectorText.includes("ready to review") ||
+    normalizedInspectorText.includes("ready to compress") ||
     !normalizedInspectorText.includes("estimated output") ||
     !normalizedInspectorText.includes("estimated space saved") ||
     normalizedInspectorText.includes("no estimate")
@@ -977,15 +983,24 @@ async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
       .getByRole("heading", { name: /^Creating sample for / })
       .waitFor({ state: "visible", timeout: timeoutMs });
     const activeRoom = page.locator(".active-room");
-    const activeText = (await activeRoom.textContent()) ?? "";
-    for (const expectedText of [
+    const expectedTexts = [
       "Episode target",
       "Mediaforce found settings near",
       "Building comparison clips",
       "2 of 3 comparison clips built",
       "Computer status",
       "Based on 3 comparable completed samples",
-    ]) {
+    ];
+    await page.waitForFunction(
+      (expected) => {
+        const text = document.querySelector(".active-room")?.textContent ?? "";
+        return expected.every((value) => text.includes(value));
+      },
+      expectedTexts,
+      { timeout: Math.max(timeoutMs, 20_000) },
+    );
+    const activeText = (await activeRoom.textContent()) ?? "";
+    for (const expectedText of expectedTexts) {
       if (!activeText.includes(expectedText)) {
         throw new Error(`Active sample progress omitted: ${expectedText}`);
       }

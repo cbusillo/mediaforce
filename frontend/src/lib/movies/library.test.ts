@@ -7,6 +7,7 @@ import {
 	movieEstimateEvidence,
 	movieEstimatedOutputTotalIsLowerBound,
 	movieExpectedOutputBytes,
+	moviePendingReviewBadge,
 	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
 	movieReclaimTotalIsLowerBound,
@@ -408,6 +409,69 @@ describe('movie action discoverability', () => {
 				}
 			})
 		).toBe('Compressing');
+	});
+
+	it('puts pending sample review ahead of encode readiness', () => {
+		const reviewTitle: MovieTitle = {
+			...readyTitle,
+			review_badge: {
+				label: 'Ready to review',
+				tone: 'attention',
+				detail: 'Review the current sample before production compression can begin.'
+			},
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'encode_candidates',
+				primary_lane: 'encode',
+				label: 'Ready to encode'
+			}
+		};
+		const plainEncodeTitle: MovieTitle = {
+			...reviewTitle,
+			prefix: 'films/Plain encode',
+			title: 'Plain encode',
+			review_badge: null
+		};
+
+		expect(movieWorkflowLabel(reviewTitle)).toBe('Ready to review');
+		expect(movieTitleNeedsAction(reviewTitle)).toBe(true);
+		expect(
+			moviePendingReviewBadge({
+				...reviewTitle,
+				review_badge: { ...reviewTitle.review_badge, tone: 'warning' }
+			})?.tone
+		).toBe('attention');
+		expect(
+			selectMovieLeadTitle(
+				sortMovieTitles([plainEncodeTitle, reviewTitle], 'priority'),
+				'priority',
+				''
+			)
+		).toBe(reviewTitle);
+	});
+
+	it('keeps accepted and later-stage movie work authoritative', () => {
+		const acceptedTitle: MovieTitle = {
+			...readyTitle,
+			review_badge: { label: 'Approved draft', tone: 'ok' },
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'encode_candidates',
+				primary_lane: 'encode'
+			}
+		};
+		const validatingTitle: MovieTitle = {
+			...acceptedTitle,
+			review_badge: { label: 'Ready to review', tone: 'attention' },
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'ready_to_validate',
+				primary_lane: 'validate'
+			}
+		};
+
+		expect(movieWorkflowLabel(acceptedTitle)).toBe('Ready to compress');
+		expect(movieWorkflowLabel(validatingTitle)).toBe('Ready to check');
 	});
 
 	it('treats a required file choice as actionable without exposing the backend label', () => {

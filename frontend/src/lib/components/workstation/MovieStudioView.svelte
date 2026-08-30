@@ -133,11 +133,13 @@
 			.filter((host) => asText(host.key) && host.available !== false)
 	);
 	const streamBudgetLedger = $derived(folder.stream_budget_ledger);
+	const sampledTitleEstimate = $derived(context?.members.length === 1 ? context : null);
 	const movieGoalFacts = $derived(
 		movieGoalFactsView(
 			streamBudgetLedger?.source.duration_seconds ?? activeMember?.duration_seconds,
 			streamBudgetLedger?.source.source_size_bytes ?? activeMember?.size_bytes,
-			streamBudgetLedger?.size_goal ?? folder.resolved_operator_intent?.size_goal
+			streamBudgetLedger?.size_goal ?? folder.resolved_operator_intent?.size_goal,
+			sampledTitleEstimate
 		)
 	);
 	const movieGoalContract = $derived(
@@ -164,7 +166,7 @@
 	const reviewSourceHasSound = $derived(reviewSourceHasAudio(folder));
 	const reviewLabel = $derived(reviewSourceLabel(folder, title));
 	const reviewEstimatedOutput = $derived(
-		movieGoalFacts.expectedOutput === 'Unknown' ? '' : `about ${movieGoalFacts.expectedOutput}`
+		movieGoalFacts.estimateBasis === 'sampled' ? `about ${movieGoalFacts.expectedOutput}` : ''
 	);
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
@@ -864,7 +866,7 @@
 		{#if !isComplete}
 			<div>
 				<span>Estimated output</span><strong>{movieGoalFacts.expectedOutput}</strong>
-				<small>Target range {movieGoalFacts.targetRange}</small>
+				<small>{movieGoalFacts.outputDetail}</small>
 			</div>
 			<div>
 				<span>Estimated space saved</span><strong>{movieGoalFacts.expectedSavings}</strong>
