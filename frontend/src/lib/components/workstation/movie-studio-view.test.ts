@@ -785,8 +785,76 @@ describe('movieGoalFactsView', () => {
 			expectedOutput: '717 MB',
 			expectedSavings: '2.11 GB · 75%',
 			targetRange: '681 MB–753 MB',
-			estimateQuality: 'Planning range, not a guarantee'
+			outputDetail: 'Target range 681 MB–753 MB',
+			estimateQuality: 'Planning range, not a guarantee',
+			estimateBasis: 'target'
 		}));
+
+	it('prefers the current complete sampled estimate over the configured target', () => {
+		const view = movieGoalFactsView(
+			7652.542,
+			8_667_928_469,
+			{
+				schema_version: 1,
+				mode: 'normalized',
+				source: 'config_default',
+				status: 'resolved',
+				requires_confirmation: false,
+				target_size_bytes: 850_282_444,
+				sample_projection_tolerance_percent: 10,
+				final_output_tolerance_percent: 5,
+				final_lower_bound_bytes: 807_768_322,
+				final_upper_bound_bytes: 892_796_566,
+				rationale: 'Runtime-adjusted movie target.'
+			},
+			{
+				estimated_output_bytes: 904_049_452,
+				estimate_provenance: 'sampled_calibration',
+				estimate_coverage: {
+					covered_included_members: 1,
+					required_included_members: 1,
+					complete: true
+				}
+			}
+		);
+
+		expect(view).toMatchObject({
+			expectedOutput: '904 MB',
+			expectedSavings: '7.76 GB · 90%',
+			targetRange: '808 MB–893 MB',
+			estimateQuality: 'Current completed-sample estimate, not a guarantee',
+			estimateBasis: 'sampled'
+		});
+		expect(view.outputDetail).toContain('above target range');
+	});
+
+	it('ignores incomplete sampled evidence', () =>
+		expect(
+			movieGoalFactsView(
+				3600,
+				1_000_000_000,
+				{
+					schema_version: 1,
+					mode: 'absolute',
+					source: 'profile',
+					status: 'resolved',
+					requires_confirmation: false,
+					target_size_bytes: 400_000_000,
+					sample_projection_tolerance_percent: 10,
+					final_output_tolerance_percent: 5,
+					rationale: 'Movie target.'
+				},
+				{
+					estimated_output_bytes: 500_000_000,
+					estimate_provenance: 'sampled_calibration',
+					estimate_coverage: {
+						covered_included_members: 1,
+						required_included_members: 2,
+						complete: false
+					}
+				}
+			).estimateBasis
+		).toBe('target'));
 
 	it('does not claim savings when the target is not smaller', () =>
 		expect(

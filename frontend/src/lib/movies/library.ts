@@ -9,9 +9,16 @@ export type MovieLibrarySortMode = 'priority' | 'name' | 'size' | 'savings' | 'o
 
 export interface MovieWorkflowDisplayState {
 	workflow_state?: FolderWorkflowState | null;
+	review_badge?: MovieTitle['review_badge'];
 	promotion_conflicts: unknown[];
 	details_loading: boolean;
 	availability: 'production' | 'browse_only';
+}
+
+export interface MoviePendingReviewBadge {
+	label: string;
+	tone?: string | null;
+	detail?: string | null;
 }
 
 export function movieWorkflowIsComplete(workflow: FolderWorkflowState | null | undefined): boolean {
@@ -96,6 +103,22 @@ export function movieTitleOwnsActiveWork(
 	);
 }
 
+export function moviePendingReviewBadge(
+	title: Pick<MovieTitle, 'workflow_state' | 'review_badge'>
+): MoviePendingReviewBadge | null {
+	const badge = title.review_badge;
+	const label = badge?.label?.trim();
+	if (!label || badge?.tone === 'ok') return null;
+	if (
+		['processing', 'validate', 'promote', 'blocked', 'complete'].includes(
+			title.workflow_state?.primary_lane ?? ''
+		)
+	) {
+		return null;
+	}
+	return { label, tone: badge?.tone, detail: badge?.detail };
+}
+
 export function movieCompositionDetail(title: MovieTitle): string | null {
 	const details: string[] = [];
 	if (title.edition_count > 1) details.push(`${title.edition_count} editions`);
@@ -116,6 +139,7 @@ export function movieTitleNeedsAction(title: MovieTitle): boolean {
 	if (title.promotion_conflicts.length) return true;
 	if (title.workflow_state?.state === 'explicit_selection_required') return true;
 	if (movieWorkflowIsComplete(title.workflow_state)) return false;
+	if (moviePendingReviewBadge(title)) return true;
 	return ['encode', 'validate', 'promote', 'processing', 'attention', 'mixed'].includes(
 		title.workflow_state?.primary_lane ?? ''
 	);
@@ -128,6 +152,8 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 	}
 	if (title.workflow_state?.state === 'explicit_selection_required') return 'Choose a file';
 	if (movieWorkflowIsComplete(title.workflow_state)) return 'Finished';
+	const pendingReview = moviePendingReviewBadge(title);
+	if (pendingReview) return pendingReview.label;
 	switch (title.workflow_state?.primary_lane ?? 'none') {
 		case 'encode':
 			return 'Ready to compress';
@@ -200,6 +226,7 @@ function moviePriorityStage(title: MovieTitle): number {
 	if (title.promotion_conflicts.length) return 0;
 	if (movieWorkflowIsComplete(title.workflow_state)) return 10;
 	if (title.workflow_state?.state === 'explicit_selection_required') return 6;
+	if (moviePendingReviewBadge(title)) return 1;
 	return {
 		attention: 1,
 		promote: 2,
@@ -220,6 +247,7 @@ function movieTitleCanBeRecommended(title: MovieTitle): boolean {
 	if (title.promotion_conflicts.length || movieWorkflowIsComplete(title.workflow_state))
 		return false;
 	if (title.workflow_state?.state === 'explicit_selection_required') return true;
+	if (moviePendingReviewBadge(title)) return true;
 	return ['promote', 'validate', 'mixed', 'encode'].includes(
 		title.workflow_state?.primary_lane ?? ''
 	);

@@ -9,6 +9,7 @@
 		movieEstimateEvidence,
 		movieEstimatedOutputTotalIsLowerBound,
 		movieExpectedOutputBytes,
+		moviePendingReviewBadge,
 		moviePrimaryStudioPrefix,
 		movieReclaimLowerBound,
 		movieReclaimTotalIsLowerBound,
@@ -133,6 +134,7 @@
 		if (title.promotion_conflicts.length) return 'attention';
 		if (title.workflow_state?.state === 'explicit_selection_required') return 'explicit';
 		if (movieWorkflowIsComplete(title.workflow_state)) return 'all';
+		if (moviePendingReviewBadge(title)) return 'attention';
 		if (title.workflow_state?.primary_lane === 'attention') return 'attention';
 		if (title.workflow_state?.primary_lane === 'processing') return 'processing';
 		if (
@@ -196,6 +198,12 @@
 	}
 
 	function recommendationExplanation(title: MovieTitle): string {
+		const pendingReview = moviePendingReviewBadge(title);
+		if (pendingReview) {
+			return pendingReview.detail?.trim()
+				? pendingReview.detail
+				: 'The current sample needs review before production compression can begin.';
+		}
 		let stageReason = 'No later-stage work is ready, so this file choice is next.';
 		switch (title.workflow_state?.primary_lane) {
 			case 'promote':
@@ -235,6 +243,8 @@
 	function workflowTone(title: MovieTitle): string {
 		if (title.promotion_conflicts.length) return 'attention';
 		if (movieWorkflowIsComplete(title.workflow_state)) return 'success';
+		const pendingReview = moviePendingReviewBadge(title);
+		if (pendingReview) return pendingReview.tone ?? 'attention';
 		return title.workflow_state?.tone ?? 'idle';
 	}
 
@@ -250,6 +260,12 @@
 			return `${explicitCount} ${explicitCount === 1 ? 'file needs' : 'files need'} you to choose ${explicitCount === 1 ? 'it' : 'them'} individually.`;
 		}
 		if (movieWorkflowIsComplete(title.workflow_state)) return 'This movie is finished.';
+		const pendingReview = moviePendingReviewBadge(title);
+		if (pendingReview) {
+			return pendingReview.detail?.trim()
+				? pendingReview.detail
+				: 'Review the current sample before production compression can begin.';
+		}
 		const count = title.included_item_count || title.item_count;
 		const fileWord = count === 1 ? 'file' : 'files';
 		switch (title.workflow_state?.primary_lane) {
