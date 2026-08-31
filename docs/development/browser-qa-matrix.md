@@ -92,8 +92,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
   review media, explicit target/band/sample-byte facts, picture/sound risk, and
   trustworthy sound metadata for the shared review comparison workspace. Verify
-  the same inline `Compare clips` control on a review-ready Movie and Other
-  fixture; the combined comparison remains a separately labeled download.
+  the same persistent Original/Sample stage and explicit `Full screen` control
+  on a review-ready Movie and Other fixture; the combined comparison remains a
+  separately labeled download.
   An exact-item review-ready TV route also keeps `Current size`, `Estimated
   output`, and `Estimated space saved` in its decision facts, separate from the
   comparison clip byte labels. Risk guidance remains visible, but no empty
@@ -234,6 +235,23 @@ Every browser QA pass should cover these routes:
 
 ## Layout Expectations
 
+On `/`, `/movies`, and `/other`, verify at 1440px, 1024px, and 390px that:
+
+- mode navigation, metrics, current-work summary, and toolbar retain one stable
+  order and visual language;
+- no mode adds a visible hero heading, subtitle, recommendation card, or
+  ranking explainer before the index;
+- current-work totals include every active row even when less-common states are
+  compacted into `other active`;
+- the index remains reachable in the first mobile scroll, controls use the same
+  compact two-column collapse, row selection does not expand detail by itself,
+  and Inspect opens the selected detail directly beneath its row;
+- desktop selection opens one inline detail directly beneath the selected row,
+  Collapse removes it without losing selection, and neither the register nor
+  detail creates an independently scrolling region;
+- switching modes does not introduce page-level horizontal overflow or shift
+  the mode-navigation anchor.
+
 The automated narrow smoke uses a 390px viewport and fails when:
 
 - the app shell or `<main>` does not render quickly;
@@ -275,10 +293,13 @@ When a measured sample lands outside that target band, the comparison viewport
 must say that the size goal was not met before presenting review media. It must
 distinguish review-clip byte savings from the full-episode estimate, make another
 same-target measured test the primary action, and require an explicit warning
-that accepting the tradeoff saves the profile and queues the full folder encode.
+that accepting the tradeoff records the profile decision while production
+remains separate until the operator chooses the exact compression action.
 
-When valid browser-ready review pairs are available, `Compare clips` must open
-paused in `Side by side` and `Fit`. `One at a time` must switch between
+When valid browser-ready review pairs are available, the Original/Sample stage
+must remain visible with playback paused in `Side by side` and `Fit`. `Full
+screen` must enter a viewing-only mode with no approval, queue, stop, retry,
+checking, replacement, or Details action. `One at a time` must switch between
 `Original` and `Sample` without changing the selected moment, playback position,
 or picture position. Sound controls appear only when both clips carry trustworthy
 sound metadata; legacy or silent clips must say they show picture only and offer
@@ -287,6 +308,12 @@ missing, and legacy-download-only review media must explain that inline comparis
 is unavailable instead of treating `review_media_ready` as browser authority. The
 normal UI must not expose codec, quality-score, synchronization, or other
 implementation vocabulary.
+
+At 390px, Original and Sample stack by default, the One/Both control remains
+available, and `Review decision` moves to the decision region without changing
+state. The fact ledger becomes a readable 2×2 grid. Escape exits fullscreen and
+returns focus and scroll position without resetting the selected moment,
+playback position, picture arrangement, or scale.
 
 Playback uses the new clip as the comparison clock. Dragging the timeline may
 preview the requested position, but each committed seek must update both clips
@@ -332,10 +359,11 @@ and 390px widths without horizontal page overflow.
 
 On Library, each show and season must expose projected space savings at the
 selection point. Verify that every sort option visibly reorders shows, that the
-desktop show and season panes keep one stable height with independent scrolling,
-and that narrow layouts replace the long show rail with a show picker. Opening a
-multi-season show must clearly state that one representative test and one size
-choice apply to all seasons before any full encode can be queued.
+show register uses normal document scrolling, and that one selected show expands
+inline without moving its identity away from the detail. At 390px, selecting a
+row must keep detail closed until Inspect is used. Opening a multi-season show
+must clearly state that one representative test and one size choice apply to all
+seasons before any full encode can be queued.
 
 On Other Library, verify that root-level files are exact work units and nested
 media is grouped by the configured bounded folder or file policy. Every row must
@@ -364,9 +392,10 @@ library usable and explain that only savings and status details are unavailable.
 
 On Movies, the default `What to work on next` view must show a visible
 `Recommended next` route to the highest-priority actionable title without
-requiring search. The full title list must remain reachable in a bounded,
-independently scrolling region with a sticky header, and the selected movie
-details must stay adjacent rather than appearing after the complete library.
+requiring search. The full title list must remain reachable through document
+scrolling, and the selected movie detail must open directly beneath its row
+rather than in a side pane or after the complete library. Selection and Collapse
+must preserve row position; narrow layouts require an explicit Inspect action.
 Verify this path at 1024px and 390px: Library → Movies → recommended title →
 Studio. Before full work starts, Movie Studio must show runtime, current size,
 expected output, planned savings, and the target range. Once full work is queued

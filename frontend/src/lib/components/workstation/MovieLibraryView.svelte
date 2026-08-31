@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { onMount } from 'svelte';
 
 	import type { MovieLibraryPayload, MovieMember, MovieTitle } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
@@ -9,6 +10,7 @@
 		movieEstimateEvidence,
 		movieEstimatedOutputTotalIsLowerBound,
 		movieExpectedOutputBytes,
+		movieLibraryStateGroup,
 		moviePendingReviewBadge,
 		moviePrimaryStudioPrefix,
 		movieReclaimLowerBound,
@@ -20,9 +22,18 @@
 		selectMovieLeadTitle,
 		selectMovieTitle,
 		sortMovieTitles,
-		type MovieLibrarySortMode
+		type MovieLibrarySortMode,
+		type MovieLibraryStateKey
 	} from '$lib/movies/library';
-	import LibraryModeNav from './LibraryModeNav.svelte';
+	import LibraryLayout from './LibraryLayout.svelte';
+	import StateBadge from './StateBadge.svelte';
+	import { summarizeWorkStates } from './library-layout';
+	import type {
+		LibraryMetric,
+		LibraryNotice,
+		LibraryTone,
+		LibraryWorkSegment
+	} from './library-layout';
 
 	let {
 		payload,
@@ -40,9 +51,15 @@
 
 	let query = $state('');
 	let rootFilter = $state('all');
-	let stateFilter = $state<'all' | 'attention' | 'ready' | 'processing' | 'explicit'>('all');
+	let stateFilter = $state<'all' | Exclude<MovieLibraryStateKey, 'idle'>>('all');
 	let sortMode = $state<MovieLibrarySortMode>('priority');
 	let selectedPrefix = $state('');
+	let selectionTouched = $state(false);
+	let detailExpanded = $state(true);
+
+	onMount(() => {
+		if (window.matchMedia('(max-width: 760px)').matches) detailExpanded = false;
+	});
 
 	const titles = $derived.by(() => {
 		const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -58,12 +75,15 @@
 					.toLocaleLowerCase();
 				if (!haystack.includes(normalizedQuery)) return false;
 			}
-			return stateFilter === 'all' || titleStateGroup(title) === stateFilter;
+			return stateFilter === 'all' || movieLibraryStateGroup(title).key === stateFilter;
 		});
 		return sortMovieTitles(filtered, sortMode);
 	});
 
 	const selectedTitle = $derived(selectMovieTitle(titles, selectedPrefix));
+	const selectedTitleIndex = $derived(
+		selectedTitle ? titles.findIndex((title) => title.prefix === selectedTitle.prefix) : -1
+	);
 	const selectedEstimateEvidence = $derived(
 		selectedTitle ? movieEstimateEvidence(selectedTitle) : null
 	);
@@ -86,67 +106,109 @@
 	);
 	const outputHasUnknowns = $derived(movieEstimatedOutputTotalIsLowerBound(payload.titles));
 	const actionableCount = $derived(payload.titles.filter(movieTitleNeedsAction).length);
-	const totalOutputLabel = $derived(
+	const totalOutputValue = $derived(
+		detailsPending ? '…' : outputCoverage === 0 ? '—' : formatBytes(totalEstimatedOutput)
+	);
+	const totalOutputDetail = $derived(
 		detailsPending
-			? '…'
+			? undefined
 			: outputCoverage === 0
 				? 'No estimate'
-				: `${outputHasUnknowns ? 'At least ' : ''}${formatBytes(totalEstimatedOutput)}`
+				: outputHasUnknowns
+					? `At least · ${outputCoverage} of ${payload.titles.length}`
+					: undefined
 	);
-	const totalReclaimLabel = $derived(
+	const totalReclaimValue = $derived(
 		detailsPending
 			? '…'
 			: reclaimCoverage === 0
+				? '—'
+				: totalReclaim < 0
+					? `−${formatBytes(Math.abs(totalReclaim))}`
+					: totalReclaim === 0
+						? '0 B'
+						: formatBytes(totalReclaim)
+	);
+	const totalReclaimDetail = $derived(
+		detailsPending
+			? undefined
+			: reclaimCoverage === 0
 				? 'No estimate'
 				: totalReclaim < 0
-					? `${reclaimHasUnknowns ? 'Known net growth ' : 'Grows by '}${formatBytes(Math.abs(totalReclaim))}`
+					? `${reclaimHasUnknowns ? 'Known net growth' : 'Net growth'}${reclaimHasUnknowns ? ` · ${reclaimCoverage} of ${payload.titles.length}` : ''}`
 					: totalReclaim === 0
 						? reclaimHasUnknowns
-							? 'Known titles net to 0 B'
+							? `Known titles only · ${reclaimCoverage} of ${payload.titles.length}`
 							: 'No savings'
-						: `${reclaimHasUnknowns ? 'Known ' : ''}${formatBytes(totalReclaim)}`
-	);
-	const outputCoverageLabel = $derived(
-		outputCoverage > 0 && outputHasUnknowns
-			? `Estimated output · ${outputCoverage} of ${payload.titles.length} titles`
-			: 'Estimated output'
-	);
-	const reclaimCoverageLabel = $derived(
-		reclaimCoverage > 0 && reclaimHasUnknowns
-			? `Estimated space saved · ${reclaimCoverage} of ${payload.titles.length} titles`
-			: 'Estimated space saved'
+						: reclaimHasUnknowns
+							? `Known amount · ${reclaimCoverage} of ${payload.titles.length}`
+							: undefined
 	);
 	const conflictCount = $derived(
 		payload.titles.reduce((total, title) => total + title.promotion_conflicts.length, 0)
 	);
-	const titleCountSummary = $derived(
-		titles.length === payload.titles.length
-			? `All ${payload.titles.length} titles`
-			: `Showing ${titles.length} of ${payload.titles.length} titles`
+	const libraryMetrics = $derived<LibraryMetric[]>([
+		{
+			value: `${payload.titles.length}`,
+			label: payload.titles.length === 1 ? 'Title' : 'Titles',
+			detail: `${actionableCount} ${actionableCount === 1 ? 'needs' : 'need'} work`
+		},
+		{ value: formatBytes(totalSize), label: 'Current size' },
+		{
+			value: totalOutputValue,
+			label: 'Estimated output',
+			detail: totalOutputDetail,
+			pending: detailsPending
+		},
+		{
+			value: totalReclaimValue,
+			label: 'Estimated space saved',
+			detail: totalReclaimDetail,
+			pending: detailsPending
+		}
+	]);
+	const libraryWorkSegments = $derived<LibraryWorkSegment[]>(
+		summarizeWorkStates(payload.titles, movieLibraryStateGroup)
 	);
+	const libraryNotices = $derived.by<LibraryNotice[]>(() => {
+		const notices: LibraryNotice[] = [];
+		if (loadError) {
+			notices.push({ title: 'The movie library could not open', detail: loadError, tone: 'fail' });
+		}
+		if (detailsError && payload.titles.length) {
+			notices.push({
+				title: 'Titles are available',
+				detail: `${detailsError} Workflow and savings details may be stale.`
+			});
+		}
+		if (conflictCount) {
+			notices.push({
+				title: `${conflictCount} replacement ${conflictCount === 1 ? 'conflict needs' : 'conflicts need'} review`,
+				detail: 'Mediaforce will not replace a file that is already in the destination.',
+				tone: 'fail'
+			});
+		}
+		return notices;
+	});
+	const titleCountSummary = $derived(`${titles.length} of ${payload.titles.length} titles`);
 
 	$effect(() => {
+		if (!selectionTouched) {
+			selectedPrefix = titles[0]?.prefix ?? '';
+			return;
+		}
 		if (selectedTitle && selectedPrefix !== selectedTitle.prefix)
 			selectedPrefix = selectedTitle.prefix;
 	});
 
-	function titleStateGroup(title: MovieTitle): typeof stateFilter {
-		if (title.promotion_conflicts.length) return 'attention';
-		if (title.workflow_state?.state === 'explicit_selection_required') return 'explicit';
-		if (movieWorkflowIsComplete(title.workflow_state)) return 'all';
-		if (moviePendingReviewBadge(title)) return 'attention';
-		if (title.workflow_state?.primary_lane === 'attention') return 'attention';
-		if (title.workflow_state?.primary_lane === 'processing') return 'processing';
-		if (
-			['encode', 'validate', 'promote', 'mixed'].includes(title.workflow_state?.primary_lane ?? '')
-		) {
-			return 'ready';
-		}
-		return 'all';
-	}
-
 	function formatBytes(value: number | null | undefined): string {
 		return formatFileSize(value, 'No estimate');
+	}
+
+	function selectWorkSegment(key: string) {
+		query = '';
+		rootFilter = 'all';
+		stateFilter = stateFilter === key ? 'all' : (key as Exclude<MovieLibraryStateKey, 'idle'>);
 	}
 
 	function formatReclaim(title: MovieTitle): string {
@@ -186,51 +248,9 @@
 		return `Save ${formatBytes(lowerBound)}`;
 	}
 
-	function priorityOrderingExplanation(): string {
-		if (detailsPending) {
-			return 'Workflow and savings details are loading. Your selected movie stays open while the order settles.';
-		}
-
-		if (!leadTitle) {
-			return 'No movie has a safe next action right now. Attention, status, and view-only titles stay visible, with A–Z breaking ties.';
-		}
-		return 'Work closest to finished comes first. Within the same next step, bigger known savings rank higher; movies without an estimate stay visible.';
-	}
-
-	function recommendationExplanation(title: MovieTitle): string {
-		const pendingReview = moviePendingReviewBadge(title);
-		if (pendingReview) {
-			return pendingReview.detail?.trim()
-				? pendingReview.detail
-				: 'The current sample needs review before production compression can begin.';
-		}
-		let stageReason = 'No later-stage work is ready, so this file choice is next.';
-		switch (title.workflow_state?.primary_lane) {
-			case 'promote':
-				stageReason = 'Ready-to-replace work comes first.';
-				break;
-			case 'validate':
-				stageReason = 'Safety checks come before starting new compression work.';
-				break;
-			case 'mixed':
-				stageReason = 'Later-stage work comes before starting new compression work.';
-				break;
-			case 'encode':
-				stageReason = 'This is the highest-ranked movie ready for new compression.';
-		}
-		const reclaim = movieReclaimLowerBound(title);
-		if (reclaim == null) return `${stageReason} Savings are not measured, so A–Z breaks the tie.`;
-		if (reclaim < 0) {
-			return `${stageReason} Its estimate shows growth of ${formatBytes(Math.abs(reclaim))}, so larger savings rank ahead of it.`;
-		}
-		if (reclaim === 0) {
-			return `${stageReason} Its estimate shows no space saved, so larger savings rank ahead of it.`;
-		}
-		if (title.projected_reclaim_bytes == null) {
-			return `${stageReason} Its known savings of at least ${formatBytes(reclaim)} rank highest at this step.`;
-		}
-		const qualifier = title.savings_confidence === 'estimated' ? 'estimated ' : '';
-		return `${stageReason} Its ${qualifier}savings of ${formatBytes(reclaim)} rank highest at this step.`;
+	function rowReclaimSummary(title: MovieTitle): string {
+		if (title.details_loading) return 'Estimating…';
+		return movieReclaimLowerBound(title) == null ? '' : reclaimSummary(title);
 	}
 
 	function memberLabel(member: MovieMember): string {
@@ -240,12 +260,19 @@
 		return 'Uncertain file';
 	}
 
-	function workflowTone(title: MovieTitle): string {
-		if (title.promotion_conflicts.length) return 'attention';
-		if (movieWorkflowIsComplete(title.workflow_state)) return 'success';
+	function workflowTone(title: MovieTitle): LibraryTone {
+		if (title.promotion_conflicts.length) return 'fail';
+		if (movieWorkflowIsComplete(title.workflow_state)) return 'ready';
 		const pendingReview = moviePendingReviewBadge(title);
-		if (pendingReview) return pendingReview.tone;
-		return title.workflow_state?.tone ?? 'idle';
+		return normalizeTone(pendingReview?.tone ?? title.workflow_state?.tone);
+	}
+
+	function normalizeTone(tone: string | undefined): LibraryTone {
+		if (tone === 'attention' || tone === 'fail') return 'fail';
+		if (tone === 'success' || tone === 'ready') return 'ready';
+		if (tone === 'active') return 'active';
+		if (tone === 'wait') return 'wait';
+		return 'idle';
 	}
 
 	function workflowExplanation(title: MovieTitle): string {
@@ -317,7 +344,10 @@
 		return exceptions;
 	}
 
-	function memberStatusLabel(member: MovieMember): string {
+	function memberStatusLabel(member: MovieMember, title: MovieTitle): string {
+		if (title.promotion_conflicts.length && member.status === 'validated') {
+			return 'File checked · replacement blocked';
+		}
 		return (
 			{
 				discovered: 'Not started',
@@ -342,12 +372,22 @@
 	}
 
 	function selectTitle(prefix: string, revealInspector = false) {
+		selectionTouched = true;
 		selectedPrefix = prefix;
-		if (!revealInspector) return;
+		detailExpanded = revealInspector && !window.matchMedia('(max-width: 760px)').matches;
+	}
+
+	function toggleTitleDetail(prefix: string) {
+		selectionTouched = true;
+		if (selectedTitle?.prefix === prefix) detailExpanded = !detailExpanded;
+		else {
+			selectedPrefix = prefix;
+			detailExpanded = true;
+		}
 		requestAnimationFrame(() => {
-			const workbench = document.querySelector<HTMLElement>('.workbench');
-			if ((workbench?.clientWidth ?? Number.MAX_SAFE_INTEGER) > 900) return;
-			document.querySelector<HTMLElement>('.title-inspector')?.scrollIntoView({ block: 'nearest' });
+			document
+				.querySelector<HTMLElement>(`[data-movie-title-row="${CSS.escape(prefix)}"]`)
+				?.scrollIntoView({ block: 'nearest' });
 		});
 	}
 
@@ -361,6 +401,7 @@
 		event.preventDefault();
 		const nextTitle = titles[nextIndex];
 		if (!nextTitle) return;
+		selectionTouched = true;
 		selectedPrefix = nextTitle.prefix;
 		requestAnimationFrame(() => {
 			document
@@ -378,198 +419,171 @@
 	/>
 </svelte:head>
 
-<main class="movie-library">
-	<LibraryModeNav active="movie" />
+<LibraryLayout
+	active="movie"
+	title="Movie Library"
+	metrics={libraryMetrics}
+	workSegments={libraryWorkSegments}
+	activeWorkSegment={stateFilter === 'all' ? '' : stateFilter}
+	onWorkSegmentSelect={selectWorkSegment}
+	notices={libraryNotices}
+	toolbarSummary={titleCountSummary}
+	loading={structurePending || detailsPending}
+>
+	{#snippet toolbar()}
+		<label class="search-field" for="movie-search">
+			<span class="sr-only">Filter this list</span>
+			<input
+				id="movie-search"
+				bind:value={query}
+				type="search"
+				placeholder="Type part of a title"
+			/>
+		</label>
+		{#if payload.libraries.length > 1}
+			<label>
+				<span>Library</span>
+				<select bind:value={rootFilter}>
+					<option value="all">All movie libraries</option>
+					{#each payload.libraries as library (library.key)}
+						<option value={library.key}>{library.label}</option>
+					{/each}
+				</select>
+			</label>
+		{/if}
+		<label>
+			<span>Status</span>
+			<select bind:value={stateFilter}>
+				<option value="all">All states</option>
+				<option value="attention">Needs attention</option>
+				<option value="blocked">Cannot start</option>
+				<option value="processing">Compressing</option>
+				<option value="ready">Ready to act on</option>
+				<option value="explicit">Needs a file choice</option>
+			</select>
+		</label>
+		<label>
+			<span>Sort</span>
+			<select bind:value={sortMode}>
+				<option value="priority">What to work on next</option>
+				<option value="name">Title A–Z</option>
+				<option value="size">Largest current size</option>
+				<option value="savings">Most estimated space saved</option>
+				<option value="oldest">Oldest added</option>
+			</select>
+		</label>
+	{/snippet}
 
-	<header class="page-heading">
-		<div class="page-heading__copy">
-			<h1>Movie Library</h1>
+	{#if structurePending && !payload.titles.length}
+		<div class="empty-state" role="status">
+			<span class="loading-mark" aria-hidden="true"></span>
+			<strong>Loading movie library…</strong>
+			<p>Files appear first; workflow details follow.</p>
+		</div>
+	{:else if !payload.titles.length && !loadError}
+		<div class="empty-state">
+			<strong>No movies found.</strong>
 			<p>
-				See what needs attention, choose a movie, and open its Studio. Whole-title work only
-				includes the main movie unless you choose a specific file.
+				Add or scan a typed Movies root in Settings. Root-level files and title folders both appear
+				here.
 			</p>
+			<a class="primary-link" href={resolve('/settings')}>Open Settings</a>
 		</div>
-		<div class="library-totals" aria-label="Movie library totals">
-			<div>
-				<strong>{payload.titles.length} titles</strong><span>{actionableCount} need work</span>
-			</div>
-			<div><strong>{formatBytes(totalSize)}</strong><span>Current size</span></div>
-			<div><strong>{totalOutputLabel}</strong><span>{outputCoverageLabel}</span></div>
-			<div><strong>{totalReclaimLabel}</strong><span>{reclaimCoverageLabel}</span></div>
-		</div>
-	</header>
-
-	{#if loadError}
-		<div class="notice notice--danger" role="alert">
-			<strong>The movie library could not open.</strong>
-			<span>{loadError}</span>
-		</div>
-	{/if}
-	{#if detailsError && payload.titles.length}
-		<div class="notice" role="status">
-			<strong>Titles are available.</strong>
-			<span>{detailsError} Workflow and savings details may be stale.</span>
-		</div>
-	{/if}
-	{#if conflictCount}
-		<div class="notice notice--danger" role="alert">
-			<strong
-				>{conflictCount} replacement {conflictCount === 1 ? 'conflict' : 'conflicts'} need review.</strong
+	{:else if !titles.length}
+		<div class="empty-state">
+			<strong>No movies match these filters.</strong>
+			<button
+				class="empty-state__action"
+				type="button"
+				onclick={() => {
+					query = '';
+					rootFilter = 'all';
+					stateFilter = 'all';
+				}}>Clear filters</button
 			>
-			<span>Mediaforce will not replace a file that is already in the destination.</span>
 		</div>
-	{/if}
-
-	<section class="workbench" aria-busy={structurePending}>
-		<header class="workbench__toolbar">
-			<div class="search-field">
-				<label for="movie-search">Filter this list</label>
-				<input
-					id="movie-search"
-					bind:value={query}
-					type="search"
-					placeholder="Type part of a title"
-				/>
-			</div>
-			{#if payload.libraries.length > 1}
-				<label>
-					<span>Library</span>
-					<select bind:value={rootFilter}>
-						<option value="all">All movie libraries</option>
-						{#each payload.libraries as library (library.key)}
-							<option value={library.key}>{library.label}</option>
-						{/each}
-					</select>
-				</label>
-			{/if}
-			<label>
-				<span>Status</span>
-				<select bind:value={stateFilter}>
-					<option value="all">All states</option>
-					<option value="attention">Needs attention</option>
-					<option value="processing">Compressing</option>
-					<option value="ready">Ready to act on</option>
-					<option value="explicit">Needs a file choice</option>
-				</select>
-			</label>
-			<label>
-				<span>Sort</span>
-				<select bind:value={sortMode}>
-					<option value="priority">What to work on next</option>
-					<option value="name">Title A–Z</option>
-					<option value="size">Largest current size</option>
-					<option value="savings">Most estimated space saved</option>
-					<option value="oldest">Oldest added</option>
-				</select>
-			</label>
-		</header>
-		{#if sortMode === 'priority'}
-			<div class="ranking-note" role="note">
-				<span class="eyebrow">How next is ranked</span>
-				<p>{priorityOrderingExplanation()}</p>
-			</div>
-		{/if}
-
-		{#if leadTitle && selectedTitle?.prefix !== leadTitle.prefix}
-			<section class="next-up" aria-labelledby="movie-next-up-title">
-				<div class="next-up__copy">
-					<span class="eyebrow">Recommended next</span>
-					<div class="next-up__heading">
-						<h2 id="movie-next-up-title">{leadTitle.title}</h2>
-						<span class="state-badge" data-tone={workflowTone(leadTitle)}>
-							{movieWorkflowLabel(leadTitle)}
-						</span>
-					</div>
-					<p>{workflowExplanation(leadTitle)} {recommendationExplanation(leadTitle)}</p>
+	{:else}
+		<div class="library-register">
+			<div class="title-index__chrome library-register__header">
+				<div class="title-index__header" aria-hidden="true">
+					<span>Title</span><span>Files</span><span>Size / estimated saved</span><span
+						>Next step</span
+					>
 				</div>
-				<button
-					type="button"
-					class="secondary-button next-up__action"
-					onclick={() => selectTitle(leadTitle.prefix, true)}
-				>
-					Select {leadTitle.title}
-				</button>
-			</section>
-		{/if}
-
-		{#if structurePending && !payload.titles.length}
-			<div class="empty-state" role="status">
-				<span class="loading-mark" aria-hidden="true"></span>
-				<strong>Loading movie library…</strong>
-				<p>Files appear first; workflow details follow.</p>
 			</div>
-		{:else if !payload.titles.length && !loadError}
-			<div class="empty-state">
-				<strong>No movies found.</strong>
-				<p>
-					Add or scan a typed Movies root in Settings. Root-level files and title folders both
-					appear here.
-				</p>
-				<a class="primary-link" href={resolve('/settings')}>Open Settings</a>
-			</div>
-		{:else if !titles.length}
-			<div class="empty-state">
-				<strong>No movies match these filters.</strong>
-				<p>Clear the search or widen the workflow state filter.</p>
-			</div>
-		{:else}
-			<div class="workbench__body">
-				<div class="title-index" role="listbox" aria-label="Movie titles">
-					<div class="title-index__chrome">
-						<div class="title-index__summary">
-							<strong>{titleCountSummary}</strong>
-							<span>Use arrow keys to move through the list</span>
-						</div>
-						<div class="title-index__header" aria-hidden="true">
-							<span>Title</span><span>Files</span><span>Size / estimated saved</span><span
-								>Next step</span
-							>
-						</div>
-					</div>
+			<div class="workbench__body library-workbench">
+				<div class="title-index library-index">
 					{#each titles as title, index (title.prefix)}
-						<button
-							type="button"
-							class="title-row"
-							class:selected={selectedTitle?.prefix === title.prefix}
-							data-movie-title-row={title.prefix}
-							role="option"
-							tabindex={selectedTitle?.prefix === title.prefix ? 0 : -1}
-							onclick={() => selectTitle(title.prefix, true)}
-							onkeydown={(event) => moveTitleSelection(event, index)}
-							aria-selected={selectedTitle?.prefix === title.prefix}
-						>
-							<span class="title-row__identity">
-								<strong>{title.title}</strong>
-								<small class:recommended={leadTitle?.prefix === title.prefix}
-									>{leadTitle?.prefix === title.prefix
-										? `Recommended next · ${title.library_label}`
-										: title.scope_mode === 'single_file'
-											? 'One movie file'
-											: title.library_label}</small
+						<div class="ledger-row">
+							<button
+								type="button"
+								class="title-row"
+								class:selected={selectedTitle?.prefix === title.prefix}
+								data-movie-title-row={title.prefix}
+								data-library-state={movieLibraryStateGroup(title).key}
+								tabindex={selectedTitle?.prefix === title.prefix ? 0 : -1}
+								onclick={() => selectTitle(title.prefix, true)}
+								onkeydown={(event) => moveTitleSelection(event, index)}
+								aria-pressed={selectedTitle?.prefix === title.prefix}
+							>
+								<span class="title-row__identity">
+									<strong>{title.title}</strong>
+									{#if leadTitle?.prefix === title.prefix}
+										<small class="recommended">Recommended next · {title.library_label}</small>
+									{:else if title.scope_mode === 'single_file'}
+										<small>One movie file</small>
+									{:else if payload.libraries.length > 1}
+										<small>{title.library_label}</small>
+									{/if}
+									<small class="title-row__mobile-meta">
+										{#if rowReclaimSummary(title)}{rowReclaimSummary(title)} ·
+										{/if}{formatBytes(title.total_size_bytes)} stored
+									</small>
+								</span>
+								<span class="title-row__count">
+									<strong>{title.item_count} {title.item_count === 1 ? 'file' : 'files'}</strong>
+									{#if movieCompositionDetail(title)}
+										<small>{movieCompositionDetail(title)}</small>
+									{/if}
+								</span>
+								<span class="title-row__size">
+									<strong>{formatBytes(title.total_size_bytes)}</strong>
+									{#if rowReclaimSummary(title)}<small>{rowReclaimSummary(title)}</small>{/if}
+								</span>
+								<StateBadge
+									tone={workflowTone(title)}
+									label={movieWorkflowLabel(title)}
+									compact
+									quiet={workflowTone(title) === 'ready' &&
+										selectedTitle?.prefix !== title.prefix &&
+										leadTitle?.prefix !== title.prefix}
+								/>
+							</button>
+							<button
+								class="row-inspect"
+								type="button"
+								aria-controls={`movie-title-detail-${index}`}
+								aria-expanded={selectedTitle?.prefix === title.prefix && detailExpanded}
+								aria-label={`${selectedTitle?.prefix === title.prefix && detailExpanded ? 'Close' : 'Inspect'} ${title.title}`}
+								onclick={() => toggleTitleDetail(title.prefix)}
+							>
+								<span aria-hidden="true"
+									>{selectedTitle?.prefix === title.prefix && detailExpanded
+										? 'Close'
+										: 'Inspect'}</span
 								>
-								<small class="title-row__mobile-meta">
-									{reclaimSummary(title)} · {formatBytes(title.total_size_bytes)} stored
-								</small>
-							</span>
-							<span class="title-row__count">
-								<strong>{title.item_count} {title.item_count === 1 ? 'file' : 'files'}</strong>
-								{#if movieCompositionDetail(title)}
-									<small>{movieCompositionDetail(title)}</small>
-								{/if}
-							</span>
-							<span class="title-row__size">
-								<strong>{formatBytes(title.total_size_bytes)}</strong>
-								<small>{reclaimSummary(title)}</small>
-							</span>
-							<span class="state-badge" data-tone={workflowTone(title)}>
-								{movieWorkflowLabel(title)}
-							</span>
-						</button>
+							</button>
+						</div>
 					{/each}
 				</div>
 
-				{#if selectedTitle}
-					<aside class="title-inspector" aria-label={`${selectedTitle.title} details`}>
+				{#if selectedTitle && detailExpanded}
+					<aside
+						id={`movie-title-detail-${selectedTitleIndex}`}
+						class="title-inspector library-inspector"
+						style:grid-row={selectedTitleIndex + 2}
+						aria-label={`${selectedTitle.title} details`}
+					>
 						<span class="sr-only" aria-live="polite">
 							Selected {selectedTitle.title}. {movieWorkflowLabel(selectedTitle)}.
 						</span>
@@ -579,24 +593,23 @@
 								<h2>{selectedTitle.title}</h2>
 								<p>{selectedTitle.prefix}</p>
 							</div>
-							<span class="state-badge" data-tone={workflowTone(selectedTitle)}>
-								{movieWorkflowLabel(selectedTitle)}
-							</span>
+							<StateBadge
+								tone={workflowTone(selectedTitle)}
+								label={movieWorkflowLabel(selectedTitle)}
+								compact
+							/>
+							<button
+								class="inspector-collapse"
+								type="button"
+								onclick={() => (detailExpanded = false)}
+							>
+								Collapse ↑
+							</button>
 						</header>
 
 						<div class="selection-command">
 							<div>
-								<span class="eyebrow"
-									>{selectedTitle.prefix === leadTitle?.prefix
-										? 'Recommended next'
-										: 'Selected movie'}</span
-								>
-								<p>
-									{workflowExplanation(selectedTitle)}
-									{#if selectedTitle.prefix === leadTitle?.prefix}
-										{recommendationExplanation(selectedTitle)}
-									{/if}
-								</p>
+								<p>{workflowExplanation(selectedTitle)}</p>
 							</div>
 							{#if selectedTitle.details_loading}
 								<span class="primary-link primary-link--disabled" aria-disabled="true">
@@ -607,7 +620,7 @@
 									class="primary-link"
 									href={resolve(folderRoutePath(moviePrimaryStudioPrefix(selectedTitle)))}
 								>
-									Open {selectedTitle.title} in Studio
+									Open in Studio
 								</a>
 							{/if}
 						</div>
@@ -667,11 +680,12 @@
 									<h3 id="movie-files-heading">
 										{selectedTitle.members.length === 1 ? 'Movie file' : 'Files and editions'}
 									</h3>
-									<p>
-										{selectedTitle.members.length === 1
-											? 'This is the movie file that opens with the selected title.'
-											: 'Open an individual edition, extra, or uncertain file only when you want to work outside the whole-title scope.'}
-									</p>
+									{#if selectedTitle.members.length > 1}
+										<p>
+											Open an individual edition, extra, or uncertain file only when you want to
+											work outside the whole-title scope.
+										</p>
+									{/if}
 								</div>
 								<span>{selectedTitle.members.length}</span>
 							</div>
@@ -680,7 +694,7 @@
 									<div class="member-row__copy">
 										<div class="member-row__heading">
 											<strong>{memberLabel(member)}</strong>
-											<span>{memberStatusLabel(member)}</span>
+											<span>{memberStatusLabel(member, selectedTitle)}</span>
 										</div>
 										<p>{member.label}</p>
 										<small>
@@ -709,51 +723,25 @@
 					</aside>
 				{/if}
 			</div>
-		{/if}
-	</section>
-</main>
+		</div>
+	{/if}
+</LibraryLayout>
 
 <style>
-	.movie-library {
-		margin: 0 auto;
-		max-width: 1400px;
-		padding: 30px 28px 54px;
-	}
-
-	.page-heading {
-		align-items: end;
-		display: flex;
-		gap: 28px;
-		justify-content: space-between;
-		margin-bottom: 22px;
-	}
-
-	.page-heading__copy {
-		max-width: 660px;
-	}
-
 	.eyebrow {
 		color: var(--mf-fg-muted);
-		font-size: 11px;
-		font-weight: 800;
-		letter-spacing: 0.12em;
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
 	}
 
-	h1,
 	h2,
 	h3,
 	p {
 		margin: 0;
 	}
 
-	h1 {
-		font-size: clamp(30px, 4vw, 44px);
-		letter-spacing: -0.04em;
-		margin-top: 4px;
-	}
-
-	.page-heading p,
 	.inspector-heading p,
 	.section-heading p,
 	.selection-command p {
@@ -762,60 +750,21 @@
 		line-height: 1.55;
 	}
 
-	.library-totals {
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line);
-		display: grid;
-		grid-template-columns: repeat(4, minmax(90px, 1fr));
-		min-width: min(100%, 460px);
-	}
-
-	.library-totals div {
-		border-left: 1px solid var(--mf-line);
-		padding: 14px 16px;
-	}
-
-	.library-totals div:first-child {
-		border-left: 0;
-	}
-
-	.library-totals strong,
-	.library-totals span {
-		display: block;
-	}
-
-	.library-totals strong {
-		font-size: 17px;
-	}
-
-	.library-totals span {
-		color: var(--mf-fg-muted);
-		font-size: 10px;
-		font-weight: 700;
-		letter-spacing: 0.06em;
-		margin-top: 3px;
-		text-transform: uppercase;
-	}
-
-	.notice,
 	.inline-alert {
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line-strong);
+		border-top: 1px solid var(--mf-line-muted);
 		display: grid;
-		gap: 4px;
-		margin-bottom: 14px;
-		padding: 12px 14px;
+		gap: var(--mf-space-2);
+		padding: var(--mf-space-5) 0;
 	}
 
-	.notice span,
 	.inline-alert span {
 		color: var(--mf-fg-secondary);
 		font-size: 12px;
 	}
 
-	.notice--danger,
 	.inline-alert--danger {
-		border-left: 4px solid var(--mf-fail-fg);
+		border-left: 3px solid var(--mf-fail-fg);
+		padding-left: var(--mf-space-5);
 	}
 
 	.inline-alert {
@@ -833,189 +782,62 @@
 		font-size: 12px;
 		line-height: 1.45;
 		margin: 0;
-		padding: 8px 10px;
-	}
-
-	.workbench {
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line);
-		box-shadow: var(--mf-shadow-popover);
-		container-type: inline-size;
-	}
-
-	.workbench__toolbar {
-		align-items: end;
-		border-bottom: 1px solid var(--mf-line);
-		display: grid;
-		gap: 12px;
-		grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(130px, auto));
-		padding: 14px;
-	}
-
-	.workbench__toolbar label,
-	.search-field {
-		display: grid;
-		gap: 5px;
-	}
-
-	.workbench__toolbar label > span,
-	.search-field label {
-		color: var(--mf-fg-muted);
-		font-size: 10px;
-		font-weight: 800;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-	}
-
-	input,
-	select {
-		background: var(--mf-bg-input);
-		border: 1px solid var(--mf-line-strong);
-		border-radius: 4px;
-		color: var(--mf-fg-primary);
-		font: inherit;
-		font-size: 13px;
-		min-height: 38px;
-		padding: 0 10px;
-	}
-
-	.next-up {
-		align-items: center;
-		background: var(--mf-bg-strip);
-		border-bottom: 1px solid var(--mf-line);
-		border-left: 4px solid var(--mf-wait-fg);
-		display: grid;
-		gap: 20px;
-		grid-template-columns: minmax(0, 1fr) auto;
-		padding: 16px 18px 17px;
-	}
-
-	.ranking-note {
-		align-items: baseline;
-		background: var(--mf-bg-strip);
-		border-bottom: 1px solid var(--mf-line);
-		display: grid;
-		gap: 12px;
-		grid-template-columns: auto minmax(0, 1fr);
-		padding: 9px 14px;
-	}
-
-	.ranking-note p {
-		color: var(--mf-fg-secondary);
-		font-size: 11px;
-		line-height: 1.45;
-	}
-
-	.next-up__copy {
-		display: grid;
-		gap: 6px;
-		min-width: 0;
-	}
-
-	.next-up__heading {
-		align-items: center;
-		display: flex;
-		flex-wrap: wrap;
-		gap: 10px;
-	}
-
-	.next-up h2 {
-		font-size: clamp(20px, 3vw, 27px);
-		letter-spacing: -0.025em;
-	}
-
-	.next-up p {
-		color: var(--mf-fg-secondary);
-		font-size: 13px;
-		line-height: 1.5;
-	}
-
-	.next-up__action {
-		font-size: 12px;
-		padding: 10px 14px;
-	}
-
-	.workbench__body {
-		align-items: stretch;
-		display: grid;
-		grid-template-columns: minmax(520px, 1.12fr) minmax(390px, 0.88fr);
-		min-height: 520px;
+		padding: var(--mf-space-4) var(--mf-space-5);
 	}
 
 	.title-index {
-		border-right: 1px solid var(--mf-line);
-		height: clamp(520px, 66vh, 720px);
-		min-width: 0;
-		overflow-y: auto;
-		overscroll-behavior: contain;
-		scrollbar-gutter: stable;
+		display: contents;
 	}
 
 	.title-index__header,
 	.title-row {
 		display: grid;
-		grid-template-columns: minmax(165px, 1.5fr) minmax(75px, 0.65fr) minmax(100px, 0.7fr) minmax(
-				105px,
-				0.8fr
-			);
+		grid-template-columns: minmax(320px, 1fr) 88px 180px 190px;
 	}
 
 	.title-index__chrome {
-		background: var(--mf-bg-strip);
+		background: var(--mf-bg-panel);
 		position: sticky;
 		top: 0;
 		z-index: 2;
 	}
 
-	.title-index__summary {
-		align-items: center;
-		border-bottom: 1px solid var(--mf-line);
-		display: flex;
-		gap: 12px;
-		justify-content: space-between;
-		padding: 8px 14px;
-	}
-
-	.title-index__summary strong {
-		font-size: 11px;
-	}
-
-	.title-index__summary span {
-		color: var(--mf-fg-muted);
-		font-size: 10px;
-	}
-
 	.title-index__header {
-		background: var(--mf-bg-strip);
-		border-bottom: 1px solid var(--mf-line);
+		background: var(--mf-bg-panel);
+		border-bottom: 1px solid var(--mf-line-strong);
 		color: var(--mf-fg-muted);
 		font-size: 10px;
-		font-weight: 800;
-		letter-spacing: 0.08em;
-		padding: 9px 14px;
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.1em;
+		padding: var(--mf-space-4) var(--mf-space-6);
 		text-transform: uppercase;
+	}
+
+	.ledger-row {
+		position: relative;
 	}
 
 	.title-row {
 		align-items: center;
 		background: transparent;
 		border: 0;
-		border-bottom: 1px solid var(--mf-line);
+		border-bottom: 1px solid var(--mf-line-muted);
 		color: inherit;
 		cursor: pointer;
 		font: inherit;
-		gap: 12px;
-		padding: 13px 14px;
+		gap: var(--mf-space-5);
+		min-height: 56px;
+		padding: var(--mf-space-4) var(--mf-space-6);
 		text-align: left;
 		width: 100%;
 	}
 
-	.title-row:hover,
-	.title-row.selected {
-		background: var(--mf-active-bg);
+	.title-row:hover {
+		background: var(--mf-bg-panel-2);
 	}
 
 	.title-row.selected {
+		background: var(--mf-bg-panel-2);
 		box-shadow: inset 3px 0 0 var(--mf-active-fg);
 	}
 
@@ -1032,7 +854,7 @@
 
 	.title-row small.recommended {
 		color: var(--mf-active-fg);
-		font-weight: 800;
+		font-weight: var(--mf-weight-semibold);
 	}
 
 	.title-row__mobile-meta {
@@ -1040,6 +862,8 @@
 	}
 
 	.title-row__identity strong {
+		font-size: 14px;
+		font-weight: var(--mf-weight-semibold);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -1047,65 +871,54 @@
 
 	.title-row small {
 		color: var(--mf-fg-muted);
-		font-size: 11px;
+		font-size: 12px;
 		line-height: 1.4;
-		margin-top: 3px;
+		margin-top: var(--mf-space-1);
 	}
 
-	.state-badge {
-		border: 1px solid var(--mf-line-strong);
-		color: var(--mf-fg-secondary);
-		display: inline-flex;
-		font-size: 10px;
-		font-weight: 800;
-		justify-self: start;
-		letter-spacing: 0.04em;
-		line-height: 1.3;
-		padding: 5px 7px;
-		text-transform: uppercase;
+	.title-row :global(.state-badge) {
+		max-width: 100%;
+		white-space: nowrap;
 	}
 
-	.state-badge[data-tone='active'] {
-		border-color: var(--mf-active-fg);
-		color: var(--mf-active-fg);
-	}
-
-	.state-badge[data-tone='attention'] {
-		border-color: var(--mf-fail-fg);
-		color: var(--mf-fail-fg);
-	}
-
-	.state-badge[data-tone='ready'] {
-		border-color: var(--mf-wait-fg);
-		color: var(--mf-wait-fg);
-	}
-
-	.state-badge[data-tone='success'] {
-		border-color: var(--mf-ready-fg);
-		color: var(--mf-ready-fg);
+	.row-inspect {
+		display: none;
 	}
 
 	.title-inspector {
 		display: grid;
-		gap: 16px;
-		grid-template-columns: minmax(0, 1fr);
-		height: clamp(520px, 66vh, 720px);
+		gap: var(--mf-space-7);
+		grid-column: 1;
+		grid-template-columns: minmax(230px, 0.75fr) minmax(390px, 1.45fr) minmax(260px, 0.8fr);
 		min-width: 0;
-		overflow-y: auto;
-		padding: 20px;
-		scrollbar-gutter: stable;
+		padding: var(--mf-space-7) var(--mf-space-6) var(--mf-space-8);
+		box-shadow:
+			inset 3px 0 0 var(--mf-active-fg),
+			0 10px 24px color-mix(in srgb, var(--mf-fg-primary) 8%, transparent);
 	}
 
 	.inspector-heading,
 	.section-heading {
 		align-items: start;
-		display: flex;
-		gap: 16px;
-		justify-content: space-between;
+		display: grid;
+		gap: var(--mf-space-6);
+	}
+
+	.inspector-heading {
+		align-self: start;
+		grid-column: 1;
+		grid-row: 1;
+		padding-right: var(--mf-space-8);
+		position: relative;
+	}
+
+	.inspector-heading :global(.state-badge) {
+		justify-self: start;
 	}
 
 	.inspector-heading h2 {
-		font-size: 24px;
+		font-size: 22px;
+		font-weight: var(--mf-weight-semibold);
 		letter-spacing: -0.025em;
 		margin: 4px 0;
 	}
@@ -1117,15 +930,16 @@
 	}
 
 	.selection-command {
-		align-items: center;
-		background: var(--mf-bg-strip);
-		border: 1px solid var(--mf-line-strong);
+		align-content: start;
+		border-left: 1px solid var(--mf-line-strong);
 		box-sizing: border-box;
 		display: grid;
-		gap: 14px;
-		grid-template-columns: minmax(0, 1fr) minmax(170px, auto);
+		gap: var(--mf-space-5);
+		grid-column: 3;
+		grid-row: 1 / span 8;
+		grid-template-columns: minmax(0, 1fr);
 		min-width: 0;
-		padding: 12px;
+		padding: 0 0 0 var(--mf-space-7);
 		width: 100%;
 	}
 
@@ -1134,15 +948,33 @@
 	}
 
 	.selection-command p {
-		margin-top: 4px;
+		margin-top: var(--mf-space-2);
 	}
 
 	.selection-command .primary-link {
-		max-width: 260px;
+		justify-self: start;
+		max-width: 100%;
 		min-width: 0;
 		overflow-wrap: anywhere;
 		text-align: center;
 		white-space: normal;
+	}
+
+	.inspector-collapse {
+		background: transparent;
+		border: 0;
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		padding: var(--mf-space-2) var(--mf-space-3);
+		position: absolute;
+		right: 0;
+		top: 0;
+	}
+
+	.inspector-collapse:hover {
+		background: var(--mf-bg-panel);
+		color: var(--mf-fg-primary);
 	}
 
 	.selection-command .primary-link--disabled {
@@ -1153,23 +985,15 @@
 	}
 
 	.inspector-facts {
-		border: 1px solid var(--mf-line);
 		display: grid;
+		gap: var(--mf-space-6) var(--mf-space-8);
+		grid-column: 2;
+		grid-row: 1;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
 
 	.inspector-facts div {
-		border-bottom: 1px solid var(--mf-line);
-		border-right: 1px solid var(--mf-line);
-		padding: 10px 12px;
-	}
-
-	.inspector-facts div:nth-child(2n) {
-		border-right: 0;
-	}
-
-	.inspector-facts div:nth-last-child(-n + 2) {
-		border-bottom: 0;
+		padding: 0;
 	}
 
 	.inspector-facts span,
@@ -1180,69 +1004,79 @@
 	.inspector-facts span {
 		color: var(--mf-fg-muted);
 		font-size: 10px;
-		font-weight: 800;
-		letter-spacing: 0.07em;
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.1em;
 		text-transform: uppercase;
 	}
 
 	.inspector-facts strong {
-		font-size: 12px;
-		margin-top: 4px;
+		font-size: 15px;
+		font-variant-numeric: tabular-nums;
+		font-weight: var(--mf-weight-semibold);
+		margin-top: var(--mf-space-2);
 	}
 
 	.policy-strip {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 7px;
+		gap: var(--mf-space-3);
+		grid-column: 2;
 	}
 
 	.policy-strip span {
-		background: var(--mf-bg-strip);
 		border: 1px solid var(--mf-line);
 		color: var(--mf-fg-secondary);
 		font-size: 10px;
-		font-weight: 700;
-		padding: 5px 7px;
+		font-weight: var(--mf-weight-semibold);
+		padding: var(--mf-space-2) var(--mf-space-3);
 	}
 
 	.member-list {
 		display: grid;
-		gap: 8px;
+		gap: 0;
+		grid-column: 2;
 		grid-template-columns: minmax(0, 1fr);
 		min-width: 0;
 	}
 
+	.estimate-evidence,
+	.inline-alert {
+		grid-column: 2;
+	}
+
 	.section-heading {
-		border-bottom: 1px solid var(--mf-line);
+		border-bottom: 1px solid var(--mf-line-muted);
 		min-width: 0;
-		padding-bottom: 9px;
+		padding-bottom: var(--mf-space-4);
 	}
 
 	.section-heading h3 {
-		font-size: 15px;
+		font-size: var(--mf-text-lg);
+		font-weight: var(--mf-weight-semibold);
 	}
 
 	.section-heading > span {
 		color: var(--mf-fg-muted);
 		font-size: 12px;
-		font-weight: 800;
+		font-weight: var(--mf-weight-semibold);
 	}
 
 	.member-row {
 		align-items: center;
-		border: 1px solid var(--mf-line);
+		border-bottom: 1px solid var(--mf-line-muted);
 		box-sizing: border-box;
 		display: flex;
-		gap: 12px;
+		gap: var(--mf-space-5);
 		justify-content: space-between;
 		min-width: 0;
-		padding: 10px 11px;
+		padding: var(--mf-space-4) 0;
 		width: 100%;
 	}
 
 	.member-row[data-role='extra'],
 	.member-row[data-role='uncertain'] {
 		border-left: 3px solid var(--mf-line-strong);
+		padding-left: var(--mf-space-4);
 	}
 
 	.member-row__copy {
@@ -1253,7 +1087,7 @@
 	.member-row__heading {
 		align-items: baseline;
 		display: flex;
-		gap: 8px;
+		gap: var(--mf-space-4);
 	}
 
 	.member-row__heading span,
@@ -1279,12 +1113,11 @@
 	}
 
 	.member-link,
-	.primary-link,
-	.secondary-button {
-		background: var(--mf-active-fg);
-		border: 1px solid var(--mf-active-fg);
+	.primary-link {
+		background: var(--mf-active-solid);
+		border: 1px solid var(--mf-active-solid);
 		border-radius: 4px;
-		color: var(--mf-fg-on-accent);
+		color: var(--mf-active-contrast);
 		font-size: 11px;
 		font-weight: 800;
 		padding: 8px 10px;
@@ -1292,17 +1125,9 @@
 		white-space: nowrap;
 	}
 
-	.secondary-button {
-		background: transparent;
-		color: var(--mf-active-fg);
-		cursor: pointer;
-		font-family: inherit;
-		overflow-wrap: anywhere;
-		white-space: normal;
-	}
-
 	.member-link {
 		background: transparent;
+		border-color: var(--mf-active-fg);
 		color: var(--mf-active-fg);
 	}
 
@@ -1311,9 +1136,20 @@
 		display: grid;
 		gap: 7px;
 		justify-items: center;
-		min-height: 420px;
-		padding: 44px;
+		min-height: 180px;
+		padding: 28px;
 		text-align: center;
+	}
+
+	.empty-state__action {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		cursor: pointer;
+		font: inherit;
+		font-weight: var(--mf-weight-semibold);
+		padding: 8px 12px;
 	}
 
 	.empty-state p {
@@ -1346,39 +1182,28 @@
 		}
 	}
 
-	@media (max-width: 900px) {
-		.page-heading {
-			align-items: stretch;
-			flex-direction: column;
+	@media (max-width: 1100px) {
+		.title-index__header,
+		.title-row {
+			grid-template-columns: minmax(260px, 1fr) 160px 190px;
 		}
 
-		.library-totals {
-			min-width: 0;
-		}
-	}
-
-	@container (max-width: 900px) {
-		.workbench__body {
-			grid-template-columns: minmax(0, 1fr);
-			min-height: 0;
+		.title-index__header > :nth-child(2),
+		.title-row > :nth-child(2) {
+			display: none;
 		}
 
 		.title-inspector {
-			height: auto;
-			overflow: visible;
+			gap: var(--mf-space-6);
+			grid-template-columns: minmax(210px, 0.75fr) minmax(320px, 1.25fr);
 		}
-
-		.title-index {
-			border-bottom: 1px solid var(--mf-line);
-			border-right: 0;
-			height: min(58vh, 620px);
-			min-height: 360px;
-		}
-	}
-
-	@container (max-width: 1100px) {
 		.selection-command {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-strong);
+			grid-column: 1 / -1;
+			grid-row: auto;
 			grid-template-columns: minmax(0, 1fr);
+			padding: var(--mf-space-6) 0 0;
 		}
 
 		.selection-command .primary-link {
@@ -1387,46 +1212,17 @@
 	}
 
 	@media (max-width: 760px) {
-		.movie-library {
-			padding: 20px 12px 42px;
-		}
-
-		.library-totals {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.library-totals div:nth-child(3) {
-			border-left: 0;
-			border-top: 1px solid var(--mf-line);
-		}
-
-		.library-totals div:nth-child(4) {
-			border-top: 1px solid var(--mf-line);
-		}
-
-		.workbench__toolbar {
-			grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-		}
-
-		.search-field {
-			grid-column: 1 / -1;
-		}
-
-		.next-up {
-			align-items: stretch;
-			grid-template-columns: minmax(0, 1fr);
-		}
-
-		.next-up__action {
-			justify-self: stretch;
-			text-align: center;
-		}
-
 		.title-index__header {
 			display: none;
 		}
 
+		.ledger-row {
+			position: relative;
+		}
+
 		.title-row {
+			min-height: 68px;
+			padding-right: 88px;
 			grid-template-columns: minmax(0, 1fr) auto;
 		}
 
@@ -1440,17 +1236,25 @@
 		}
 
 		.title-inspector {
-			padding: 16px;
+			grid-template-columns: minmax(0, 1fr);
+			padding: var(--mf-space-6) var(--mf-space-5) var(--mf-space-7);
 		}
 
 		.inspector-heading,
-		.selection-command,
 		.member-row {
 			align-items: stretch;
 			flex-direction: column;
 		}
 
+		.inspector-heading,
+		.inspector-facts,
+		.estimate-evidence,
+		.inline-alert,
+		.policy-strip,
+		.member-list,
 		.selection-command {
+			grid-column: 1;
+			grid-row: auto;
 			grid-template-columns: minmax(0, 1fr);
 		}
 
@@ -1462,28 +1266,25 @@
 		.primary-link {
 			text-align: center;
 		}
+
+		.row-inspect {
+			background: var(--mf-bg-panel);
+			border: 1px solid var(--mf-line-strong);
+			border-radius: var(--mf-radius-2);
+			bottom: var(--mf-space-3);
+			color: var(--mf-fg-secondary);
+			display: inline-flex;
+			font-size: 11px;
+			min-height: 26px;
+			padding: 0 var(--mf-space-2);
+			position: absolute;
+			right: var(--mf-space-3);
+		}
 	}
 
 	@media (max-width: 460px) {
-		.ranking-note {
-			gap: 5px;
-			grid-template-columns: minmax(0, 1fr);
-		}
-
-		.workbench__toolbar,
 		.inspector-facts {
-			grid-template-columns: minmax(0, 1fr);
-		}
-
-		.inspector-facts div,
-		.inspector-facts div:nth-child(2n),
-		.inspector-facts div:nth-last-child(-n + 2) {
-			border-bottom: 1px solid var(--mf-line);
-			border-right: 0;
-		}
-
-		.inspector-facts div:last-child {
-			border-bottom: 0;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 	}
 

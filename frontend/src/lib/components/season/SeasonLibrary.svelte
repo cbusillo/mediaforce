@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { onMount } from 'svelte';
 	import { postJson } from '$lib/api/client';
 	import type {
 		DashboardFoldersPayload,
@@ -9,7 +10,6 @@
 		SeasonLifecycleState
 	} from '$lib/api/types';
 	import {
-		activeSeasonCards,
 		folderHref,
 		formatFileSize,
 		librarySeasonState,
@@ -18,14 +18,25 @@
 	} from '$lib/season/experience';
 	import {
 		buildShowCards,
+		compareSeasonCards,
 		filterShowCards,
 		olderSeasonLibraryAction,
 		savingsPercent,
 		seasonsByShow,
 		sortShowCards,
-		type LibrarySort
+		tvLibraryStateGroup,
+		type LibrarySort,
+		type TvLibraryStateKey
 	} from '$lib/season/library';
-	import LibraryModeNav from '$lib/components/workstation/LibraryModeNav.svelte';
+	import LibraryLayout from '$lib/components/workstation/LibraryLayout.svelte';
+	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
+	import { summarizeWorkStates } from '$lib/components/workstation/library-layout';
+	import type {
+		LibraryMetric,
+		LibraryNotice,
+		LibraryTone,
+		LibraryWorkSegment
+	} from '$lib/components/workstation/library-layout';
 
 	type LifecycleMode = 'auto' | 'on' | 'off';
 
@@ -48,13 +59,18 @@
 	} = $props();
 
 	let query = $state('');
+	let stateFilter = $state<'all' | TvLibraryStateKey>('all');
 	let sortMode = $state<LibrarySort>('size');
 	let selectedShowPrefix = $state('');
-	let showListElement: HTMLElement | undefined = $state();
+	let detailExpanded = $state(true);
 	let pendingLifecycleMode = $state<{ prefix: string; mode: LifecycleMode } | null>(null);
 	let policySavingPrefix = $state('');
 	let policySavingTitle = $state('');
 	let policyError = $state('');
+
+	onMount(() => {
+		if (window.matchMedia('(max-width: 760px)').matches) detailExpanded = false;
+	});
 
 	const seasonCards = $derived(
 		foldersPayload.folders.filter(
@@ -63,16 +79,33 @@
 	);
 	const groupedSeasons = $derived(seasonsByShow(seasonCards));
 	const showCards = $derived(buildShowCards(foldersPayload.series_folders ?? [], seasonCards));
+	const searchMatchedShows = $derived(filterShowCards(showCards, groupedSeasons, query));
 	const filteredShows = $derived(
-		sortShowCards(filterShowCards(showCards, groupedSeasons, query), groupedSeasons, sortMode)
+		sortShowCards(
+			searchMatchedShows.filter(
+				(show) => stateFilter === 'all' || showLibraryStateGroup(show.prefix).key === stateFilter
+			),
+			groupedSeasons,
+			sortMode
+		)
 	);
 	const selectedShow = $derived(
 		filteredShows.find((show) => show.prefix === selectedShowPrefix) ?? filteredShows[0]
+	);
+	const selectedShowIndex = $derived(
+		selectedShow ? filteredShows.findIndex((show) => show.prefix === selectedShow.prefix) : -1
 	);
 	const selectedSeasons = $derived(
 		selectedShow
 			? [...(groupedSeasons.get(selectedShow.prefix) ?? [])].sort(compareSeasonCards)
 			: []
+	);
+	const selectedSeasonPreview = $derived.by(() => {
+		if (selectedSeasons.length <= 4) return selectedSeasons;
+		return [...selectedSeasons.slice(0, 2), ...selectedSeasons.slice(-2)];
+	});
+	const hiddenSelectedSeasonCount = $derived(
+		Math.max(0, selectedSeasons.length - selectedSeasonPreview.length)
 	);
 	const selectedLifecycle = $derived(selectedShow?.lifecycle ?? null);
 	const olderSeasonAction = $derived(
@@ -87,8 +120,14 @@
 	const lifecycleAvailable = $derived(selectedLifecycle !== null);
 	const eligibleEpisodeCount = $derived(selectedLifecycle?.eligible_candidate_count ?? 0);
 	const heldEpisodeCount = $derived(selectedLifecycle?.held_candidate_count ?? 0);
-	const activeCards = $derived(activeSeasonCards(seasonCards, dashboard).slice(0, 4));
-	const resumeCard = $derived(activeCards[0] ?? null);
+	const selectedShowActionAvailable = $derived(
+		Boolean(
+			olderSeasonAction ||
+			(selectedShow &&
+				selectedSeasons.length > 1 &&
+				(!lifecycleAvailable || eligibleEpisodeCount > 0))
+		)
+	);
 	const librarySize = $derived(
 		seasonCards.reduce((total, card) => total + Math.max(0, card.total_size_bytes), 0)
 	);
@@ -99,6 +138,41 @@
 		!detailsPending && seasonCards.every((card) => !card.details_loading)
 	);
 	const libraryOutput = $derived(Math.max(0, librarySize - librarySavings));
+	const libraryMetrics = $derived<LibraryMetric[]>([
+		{
+			value: `${seasonCards.length}`,
+			label: seasonCards.length === 1 ? 'Season' : 'Seasons',
+			detail: countLabel(showCards.length, 'show')
+		},
+		{ value: librarySizeLabel(librarySize), label: 'Current size' },
+		{
+			value: librarySavingsReady ? librarySizeLabel(libraryOutput) : '…',
+			label: 'Estimated output',
+			detail: librarySavingsReady ? 'Approximate' : undefined,
+			pending: !librarySavingsReady
+		},
+		{
+			value: librarySavingsReady ? librarySizeLabel(librarySavings) : '…',
+			label: 'Estimated space saved',
+			detail: librarySavingsReady ? 'Approximate' : undefined,
+			pending: !librarySavingsReady
+		}
+	]);
+	const libraryWorkSegments = $derived<LibraryWorkSegment[]>(
+		summarizeWorkStates(showCards, (show) => showLibraryStateGroup(show.prefix))
+	);
+	const libraryNotices = $derived.by<LibraryNotice[]>(() => {
+		const notices: LibraryNotice[] = [];
+		if (loadError)
+			notices.push({ title: 'TV Library could not open', detail: loadError, tone: 'fail' });
+		if (detailsError) {
+			notices.push({
+				title: 'TV Library is ready',
+				detail: `${detailsError} Names, episode counts, and current sizes are still available.`
+			});
+		}
+		return notices;
+	});
 
 	$effect(() => {
 		const available = filteredShows;
@@ -111,43 +185,12 @@
 		}
 	});
 
-	$effect(() => {
-		const selectedPrefix = selectedShowPrefix;
-		const currentSort = sortMode;
-		const currentQuery = query;
-		queueMicrotask(() => {
-			if (
-				selectedPrefix !== selectedShowPrefix ||
-				currentSort !== sortMode ||
-				currentQuery !== query
-			)
-				return;
-			const selectedButton = showListElement?.querySelector<HTMLElement>('button.selected');
-			if (!selectedButton || !showListElement) return;
-			const listBounds = showListElement.getBoundingClientRect();
-			const selectedBounds = selectedButton.getBoundingClientRect();
-			if (selectedBounds.top < listBounds.top) {
-				showListElement.scrollTop += selectedBounds.top - listBounds.top;
-			} else if (selectedBounds.bottom > listBounds.bottom) {
-				showListElement.scrollTop += selectedBounds.bottom - listBounds.bottom;
-			}
-		});
-	});
-
-	function compareSeasonCards(left: FolderCard, right: FolderCard): number {
-		const leftNumber = Number(seasonNumberLabel(seasonIdentity(left.prefix).season));
-		const rightNumber = Number(seasonNumberLabel(seasonIdentity(right.prefix).season));
-		if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber))
-			return leftNumber - rightNumber;
-		return left.title.localeCompare(right.title);
-	}
-
 	function seasonCount(showPrefix: string): number {
 		return groupedSeasons.get(showPrefix)?.length ?? 0;
 	}
 
-	function showInitial(title: string): string {
-		return title.trim().slice(0, 1).toUpperCase() || 'T';
+	function countLabel(count: number, singular: string): string {
+		return `${count} ${count === 1 ? singular : `${singular}s`}`;
 	}
 
 	function fullyHeld(card: FolderCard): boolean {
@@ -163,6 +206,31 @@
 			return `${(bytes / 1024 ** 4).toLocaleString('en-US', { maximumFractionDigits: 1 })} TB`;
 		}
 		return formatFileSize(bytes);
+	}
+
+	function normalizeTone(tone: string): LibraryTone {
+		if (tone === 'attention' || tone === 'fail') return 'fail';
+		if (tone === 'success' || tone === 'ready') return 'ready';
+		if (tone === 'active') return 'active';
+		if (tone === 'wait') return 'wait';
+		return 'idle';
+	}
+
+	function showLibraryStateGroup(showPrefix: string) {
+		const states = (groupedSeasons.get(showPrefix) ?? []).map((season) =>
+			librarySeasonState(season, dashboard)
+		);
+		return tvLibraryStateGroup(states);
+	}
+
+	function selectWorkSegment(key: string) {
+		query = '';
+		stateFilter = stateFilter === key ? 'all' : (key as TvLibraryStateKey);
+	}
+
+	function clearFilters() {
+		query = '';
+		stateFilter = 'all';
 	}
 
 	function encodePrefix(prefix: string): string {
@@ -233,6 +301,24 @@
 			}
 		}
 	}
+
+	function selectShow(prefix: string, revealInspector = false) {
+		selectedShowPrefix = prefix;
+		detailExpanded = revealInspector && !window.matchMedia('(max-width: 760px)').matches;
+	}
+
+	function toggleShowDetail(prefix: string) {
+		if (selectedShow?.prefix === prefix) detailExpanded = !detailExpanded;
+		else {
+			selectedShowPrefix = prefix;
+			detailExpanded = true;
+		}
+		requestAnimationFrame(() => {
+			document
+				.querySelector<HTMLElement>(`[data-tv-show-row="${CSS.escape(prefix)}"]`)
+				?.scrollIntoView({ block: 'nearest' });
+		});
+	}
 </script>
 
 <svelte:head>
@@ -243,599 +329,397 @@
 	/>
 </svelte:head>
 
-<main class="season-library">
-	<LibraryModeNav active="tv" />
-	<header class="page-heading">
-		<div>
-			<h1>TV Library</h1>
-			<p>Choose a season, or use one good setup for every season in a show.</p>
-		</div>
-		<div
-			class="library-total"
-			role="group"
-			aria-label={librarySavingsReady
-				? `${seasonCards.length} seasons, ${librarySizeLabel(librarySize)} current size, about ${librarySizeLabel(libraryOutput)} estimated output, about ${librarySizeLabel(librarySavings)} estimated space saved`
-				: `${seasonCards.length} seasons, ${librarySizeLabel(librarySize)} current size, estimates pending`}
-		>
-			<div><strong>{seasonCards.length} seasons</strong><span>{showCards.length} shows</span></div>
-			<div><strong>{librarySizeLabel(librarySize)}</strong><span>Current size</span></div>
-			<div>
-				<strong class:metric-pending={!librarySavingsReady}
-					>{librarySavingsReady ? `~${librarySizeLabel(libraryOutput)}` : '…'}</strong
-				><span>Estimated output</span>
-			</div>
-			<div class="library-total__savings">
-				{#if librarySavingsReady}
-					<strong>~{librarySizeLabel(librarySavings)}</strong>
-				{:else}
-					<strong class="metric-pending">…</strong>
-				{/if}
-				<span>Estimated space saved</span>
-			</div>
-		</div>
-	</header>
+<LibraryLayout
+	active="tv"
+	title="TV Library"
+	metrics={libraryMetrics}
+	workSegments={libraryWorkSegments}
+	activeWorkSegment={stateFilter === 'all' ? '' : stateFilter}
+	onWorkSegmentSelect={selectWorkSegment}
+	notices={libraryNotices}
+	toolbarSummary={`${filteredShows.length.toLocaleString('en-US')} of ${showCards.length.toLocaleString('en-US')} shows`}
+	loading={foldersPending || detailsPending}
+>
+	{#snippet toolbar()}
+		<label class="search-field">
+			<span class="sr-only">Find a show or season</span>
+			<input bind:value={query} type="search" placeholder="Find a show or season" />
+		</label>
+		<label>
+			<span>State</span>
+			<select bind:value={stateFilter} aria-label="Filter shows by state">
+				<option value="all">All states</option>
+				<option value="attention">Needs attention</option>
+				<option value="processing">In progress</option>
+				<option value="ready">Ready to act on</option>
+				<option value="idle">No active work</option>
+			</select>
+		</label>
+		<label class="sort-field">
+			<span>Sort</span>
+			<select bind:value={sortMode} aria-label="Sort shows">
+				<option value="savings" disabled={!librarySavingsReady}>
+					Most estimated space saved{librarySavingsReady ? '' : ' (estimating)'}
+				</option>
+				<option value="size">Largest library</option>
+				<option value="seasons">Most seasons</option>
+				<option value="name">Name A–Z</option>
+			</select>
+		</label>
+	{/snippet}
 
-	{#if loadError}
-		<div class="notice notice--problem" role="alert">
-			<strong>TV Library could not open.</strong>
-			<span>{loadError}</span>
+	{#if foldersPending && !seasonCards.length}
+		<div class="loading-state" role="status" aria-live="polite">
+			<span></span><span></span><span></span>
+			<p>Loading TV library…</p>
 		</div>
-	{/if}
-	{#if detailsError}
-		<div class="notice notice--detail" role="status">
-			<strong>TV Library is ready.</strong>
-			<span>{detailsError} Names, episode counts, and current sizes are still available.</span>
+	{:else if !filteredShows.length}
+		<div class="empty-state">
+			{#if query.trim() || stateFilter !== 'all'}
+				<h3>No TV shows match these filters.</h3>
+				<p>Try another title, season, or workflow state.</p>
+				<button class="secondary-button" type="button" onclick={clearFilters}>Clear filters</button>
+			{:else}
+				<h3>No TV shows or seasons found.</h3>
+				<p>Choose a TV folder in Settings, then scan it to see shows and seasons here.</p>
+				<a class="primary-button" href={resolve('/settings')}>Open Settings</a>
+			{/if}
 		</div>
-	{/if}
-
-	{#if resumeCard}
-		{@const resumeIdentity = seasonIdentity(resumeCard.card.prefix)}
-		<section class="resume-card" aria-labelledby="resume-heading">
-			<div class="resume-card__copy">
-				<span class="status-chip" data-tone={resumeCard.state.tone}>{resumeCard.state.label}</span>
-				<h2 id="resume-heading">{resumeIdentity.show} · {resumeIdentity.season}</h2>
-				<p>{resumeCard.state.detail}</p>
-				<span class="resume-card__meta">
-					{resumeCard.card.item_count} episodes · {formatFileSize(resumeCard.card.total_size_bytes)}
-					{#if resumeCard.card.details_loading}
-						· estimating space saved
-					{:else if fullyHeld(resumeCard.card)}
-						· protected · stays original
-					{:else}
-						· estimated space saved: about {formatFileSize(resumeCard.card.projected_reclaim_bytes)}
-					{/if}
-				</span>
+	{:else}
+		<div class="library-register">
+			<div class="show-list__head library-register__header" aria-hidden="true">
+				<span>Show</span><span>Seasons</span><span>Current size</span><span>Est. saved</span><span
+					>State</span
+				>
 			</div>
-			<a class="primary-button" href={resolve(folderHref(resumeCard.card.prefix))}>Open season</a>
-		</section>
-	{/if}
-
-	<section class="library-card" aria-labelledby="choose-season-heading" aria-busy={detailsPending}>
-		<div class="library-card__heading">
-			<div>
-				<h2 id="choose-season-heading">Browse your library</h2>
-				<p>Compare the biggest opportunities, then open one season or the whole show.</p>
-			</div>
-			<div class="library-controls">
-				<label class="search-field">
-					<svg viewBox="0 0 20 20" aria-hidden="true">
-						<circle cx="8.5" cy="8.5" r="5.5" /><path d="m12.5 12.5 4 4" />
-					</svg>
-					<span class="sr-only">Find a show or season</span>
-					<input bind:value={query} type="search" placeholder="Find a show or season" />
-				</label>
-				<label class="sort-field">
-					<span>Sort</span>
-					<select bind:value={sortMode} aria-label="Sort shows">
-						<option value="savings" disabled={!librarySavingsReady}>
-							Most estimated space saved{librarySavingsReady ? '' : ' (estimating)'}
-						</option>
-						<option value="size">Largest library</option>
-						<option value="seasons">Most seasons</option>
-						<option value="name">Name A–Z</option>
-					</select>
-				</label>
-			</div>
-		</div>
-
-		{#if foldersPending && !seasonCards.length}
-			<div class="loading-state" role="status" aria-live="polite">
-				<span></span><span></span><span></span>
-				<p>Loading TV library…</p>
-			</div>
-		{:else if !filteredShows.length}
-			<div class="empty-state">
-				{#if query.trim()}
-					<h3>No TV shows or seasons match “{query}”</h3>
-					<p>Try a show title or season number.</p>
-					<button class="secondary-button" type="button" onclick={() => (query = '')}
-						>Clear search</button
-					>
-				{:else}
-					<h3>No TV shows or seasons found.</h3>
-					<p>Choose a TV folder in Settings, then scan it to see shows and seasons here.</p>
-					<a class="primary-button" href={resolve('/settings')}>Open Settings</a>
-				{/if}
-			</div>
-		{:else}
-			<div class="library-browser">
-				<label class="mobile-show-picker">
-					<span>Show</span>
-					<select bind:value={selectedShowPrefix}>
-						{#each filteredShows as show (show.prefix)}
-							<option value={show.prefix}>{show.title}</option>
-						{/each}
-					</select>
-				</label>
-				<nav class="show-list" aria-label="TV shows" bind:this={showListElement}>
-					{#each filteredShows as show (show.prefix)}
-						<button
-							type="button"
-							class:selected={show.prefix === selectedShow?.prefix}
-							aria-pressed={show.prefix === selectedShow?.prefix}
-							onclick={() => (selectedShowPrefix = show.prefix)}
-						>
-							<span class="show-initial" aria-hidden="true">{showInitial(show.title)}</span>
-							<span class="show-copy">
-								<strong>{show.title}</strong>
-								<small
-									>{seasonCount(show.prefix)}
-									{seasonCount(show.prefix) === 1 ? 'season' : 'seasons'} · {formatFileSize(
-										show.total_size_bytes
-									)}</small
-								>
-							</span>
-							<span class="show-savings">
-								{#if show.details_loading && show.projected_reclaim_bytes <= 0}
-									<strong class="metric-pending">…</strong>
-									<small>{detailsPending ? 'estimating' : 'estimate unavailable'}</small>
-								{:else if fullyHeld(show)}
-									<strong>Held</strong>
-									<small>no eligible savings</small>
-								{:else}
-									<strong>~{formatFileSize(show.projected_reclaim_bytes)}</strong>
-									<small>{show.details_loading ? 'partial estimate' : 'estimated saved'}</small>
-								{/if}
-							</span>
-						</button>
-					{/each}
-				</nav>
-
-				<div class="season-list" aria-live="polite">
-					<div class="season-list__heading">
-						<div class="season-list__title">
-							<span>Selected show</span>
-							<strong>{selectedShow?.title}</strong>
-							<small
-								>{selectedSeasons.length} seasons · {selectedShow?.item_count ?? 0} episodes</small
+			<div class="library-browser library-workbench">
+				<div class="show-list library-index">
+					{#each filteredShows as show, showIndex (show.prefix)}
+						{@const showState = showLibraryStateGroup(show.prefix)}
+						<div class="ledger-row">
+							<button
+								type="button"
+								class="show-row"
+								class:selected={show.prefix === selectedShow?.prefix}
+								data-tv-show-row={show.prefix}
+								data-library-state={showState.key}
+								aria-pressed={show.prefix === selectedShow?.prefix}
+								onclick={() => selectShow(show.prefix, true)}
 							>
-						</div>
-						{#if selectedShow}
-							<div class="show-summary">
-								<span><strong>{formatFileSize(selectedShow.total_size_bytes)}</strong> now</span>
-								{#if selectedShow.details_loading && selectedShow.projected_reclaim_bytes <= 0}
-									<span class="show-summary__savings"
-										><strong class="metric-pending">…</strong>
-										{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</span
-									>
-								{:else if fullyHeld(selectedShow)}
-									<span class="show-summary__savings"
-										><strong>Held</strong> · no eligible savings</span
-									>
-								{:else}
-									<span class="show-summary__savings"
-										><strong>~{formatFileSize(selectedShow.projected_reclaim_bytes)}</strong>
-										estimated saved · {savingsPercent(selectedShow)}%</span
-									>
-								{/if}
-							</div>
-							<div class="show-policy">
-								<label>
-									<span>Current-season policy for this show</span>
-									{#key selectedShow.prefix}
-										<select
-											value={displayedLifecycleMode}
-											onchange={saveLifecycleMode}
-											disabled={policySaving || !lifecycleAvailable}
-											aria-describedby="current-season-policy-help"
-										>
-											<option value="auto">Auto · use series status</option>
-											<option value="on">On · protect current season</option>
-											<option value="off">Off · no current-season hold</option>
-										</select>
-									{/key}
-									<small id="current-season-policy-help">
-										{policySaving
-											? `Saving current-season policy for ${policySavingTitle}…`
-											: lifecycleModeCopy()}
-									</small>
-								</label>
-								<div>
-									<strong>{providerStateCopy()}</strong>
-									{#if lifecycleAvailable}
-										<span>{eligibleEpisodeCount} eligible · {heldEpisodeCount} held</span>
+								<span class="show-copy">
+									<strong>{show.title}</strong>
+									<small>{countLabel(show.item_count, 'episode')}</small>
+								</span>
+								<span class="show-count">{seasonCount(show.prefix)}</span>
+								<span class="show-size">{formatFileSize(show.total_size_bytes)}</span>
+								<span class="show-savings">
+									{#if show.details_loading && show.projected_reclaim_bytes <= 0}
+										<strong class="metric-pending">…</strong>
+										<small>{detailsPending ? 'estimating' : 'estimate unavailable'}</small>
+									{:else if fullyHeld(show)}
+										<strong>Held</strong>
+										<small>no eligible savings</small>
 									{:else}
-										<span
-											>{detailsPending ? 'Checking eligibility…' : 'Eligibility unavailable'}</span
+										<strong>~{formatFileSize(show.projected_reclaim_bytes)}</strong>
+									{/if}
+								</span>
+								<StateBadge
+									tone={showState.tone}
+									label={showState.label}
+									compact
+									quiet={showState.tone === 'ready' && show.prefix !== selectedShow?.prefix}
+								/>
+							</button>
+							<button
+								class="row-inspect"
+								type="button"
+								aria-controls={`tv-show-detail-${showIndex}`}
+								aria-expanded={show.prefix === selectedShow?.prefix && detailExpanded}
+								aria-label={`${show.prefix === selectedShow?.prefix && detailExpanded ? 'Close' : 'Inspect'} ${show.title}`}
+								onclick={() => toggleShowDetail(show.prefix)}
+							>
+								<span aria-hidden="true"
+									>{show.prefix === selectedShow?.prefix && detailExpanded
+										? 'Close'
+										: 'Inspect'}</span
+								>
+							</button>
+						</div>
+					{/each}
+				</div>
+
+				{#if selectedShow && detailExpanded}
+					<div
+						id={`tv-show-detail-${selectedShowIndex}`}
+						class="season-list library-inspector"
+						class:season-list--has-action={selectedShowActionAvailable}
+						style:grid-row={selectedShowIndex + 2}
+						aria-live="polite"
+					>
+						<div class="season-list__heading">
+							<div class="season-list__title">
+								<span class="eyebrow">Selected show</span>
+								<strong>{selectedShow?.title}</strong>
+								<small>
+									{countLabel(selectedSeasons.length, 'season')} · {countLabel(
+										selectedShow?.item_count ?? 0,
+										'episode'
+									)}
+								</small>
+							</div>
+							{#if selectedShow}
+								<button
+									class="detail-collapse"
+									type="button"
+									onclick={() => (detailExpanded = false)}
+								>
+									Collapse ↑
+								</button>
+								<div class="show-summary">
+									<span><strong>{formatFileSize(selectedShow.total_size_bytes)}</strong> now</span>
+									{#if selectedShow.details_loading && selectedShow.projected_reclaim_bytes <= 0}
+										<span class="show-summary__savings"
+											><strong class="metric-pending">…</strong>
+											{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</span
+										>
+									{:else if fullyHeld(selectedShow)}
+										<span class="show-summary__savings"
+											><strong>Held</strong> · no eligible savings</span
+										>
+									{:else}
+										<span class="show-summary__savings"
+											><strong>~{formatFileSize(selectedShow.projected_reclaim_bytes)}</strong>
+											estimated saved · {savingsPercent(selectedShow)}%</span
 										>
 									{/if}
 								</div>
+								<div class="show-policy">
+									<label>
+										<span>Current-season policy for this show</span>
+										{#key selectedShow.prefix}
+											<select
+												value={displayedLifecycleMode}
+												onchange={saveLifecycleMode}
+												disabled={policySaving || !lifecycleAvailable}
+												aria-describedby="current-season-policy-help"
+											>
+												<option value="auto">Auto · use series status</option>
+												<option value="on">On · protect current season</option>
+												<option value="off">Off · no current-season hold</option>
+											</select>
+										{/key}
+										<small id="current-season-policy-help">
+											{policySaving
+												? `Saving current-season policy for ${policySavingTitle}…`
+												: lifecycleModeCopy()}
+										</small>
+									</label>
+									<div>
+										<strong>{providerStateCopy()}</strong>
+										{#if lifecycleAvailable}
+											<span>{eligibleEpisodeCount} eligible · {heldEpisodeCount} held</span>
+										{:else}
+											<span
+												>{detailsPending
+													? 'Checking eligibility…'
+													: 'Eligibility unavailable'}</span
+											>
+										{/if}
+									</div>
+								</div>
+								{#if policyError}<p class="policy-error">{policyError}</p>{/if}
+							{/if}
+						</div>
+
+						{#if selectedShow && olderSeasonAction}
+							<div class="show-action show-action--override">
+								<div>
+									<strong>Process older seasons with one setup</strong>
+									<span>
+										Include {olderSeasonAction.episodeCount}
+										{olderSeasonAction.episodeCount === 1 ? 'episode' : 'episodes'} across
+										{olderSeasonAction.seasonCount} older
+										{olderSeasonAction.seasonCount === 1 ? 'season' : 'seasons'}.
+										{olderSeasonAction.latestSeasonLabel} stays original, and the current-season policy
+										does not change. Recent-acquisition holds are bypassed only after confirmation.
+									</span>
+								</div>
+								<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
+									>Open in Studio</a
+								>
 							</div>
-							{#if policyError}<p class="policy-error">{policyError}</p>{/if}
+						{/if}
+
+						{#if selectedShow && !olderSeasonAction && selectedSeasons.length > 1 && (!lifecycleAvailable || eligibleEpisodeCount > 0)}
+							<div class="show-action">
+								<div>
+									<strong>Use one setup for eligible seasons</strong>
+									{#if lifecycleAvailable}
+										<span
+											>Approve one representative test, then make {eligibleEpisodeCount} eligible episodes
+											with that choice. {heldEpisodeCount} held episodes stay original.</span
+										>
+									{:else}
+										<span>Mediaforce is checking which seasons the lifecycle policy allows.</span>
+									{/if}
+								</div>
+								{#if lifecycleAvailable && eligibleEpisodeCount > 0}
+									<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
+										>Open in Studio</a
+									>
+								{:else}
+									<button class="primary-button primary-button--disabled" type="button" disabled>
+										{lifecycleAvailable ? 'No eligible seasons' : 'Checking eligibility'}
+									</button>
+								{/if}
+							</div>
+						{/if}
+
+						{#each selectedSeasonPreview as season, previewIndex (season.prefix)}
+							{@const state = librarySeasonState(season, dashboard)}
+							{@const seasonName = seasonIdentity(season.prefix).season}
+							{@const seasonLifecycle = season.lifecycle?.seasons?.[0]}
+							<a
+								class="season-row"
+								class:season-row--mobile-optional={hiddenSelectedSeasonCount > 0 &&
+									(previewIndex === 1 || previewIndex === 2)}
+								href={resolve(folderHref(season.prefix))}
+							>
+								<span class="season-number">{seasonNumberLabel(seasonName)}</span>
+								<span class="season-copy">
+									<strong>{seasonName}</strong>
+									<small>
+										{countLabel(season.item_count, 'episode')} · {formatFileSize(
+											season.total_size_bytes
+										)} now
+									</small>
+								</span>
+								<span class="season-savings">
+									{#if season.details_loading}
+										<strong class="metric-pending">…</strong>
+										<small
+											>{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</small
+										>
+									{:else if seasonLifecycle?.held_candidate_count && !seasonLifecycle.eligible_candidate_count}
+										<strong>Held</strong>
+										<small>stays original</small>
+									{:else}
+										<strong>~{formatFileSize(season.projected_reclaim_bytes)}</strong>
+										<small>estimated saved · {savingsPercent(season)}%</small>
+									{/if}
+								</span>
+								{#if seasonLifecycle?.held_candidate_count}
+									<span
+										class="season-state"
+										title={seasonLifecycle.hold_reasons
+											.map((reason) => `${reason.label}: ${reason.detail}`)
+											.join(' ')}
+									>
+										<StateBadge tone="wait" label={seasonHoldCopy(seasonLifecycle)} compact />
+									</span>
+								{:else if state.key !== 'needs_test'}
+									<span class="season-state">
+										<StateBadge tone={normalizeTone(state.tone)} label={state.label} compact />
+									</span>
+								{/if}
+								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 5.5 5.5L7 15.5" /></svg>
+							</a>
+						{/each}
+
+						{#if selectedShow && hiddenSelectedSeasonCount > 0}
+							<div class="season-list__more">
+								<span class="season-list__more-desktop"
+									>{hiddenSelectedSeasonCount} more seasons are available.</span
+								>
+								<span class="season-list__more-mobile"
+									>{selectedSeasons.length - 2} more seasons are available.</span
+								>
+								<a href={resolve(folderHref(selectedShow.prefix))}
+									>View all {selectedSeasons.length} seasons in Studio →</a
+								>
+							</div>
+						{/if}
+
+						{#if !selectedSeasons.length}
+							<div class="season-list__empty">No seasons are available for this show.</div>
 						{/if}
 					</div>
-
-					{#if selectedShow && olderSeasonAction}
-						<div class="show-action show-action--override">
-							<div>
-								<strong>Process older seasons with one setup</strong>
-								<span>
-									Include {olderSeasonAction.episodeCount}
-									{olderSeasonAction.episodeCount === 1 ? 'episode' : 'episodes'} across
-									{olderSeasonAction.seasonCount} older
-									{olderSeasonAction.seasonCount === 1 ? 'season' : 'seasons'}.
-									{olderSeasonAction.latestSeasonLabel} stays original, and the current-season policy
-									does not change. Recent-acquisition holds are bypassed only after confirmation.
-								</span>
-							</div>
-							<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
-								>Set up older seasons</a
-							>
-						</div>
-					{/if}
-
-					{#if selectedShow && selectedSeasons.length > 1 && (!lifecycleAvailable || eligibleEpisodeCount > 0 || !olderSeasonAction)}
-						<div class="show-action">
-							<div>
-								<strong>Use one setup for eligible seasons</strong>
-								{#if lifecycleAvailable}
-									<span
-										>Approve one representative test, then make {eligibleEpisodeCount} eligible episodes
-										with that choice. {heldEpisodeCount} held episodes stay original.</span
-									>
-								{:else}
-									<span>Mediaforce is checking which seasons the lifecycle policy allows.</span>
-								{/if}
-							</div>
-							{#if lifecycleAvailable && eligibleEpisodeCount > 0}
-								<a class="primary-button" href={resolve(folderHref(selectedShow.prefix))}
-									>Set up eligible seasons</a
-								>
-							{:else}
-								<button class="primary-button primary-button--disabled" type="button" disabled>
-									{lifecycleAvailable ? 'No eligible seasons' : 'Checking eligibility'}
-								</button>
-							{/if}
-						</div>
-					{/if}
-
-					{#each selectedSeasons as season (season.prefix)}
-						{@const state = librarySeasonState(season, dashboard)}
-						{@const seasonName = seasonIdentity(season.prefix).season}
-						{@const seasonLifecycle = season.lifecycle?.seasons?.[0]}
-						<a class="season-row" href={resolve(folderHref(season.prefix))}>
-							<span class="season-number">{seasonNumberLabel(seasonName)}</span>
-							<span class="season-copy">
-								<strong>{seasonName}</strong>
-								<small
-									>{season.item_count} episodes · {formatFileSize(season.total_size_bytes)} now</small
-								>
-							</span>
-							<span class="season-savings">
-								{#if season.details_loading}
-									<strong class="metric-pending">…</strong>
-									<small>{detailsPending ? 'estimating space saved' : 'estimate unavailable'}</small
-									>
-								{:else if seasonLifecycle?.held_candidate_count && !seasonLifecycle.eligible_candidate_count}
-									<strong>Held</strong>
-									<small>stays original</small>
-								{:else}
-									<strong>~{formatFileSize(season.projected_reclaim_bytes)}</strong>
-									<small>estimated saved · {savingsPercent(season)}%</small>
-								{/if}
-							</span>
-							{#if seasonLifecycle?.held_candidate_count}
-								<span
-									class="status-chip"
-									data-tone="attention"
-									title={seasonLifecycle.hold_reasons
-										.map((reason) => `${reason.label}: ${reason.detail}`)
-										.join(' ')}>{seasonHoldCopy(seasonLifecycle)}</span
-								>
-							{:else if state.key !== 'needs_test'}
-								<span class="status-chip" data-tone={state.tone}>{state.label}</span>
-							{/if}
-							<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 5.5 5.5L7 15.5" /></svg>
-						</a>
-					{/each}
-
-					{#if !selectedSeasons.length}
-						<div class="season-list__empty">No seasons are available for this show.</div>
-					{/if}
-				</div>
+				{/if}
 			</div>
-		{/if}
-	</section>
-</main>
+		</div>
+	{/if}
+</LibraryLayout>
 
 <style>
 	:global(html) {
 		background: var(--mf-bg-base);
 	}
 
-	.season-library {
-		margin: 0 auto;
-		max-width: 1088px;
-		padding: 34px 24px 64px;
-	}
-
-	.page-heading {
-		align-items: flex-end;
-		display: flex;
-		gap: 24px;
-		justify-content: space-between;
-		margin-bottom: 24px;
-	}
-
-	h1 {
-		font-size: clamp(22px, 2.5vw, 28px);
-		font-weight: 600;
-		letter-spacing: -0.02em;
-		line-height: 1.25;
-	}
-
-	.page-heading p,
-	.library-card__heading p {
-		color: var(--mf-fg-secondary);
-		font-size: 14px;
-		margin-top: 5px;
-	}
-
-	.library-total {
-		border: 1px solid var(--mf-line-muted);
-		display: grid;
-		grid-template-columns: repeat(4, auto);
-		white-space: nowrap;
-	}
-
-	.library-total div {
-		display: grid;
-		gap: 1px;
-		padding: 8px 13px;
-	}
-
-	.library-total div + div {
-		border-left: 1px solid var(--mf-line-muted);
-	}
-
-	.library-total strong {
-		color: var(--mf-fg-primary);
-		font-size: 14px;
-		font-variant-numeric: tabular-nums;
-	}
-
-	.library-total span {
+	.eyebrow {
 		color: var(--mf-fg-tertiary);
-		font-size: 10px;
-		font-weight: 600;
-		letter-spacing: 0.04em;
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
-	}
-
-	.library-total__savings strong {
-		color: var(--mf-ready-fg);
-	}
-
-	.library-total__savings {
-		min-width: 118px;
-	}
-
-	.notice {
-		border: 1px solid var(--mf-fail-line);
-		border-radius: var(--mf-radius-3);
-		display: grid;
-		gap: 2px;
-		margin-bottom: 18px;
-		padding: 14px 16px;
-	}
-
-	.notice--problem {
-		background: var(--mf-fail-bg);
-		color: var(--mf-fail-fg);
-	}
-
-	.notice--detail {
-		background: var(--mf-idle-bg);
-		border-color: var(--mf-idle-line);
-		color: var(--mf-idle-fg);
-	}
-
-	.resume-card {
-		align-items: center;
-		background: var(--mf-active-bg);
-		border: 1px solid var(--mf-active-line);
-		border-left-width: 3px;
-		border-radius: var(--mf-radius-3);
-		box-shadow: var(--mf-shadow-popover);
-		display: flex;
-		gap: 24px;
-		justify-content: space-between;
-		margin-bottom: 24px;
-		padding: 18px 20px;
-	}
-
-	.resume-card__copy {
-		display: grid;
-		gap: 4px;
-	}
-
-	.resume-card h2 {
-		font-size: 18px;
-		margin-top: 4px;
-	}
-
-	.resume-card p {
-		color: var(--mf-fg-secondary);
-		font-size: 14px;
-	}
-
-	.resume-card__meta {
-		color: var(--mf-fg-tertiary);
-		font-size: 12px;
-	}
-
-	.library-card {
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line);
-		border-radius: var(--mf-radius-3);
-		box-shadow: var(--mf-shadow-popover);
-		overflow: hidden;
-	}
-
-	.library-card__heading {
-		align-items: center;
-		border-bottom: 1px solid var(--mf-line-muted);
-		display: flex;
-		gap: 20px;
-		justify-content: space-between;
-		padding: 18px 20px;
-	}
-
-	.library-card__heading h2 {
-		font-size: 17px;
-	}
-
-	.library-controls {
-		align-items: end;
-		display: flex;
-		gap: 10px;
-		justify-content: flex-end;
-		max-width: 570px;
-		width: 100%;
-	}
-
-	.search-field {
-		align-items: center;
-		background: var(--mf-bg-input);
-		border: 1px solid var(--mf-line);
-		border-radius: var(--mf-radius-2);
-		display: flex;
-		max-width: 310px;
-		padding: 0 11px;
-		width: 100%;
-	}
-
-	.search-field:focus-within {
-		border-color: var(--mf-active-fg);
-		box-shadow: var(--mf-ring-focus);
-	}
-
-	.search-field svg {
-		fill: none;
-		height: 17px;
-		stroke: var(--mf-fg-tertiary);
-		stroke-linecap: round;
-		stroke-width: 1.5;
-		width: 17px;
-	}
-
-	.search-field input {
-		background: transparent;
-		border: 0;
-		color: var(--mf-fg-primary);
-		font-size: 14px;
-		height: 38px;
-		min-width: 0;
-		outline: 0;
-		padding: 0 0 0 9px;
-		width: 100%;
-	}
-
-	.sort-field {
-		display: grid;
-		gap: 4px;
-		min-width: 190px;
-	}
-
-	.sort-field > span,
-	.mobile-show-picker > span {
-		color: var(--mf-fg-tertiary);
-		font-size: 10px;
-		font-weight: 600;
-		letter-spacing: 0.05em;
-		text-transform: uppercase;
-	}
-
-	.sort-field select,
-	.mobile-show-picker select {
-		background: var(--mf-bg-input);
-		border: 1px solid var(--mf-line);
-		border-radius: var(--mf-radius-2);
-		color: var(--mf-fg-primary);
-		height: 38px;
-		padding: 0 30px 0 10px;
 	}
 
 	.library-browser {
 		display: grid;
-		grid-template-columns: minmax(220px, 0.78fr) minmax(0, 1.6fr);
-		height: clamp(460px, calc(100vh - 300px), 680px);
-		min-height: 0;
-	}
-
-	.mobile-show-picker {
-		display: none;
+		grid-auto-flow: row;
+		grid-template-columns: minmax(0, 1fr);
+		min-width: 0;
 	}
 
 	.show-list {
-		background: var(--mf-bg-panel-2);
-		border-right: 1px solid var(--mf-line-muted);
-		height: 100%;
-		overflow-y: auto;
-		padding: 8px;
-		scrollbar-gutter: stable;
+		display: contents;
 	}
 
-	.show-list button {
+	.show-list__head,
+	.show-row {
+		display: grid;
+		grid-template-columns: minmax(320px, 1fr) 88px 128px 128px 180px;
+	}
+
+	.show-list__head {
+		background: var(--mf-bg-panel);
+		border-bottom: 1px solid var(--mf-line-strong);
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.1em;
+		padding: var(--mf-space-4) var(--mf-space-6);
+		position: sticky;
+		text-transform: uppercase;
+		top: 0;
+		z-index: 2;
+	}
+
+	.ledger-row {
+		position: relative;
+	}
+
+	.show-row {
 		align-items: center;
-		border: 1px solid transparent;
-		border-radius: var(--mf-radius-2);
+		border: 0;
+		border-bottom: 1px solid var(--mf-line-muted);
+		border-radius: 0;
 		color: var(--mf-fg-secondary);
-		display: flex;
-		gap: 10px;
-		min-height: 54px;
-		padding: 8px 9px;
+		gap: var(--mf-space-5);
+		min-height: 56px;
+		padding: var(--mf-space-4) var(--mf-space-6);
 		text-align: left;
 		width: 100%;
 	}
 
-	.show-list button:hover {
-		background: var(--mf-bg-panel);
+	.show-row:hover {
+		background: var(--mf-bg-panel-2);
 		color: var(--mf-fg-primary);
 	}
 
-	.show-list button.selected {
-		background: var(--mf-active-bg);
-		border-color: var(--mf-active-line);
+	.show-row.selected {
+		background: var(--mf-bg-panel-2);
+		box-shadow: inset 3px 0 var(--mf-active-fg);
 		color: var(--mf-fg-primary);
-	}
-
-	.show-initial {
-		align-items: center;
-		background: var(--mf-idle-bg);
-		border-radius: 8px;
-		color: var(--mf-idle-fg);
-		display: inline-flex;
-		font-size: 14px;
-		font-weight: 600;
-		height: 34px;
-		justify-content: center;
-		width: 34px;
-	}
-
-	.selected .show-initial {
-		background: var(--mf-active-bg-strong);
-		color: var(--mf-active-fg);
 	}
 
 	.show-copy {
@@ -846,6 +730,8 @@
 	}
 
 	.show-copy strong {
+		font-size: 14px;
+		font-weight: var(--mf-weight-semibold);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -854,6 +740,13 @@
 	.show-copy small {
 		color: var(--mf-fg-tertiary);
 		font-size: 12px;
+	}
+
+	.show-count,
+	.show-size {
+		font-size: 12px;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
 	}
 
 	.show-savings,
@@ -874,8 +767,8 @@
 
 	.show-savings strong,
 	.season-savings strong {
-		color: var(--mf-ready-fg);
-		font-size: 12px;
+		color: var(--mf-fg-primary);
+		font-size: var(--mf-text-xs);
 		font-variant-numeric: tabular-nums;
 		font-weight: 600;
 	}
@@ -885,6 +778,19 @@
 		color: var(--mf-fg-tertiary);
 		font-size: 10px;
 		white-space: nowrap;
+	}
+
+	.show-row.selected .show-savings strong {
+		color: var(--mf-active-fg);
+	}
+
+	.show-row :global(.state-badge) {
+		max-width: 100%;
+		white-space: nowrap;
+	}
+
+	.row-inspect {
+		display: none;
 	}
 
 	.metric-pending,
@@ -904,28 +810,38 @@
 	}
 
 	.season-list {
-		height: 100%;
-		overflow-y: auto;
-		padding: 0 18px 20px;
-		scrollbar-gutter: stable;
+		display: grid;
+		gap: var(--mf-space-6) var(--mf-space-7);
+		grid-column: 1;
+		grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+		padding: var(--mf-space-7) var(--mf-space-6) var(--mf-space-8);
+		box-shadow:
+			inset 3px 0 var(--mf-active-fg),
+			0 10px 24px color-mix(in srgb, var(--mf-fg-primary) 8%, transparent);
+	}
+
+	.season-list--has-action {
+		grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
 	}
 
 	.season-list__heading {
-		align-items: center;
-		background: var(--mf-bg-panel);
-		border-bottom: 1px solid var(--mf-line-muted);
-		display: flex;
-		gap: 20px;
-		justify-content: space-between;
-		padding: 15px 2px 13px;
-		position: sticky;
-		top: 0;
-		z-index: 2;
+		align-items: start;
+		display: grid;
+		gap: var(--mf-space-7);
+		grid-column: 1 / -1;
+		grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+		position: relative;
+	}
+
+	.season-list--has-action .season-list__heading {
+		grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
 	}
 
 	.season-list__title {
 		display: grid;
 		gap: 2px;
+		grid-column: 1;
+		grid-row: 1 / span 2;
 	}
 
 	.season-list__heading span,
@@ -935,15 +851,18 @@
 	}
 
 	.season-list__heading strong {
-		font-size: 16px;
+		font-size: 22px;
+		font-weight: var(--mf-weight-semibold);
 	}
 
 	.show-summary {
 		display: grid;
 		gap: 2px;
-		justify-items: end;
+		grid-column: 2;
+		grid-row: 1;
+		justify-items: start;
 		min-width: 138px;
-		text-align: right;
+		text-align: left;
 	}
 
 	.show-summary span {
@@ -962,17 +881,33 @@
 	}
 
 	.show-policy {
-		align-items: center;
-		border-left: 1px solid var(--mf-line-muted);
+		align-items: start;
 		display: flex;
-		gap: 12px;
-		padding-left: 16px;
+		gap: var(--mf-space-5);
+		grid-column: 2;
+		grid-row: 2;
+	}
+
+	.detail-collapse {
+		background: transparent;
+		border: 0;
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		padding: var(--mf-space-2) var(--mf-space-3);
+		position: absolute;
+		right: 0;
+		top: 0;
 	}
 
 	.show-policy label,
 	.show-policy > div {
 		display: grid;
-		gap: 3px;
+		gap: var(--mf-space-1);
+	}
+
+	.show-policy label {
+		min-width: 0;
 	}
 
 	.show-policy label small {
@@ -990,6 +925,7 @@
 		font: inherit;
 		min-height: 30px;
 		padding: 3px 28px 3px 8px;
+		width: 100%;
 	}
 
 	.show-policy strong {
@@ -1007,14 +943,16 @@
 	}
 
 	.show-action {
+		align-self: start;
 		align-items: center;
-		background: var(--mf-ready-bg);
-		border: 1px solid var(--mf-ready-line);
-		display: flex;
-		gap: 16px;
-		justify-content: space-between;
-		margin: 12px 0 4px;
-		padding: 12px;
+		border-top: 1px solid var(--mf-line-strong);
+		display: grid;
+		gap: var(--mf-space-6);
+		grid-column: 1 / -1;
+		grid-row: auto;
+		grid-template-columns: minmax(0, 1fr) auto;
+		margin: 0;
+		padding: var(--mf-space-6) 0 0;
 	}
 
 	.show-action > div {
@@ -1033,8 +971,7 @@
 	}
 
 	.show-action--override {
-		background: var(--mf-wait-bg);
-		border-color: var(--mf-wait-line);
+		border-left-color: var(--mf-line-strong);
 	}
 
 	.show-action--override strong {
@@ -1043,6 +980,7 @@
 
 	.show-action .primary-button {
 		flex: 0 0 auto;
+		justify-self: start;
 		min-height: 34px;
 		white-space: nowrap;
 	}
@@ -1052,9 +990,10 @@
 		border-top: 1px solid var(--mf-line-muted);
 		color: var(--mf-fg-primary);
 		display: flex;
-		gap: 12px;
-		min-height: 64px;
-		padding: 9px 4px;
+		gap: var(--mf-space-5);
+		grid-column: 1 / -1;
+		min-height: 56px;
+		padding: var(--mf-space-4) var(--mf-space-2);
 		text-decoration: none;
 	}
 
@@ -1087,34 +1026,6 @@
 		font-size: 12px;
 	}
 
-	.status-chip {
-		background: var(--mf-idle-bg);
-		border-radius: 999px;
-		color: var(--mf-idle-fg);
-		display: inline-flex;
-		font-size: 12px;
-		font-weight: 600;
-		line-height: 1;
-		padding: 6px 9px;
-		width: fit-content;
-	}
-
-	.status-chip[data-tone='active'] {
-		background: var(--mf-active-bg);
-		color: var(--mf-active-fg);
-	}
-
-	.status-chip[data-tone='ready'],
-	.status-chip[data-tone='success'] {
-		background: var(--mf-ready-bg);
-		color: var(--mf-ready-fg);
-	}
-
-	.status-chip[data-tone='attention'] {
-		background: var(--mf-wait-bg);
-		color: var(--mf-wait-fg);
-	}
-
 	.primary-button,
 	.secondary-button {
 		align-items: center;
@@ -1130,12 +1041,12 @@
 
 	.primary-button {
 		background: var(--mf-active-solid);
-		color: var(--mf-fg-on-accent);
+		color: var(--mf-active-contrast);
 	}
 
 	.primary-button:hover {
 		background: var(--mf-active-solid-hi);
-		color: var(--mf-fg-on-accent);
+		color: var(--mf-active-contrast);
 	}
 
 	.primary-button--disabled {
@@ -1187,8 +1098,32 @@
 
 	.empty-state p,
 	.season-list__empty {
+		grid-column: 1 / -1;
 		color: var(--mf-fg-secondary);
 		font-size: 14px;
+	}
+
+	.season-list__more {
+		align-items: center;
+		border-top: 1px solid var(--mf-line-strong);
+		color: var(--mf-fg-secondary);
+		display: flex;
+		font-size: var(--mf-text-xs);
+		gap: var(--mf-space-5);
+		grid-column: 1 / -1;
+		justify-content: space-between;
+		padding: var(--mf-space-5) var(--mf-space-2) 0;
+	}
+
+	.season-list__more a {
+		color: var(--mf-active-fg);
+		font-weight: var(--mf-weight-semibold);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+
+	.season-list__more-mobile {
+		display: none;
 	}
 
 	.season-list__empty {
@@ -1226,62 +1161,124 @@
 		}
 	}
 
-	@media (max-width: 760px) {
-		.season-library {
-			padding: 26px 16px 48px;
-		}
-
-		.page-heading,
-		.library-card__heading {
-			align-items: stretch;
-			flex-direction: column;
-		}
-
-		.library-total {
-			align-self: flex-start;
-			grid-template-columns: repeat(2, minmax(0, 1fr));
+	@media (min-width: 1101px) {
+		.show-policy {
+			border-top: 1px solid var(--mf-line-muted);
+			justify-content: space-between;
+			padding: 10px 0 0;
 			width: 100%;
 		}
 
-		.resume-card {
-			align-items: stretch;
-			flex-direction: column;
+		.show-policy label {
+			flex: 1;
 		}
 
-		.library-browser {
-			display: block;
-			height: auto;
-		}
-
-		.mobile-show-picker {
-			background: var(--mf-bg-panel-2);
-			border-bottom: 1px solid var(--mf-line-muted);
+		.season-row {
 			display: grid;
-			gap: 4px;
-			padding: 10px 14px;
+			grid-template-columns: 38px minmax(180px, 1fr) minmax(140px, auto) auto 17px;
 		}
 
-		.mobile-show-picker select {
-			width: 100%;
+		.season-number {
+			grid-column: 1;
+			grid-row: 1;
 		}
 
-		.show-list {
+		.season-copy {
+			grid-column: 2;
+			grid-row: 1;
+			min-width: 0;
+		}
+
+		.season-savings {
+			grid-column: 3;
+			grid-row: 1;
+			justify-items: start;
+			min-width: 0;
+		}
+
+		.season-state {
+			grid-column: 4;
+			grid-row: 1;
+		}
+
+		.season-row > svg {
+			grid-column: 5;
+			grid-row: 1;
+			justify-self: end;
+		}
+	}
+
+	@media (max-width: 1100px) {
+		.show-list__head,
+		.show-row {
+			grid-template-columns: minmax(260px, 1fr) 80px 118px 178px;
+		}
+
+		.show-list__head > :nth-child(4),
+		.show-row > :nth-child(4) {
 			display: none;
 		}
 
-		.season-list {
-			height: auto;
-			overflow: visible;
-			padding: 0 14px 18px;
+		.season-list,
+		.season-list.season-list--has-action {
+			grid-template-columns: minmax(210px, 0.75fr) minmax(320px, 1.25fr);
 		}
 
-		.season-list__heading {
-			flex-wrap: wrap;
-			position: static;
+		.season-list__heading,
+		.season-list--has-action .season-list__heading {
+			grid-template-columns: minmax(210px, 0.75fr) minmax(320px, 1.25fr);
+		}
+
+		.show-action {
+			grid-column: 1 / -1;
+			grid-row: auto;
+		}
+	}
+
+	@media (max-width: 760px) {
+		.show-list__head {
+			border: 0;
+			height: 0;
+			overflow: hidden;
+			padding: 0;
+			visibility: hidden;
+		}
+
+		.show-row {
+			grid-template-columns: minmax(0, 1fr) auto;
+			min-height: 68px;
+			padding-right: 88px;
+		}
+
+		.show-count,
+		.show-size,
+		.show-savings {
+			display: none;
+		}
+
+		.season-list,
+		.season-list.season-list--has-action {
+			grid-template-columns: minmax(0, 1fr);
+			padding: var(--mf-space-6) var(--mf-space-5) var(--mf-space-7);
+		}
+
+		.season-list__heading,
+		.season-list--has-action .season-list__heading {
+			grid-template-columns: minmax(0, 1fr);
+		}
+
+		.season-list__title,
+		.show-summary,
+		.show-policy,
+		.season-row,
+		.season-list__empty,
+		.season-list__more,
+		.show-action {
+			grid-column: 1;
+			grid-row: auto;
 		}
 
 		.show-policy {
-			border-left: 0;
 			border-top: 1px solid var(--mf-line-muted);
 			justify-content: space-between;
 			padding: 10px 0 0;
@@ -1290,57 +1287,50 @@
 
 		.show-action {
 			align-items: stretch;
-			flex-direction: column;
+			grid-template-columns: minmax(0, 1fr);
 		}
 
 		.show-action .primary-button {
 			width: 100%;
 		}
-	}
 
-	@media (max-width: 440px) {
-		.season-library {
-			padding-inline: 12px;
+		.row-inspect {
+			background: var(--mf-bg-panel);
+			border: 1px solid var(--mf-line-strong);
+			border-radius: var(--mf-radius-2);
+			bottom: var(--mf-space-3);
+			color: var(--mf-fg-secondary);
+			display: inline-flex;
+			font-size: 11px;
+			min-height: 26px;
+			padding: 0 var(--mf-space-2);
+			position: absolute;
+			right: var(--mf-space-3);
 		}
 
-		.page-heading {
-			margin-bottom: 18px;
+		.season-list__more {
+			align-items: flex-start;
+			flex-direction: column;
+			gap: var(--mf-space-2);
 		}
 
-		.resume-card,
-		.library-card__heading {
-			padding: 15px;
-		}
-
-		.library-total {
-			grid-template-columns: 1fr;
+		.season-list__more a {
 			white-space: normal;
 		}
 
-		.library-total div + div {
-			border-left: 0;
-			border-top: 1px solid var(--mf-line-muted);
+		.season-row--mobile-optional,
+		.season-list__more-desktop {
+			display: none;
 		}
 
-		.library-controls {
-			align-items: stretch;
-			flex-direction: column;
+		.season-list__more-mobile {
+			display: inline;
 		}
+	}
 
-		.search-field,
-		.sort-field {
-			max-width: none;
-			width: 100%;
-		}
-
+	@media (max-width: 440px) {
 		.primary-button {
 			width: 100%;
-		}
-
-		.season-list__heading {
-			align-items: flex-start;
-			flex-direction: column;
-			gap: 8px;
 		}
 
 		.show-summary {
@@ -1351,25 +1341,45 @@
 
 		.season-row {
 			align-items: flex-start;
-			flex-wrap: wrap;
-			gap: 9px;
+			display: grid;
+			gap: 9px 12px;
+			grid-template-columns: 38px minmax(0, 1fr) 17px;
+		}
+
+		.season-number {
+			grid-column: 1;
+			grid-row: 1 / span 3;
 		}
 
 		.season-copy {
-			min-width: calc(100% - 52px);
+			grid-column: 2;
+			grid-row: 1;
+			min-width: 0;
 		}
 
 		.season-savings {
+			grid-column: 2;
+			grid-row: 2;
 			justify-items: start;
-			margin-left: 47px;
+			margin-left: 0;
 		}
 
-		.season-row .status-chip {
-			margin-left: auto;
-			max-width: 112px;
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
+		.season-state {
+			grid-column: 2;
+			grid-row: 3;
+			margin-left: 0;
+			max-width: none;
+		}
+
+		.season-row > svg {
+			align-self: center;
+			grid-column: 3;
+			grid-row: 1 / span 3;
+			justify-self: end;
+		}
+
+		.season-row.season-row--mobile-optional {
+			display: none;
 		}
 	}
 

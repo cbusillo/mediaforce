@@ -7,6 +7,7 @@ import {
 	movieEstimateEvidence,
 	movieEstimatedOutputTotalIsLowerBound,
 	movieExpectedOutputBytes,
+	movieLibraryStateGroup,
 	moviePendingReviewBadge,
 	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
@@ -409,6 +410,26 @@ describe('movie action discoverability', () => {
 				}
 			})
 		).toBe('Compressing');
+	});
+
+	it('keeps blocked titles reachable through the cannot-start group', () => {
+		const blockedTitle: MovieTitle = {
+			...readyTitle,
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'blocked',
+				primary_lane: 'blocked',
+				label: 'Blocked'
+			}
+		};
+
+		expect(movieLibraryStateGroup(blockedTitle)).toEqual({
+			key: 'blocked',
+			label: 'Cannot start',
+			tone: 'fail'
+		});
+		expect(movieTitleNeedsAction(blockedTitle)).toBe(true);
+		expect(movieWorkflowLabel(blockedTitle)).toBe('Cannot start');
 	});
 
 	it('puts pending sample review ahead of encode readiness', () => {
