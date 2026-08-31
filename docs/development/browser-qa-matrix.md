@@ -146,10 +146,13 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   queued encode work exists.
 - Completed cleanup: one promoted `movies/Archive Ready` item with an archived
   original under the smoke archive root, so `/completed` has cleanup-ready work.
+  Selection stays reversible, review resolution remains visually separate from
+  destructive cleanup, and every disabled cleanup command exposes its reason
+  beside the command through `aria-describedby`.
 - Completed history: the completed fixtures include earlier failed and
   operator-stopped encode events so History must distinguish the two outcomes.
   Item events use media-aware labels such as `Movie failed` or `Episode
-finished`; season wording is reserved for folder-level summaries. The History
+  finished`; season wording is reserved for folder-level summaries. The History
   tab reports visible and total events and renders every returned event rather
   than a capped summary.
 - Exact-item Activity: a running episode fixture must keep the readiness badge

@@ -2409,6 +2409,28 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       timeout: timeoutMs,
     });
     const completedRegister = page.locator(".completed-table");
+    const completedPanel = completedRegister.locator(
+      "xpath=ancestor::section[contains(concat(' ', normalize-space(@class), ' '), ' panel ')]",
+    );
+    if ((await completedPanel.count()) !== 1) {
+      throw new Error("Finished media did not render as one coherent register panel.");
+    }
+    for (const selector of [
+      ".completed-filter",
+      ".selection-bar",
+      ".cleanup-actions",
+      ".completed-table",
+    ]) {
+      if ((await completedPanel.locator(selector).count()) !== 1) {
+        throw new Error(`Finished register is missing ${selector}.`);
+      }
+    }
+    await completedPanel
+      .getByText("Review resolution", { exact: true })
+      .waitFor();
+    await completedPanel
+      .getByText("Destructive cleanup", { exact: true })
+      .waitFor();
     await completedRegister
       .getByText("Backups ready to delete", { exact: true })
       .waitFor();
@@ -2438,6 +2460,17 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     const selectedDeleteTrigger = page.getByRole("button", {
       name: "Delete selected original backups",
     });
+    const reviewTrigger = page.getByRole("button", {
+      name: "Mark backups already gone as handled",
+    });
+    for (const trigger of [selectedDeleteTrigger, reviewTrigger]) {
+      const describedBy = await trigger.getAttribute("aria-describedby");
+      if (!describedBy || !(await page.locator(`#${describedBy}`).isVisible())) {
+        throw new Error(
+          "A disabled Finished action is not bound to its visible reason.",
+        );
+      }
+    }
     await readyCleanupCheckbox.check();
     await selectedDeleteTrigger.click();
     const completedDeleteDialog = page.getByRole("alertdialog", {
@@ -2482,9 +2515,7 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       .getByLabel(/Select .* to mark already-gone original backups handled/)
       .first()
       .check();
-    await page
-      .getByRole("button", { name: "Mark backups already gone as handled" })
-      .click();
+    await reviewTrigger.click();
     const completedReviewDialog = page.getByRole("alertdialog", {
       name: "Confirm already-gone original backups",
     });
