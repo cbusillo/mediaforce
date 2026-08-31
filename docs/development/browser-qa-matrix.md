@@ -149,7 +149,9 @@ The managed smoke seeds a compact but non-empty workflow dataset:
 - Completed history: the completed fixtures include earlier failed and
   operator-stopped encode events so History must distinguish the two outcomes.
   Item events use media-aware labels such as `Movie failed` or `Episode
-finished`; season wording is reserved for folder-level summaries.
+finished`; season wording is reserved for folder-level summaries. The History
+  tab reports visible and total events and renders every returned event rather
+  than a capped summary.
 - Exact-item Activity: a running episode fixture must keep the readiness badge
   readable without horizontal overflow at 390px, including a long episode name.
 - Blocked cleanup: one promoted `movies/Blocked Cleanup` item with an archived

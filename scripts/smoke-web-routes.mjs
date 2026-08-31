@@ -2408,13 +2408,12 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       waitUntil: "domcontentloaded",
       timeout: timeoutMs,
     });
-    await page
-      .locator("strong:visible", { hasText: "Backups ready to delete" })
-      .first()
+    const completedRegister = page.locator(".completed-table");
+    await completedRegister
+      .getByText("Backups ready to delete", { exact: true })
       .waitFor();
-    await page
-      .locator("strong:visible", { hasText: "Backups already gone" })
-      .first()
+    await completedRegister
+      .getByText("Backups already gone", { exact: true })
       .waitFor();
     await page.waitForFunction(() =>
       document.body.innerText.includes("Cleanup folder"),
@@ -2520,11 +2519,23 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       );
     }
 
+    const completedHistoryPayload = await fetch(`${baseUrl}/api/completed`).then(
+      (response) => response.json(),
+    );
+    await page.getByRole("tab", { name: "History" }).click();
+    const renderedHistoryRows = page.locator(".history-list--wide .history-row");
+    await renderedHistoryRows.first().waitFor();
+    if ((await renderedHistoryRows.count()) !== completedHistoryPayload.history.length) {
+      throw new Error(
+        "Finished history did not render every event returned by the completed API.",
+      );
+    }
+
     await page.setViewportSize(NARROW_VIEWPORT);
     await page.reload({ waitUntil: "domcontentloaded", timeout: timeoutMs });
     await page
-      .locator("strong:visible", { hasText: "Backups ready to delete" })
-      .first()
+      .locator(".completed-table")
+      .getByText("Backups ready to delete", { exact: true })
       .waitFor();
     const narrowState = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,

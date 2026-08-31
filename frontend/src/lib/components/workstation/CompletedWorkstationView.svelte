@@ -20,7 +20,6 @@
 		buildMarkHandledConfirmCopy,
 		buildCompletedFooterSignals,
 		buildCompletedHistoryRows,
-		buildCompletedReadinessSummary,
 		buildCompletedStatusTiles,
 		cleanupDetail,
 		cleanupActionBlockers,
@@ -38,7 +37,6 @@
 		folderSearchText,
 		readyFolders,
 		totalArchivedBackupSize,
-		totalSavedSize,
 		type CompletedCleanupScope,
 		type CleanupState
 	} from './completed-workstation';
@@ -98,7 +96,6 @@
 	);
 	const statusTiles = $derived(buildCompletedStatusTiles(completed, actionError || loadError));
 	const footerSignals = $derived(buildCompletedFooterSignals(completed));
-	const readiness = $derived(buildCompletedReadinessSummary(completed, actionError || loadError));
 	const libraryOptions = $derived(completedLibraryOptions(folders));
 	const stateOptions = $derived(completedStateOptions(folders, archive));
 	const normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
@@ -149,32 +146,10 @@
 	const cleanupStatusTone = $derived(
 		cleanupReadyFolders.length > 0 ? 'ready' : cleanupReviewCount > 0 ? 'wait' : 'idle'
 	);
-	const cleanupStatusLabel = $derived(
-		cleanupReadyFolders.length > 0
-			? 'Backups ready to delete'
-			: cleanupReviewCount > 0
-				? 'Review needed'
-				: 'Settled'
-	);
-	const cleanupStatusTitle = $derived(
-		cleanupReadyFolders.length > 0
-			? `${cleanupReadyFolders.length.toLocaleString('en-US')} finished items have original backups ready to delete.`
-			: cleanupReviewCount > 0
-				? `${cleanupReviewCount.toLocaleString('en-US')} finished items need review.`
-				: 'No original backups are waiting.'
-	);
-	const cleanupStatusDetail = $derived(
-		cleanupReadyFolders.length > 0
-			? 'Review the media below before deleting its original backups.'
-			: cleanupReviewCount > 0
-				? 'Check the finished files, then mark backups already gone as handled.'
-				: 'Past changes remain available in History.'
-	);
 	const historyRows = $derived([
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
 		...(completed ? buildCompletedHistoryRows(completed) : [])
 	]);
-	const showMainHistorySummary = $derived(!cleanupNeedsAction && historyRows.length > 0);
 	const normalizedHistoryQuery = $derived(historyQuery.trim().toLowerCase());
 	const visibleHistory = $derived(
 		historyRows.filter((event) => {
@@ -201,13 +176,6 @@
 			cleanupPending,
 			reviewPending
 		})
-	);
-	const globalCleanupBlockerId = $derived(
-		actionBlockers.global
-			? actionBlockers.global === actionBlockers.selected
-				? 'selected-cleanup-blocker'
-				: 'global-cleanup-blocker'
-			: undefined
 	);
 	$effect(() => {
 		if (armedScope && !cleanupPending && cleanupDisabled(armedScope)) {
@@ -513,32 +481,6 @@
 >
 	<main class="completed">
 		<section class="completed__main" aria-label="Finished media">
-			<header class="completed-header">
-				<div>
-					<span class="mf-eyebrow">Finished</span>
-					<h1>Finished media</h1>
-					<p>{readiness.detail}</p>
-				</div>
-				<div class="completed-header__facts" aria-label="Finished backup totals">
-					<div>
-						<span>Finished</span>
-						<strong>{folders.length.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Backups to delete</span>
-						<strong>{counts.ready.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Needs review</span>
-						<strong>{(counts.blocked + counts.unknown).toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Space saved</span>
-						<strong>{formatBytes(totalSavedSize(folders))}</strong>
-					</div>
-				</div>
-			</header>
-
 			<div class="modebar" role="tablist" aria-label="Finished media views">
 				<button
 					type="button"
@@ -563,43 +505,7 @@
 					</div>
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
-				<WorkstationPanel eyebrow="Backups" title="What needs attention">
-					<div class="cleanup-status cleanup-status--{cleanupStatusTone}">
-						<StateBadge tone={cleanupStatusTone} label={cleanupStatusLabel} />
-						<div>
-							<strong>{cleanupStatusTitle}</strong>
-							<span>{cleanupStatusDetail}</span>
-						</div>
-					</div>
-				</WorkstationPanel>
-
-				{#if showMainHistorySummary}
-					<WorkstationPanel
-						eyebrow="History"
-						title="Recent changes"
-						meta={`${historyRows.length.toLocaleString('en-US')} events`}
-					>
-						<div class="history-list history-list--summary">
-							{#each historyRows.slice(0, 5) as event (`summary:${event.source}:${event.id}:${event.created_at}`)}
-								<div class="history-row">
-									<StateBadge
-										compact
-										tone={eventTone(event.tone)}
-										label={completedHistoryLabel(event)}
-									/>
-									<div>
-										<strong>{event.title}</strong>
-										<span>{event.prefix}</span>
-									</div>
-									<p>{completedHistoryDetail(event.detail, event)}</p>
-									<time>{formatTimestamp(event.created_at)}</time>
-								</div>
-							{/each}
-						</div>
-					</WorkstationPanel>
-				{/if}
-
-				<WorkstationPanel eyebrow="Library" title="Find finished media">
+				<WorkstationPanel eyebrow="Selection" title="Finished media register">
 					<div class="completed-filter" aria-label="Finished backup filters">
 						<div class="completed-filter__summary">
 							<span>Visible media</span>
@@ -749,47 +655,51 @@
 										class="control control--danger"
 										class:armed={armedScope === 'selected'}
 										disabled={cleanupDisabled('selected')}
-										aria-expanded={armedScope === 'selected'}
-										aria-controls="selected-cleanup-confirm"
 										aria-describedby={actionBlockers.selected
 											? 'selected-cleanup-blocker'
 											: undefined}
+										aria-expanded={armedScope === 'selected'}
+										aria-controls="selected-cleanup-confirm"
 										bind:this={selectedCleanupTrigger}
 										onclick={() => armCleanup('selected')}>Delete selected original backups</button
 									>
+									{#if actionBlockers.selected}
+										<span id="selected-cleanup-blocker" class="action-blocker"
+											>{actionBlockers.selected}</span
+										>
+									{/if}
 									<button
 										type="button"
 										class="control control--danger"
 										class:armed={armedScope === 'global'}
 										disabled={cleanupDisabled('global')}
+										aria-describedby={actionBlockers.global ? 'global-cleanup-blocker' : undefined}
 										aria-expanded={armedScope === 'global'}
 										aria-controls="global-cleanup-confirm"
-										aria-describedby={globalCleanupBlockerId}
 										bind:this={globalCleanupTrigger}
 										onclick={() => armCleanup('global')}>Delete all original backups</button
 									>
+									{#if actionBlockers.global}
+										<span id="global-cleanup-blocker" class="action-blocker"
+											>{actionBlockers.global}</span
+										>
+									{/if}
 									<button
 										type="button"
 										class="control control--primary"
 										class:armed={armedReview === 'already-removed'}
 										disabled={actionBlockers.review !== null}
+										aria-describedby={actionBlockers.review ? 'review-cleanup-blocker' : undefined}
 										aria-expanded={armedReview === 'already-removed'}
 										aria-controls="review-cleanup-confirm"
-										aria-describedby={actionBlockers.review ? 'review-cleanup-blocker' : undefined}
 										bind:this={reviewCleanupTrigger}
 										onclick={() => armReview('already-removed')}
 										>Mark backups already gone as handled</button
 									>
-								</div>
-								<div class="control-notes" aria-live="polite">
-									{#if actionBlockers.selected}
-										<p id="selected-cleanup-blocker">{actionBlockers.selected}</p>
-									{/if}
-									{#if actionBlockers.global && actionBlockers.global !== actionBlockers.selected}
-										<p id="global-cleanup-blocker">{actionBlockers.global}</p>
-									{/if}
 									{#if actionBlockers.review}
-										<p id="review-cleanup-blocker">{actionBlockers.review}</p>
+										<span id="review-cleanup-blocker" class="action-blocker"
+											>{actionBlockers.review}</span
+										>
 									{/if}
 								</div>
 							{:else}
@@ -920,9 +830,9 @@
 				{/if}
 
 				<WorkstationPanel
-					eyebrow="Media"
-					title="Finished media list"
-					meta={`${filteredFolders.length.toLocaleString('en-US')} visible`}
+					eyebrow="Register"
+					title="Finished media"
+					meta={`${filteredFolders.length.toLocaleString('en-US')} of ${folders.length.toLocaleString('en-US')} visible`}
 				>
 					<div class="table-wrap">
 						<table class="completed-table">
@@ -1005,7 +915,7 @@
 				<WorkstationPanel
 					eyebrow="History"
 					title="Handled history"
-					meta={`${visibleHistory.length.toLocaleString('en-US')} visible`}
+					meta={`${visibleHistory.length.toLocaleString('en-US')} of ${historyRows.length.toLocaleString('en-US')} events`}
 				>
 					<div class="history-workspace">
 						<label class="history-search">
@@ -1132,6 +1042,18 @@
 		gap: var(--mf-space-5);
 		min-width: 0;
 		padding: var(--mf-space-6);
+	}
+
+	.completed__main > :global(.panel:nth-of-type(3)) {
+		order: 1;
+	}
+
+	.completed__main > :global(.panel:nth-of-type(1)) {
+		order: 2;
+	}
+
+	.completed__main > :global(.panel:nth-of-type(2)) {
+		order: 3;
 	}
 
 	.completed__rail {
@@ -1408,6 +1330,17 @@
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--mf-space-3);
+	}
+
+	.cleanup-command__actions .control--danger:first-of-type {
+		margin-left: var(--mf-space-5);
+	}
+
+	.action-blocker {
+		align-self: center;
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		max-width: 230px;
 	}
 
 	.control-notes {
