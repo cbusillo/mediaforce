@@ -6,6 +6,14 @@ import type {
 } from '$lib/api/types';
 
 export type MovieLibrarySortMode = 'priority' | 'name' | 'size' | 'savings' | 'oldest';
+export type MovieLibraryStateKey =
+	'attention' | 'blocked' | 'processing' | 'ready' | 'explicit' | 'idle';
+
+export interface MovieLibraryStateGroup {
+	key: MovieLibraryStateKey;
+	label: string;
+	tone: 'active' | 'ready' | 'wait' | 'fail' | 'idle';
+}
 
 export interface MovieWorkflowDisplayState {
 	workflow_state?: FolderWorkflowState | null;
@@ -133,17 +141,35 @@ export function movieCompositionDetail(title: MovieTitle): string | null {
 	return details.length ? details.join(' · ') : null;
 }
 
-export function movieTitleNeedsAction(title: MovieTitle): boolean {
+export function movieLibraryStateGroup(title: MovieTitle): MovieLibraryStateGroup {
 	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
-		return false;
+		return { key: 'idle', label: 'View only', tone: 'idle' };
 	}
-	if (title.promotion_conflicts.length) return true;
-	if (title.workflow_state?.state === 'explicit_selection_required') return true;
-	if (movieWorkflowIsComplete(title.workflow_state)) return false;
-	if (moviePendingReviewBadge(title)) return true;
-	return ['encode', 'validate', 'promote', 'processing', 'attention', 'mixed'].includes(
-		title.workflow_state?.primary_lane ?? ''
-	);
+	if (movieWorkflowIsComplete(title.workflow_state)) {
+		return { key: 'idle', label: 'Finished', tone: 'idle' };
+	}
+	if (title.promotion_conflicts.length || title.workflow_state?.primary_lane === 'blocked') {
+		return { key: 'blocked', label: 'Cannot start', tone: 'fail' };
+	}
+	if (title.workflow_state?.state === 'explicit_selection_required') {
+		return { key: 'explicit', label: 'Needs a file choice', tone: 'wait' };
+	}
+	if (moviePendingReviewBadge(title) || title.workflow_state?.primary_lane === 'attention') {
+		return { key: 'attention', label: 'Needs attention', tone: 'fail' };
+	}
+	if (title.workflow_state?.primary_lane === 'processing') {
+		return { key: 'processing', label: 'Compressing', tone: 'active' };
+	}
+	if (
+		['encode', 'validate', 'promote', 'mixed'].includes(title.workflow_state?.primary_lane ?? '')
+	) {
+		return { key: 'ready', label: 'Ready to act on', tone: 'ready' };
+	}
+	return { key: 'idle', label: 'No work needed', tone: 'idle' };
+}
+
+export function movieTitleNeedsAction(title: MovieTitle): boolean {
+	return movieLibraryStateGroup(title).key !== 'idle';
 }
 
 export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
