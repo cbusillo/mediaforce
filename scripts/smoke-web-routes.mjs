@@ -13,7 +13,7 @@ const rootDir = path.resolve(
   "..",
 );
 const require = createRequire(path.join(rootDir, "frontend", "package.json"));
-const { chromium } = require("@playwright/test");
+const { chromium, expect } = require("@playwright/test");
 
 const DEFAULT_ENDPOINT_TIMEOUT_MS = 2000;
 const DEFAULT_ROUTE_TIMEOUT_MS = 6000;
@@ -1028,20 +1028,53 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
           }
         }
         if (viewport.width === 390) {
+          await page.waitForLoadState("load", { timeout: timeoutMs });
+          await page.evaluate(
+            () =>
+              new Promise((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+              }),
+          );
           const rowSelector =
             route === "/"
               ? ".show-row"
               : route === "/movies"
                 ? ".title-row"
                 : ".unit-row";
-          const selectedRow = page.locator(rowSelector).nth(1);
+          const rowIdentityAttribute =
+            route === "/"
+              ? "data-tv-show-row"
+              : route === "/movies"
+                ? "data-movie-title-row"
+                : "data-other-unit-row";
+          const candidateRow = page.locator(rowSelector).nth(1);
+          const rowIdentity = await candidateRow.getAttribute(
+            rowIdentityAttribute,
+          );
+          if (!rowIdentity) {
+            throw new Error(
+              `Narrow Library row is missing ${rowIdentityAttribute}: ${route}`,
+            );
+          }
+          const escapedRowIdentity = rowIdentity
+            .replaceAll("\\", "\\\\")
+            .replaceAll('"', '\\"');
+          const selectedRow = page.locator(
+            `[${rowIdentityAttribute}="${escapedRowIdentity}"]`,
+          );
           await selectedRow.click();
+          await expect(selectedRow).toHaveAttribute("aria-pressed", "true", {
+            timeout: timeoutMs,
+          });
           if (await page.locator(".library-inspector").count()) {
             throw new Error(
               `Narrow Library row opened detail without Inspect: ${route}`,
             );
           }
-          await selectedRow.locator("xpath=..").locator(".row-inspect").click();
+          const inspectControl = selectedRow
+            .locator("xpath=..")
+            .locator(".row-inspect");
+          await inspectControl.click();
           await page.waitForFunction(
             () => {
               const inspector = document.querySelector(".library-inspector");
@@ -1059,10 +1092,15 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
             undefined,
             { timeout: timeoutMs },
           );
-          const inspectState = await selectedRow
-			.locator("xpath=..")
-			.locator(".row-inspect")
-			.evaluate((button) => ({
+          await expect(inspectControl).toHaveAttribute("aria-expanded", "true", {
+            timeout: timeoutMs,
+          });
+          await expect(inspectControl).toHaveAttribute(
+            "aria-label",
+            /^Close\s+\S/,
+            { timeout: timeoutMs },
+          );
+          const inspectState = await inspectControl.evaluate((button) => ({
 			  expanded: button.getAttribute("aria-expanded"),
 			  label: button.getAttribute("aria-label") ?? "",
 			}));
@@ -1076,6 +1114,20 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
 		  }
         }
         if (viewport.width === 1440) {
+          await page.waitForFunction(
+            () => {
+              const header = document.querySelector(
+                ".library-register__header",
+              );
+              if (!header) return false;
+              return (
+                document.documentElement.scrollHeight - window.innerHeight >=
+                header.getBoundingClientRect().top
+              );
+            },
+            undefined,
+            { timeout: timeoutMs },
+          );
           await page.evaluate(() => {
             window.scrollTo(
               0,
@@ -1085,7 +1137,19 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
               ),
             );
           });
-          await page.waitForTimeout(50);
+          await page.waitForFunction(
+            () => {
+              const header = document.querySelector(
+                ".library-register__header",
+              );
+              return (
+                header !== null &&
+                Math.abs(header.getBoundingClientRect().top) <= 1
+              );
+            },
+            undefined,
+            { timeout: timeoutMs },
+          );
           const stickyRegisterState = await page.evaluate(() => {
             const header = document.querySelector(".library-register__header");
             const visibleBadgeStarts = new Set(
@@ -1111,6 +1175,7 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
                 ? window.getComputedStyle(header).position
                 : "missing",
               headerTop: header?.getBoundingClientRect().top ?? -1,
+              scrollY: window.scrollY,
               visibleBadgeStartCount: visibleBadgeStarts.size,
             };
           });

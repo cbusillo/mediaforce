@@ -241,8 +241,8 @@ On `/`, `/movies`, and `/other`, verify at 1440px, 1024px, and 390px that:
   order and visual language;
 - no mode adds a visible hero heading, subtitle, recommendation card, or
   ranking explainer before the index;
-- current-work totals include every active row even when less-common states are
-  compacted into `other active`;
+- current-work totals equal the active rows exposed by the state controls, and
+  every emitted non-idle state remains reachable through ordinary filtering;
 - the index remains reachable in the first mobile scroll, controls use the same
   compact two-column collapse, row selection does not expand detail by itself,
   and Inspect opens the selected detail directly beneath its row;
