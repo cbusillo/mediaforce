@@ -1028,13 +1028,40 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
           }
         }
         if (viewport.width === 390) {
+          await page.waitForLoadState("load", { timeout: timeoutMs });
+          await page.evaluate(
+            () =>
+              new Promise((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+              }),
+          );
           const rowSelector =
             route === "/"
               ? ".show-row"
               : route === "/movies"
                 ? ".title-row"
                 : ".unit-row";
-          const selectedRow = page.locator(rowSelector).nth(1);
+          const rowIdentityAttribute =
+            route === "/"
+              ? "data-tv-show-row"
+              : route === "/movies"
+                ? "data-movie-title-row"
+                : "data-other-unit-row";
+          const candidateRow = page.locator(rowSelector).nth(1);
+          const rowIdentity = await candidateRow.getAttribute(
+            rowIdentityAttribute,
+          );
+          if (!rowIdentity) {
+            throw new Error(
+              `Narrow Library row is missing ${rowIdentityAttribute}: ${route}`,
+            );
+          }
+          const escapedRowIdentity = rowIdentity
+            .replaceAll("\\", "\\\\")
+            .replaceAll('"', '\\"');
+          const selectedRow = page.locator(
+            `[${rowIdentityAttribute}="${escapedRowIdentity}"]`,
+          );
           await selectedRow.click();
           await expect(selectedRow).toHaveAttribute("aria-pressed", "true", {
             timeout: timeoutMs,
