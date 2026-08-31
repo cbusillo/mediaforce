@@ -6,8 +6,11 @@
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
+	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
 	import type {
 		CompressionIntentLevel,
+		DashboardFoldersPayload,
+		DashboardSummaryPayload,
 		FolderPayload,
 		FolderStatusPayload,
 		HostsPayload,
@@ -15,6 +18,7 @@
 		QualityRiskTag
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
+	import { formatFileSize } from '$lib/format';
 	import { reviewAvailability } from '$lib/review/availability';
 	import { clampMomentIndex, reviewPairHasSound } from '$lib/review/comparison';
 	import { reviewSampleSizes, reviewSourceHasAudio } from '$lib/review/pairs';
@@ -41,11 +45,13 @@
 		exactReviewSizeFacts,
 		expectedSizeChange,
 		folderSizeTargetAnalysis,
+		folderHref,
 		formatDecimalFileSize,
 		formatDuration,
 		goalRequest,
 		isSizeGoalSelectionConfirmed,
 		isSeriesPrefix,
+		librarySeasonState,
 		measuredFollowupRequest,
 		overlappingCalibrationActivity,
 		plainFailureMessage,
@@ -58,6 +64,7 @@
 		reviewSizeAdjustment,
 		scopedEncodeProgress,
 		seasonIdentity,
+		seasonNumberLabel,
 		seasonEpisodeNavigationUnavailable,
 		seasonPromotionIntegrity,
 		seasonEpisodeOptions,
@@ -73,6 +80,7 @@
 		type ReviewSizeAdjustmentDirection,
 		type SizeGoal
 	} from '$lib/season/experience';
+	import { applySeriesLifecycle, compareSeasonCards, seasonsByShow } from '$lib/season/library';
 
 	type ActionPhase =
 		| 'idle'
@@ -122,15 +130,21 @@
 		folder,
 		status,
 		hosts,
+		dashboard,
+		foldersPayload,
 		folderPending = false,
 		loadError,
+		seriesContextError = '',
 		onMutate
 	}: {
 		folder: FolderPayload;
 		status: FolderStatusPayload;
 		hosts: HostsPayload;
+		dashboard: DashboardSummaryPayload;
+		foldersPayload: DashboardFoldersPayload;
 		folderPending?: boolean;
 		loadError?: string;
+		seriesContextError?: string;
 		onMutate: () => Promise<void>;
 	} = $props();
 
@@ -172,6 +186,16 @@
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
 	const seriesSeasonLabel = $derived(seriesSeasonCount === 1 ? 'season' : 'seasons');
 	const lifecycle = $derived(folder.lifecycle ?? null);
+	const seriesFolderCards = $derived(
+		lifecycle ? applySeriesLifecycle(foldersPayload, lifecycle) : foldersPayload
+	);
+	const seriesSeasonCards = $derived(
+		isSeriesScope
+			? [...(seasonsByShow(seriesFolderCards.folders).get(folder.prefix) ?? [])].sort(
+					compareSeasonCards
+				)
+			: []
+	);
 	const currentSeasonLifecycle = $derived(
 		lifecycle?.seasons.find((season) => season.prefix === folder.prefix) ??
 			lifecycle?.seasons[0] ??
@@ -1419,6 +1443,14 @@
 	function technicalPolicy() {
 		return technicalVideo;
 	}
+
+	function seasonBadgeTone(tone: string): 'active' | 'ready' | 'wait' | 'fail' | 'idle' {
+		if (tone === 'active') return 'active';
+		if (tone === 'ready' || tone === 'success') return 'ready';
+		if (tone === 'attention' || tone === 'fail') return 'fail';
+		if (tone === 'wait') return 'wait';
+		return 'idle';
+	}
 </script>
 
 <svelte:head>
@@ -1460,6 +1492,53 @@
 				<span aria-hidden="true">{actionMessageTone === 'success' ? '✓' : 'i'}</span>
 				<div><strong>{actionMessage}</strong></div>
 			</div>
+		{/if}
+
+		{#if !folder.pending && isSeriesScope}
+			<section class="series-season-index" aria-labelledby="series-season-index-title">
+				<header class="series-season-index__header">
+					<div>
+						<p class="eyebrow">All seasons</p>
+						<h2 id="series-season-index-title">
+							{seriesContextError
+								? 'Season list unavailable'
+								: `${seriesSeasonCards.length} ${seriesSeasonCards.length === 1 ? 'season' : 'seasons'}`}
+						</h2>
+					</div>
+					<p>Open any season without starting work or changing media.</p>
+				</header>
+				{#if seriesContextError}
+					<p class="series-season-index__empty" role="status">
+						The complete season list is unavailable. {seriesContextError}
+					</p>
+				{:else if seriesSeasonCards.length}
+					<div class="series-season-index__head" aria-hidden="true">
+						<span>Season</span><span>Episodes</span><span>Current size</span><span>State</span><span
+						></span>
+					</div>
+					<div class="series-season-index__rows">
+						{#each seriesSeasonCards as season (season.prefix)}
+							{@const state = librarySeasonState(season, dashboard)}
+							{@const seasonName = seasonIdentity(season.prefix).season}
+							<a
+								class="series-season-index__row"
+								data-season-prefix={season.prefix}
+								href={resolve(folderHref(season.prefix))}
+							>
+								<span class="series-season-index__identity">
+									<b>{seasonNumberLabel(seasonName)}</b><strong>{seasonName}</strong>
+								</span>
+								<span>{season.item_count}</span>
+								<span>{formatFileSize(season.total_size_bytes)}</span>
+								<StateBadge tone={seasonBadgeTone(state.tone)} label={state.label} compact />
+								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 4.5 5.5 5.5L7 15.5" /></svg>
+							</a>
+						{/each}
+					</div>
+				{:else}
+					<p class="series-season-index__empty">No catalog seasons found for this show.</p>
+				{/if}
+			</section>
 		{/if}
 
 		{#if !folder.pending && heldEpisodeCount > 0 && humanState.key !== 'making_test'}
@@ -2023,54 +2102,9 @@
 			</section>
 		{:else if humanState.key === 'ready_to_compare'}
 			<section class="compare-room">
-				<div class="compare-heading">
-					<div>
-						<p class={sizeTargetMissed || targetConstraint ? 'eyebrow eyebrow--missed' : 'eyebrow'}>
-							{targetConstraint
-								? 'Target needs a change'
-								: sizeTargetMissed
-									? 'Size goal not met'
-									: 'Ready to review'}
-						</p>
-						<h1>{targetConstraint ? targetConstraint.title : `Review ${reviewSubject}`}</h1>
-						<p>{sampleEpisode} · Compare the same moment on both sides.</p>
-					</div>
-				</div>
-
-				<section class="review-contract" aria-label="Episode size comparison">
-					<dl>
-						{#if isExactItemScope}
-							<div>
-								<dt>Current size</dt>
-								<dd>{formatDecimalFileSize(exactReviewFacts.currentSizeBytes)}</dd>
-							</div>
-						{/if}
-						<div>
-							<dt>{isExactItemScope ? 'Estimated output' : 'Estimated episode output'}</dt>
-							<dd>
-								{exactReviewFacts.estimatedOutputBytes
-									? formatDecimalFileSize(exactReviewFacts.estimatedOutputBytes)
-									: 'No usable estimate'}
-							</dd>
-						</div>
-						{#if isExactItemScope}
-							<div>
-								<dt>Estimated space saved</dt>
-								<dd>
-									{exactReviewFacts.estimatedSpaceSavedBytes !== null
-										? exactExpectedSizeChange.direction === 'larger'
-											? `None · grows by ${formatDecimalFileSize(exactExpectedSizeChange.bytes)}`
-											: formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
-										: 'No usable estimate'}
-								</dd>
-							</div>
-						{/if}
-						<div>
-							<dt>Episode target</dt>
-							<dd>{sizeTargetLabel}</dd>
-						</div>
-					</dl>
-				</section>
+				<h1 class="sr-only">
+					{targetConstraint ? targetConstraint.title : `Review ${reviewSubject}`}
+				</h1>
 
 				{#if targetConstraint}
 					<div class="target-warning target-warning--constraint" role="status">
@@ -2150,6 +2184,27 @@
 						estimatedOutputLabel={expectedEpisodeBytes
 							? `about ${formatDecimalFileSize(expectedEpisodeBytes)}`
 							: ''}
+						facts={[
+							{
+								label: 'Current size',
+								value: formatDecimalFileSize(exactReviewFacts.currentSizeBytes)
+							},
+							{
+								label: 'Estimated output',
+								value: exactReviewFacts.estimatedOutputBytes
+									? formatDecimalFileSize(exactReviewFacts.estimatedOutputBytes)
+									: 'No estimate'
+							},
+							{
+								label: 'Estimated space saved',
+								value:
+									exactReviewFacts.estimatedSpaceSavedBytes !== null
+										? formatDecimalFileSize(exactReviewFacts.estimatedSpaceSavedBytes)
+										: 'No estimate'
+							},
+							{ label: 'Target', value: sizeTargetLabel }
+						]}
+						decisionTargetId="season-review-decision"
 						canCreateSoundSample={sampleHasAudio}
 						soundSampleDisabled={actionPhase !== 'idle' || noAvailableHosts}
 						onMomentChange={chooseMoment}
@@ -2172,42 +2227,48 @@
 				{/if}
 
 				{#if riskSummary}
-					<div class={`risk-summary risk-summary--${riskSummary.tone}`}>
-						<div class="risk-summary__headline">
-							<span>What to check</span>
-							<strong>{riskSummary.verdict}</strong>
-						</div>
-						<div class="risk-summary__fact">
-							<span>Picture</span>
-							<strong>{riskSummary.picture.label}</strong>
-							<small>{riskSummary.picture.level} · {riskSummary.picture.detail}</small>
-						</div>
-						<div class="risk-summary__fact">
-							<span>Sound</span>
-							<strong>{riskSummary.sound.label}</strong>
-							<small>{riskSummary.sound.level} · {riskSummary.sound.detail}</small>
-						</div>
-						{#if riskSummary.hasSavedDecision}
+					<details
+						class="review-details"
+						open={riskSummary.blocked || riskSummary.requiresCadenceResolution}
+					>
+						<summary>Details</summary>
+						<div class={`risk-summary risk-summary--${riskSummary.tone}`}>
+							<div class="risk-summary__headline">
+								<span>What to check</span>
+								<strong>{riskSummary.verdict}</strong>
+							</div>
 							<div class="risk-summary__fact">
-								<span>Decision</span>
-								<strong>{riskSummary.authority}</strong>
-								<small>{riskSummary.authorityDetail}</small>
+								<span>Picture</span>
+								<strong>{riskSummary.picture.label}</strong>
+								<small>{riskSummary.picture.level} · {riskSummary.picture.detail}</small>
 							</div>
-						{/if}
-						<p class="risk-summary__detail">{riskSummary.detail}</p>
-						{#if riskSummary.focusMoments.length}
-							<p class="risk-summary__focus">Review focus: {riskSummary.focusMoments[0]}</p>
-						{/if}
-						{#if riskSummary.requiresCadenceResolution}
-							<div class="risk-summary__resolution">
-								<div>
-									<span>Next step</span>
-									<strong>Resolve the selected file’s motion pattern</strong>
-									<small>This is evidence work, not a size or quality-setting problem.</small>
+							<div class="risk-summary__fact">
+								<span>Sound</span>
+								<strong>{riskSummary.sound.label}</strong>
+								<small>{riskSummary.sound.level} · {riskSummary.sound.detail}</small>
+							</div>
+							{#if riskSummary.hasSavedDecision}
+								<div class="risk-summary__fact">
+									<span>Decision</span>
+									<strong>{riskSummary.authority}</strong>
+									<small>{riskSummary.authorityDetail}</small>
 								</div>
-							</div>
-						{/if}
-					</div>
+							{/if}
+							<p class="risk-summary__detail">{riskSummary.detail}</p>
+							{#if riskSummary.focusMoments.length}
+								<p class="risk-summary__focus">Review focus: {riskSummary.focusMoments[0]}</p>
+							{/if}
+							{#if riskSummary.requiresCadenceResolution}
+								<div class="risk-summary__resolution">
+									<div>
+										<span>Next step</span>
+										<strong>Resolve the selected file’s motion pattern</strong>
+										<small>This is evidence work, not a size or quality-setting problem.</small>
+									</div>
+								</div>
+							{/if}
+						</div>
+					</details>
 				{/if}
 
 				{#if revisionPaneVisible}
@@ -2325,9 +2386,11 @@
 				{/if}
 
 				<div
+					id="season-review-decision"
 					class="decision"
 					class:decision--target-miss={sizeTargetMissed || Boolean(targetConstraint)}
 					class:decision--blocked={approvalBlocked}
+					tabindex="-1"
 				>
 					<div>
 						{#if targetConstraint}
@@ -2355,8 +2418,8 @@
 								Create another sample before deciding whether to use this setting for the season.
 							</p>
 						{:else}
-							<h2>What do you want to do with this version?</h2>
-							<p>Keep it, see if it can use less space, or tell Mediaforce what should improve.</p>
+							<h2>Keep this version?</h2>
+							<p>Nothing is compressed or queued until you choose a separate production action.</p>
 						{/if}
 					</div>
 					<div class="decision-actions">
@@ -2412,15 +2475,6 @@
 							</button>
 						{:else}
 							<button
-								class="primary-button primary-button--light"
-								type="button"
-								onclick={() => approveTest()}
-								disabled={!currentPair || approvalBlocked}
-							>
-								Keep this version
-								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
-							</button>
-							<button
 								class="secondary-button"
 								type="button"
 								onclick={() => chooseReviewAdjustment('smaller')}
@@ -2437,6 +2491,15 @@
 								aria-controls={revisionPaneVisible ? 'revision-pane' : undefined}
 							>
 								Improve picture or sound
+							</button>
+							<button
+								class="primary-button primary-button--light"
+								type="button"
+								onclick={() => approveTest()}
+								disabled={!currentPair || approvalBlocked}
+							>
+								Keep this version
+								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 							</button>
 						{/if}
 					</div>
@@ -2770,7 +2833,7 @@
 				<div class="ready-symbol" aria-hidden="true"><span>✓</span></div>
 				<p class="eyebrow">Every check passed</p>
 				<h1>
-					{isExactItemScope
+					{promotionIntegrity.readyCount === 1
 						? 'Ready to replace the original episode.'
 						: 'Ready to replace the original episodes.'}
 				</h1>
@@ -2781,13 +2844,15 @@
 						: promotionIntegrity.readyCount === 1
 							? 'Replacing installs the checked episode.'
 							: `Replacing installs all ${promotionIntegrity.readyCount} checked episodes together.`}
-					{isExactItemScope
+					{promotionIntegrity.readyCount === 1
 						? 'The current original moves to the cleanup folder so it can be recovered later.'
 						: 'The current originals move to the cleanup folder so they can be recovered later.'}
 				</p>
 				<SeasonIntegrityPanel integrity={promotionIntegrity} tone="ready" />
 				<button class="primary-button" type="button" onclick={finishSeason}>
-					{isExactItemScope ? 'Replace the original episode' : 'Replace original episodes'}
+					{promotionIntegrity.readyCount === 1
+						? 'Replace the original episode'
+						: 'Replace original episodes'}
 					<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 				</button>
 				<p class="action-note">Nothing changes until you choose this action.</p>
@@ -3782,25 +3847,6 @@
 		max-width: 1280px;
 	}
 
-	.compare-heading {
-		align-items: flex-end;
-		display: flex;
-		gap: 30px;
-		justify-content: space-between;
-		margin-bottom: 34px;
-	}
-
-	.compare-heading h1 {
-		font-size: clamp(46px, 5.3vw, 72px);
-		margin-bottom: 11px;
-	}
-
-	.compare-heading > div > p:last-child {
-		color: var(--muted);
-		font-size: 13px;
-		margin-bottom: 0;
-	}
-
 	.missing-media {
 		align-items: center;
 		background: rgb(255 255 255 / 4%);
@@ -3823,6 +3869,35 @@
 
 	.missing-media p {
 		color: var(--muted);
+	}
+
+	.review-details {
+		margin-top: 14px;
+	}
+
+	.review-details summary {
+		color: var(--muted);
+		cursor: pointer;
+		font-size: 12px;
+		font-weight: 700;
+		list-style: none;
+		padding: 4px 0;
+	}
+
+	.review-details summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.review-details summary::after {
+		content: ' +';
+	}
+
+	.review-details[open] summary::after {
+		content: ' −';
+	}
+
+	.review-details .risk-summary {
+		margin-top: 8px;
 	}
 
 	.risk-summary {
@@ -4458,11 +4533,6 @@
 			justify-self: center;
 		}
 
-		.compare-heading {
-			align-items: flex-start;
-			flex-direction: column;
-		}
-
 		.risk-summary {
 			grid-template-columns: 1fr;
 		}
@@ -4574,10 +4644,6 @@
 		.step-line span {
 			font-size: 9px;
 			gap: 4px;
-		}
-
-		.compare-heading h1 {
-			font-size: 46px;
 		}
 
 		.safety-dialog {
@@ -4834,6 +4900,112 @@
 
 	.lifecycle-notice b {
 		color: var(--mf-wait-fg);
+	}
+
+	.series-season-index {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: var(--mf-radius-3);
+		margin: 0 0 18px;
+		padding: 16px 18px;
+	}
+
+	.series-season-index__header {
+		align-items: end;
+		display: flex;
+		gap: 24px;
+		justify-content: space-between;
+		padding-bottom: 12px;
+	}
+
+	.series-season-index__header .eyebrow,
+	.series-season-index__header h2,
+	.series-season-index__header p {
+		margin: 0;
+	}
+
+	.series-season-index__header h2 {
+		font-size: 18px;
+		letter-spacing: -0.02em;
+	}
+
+	.series-season-index__header > p,
+	.series-season-index__empty {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+	}
+
+	.series-season-index__head,
+	.series-season-index__row {
+		display: grid;
+		grid-template-columns: minmax(180px, 1fr) 90px 120px minmax(150px, auto) 18px;
+	}
+
+	.series-season-index__head {
+		border-top: 1px solid var(--mf-line-strong);
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.08em;
+		padding: 9px 10px;
+		text-transform: uppercase;
+	}
+
+	.series-season-index__row {
+		align-items: center;
+		border-top: 1px solid var(--mf-line-muted);
+		color: var(--mf-fg-primary);
+		gap: 12px;
+		min-height: 48px;
+		padding: 7px 10px;
+		text-decoration: none;
+	}
+
+	.series-season-index__row:hover {
+		background: var(--mf-bg-panel-2);
+		color: var(--mf-active-fg);
+	}
+
+	.series-season-index__identity {
+		align-items: center;
+		display: flex;
+		gap: 10px;
+		min-width: 0;
+	}
+
+	.series-season-index__identity b {
+		align-items: center;
+		background: var(--mf-bg-raised);
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-secondary);
+		display: inline-flex;
+		font-size: 12px;
+		height: 32px;
+		justify-content: center;
+		min-width: 32px;
+	}
+
+	.series-season-index__identity strong {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.series-season-index__row > span:not(.series-season-index__identity) {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.series-season-index__row > svg {
+		fill: none;
+		height: 17px;
+		justify-self: end;
+		stroke: currentColor;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		stroke-width: 1.5;
+		width: 17px;
 	}
 
 	.episode-selector {
@@ -5568,65 +5740,6 @@
 		padding: 22px;
 	}
 
-	.compare-heading {
-		align-items: flex-end;
-		display: flex;
-		gap: 18px;
-		justify-content: space-between;
-		margin: 0;
-	}
-
-	.compare-heading > div:first-child {
-		display: grid;
-		gap: 7px;
-	}
-
-	.compare-heading p {
-		color: var(--mf-fg-secondary);
-	}
-
-	.review-contract {
-		background: var(--mf-bg-panel-2);
-		border: 1px solid var(--mf-line);
-		overflow: hidden;
-	}
-
-	.review-contract dt {
-		color: var(--mf-fg-tertiary);
-		font-size: 10px;
-		font-weight: 750;
-		letter-spacing: 0.055em;
-		text-transform: uppercase;
-	}
-
-	.review-contract dl {
-		display: grid;
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-		margin: 0;
-	}
-
-	.review-contract dl > div {
-		display: grid;
-		gap: 4px;
-		min-width: 0;
-		padding: 11px 14px;
-	}
-
-	.review-contract dl > div + div {
-		border-left: 1px solid var(--mf-line-muted);
-	}
-
-	.review-contract dd {
-		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-mono);
-		font-size: 15px;
-		font-variant-numeric: tabular-nums;
-		font-weight: 720;
-		line-height: 1.2;
-		margin: 0;
-		white-space: nowrap;
-	}
-
 	.target-warning {
 		align-items: center;
 		background: var(--mf-fail-bg);
@@ -5699,6 +5812,7 @@
 		align-items: center;
 		background: var(--mf-active-bg);
 		border: 1px solid #c6ddd7;
+		border-top-width: 3px;
 		border-radius: var(--mf-radius-3);
 		color: var(--mf-fg-primary);
 		display: flex;
@@ -5706,6 +5820,7 @@
 		justify-content: space-between;
 		margin: 0;
 		padding: 16px;
+		scroll-margin-top: var(--mf-space-6);
 	}
 
 	.decision p {
@@ -7111,28 +7226,10 @@
 			border-bottom: 0;
 		}
 
-		.compare-heading,
 		.decision,
 		.goal-action {
 			align-items: stretch;
 			flex-direction: column;
-		}
-
-		.review-contract dl {
-			grid-template-columns: repeat(2, minmax(0, 1fr));
-		}
-
-		.review-contract dl > div:nth-child(3) {
-			border-left: 0;
-			border-top: 1px solid var(--mf-line-muted);
-		}
-
-		.review-contract dl > div:nth-child(4) {
-			border-top: 1px solid var(--mf-line-muted);
-		}
-
-		.review-contract dd {
-			white-space: normal;
 		}
 
 		.target-warning {
@@ -7144,6 +7241,41 @@
 			grid-template-columns: minmax(0, 1fr) 130px;
 		}
 
+		.series-season-index__header {
+			align-items: start;
+			flex-direction: column;
+			gap: 4px;
+		}
+
+		.series-season-index__head {
+			display: none;
+		}
+
+		.series-season-index__row {
+			grid-template-columns: minmax(0, 1fr) auto 17px;
+			padding-block: 10px;
+		}
+
+		.series-season-index__row > span:nth-child(2) {
+			display: none;
+		}
+
+		.series-season-index__row > span:nth-child(3) {
+			grid-column: 1;
+			grid-row: 2;
+			margin-left: 42px;
+		}
+
+		.series-season-index__row :global(.state-badge) {
+			grid-column: 2;
+			grid-row: 1 / span 2;
+		}
+
+		.series-season-index__row > svg {
+			grid-column: 3;
+			grid-row: 1 / span 2;
+		}
+
 		.progress-ring {
 			height: 120px;
 			width: 120px;
@@ -7151,6 +7283,13 @@
 	}
 
 	@media (max-width: 520px) {
+		.decision {
+			bottom: 0;
+			box-shadow: 0 -8px 22px rgb(12 16 19 / 18%);
+			position: sticky;
+			z-index: 8;
+		}
+
 		.experience-page,
 		.experience-page.cinematic {
 			min-height: calc(100vh - 62px);

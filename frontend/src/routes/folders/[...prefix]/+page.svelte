@@ -20,6 +20,7 @@
 	} from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
 	import { studioRefreshPlan } from '$lib/folders/studio-refresh';
+	import { isSeriesPrefix } from '$lib/season/experience';
 	import SeasonExperience from '$lib/components/season/SeasonExperience.svelte';
 	import SeasonLibrary from '$lib/components/season/SeasonLibrary.svelte';
 	import MovieStudioView from '$lib/components/workstation/MovieStudioView.svelte';
@@ -39,6 +40,7 @@
 	let statusPending = $state(false);
 	let folderHydrated = $state(false);
 	let loadError = $state<string | null>(null);
+	let seriesContextError = $state('');
 	let hydrationGeneration = 0;
 
 	function encodePrefix(prefix: string): string {
@@ -112,23 +114,51 @@
 		const generation = ++hydrationGeneration;
 		folderPending = true;
 		loadError = null;
+		seriesContextError = '';
 		const encodedPrefix = encodePrefix(currentPrefix);
 		try {
-			const [folderPayload, statusPayload, integrityPayload, hostsPayload] = await Promise.all([
-				fetchJson<FolderPayload>(`/api/folders/${encodedPrefix}`),
-				fetchJson<FolderStatusPayload>(`/api/folders/${encodedPrefix}/status`),
-				fetchStagedIntegrity(currentPrefix).catch(() =>
-					initialStagedIntegrityPayload(
-						currentPrefix,
-						'Mediaforce could not load the staged-file inventory.'
-					)
-				),
-				fetchJson<HostsPayload>('/api/hosts?compact=1').catch(() => initialHosts)
-			]);
+			const needsSeriesContext = isSeriesPrefix(currentPrefix);
+			const seriesContextPromise = needsSeriesContext
+				? Promise.all([
+						fetchJson<DashboardSummaryPayload>('/api/dashboard?preview_limit=0'),
+						fetchJson<DashboardFoldersPayload>('/api/dashboard/library/details')
+					]).then(([dashboardPayload, libraryPayload]) => ({
+						dashboardPayload,
+						libraryPayload,
+						error: ''
+					}))
+				: Promise.resolve({
+						dashboardPayload: initialDashboard,
+						libraryPayload: initialFoldersPayload,
+						error: ''
+					});
+			const [folderPayload, statusPayload, integrityPayload, hostsPayload, seriesContext] =
+				await Promise.all([
+					fetchJson<FolderPayload>(`/api/folders/${encodedPrefix}`),
+					fetchJson<FolderStatusPayload>(`/api/folders/${encodedPrefix}/status`),
+					fetchStagedIntegrity(currentPrefix).catch(() =>
+						initialStagedIntegrityPayload(
+							currentPrefix,
+							'Mediaforce could not load the staged-file inventory.'
+						)
+					),
+					fetchJson<HostsPayload>('/api/hosts?compact=1').catch(() => initialHosts),
+					seriesContextPromise.catch((error) => ({
+						dashboardPayload: initialDashboard,
+						libraryPayload: initialFoldersPayload,
+						error:
+							error instanceof Error
+								? error.message
+								: 'The complete season list could not be loaded.'
+					}))
+				]);
 			if (generation !== hydrationGeneration || currentPrefix !== prefix) return;
 			folder = folderPayload;
 			status = { ...statusPayload, staged_integrity: integrityPayload };
 			hosts = hostsPayload;
+			dashboard = seriesContext.dashboardPayload;
+			foldersPayload = seriesContext.libraryPayload;
+			seriesContextError = seriesContext.error;
 		} catch (error) {
 			if (generation === hydrationGeneration) {
 				loadError = error instanceof Error ? error.message : 'Unable to open this media scope.';
@@ -197,12 +227,15 @@
 		const currentMode = mode;
 		const currentPrefix = prefix;
 		loadError = null;
+		seriesContextError = '';
 
 		if (currentMode === 'studio') {
 			folderHydrated = false;
 			folder = initialFolderPayload(currentPrefix);
 			status = initialFolderStatusPayload(currentPrefix);
 			hosts = initialHosts;
+			dashboard = initialDashboard;
+			foldersPayload = initialFoldersPayload;
 			void hydrateStudio(currentPrefix);
 			const refreshTimer = window.setInterval(() => {
 				void refreshStudioStatus(currentPrefix);
@@ -266,8 +299,11 @@
 			{folder}
 			{status}
 			{hosts}
+			{dashboard}
+			{foldersPayload}
 			{folderPending}
 			loadError={loadError ?? undefined}
+			{seriesContextError}
 			onMutate={refreshStudio}
 		/>
 	{/if}
