@@ -44,6 +44,7 @@ SAMPLING_PREFIX = "tv/Sampling Show/Season 1"
 RETRY_PREFIX = "tv/Retry Show/Season 1"
 SHARED_TEST_PREFIX = "tv/Shared Test Show/Season 1"
 SHARED_TEST_SERIES_PREFIX = "tv/Shared Test Show"
+HIGH_SEASON_SERIES_PREFIX = "tv/Long Running Show"
 COMPLETED_PREFIX = "movies/Archive Ready"
 BLOCKED_COMPLETED_PREFIX = "movies/Blocked Cleanup"
 MISSING_COMPLETED_PREFIX = "movies/Backups Already Gone"
@@ -1648,6 +1649,20 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
         rows.extend(
             _library_item(
                 project_root=project_root,
+                media_root="tv",
+                rel_path=f"{HIGH_SEASON_SERIES_PREFIX}/Season {season_number}/Episode 01.mkv",
+                size_bytes=1024**3,
+                status="discovered",
+                video_codec="h264",
+                priority_score=30,
+                recommendation="review_encode",
+                recommendation_reason="Fixture long-running series for bounded Library detail coverage.",
+            )
+            for season_number in range(1, 15)
+        )
+        rows.extend(
+            _library_item(
+                project_root=project_root,
                 media_root="other",
                 rel_path=f"{OTHER_OVERSIZED_PREFIX}/Clip-{index:03d}.mkv",
                 size_bytes=32 * 1024**2,
@@ -2362,7 +2377,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Other Studio review-ready fixture",
                 "route": "/folders/other/Review%20Ready",
                 "marker": "Review Ready",
-                "stageMarker": "Compare clips",
+                "stageMarker": "Full screen",
             },
             {
                 "label": "Other Studio active-processing fixture",
@@ -2422,7 +2437,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Movie Studio review-ready fixture",
                 "route": "/folders/movies/Review%20Ready",
                 "marker": "Review Ready",
-                "stageMarker": "Compare clips",
+                "stageMarker": "Full screen",
             },
             {
                 "label": "Movie Studio exact-file title-review fixture",
@@ -2505,7 +2520,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio review-ready fixture",
                 "route": "/folders/tv/Review%20Ready/Season%201",
                 "marker": "Review Ready",
-                "stageMarker": "Ready to review",
+                "stageMarker": "Full screen",
             },
             {
                 "label": "Folder Studio exact-item review-ready fixture",
@@ -2541,7 +2556,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio missed-target fixture",
                 "route": "/folders/tv/Overshoot%20Show/Season%201",
                 "marker": "Overshoot Show",
-                "stageMarker": "Size goal not met",
+                "stageMarker": "The measured result stayed above your size goal.",
             },
             {
                 "label": "Folder Studio under-target fixture",
@@ -2589,7 +2604,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio promotion fixture",
                 "route": "/folders/tv/Promotion%20Ready/Season%201",
                 "marker": "Promotion Ready",
-                "stageMarker": "Ready to replace the original episodes",
+                "stageMarker": "Ready to replace the original episode",
             },
             {
                 "label": "Folder Studio partial-promotion fixture",

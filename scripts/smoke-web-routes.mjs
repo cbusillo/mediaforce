@@ -20,11 +20,26 @@ const DEFAULT_ROUTE_TIMEOUT_MS = 6000;
 const SERVER_START_TIMEOUT_MS = 12000;
 const NARROW_VIEWPORT = { width: 390, height: 844 };
 const APP_ROOT_SELECTOR = ".app-shell";
+const HIGH_SEASON_SERIES_PREFIX = "tv/Long Running Show";
 const LIBRARY_METRIC_COPY = [
   "Current size",
   "Estimated output",
   "Estimated space saved",
 ];
+
+async function launchSmokeBrowser() {
+  let browser;
+  try {
+    browser = await chromium.launch({ channel: "chromium" });
+    const page = await browser.newPage();
+    await page.close();
+    return browser;
+  } catch {
+    await browser?.close().catch(() => undefined);
+    return chromium.launch();
+  }
+}
+
 const FIXTURE_REQUIRED_COPY = new Map([
   [
     "/folders/tv/Approved%20Show/Season%201",
@@ -48,7 +63,16 @@ const FIXTURE_REQUIRED_COPY = new Map([
   ],
   [
     "/folders/movies/Review%20Ready",
-    ["Ready to review", "Estimated output", "Current sample estimate"],
+    [
+      "Ready to review",
+      "Estimated output",
+      "Sample-backed",
+      "Keep this version",
+    ],
+  ],
+  [
+    "/folders/movies/Archive%20Ready",
+    ["Current file", "Space saved", "Original backup", "Review in Finished"],
   ],
   [
     "/folders/other/Field%20Notes",
@@ -94,18 +118,11 @@ const endpointChecks = [
 ];
 
 const routeChecks = [
-  [
-    "TV Library",
-    "/",
-    "TV Library",
-    "",
-    LIBRARY_METRIC_COPY,
-    "TV Library · Mediaforce",
-  ],
+  ["TV Library", "/", "TV", "", LIBRARY_METRIC_COPY, "TV Library · Mediaforce"],
   [
     "Movie Library",
     "/movies",
-    "Movie Library",
+    "Movies",
     "",
     LIBRARY_METRIC_COPY,
     "Movie Library · Mediaforce",
@@ -113,7 +130,7 @@ const routeChecks = [
   [
     "Other Library",
     "/other",
-    "Other Library",
+    "Other",
     "",
     LIBRARY_METRIC_COPY,
     "Other Library · Mediaforce",
@@ -441,9 +458,10 @@ async function waitForRouteContent(page, expectation, timeoutMs, label) {
       expectation,
       { timeout: timeoutMs },
     )
-    .catch((error) => {
+    .catch(async (error) => {
+      const state = await readRouteState(page, expectation);
       throw new Error(
-        `${label} did not render the required route content within ${timeoutMs}ms: ${error.message}`,
+        `${label} did not render the required route content within ${timeoutMs}ms: ${JSON.stringify(state)} (${error.message})`,
       );
     });
 }
@@ -508,17 +526,34 @@ async function readRouteState(page, expectation, inspectNarrowLayout = false) {
 async function checkMovieEstimateCoverage(page, timeoutMs, label) {
   await page.waitForFunction(
     () => {
-      const totals =
-        document.querySelector(".library-totals")?.textContent ?? "";
-      return (
-        /Estimated output\s*·\s*\d+ of \d+ titles/.test(totals) &&
-        /Estimated space saved\s*·\s*\d+ of \d+ titles/.test(totals)
-      );
+      const metrics = Array.from(
+        document.querySelectorAll(".metric-strip > div"),
+      ).map((metric) => ({
+        label:
+          metric.querySelector(".metric-strip__label")?.textContent?.trim() ??
+          "",
+        value: metric.querySelector("strong")?.textContent?.trim() ?? "",
+        detail: metric.querySelector("small")?.textContent?.trim() ?? "",
+      }));
+      return ["Estimated output", "Estimated space saved"].every((label) => {
+        const metric = metrics.find((candidate) => candidate.label === label);
+        return (
+          metric != null &&
+          /(?:^| · )\d+ of \d+$/.test(metric.detail) &&
+          !/At least|At most|Known|No estimate/.test(metric.value)
+        );
+      });
     },
     undefined,
     { timeout: timeoutMs },
   );
-  await page.locator('[data-movie-title-row="movies/Review Ready"]').click();
+  const reviewReadyRow = page.locator(
+    '[data-movie-title-row="movies/Review Ready"]',
+  );
+  await reviewReadyRow.click();
+  if (!(await page.locator(".title-inspector").count())) {
+    await reviewReadyRow.locator("xpath=..").locator(".row-inspect").click();
+  }
   await page.waitForFunction(
     () =>
       (document.querySelector(".title-inspector")?.textContent ?? "").includes(
@@ -619,7 +654,9 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
       .getByRole("radio", { name: "No visible difference", exact: false })
       .count()) > 0
   ) {
-    throw new Error(`${label} exposed the behaviorally duplicate transparent option.`);
+    throw new Error(
+      `${label} exposed the behaviorally duplicate transparent option.`,
+    );
   }
   const contractText = await page.locator(".goal-contract").innerText();
   for (const requiredCopy of [
@@ -638,7 +675,7 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
 }
 
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -760,12 +797,542 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   }
 }
 
+async function checkLibraryModeLayout(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const viewport of [
+      { width: 1440, height: 960 },
+      { width: 1024, height: 768 },
+      { width: 390, height: 844 },
+    ]) {
+      const page = await browser.newPage({ viewport });
+      const navTops = [];
+      for (const route of ["/", "/movies", "/other"]) {
+        await openRoute(page, baseUrl, route, timeoutMs);
+        await page.locator(".library-layout .library-workbench").waitFor({
+          state: "visible",
+          timeout: timeoutMs,
+        });
+        const state = await page.evaluate(() => {
+          const heading = document.querySelector(".library-layout > h1");
+          const nav = document.querySelector(".library-mode-nav");
+          const workTotal = Number(
+            document.querySelector(".work-bar__total strong")?.textContent ?? 0,
+          );
+          const segmentTotal = Array.from(
+            document.querySelectorAll(".work-segment"),
+          ).reduce(
+            (total, segment) =>
+              total + Number(segment.getAttribute("data-count") ?? 0),
+            0,
+          );
+          const headingStyle = heading
+            ? window.getComputedStyle(heading)
+            : null;
+          const index = document.querySelector(".library-index");
+          const indexStyle = index ? window.getComputedStyle(index) : null;
+          const inspectorRect = document
+            .querySelector(".library-inspector")
+            ?.getBoundingClientRect();
+          const selectedRect = document
+            .querySelector(
+              ".show-row.selected, .title-row.selected, .unit-row.is-selected",
+            )
+            ?.getBoundingClientRect();
+          const nestedScrollCount = Array.from(
+            document.querySelectorAll(".library-workbench *"),
+          ).filter((element) => {
+            const style = window.getComputedStyle(element);
+            return (
+              ["auto", "scroll"].includes(style.overflowY) &&
+              element.scrollHeight > element.clientHeight + 2
+            );
+          }).length;
+          const clippedBadgeCount = Array.from(
+            document.querySelectorAll(".library-workbench .state-badge"),
+          ).filter((badge) => badge.scrollWidth > badge.clientWidth + 1).length;
+          return {
+            metricCount: document.querySelectorAll(".metric-strip > div")
+              .length,
+            navTop: nav?.getBoundingClientRect().top ?? -1,
+            visibleHeading:
+              headingStyle?.position !== "absolute" ||
+              headingStyle?.width !== "1px" ||
+              headingStyle?.height !== "1px",
+            hasWorkspace: Boolean(document.querySelector(".library-workbench")),
+            pageOverflow:
+              document.documentElement.scrollWidth >
+              document.documentElement.clientWidth,
+            indexIsContents: indexStyle?.display === "contents",
+            inspectorTop: inspectorRect?.top ?? 0,
+            inspectorBottom: inspectorRect?.bottom ?? 0,
+            hasInspector: Boolean(inspectorRect),
+            pageHeight: document.documentElement.scrollHeight,
+            selectedTop: selectedRect?.top ?? 0,
+            selectedBottom: selectedRect?.bottom ?? 0,
+            inlineGap:
+              inspectorRect && selectedRect
+                ? Math.round(inspectorRect.top - selectedRect.bottom)
+                : null,
+            nestedScrollCount,
+            clippedBadgeCount,
+            workTotal,
+            segmentTotal,
+          };
+        });
+        if (
+          state.metricCount !== 4 ||
+          state.visibleHeading ||
+          !state.hasWorkspace ||
+          state.pageOverflow ||
+          !state.indexIsContents ||
+          state.nestedScrollCount !== 0 ||
+          state.clippedBadgeCount !== 0 ||
+          state.workTotal !== state.segmentTotal ||
+          (viewport.width > 760 &&
+            (!state.hasInspector ||
+              Math.abs(state.inlineGap ?? Number.POSITIVE_INFINITY) > 2 ||
+              state.inspectorBottom > state.pageHeight + 2)) ||
+          (viewport.width <= 760 && state.hasInspector)
+        ) {
+          throw new Error(
+            `Library mode layout contract failed at ${viewport.width}px ${route}: ${JSON.stringify(state)}`,
+          );
+        }
+        if (route === "/" && viewport.width === 1440) {
+          const policyState = await page
+            .locator(".show-policy")
+            .evaluate((policy) => {
+              const policyRect = policy.getBoundingClientRect();
+              const selectRect = policy
+                .querySelector("select")
+                ?.getBoundingClientRect();
+              return {
+                overflow: policy.scrollWidth > policy.clientWidth + 1,
+                selectClipped: selectRect
+                  ? selectRect.right > policyRect.right + 1
+                  : true,
+              };
+            });
+          if (policyState.overflow || policyState.selectClipped) {
+            throw new Error(
+              `TV inspector policy clipped at 1440px: ${JSON.stringify(policyState)}`,
+            );
+          }
+        }
+        if (route === "/") {
+          const highSeasonRow = page.locator(
+            `[data-tv-show-row="${HIGH_SEASON_SERIES_PREFIX}"]`,
+          );
+          await highSeasonRow.click();
+          if (viewport.width <= 760) {
+            await highSeasonRow
+              .locator("xpath=..")
+              .getByRole("button", { name: "Inspect" })
+              .click();
+          }
+          const highSeasonInspector = page.locator(".library-inspector");
+          await highSeasonInspector.waitFor({
+            state: "visible",
+            timeout: timeoutMs,
+          });
+          const highSeasonState = await highSeasonInspector.evaluate((inspector) => {
+            const visibleSeasonRows = Array.from(
+              inspector.querySelectorAll(".season-row"),
+            ).filter((row) => window.getComputedStyle(row).display !== "none");
+            const inspectorRect = inspector.getBoundingClientRect();
+            const firstSeasonRect = visibleSeasonRows[0]?.getBoundingClientRect();
+            const arrowInsets = visibleSeasonRows.map((row) => {
+              const arrowRect = row.querySelector("svg")?.getBoundingClientRect();
+              return arrowRect
+                ? row.getBoundingClientRect().right - arrowRect.right
+                : Number.POSITIVE_INFINITY;
+            });
+            const nestedScrollCount = Array.from(inspector.querySelectorAll("*")).filter(
+              (element) => {
+                const style = window.getComputedStyle(element);
+                return (
+                  ["auto", "scroll"].includes(style.overflowY) &&
+                  element.scrollHeight > element.clientHeight + 2
+                );
+              },
+            ).length;
+            return {
+              height: inspector.getBoundingClientRect().height,
+              seasonInset: firstSeasonRect
+                ? firstSeasonRect.left - inspectorRect.left
+                : Number.POSITIVE_INFINITY,
+              seasonWidthRatio: firstSeasonRect
+                ? firstSeasonRect.width / inspectorRect.width
+                : 0,
+              maximumArrowInset: Math.max(...arrowInsets),
+              nestedScrollCount,
+              omittedCopy:
+                inspector.querySelector(".season-list__more")?.textContent?.trim() ?? "",
+              seasonLabels: visibleSeasonRows.map(
+                (row) => row.querySelector(".season-copy strong")?.textContent?.trim() ?? "",
+              ),
+            };
+          });
+          const expectedSeasonLabels =
+            viewport.width <= 760
+              ? ["Season 1", "Season 14"]
+              : ["Season 1", "Season 2", "Season 13", "Season 14"];
+          const expectedOmittedCount = viewport.width <= 760 ? 12 : 10;
+          const maximumInspectorHeight = viewport.width <= 760 ? 1000 : 900;
+          const allSeasonsLink = highSeasonInspector.getByRole("link", {
+            name: "View all 14 seasons in Studio →",
+          });
+          const allSeasonsHref = await allSeasonsLink.getAttribute("href");
+          if (
+            JSON.stringify(highSeasonState.seasonLabels) !==
+              JSON.stringify(expectedSeasonLabels) ||
+            !highSeasonState.omittedCopy.includes(
+              `${expectedOmittedCount} more seasons are available.`,
+            ) ||
+            highSeasonState.height > maximumInspectorHeight ||
+            highSeasonState.seasonInset > 32 ||
+            highSeasonState.seasonWidthRatio < 0.85 ||
+            highSeasonState.maximumArrowInset > 24 ||
+            highSeasonState.nestedScrollCount !== 0 ||
+            allSeasonsHref !== "/folders/tv/Long%20Running%20Show"
+          ) {
+            throw new Error(
+              `High-season TV detail exceeded its bounded preview contract at ${viewport.width}px: ${JSON.stringify({ ...highSeasonState, allSeasonsHref })}`,
+            );
+          }
+        }
+        if (route === "/movies" && viewport.width === 1024) {
+          await page.getByPlaceholder("Type part of a title").fill("Review");
+          await page.waitForFunction(
+            () => document.querySelectorAll(".title-row").length === 1,
+            undefined,
+            { timeout: timeoutMs },
+          );
+          const sparseIndexState = await page
+            .locator(".title-index")
+            .evaluate((index) => {
+              const style = window.getComputedStyle(index);
+              return {
+                display: style.display,
+                overflowY: style.overflowY,
+              };
+            });
+          if (
+            sparseIndexState.display !== "contents" ||
+            sparseIndexState.overflowY !== "visible"
+          ) {
+            throw new Error(
+              `Sparse Movie results retained a bounded index well at 1024px: ${JSON.stringify(sparseIndexState)}`,
+            );
+          }
+        }
+        if (viewport.width === 390) {
+          const rowSelector =
+            route === "/"
+              ? ".show-row"
+              : route === "/movies"
+                ? ".title-row"
+                : ".unit-row";
+          const selectedRow = page.locator(rowSelector).nth(1);
+          await selectedRow.click();
+          if (await page.locator(".library-inspector").count()) {
+            throw new Error(
+              `Narrow Library row opened detail without Inspect: ${route}`,
+            );
+          }
+          await selectedRow.locator("xpath=..").locator(".row-inspect").click();
+          await page.waitForFunction(
+            () => {
+              const inspector = document.querySelector(".library-inspector");
+              const selected = document.querySelector(
+                ".show-row.selected, .title-row.selected, .unit-row.is-selected",
+              );
+              if (!inspector || !selected) return false;
+              return (
+                Math.abs(
+                  inspector.getBoundingClientRect().top -
+                    selected.getBoundingClientRect().bottom,
+                ) <= 2
+              );
+            },
+            undefined,
+            { timeout: timeoutMs },
+          );
+          const inspectState = await selectedRow
+			.locator("xpath=..")
+			.locator(".row-inspect")
+			.evaluate((button) => ({
+			  expanded: button.getAttribute("aria-expanded"),
+			  label: button.getAttribute("aria-label") ?? "",
+			}));
+          if (
+			inspectState.expanded !== "true" ||
+			!/^Close\s+\S/.test(inspectState.label)
+		  ) {
+			throw new Error(
+			  `Narrow Library Inspect control did not expose its target state: ${route} ${JSON.stringify(inspectState)}`,
+			);
+		  }
+        }
+        if (viewport.width === 1440) {
+          await page.evaluate(() => {
+            window.scrollTo(
+              0,
+              Math.min(
+                900,
+                document.documentElement.scrollHeight - window.innerHeight,
+              ),
+            );
+          });
+          await page.waitForTimeout(50);
+          const stickyRegisterState = await page.evaluate(() => {
+            const header = document.querySelector(".library-register__header");
+            const visibleBadgeStarts = new Set(
+              Array.from(
+                document.querySelectorAll(
+                  "[data-library-state] .state-badge",
+                ),
+              )
+                .filter((badge) => {
+                  const rect = badge.getBoundingClientRect();
+                  return rect.bottom > 0 && rect.top < window.innerHeight;
+                })
+                .map((badge) => {
+                  const badgeRect = badge.getBoundingClientRect();
+                  const dotRect = badge
+                    .querySelector(".state-badge__dot")
+                    ?.getBoundingClientRect();
+                  return `${badgeRect.left.toFixed(1)}:${dotRect?.left.toFixed(1) ?? "missing"}`;
+                }),
+            );
+            return {
+              headerPosition: header
+                ? window.getComputedStyle(header).position
+                : "missing",
+              headerTop: header?.getBoundingClientRect().top ?? -1,
+              visibleBadgeStartCount: visibleBadgeStarts.size,
+            };
+          });
+          if (
+            stickyRegisterState.headerPosition !== "sticky" ||
+            Math.abs(stickyRegisterState.headerTop) > 1 ||
+            stickyRegisterState.visibleBadgeStartCount !== 1
+          ) {
+            throw new Error(
+              `Library register scan contract failed at 1440px ${route}: ${JSON.stringify(stickyRegisterState)}`,
+            );
+          }
+          await page.evaluate(() => window.scrollTo(0, 0));
+        }
+        navTops.push(state.navTop);
+      }
+      if (Math.max(...navTops) - Math.min(...navTops) > 2) {
+        throw new Error(
+          `Library mode navigation shifted at ${viewport.width}px: ${JSON.stringify(navTops)}`,
+        );
+      }
+      await page.close();
+    }
+    console.log("route ok: Shared TV, Movies, and Other library layout");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkLibraryStateReachability(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1024, height: 768 },
+    });
+    for (const route of ["/", "/movies", "/other"]) {
+      await openRoute(page, baseUrl, route, timeoutMs);
+      await page.locator(".library-layout .library-workbench").waitFor({
+        state: "visible",
+        timeout: timeoutMs,
+      });
+      await page.waitForTimeout(250);
+      const segments = await page
+        .locator("button.work-segment[data-state][data-count]")
+        .evaluateAll((elements) =>
+          elements.map((element) => ({
+            key: element.getAttribute("data-state") ?? "",
+            count: Number(element.getAttribute("data-count") ?? 0),
+            label: element.textContent?.replace(/\s+/g, " ").trim() ?? "",
+          })),
+        );
+      if (route === "/" && !segments.length) {
+        throw new Error("TV Library exposed no reachable current-work state.");
+      }
+      let foundCannotStart = false;
+      for (const segment of segments) {
+        if (!segment.key || segment.count <= 0) continue;
+        if (segment.label.includes("Cannot start")) foundCannotStart = true;
+        await page.locator(`button.work-segment[data-state="${segment.key}"]`).click();
+        await page.waitForTimeout(100);
+        const rowState = await page.evaluate((key) => {
+          const rows = Array.from(document.querySelectorAll("[data-library-state]"));
+          return {
+            count: rows.length,
+            keys: [...new Set(rows.map((row) => row.getAttribute("data-library-state")))],
+            active:
+              document
+                .querySelector(`button.work-segment[data-state="${key}"]`)
+                ?.getAttribute("aria-pressed") === "true",
+          };
+        }, segment.key);
+        if (
+          !rowState.active ||
+          rowState.count !== segment.count ||
+          rowState.keys.length !== 1 ||
+          rowState.keys[0] !== segment.key
+        ) {
+          throw new Error(
+            `Library state summary did not match rows for ${segment.key} at ${route}: ${JSON.stringify({ segment, rowState })}`,
+          );
+        }
+      }
+      if (route === "/movies" && !foundCannotStart) {
+        throw new Error(
+          "Movie Library did not expose the Cannot start state through its shared filter.",
+        );
+      }
+    }
+    await page.close();
+    console.log("route ok: Shared Library state filters reach every summarized row");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkSeriesSeasonIndex(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    for (const viewport of [
+      { width: 1440, height: 960 },
+      { width: 390, height: 844 },
+    ]) {
+      const page = await browser.newPage({ viewport });
+      await openRoute(
+        page,
+        baseUrl,
+        "/folders/tv/Long%20Running%20Show",
+        timeoutMs,
+      );
+      const index = page.locator(".series-season-index");
+      await index.waitFor({ state: "visible", timeout: timeoutMs });
+      const state = await index.evaluate((element) => {
+        const rows = Array.from(
+          element.querySelectorAll("[data-season-prefix]"),
+        );
+        return {
+          rowCount: rows.length,
+          prefixes: rows.map((row) => row.getAttribute("data-season-prefix")),
+          hrefs: rows.map((row) => row.getAttribute("href")),
+          nestedScrollCount: Array.from(element.querySelectorAll("*")).filter(
+            (child) => {
+              const style = window.getComputedStyle(child);
+              return (
+                ["auto", "scroll"].includes(style.overflowY) &&
+                child.scrollHeight > child.clientHeight + 2
+              );
+            },
+          ).length,
+        };
+      });
+      const expectedPrefixes = Array.from(
+        { length: 14 },
+        (_, index) => `tv/Long Running Show/Season ${index + 1}`,
+      );
+      if (
+        state.rowCount !== 14 ||
+        JSON.stringify(state.prefixes) !== JSON.stringify(expectedPrefixes) ||
+        state.hrefs.some(
+          (href, index) =>
+            href !==
+            `/folders/tv/Long%20Running%20Show/Season%20${index + 1}`,
+        ) ||
+        state.nestedScrollCount !== 0
+      ) {
+        throw new Error(
+          `Series season index contract failed at ${viewport.width}px: ${JSON.stringify(state)}`,
+        );
+      }
+      await page.close();
+    }
+    console.log("route ok: Show-level Studio exposes every season");
+  } finally {
+    await browser.close();
+  }
+}
+
+async function checkSeriesSeasonContextFailures(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  try {
+    const seasonPage = await browser.newPage({
+      viewport: { width: 1024, height: 768 },
+    });
+    const seasonRequests = [];
+    seasonPage.on("request", (request) => {
+      if (request.url().includes("/api/dashboard/library/details")) {
+        seasonRequests.push(request.url());
+      }
+    });
+    await openRoute(
+      seasonPage,
+      baseUrl,
+      "/folders/tv/Example%20Show/Season%201",
+      timeoutMs,
+    );
+    await seasonPage.waitForFunction(
+      () => document.body.innerText.includes("Choose a size for Season 1"),
+      undefined,
+      { timeout: timeoutMs },
+    );
+    if (seasonRequests.length) {
+      throw new Error(
+        `Season Studio fetched show-level catalog context: ${JSON.stringify(seasonRequests)}`,
+      );
+    }
+    await seasonPage.close();
+
+    const showPage = await browser.newPage({
+      viewport: { width: 1024, height: 768 },
+    });
+    await showPage.route("**/api/dashboard/library/details", (route) => route.abort());
+    await openRoute(
+      showPage,
+      baseUrl,
+      "/folders/tv/Long%20Running%20Show",
+      timeoutMs,
+    );
+    await showPage.locator(".series-season-index").waitFor({
+      state: "visible",
+      timeout: timeoutMs,
+    });
+    const indexText = await showPage.locator(".series-season-index").innerText();
+    if (
+      !indexText.includes("The complete season list is unavailable.") ||
+      indexText.includes("No catalog seasons found for this show.")
+    ) {
+      throw new Error(
+        `Show-level Studio hid a season-context failure: ${JSON.stringify(indexText)}`,
+      );
+    }
+    await showPage.close();
+    console.log("route ok: TV Studio scopes and reports complete-season context");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function checkLibraryStructureWithoutDashboard(
   baseUrl,
   expectedMarker,
   timeoutMs,
 ) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -827,7 +1394,7 @@ async function checkLibraryStructureWithoutDashboard(
 }
 
 async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -849,14 +1416,14 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
       waitUntil: "domcontentloaded",
       timeout: timeoutMs,
     });
-    const showButtons = page.locator(".show-list button");
+    const showButtons = page.locator(".show-row");
     await showButtons.nth(1).waitFor({ state: "visible", timeout: timeoutMs });
     const originalShowName = (
       await showButtons.nth(0).locator(".show-copy strong").innerText()
     ).trim();
     const alternateShowName = "Example Show";
     const showButton = (name) =>
-      page.locator(".show-list button").filter({ hasText: name }).first();
+      page.locator(".show-row").filter({ hasText: name }).first();
     const policySelect = page.locator(
       'select[aria-describedby="current-season-policy-help"]',
     );
@@ -918,7 +1485,7 @@ async function checkLifecyclePolicyShowIsolation(baseUrl, timeoutMs) {
 }
 
 async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -970,7 +1537,7 @@ async function checkOlderSeasonConfirmation(baseUrl, timeoutMs) {
 }
 
 async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 900 },
@@ -1056,7 +1623,7 @@ async function checkActiveTestProgress(baseUrl, route, timeoutMs) {
 }
 
 async function checkReviewTransitionDedupe(baseUrl, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 900 },
@@ -1186,7 +1753,7 @@ async function checkReviewTransitionDedupe(baseUrl, timeoutMs) {
 }
 
 async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 900 },
@@ -1195,8 +1762,24 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       waitUntil: "domcontentloaded",
       timeout: timeoutMs,
     });
-    const openButton = page.getByRole("button", { name: "Compare clips" });
-    await openButton.waitFor({ state: "visible", timeout: timeoutMs });
+    const inlineWorkspace = page.getByRole("group", {
+      name: "Original and sample comparison",
+    });
+    await inlineWorkspace.waitFor({ state: "visible", timeout: timeoutMs });
+    const openButton = inlineWorkspace.getByRole("button", {
+      name: "Full screen",
+    });
+    const inlineText =
+      (await page.getByLabel("Review facts").textContent()) ?? "";
+    for (const expectedText of [
+      "Current size",
+      "Estimated output",
+      "Estimated space saved",
+    ]) {
+      if (!inlineText.includes(expectedText)) {
+        throw new Error(`Comparison ledger omitted: ${expectedText}`);
+      }
+    }
     await openButton.click();
     const workspace = page.getByRole("dialog", {
       name: "Compare picture and sound",
@@ -1226,11 +1809,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       .getByRole("group", { name: "Picture shown" })
       .getByRole("button", { name: "Sample", exact: true })
       .waitFor({ state: "visible", timeout: timeoutMs });
-    for (const expectedText of [
-      "Sample",
-      "Clip sizes only.",
-      "Estimated output:",
-    ]) {
+    for (const expectedText of ["Sample"]) {
       if (!state.text.includes(expectedText)) {
         throw new Error(`Comparison workspace omitted: ${expectedText}`);
       }
@@ -1240,12 +1819,47 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
     ) {
       throw new Error("Comparison workspace exposed implementation language.");
     }
-    await workspace.getByRole("button", { name: "Close comparison" }).click();
+    for (const forbiddenAction of [
+      "Keep this version",
+      "Use less space",
+      "Improve picture or sound",
+    ]) {
+      if (
+        (await workspace
+          .getByRole("button", { name: forbiddenAction, exact: true })
+          .count()) !== 0
+      ) {
+        throw new Error(
+          `Fullscreen exposed workflow action: ${forbiddenAction}`,
+        );
+      }
+    }
+    await workspace.getByRole("button", { name: "Exit full screen" }).click();
     await page.waitForFunction(
-      () => document.activeElement?.textContent?.includes("Compare clips"),
+      () => document.activeElement?.textContent?.includes("Full screen"),
       undefined,
       { timeout: timeoutMs },
     );
+    const restoredViewingState = await inlineWorkspace.evaluate((element) => ({
+      oneAtATime: element.classList.contains("one-at-a-time"),
+      originalVisible: element.classList.contains("show-original"),
+      actualSize: element.classList.contains("actual-size"),
+    }));
+    if (
+      !restoredViewingState.oneAtATime ||
+      !restoredViewingState.originalVisible ||
+      !restoredViewingState.actualSize
+    ) {
+      throw new Error(
+        `Fullscreen exit reset viewing state: ${JSON.stringify(restoredViewingState)}`,
+      );
+    }
+    await inlineWorkspace
+      .getByRole("button", { name: "Side by side", exact: true })
+      .click();
+    await inlineWorkspace
+      .getByRole("button", { name: "Fit", exact: true })
+      .click();
     const revisionPanel = page.locator("#revision-pane");
     if ((await revisionPanel.count()) !== 0) {
       throw new Error(
@@ -1377,6 +1991,32 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       );
     }
     await page.setViewportSize({ width: 390, height: 844 });
+    const reviewJump = page.getByRole("button", {
+      name: "Review decision",
+      exact: true,
+    });
+    await reviewJump.waitFor({ state: "visible", timeout: timeoutMs });
+    const narrowComparisonState = await inlineWorkspace.evaluate((element) => {
+      const panes = Array.from(element.querySelectorAll(".media-pane"));
+      return {
+        visiblePanes: panes.filter((pane) => {
+          const style = window.getComputedStyle(pane);
+          return style.display !== "none" && style.visibility !== "hidden";
+        }).length,
+        pageOverflow:
+          document.documentElement.scrollWidth >
+          document.documentElement.clientWidth,
+      };
+    });
+    if (
+      narrowComparisonState.visiblePanes !== 2 ||
+      narrowComparisonState.pageOverflow
+    ) {
+      throw new Error(
+        `Narrow comparison did not keep both panes reachable: ${JSON.stringify(narrowComparisonState)}`,
+      );
+    }
+    await reviewJump.click();
     await page
       .getByRole("button", { name: "Improve picture or sound", exact: true })
       .click();
@@ -1414,7 +2054,7 @@ async function checkSharedComparisonWorkspace(
   sectionLabel,
   timeoutMs,
 ) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 900 },
@@ -1424,20 +2064,26 @@ async function checkSharedComparisonWorkspace(
       timeout: timeoutMs,
     });
     const reviewSection = page.getByLabel(sectionLabel);
-    const openButton = reviewSection.getByRole("button", {
-      name: "Compare clips",
+    const inlineWorkspace = reviewSection.getByRole("group", {
+      name: "Original and sample comparison",
+    });
+    await inlineWorkspace.waitFor({ state: "visible", timeout: timeoutMs });
+    const openButton = inlineWorkspace.getByRole("button", {
+      name: "Full screen",
       exact: true,
     });
     await openButton.click({ timeout: timeoutMs });
     const workspace = page.getByRole("dialog", { name: /Compare picture/ });
     await workspace.waitFor({ state: "visible", timeout: timeoutMs });
-    await workspace.getByRole("button", { name: "Close comparison" }).click();
+    await workspace.getByRole("button", { name: "Exit full screen" }).click();
     await page.waitForFunction(
-      () => document.activeElement?.textContent?.includes("Compare clips"),
+      () => document.activeElement?.textContent?.includes("Full screen"),
       undefined,
       { timeout: timeoutMs },
     );
-    const bodyOverflow = await page.evaluate(() => document.body.style.overflow);
+    const bodyOverflow = await page.evaluate(
+      () => document.body.style.overflow,
+    );
     if (bodyOverflow) {
       throw new Error(`${label} comparison left body scrolling locked`);
     }
@@ -1454,39 +2100,39 @@ async function checkSharedComparisonWorkspace(
 }
 
 async function checkMovieTitleReviewRecovery(baseUrl, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 900 },
     });
-    await page.goto(
-      `${baseUrl}/folders/movies/Review%20Ready/Feature.mkv`,
-      {
-        waitUntil: "domcontentloaded",
-        timeout: timeoutMs,
-      },
-    );
+    await page.goto(`${baseUrl}/folders/movies/Review%20Ready/Feature.mkv`, {
+      waitUntil: "domcontentloaded",
+      timeout: timeoutMs,
+    });
     const reviewAction = page.getByRole("link", {
       name: "Review title sample",
       exact: true,
     });
     await reviewAction.waitFor({ state: "visible", timeout: timeoutMs });
     if ((await reviewAction.count()) !== 1) {
-      throw new Error("Exact-file recovery did not expose one title-review action.");
+      throw new Error(
+        "Exact-file recovery did not expose one title-review action.",
+      );
     }
     const duplicateActions = [
       "Create sample",
       "Set up sample",
       "Set up another sample",
     ];
-    const visibleDuplicateActions = await page.evaluate((labels) =>
-      Array.from(document.querySelectorAll("button"))
-        .filter((element) => {
-          const label = String(element.textContent ?? "").trim();
-          const rect = element.getBoundingClientRect();
-          return labels.includes(label) && rect.width > 0 && rect.height > 0;
-        })
-        .map((element) => String(element.textContent ?? "").trim()),
+    const visibleDuplicateActions = await page.evaluate(
+      (labels) =>
+        Array.from(document.querySelectorAll("button"))
+          .filter((element) => {
+            const label = String(element.textContent ?? "").trim();
+            const rect = element.getBoundingClientRect();
+            return labels.includes(label) && rect.width > 0 && rect.height > 0;
+          })
+          .map((element) => String(element.textContent ?? "").trim()),
       duplicateActions,
     );
     if (visibleDuplicateActions.length > 0) {
@@ -1542,8 +2188,14 @@ async function checkMovieTitleReviewRecovery(baseUrl, timeoutMs) {
       .getByText("The checked replacement is installed.", { exact: false })
       .waitFor({ state: "visible", timeout: timeoutMs });
     for (const staleAction of ["Review title sample", "Open title workspace"]) {
-      if ((await page.getByRole("link", { name: staleAction, exact: true }).count()) > 0) {
-        throw new Error(`Completed exact-file route exposed stale action: ${staleAction}`);
+      if (
+        (await page
+          .getByRole("link", { name: staleAction, exact: true })
+          .count()) > 0
+      ) {
+        throw new Error(
+          `Completed exact-file route exposed stale action: ${staleAction}`,
+        );
       }
     }
     console.log("route ok: Movie exact-file recovery returns to title review");
@@ -1553,7 +2205,7 @@ async function checkMovieTitleReviewRecovery(baseUrl, timeoutMs) {
 }
 
 async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: NARROW_VIEWPORT,
@@ -1671,7 +2323,7 @@ async function checkEmptyFixtureRoutes(baseUrl, configPath, timeoutMs, narrow) {
 }
 
 async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
-  const browser = await chromium.launch({ channel: "chromium" });
+  const browser = await launchSmokeBrowser();
   try {
     const page = await browser.newPage({
       viewport: { width: 1440, height: 1000 },
@@ -1975,8 +2627,9 @@ async function main() {
       managedServer = await startServer(args.config);
       targetUrl = managedServer.baseUrl;
     }
+    const folderRoutes = fixtures?.folderRoutes ?? [];
     const browserRouteChecks = [...routeChecks];
-    for (const fixtureRoute of fixtures?.folderRoutes ?? []) {
+    for (const fixtureRoute of folderRoutes) {
       browserRouteChecks.push([
         fixtureRoute.label,
         fixtureRoute.route,
@@ -1987,11 +2640,15 @@ async function main() {
     }
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
-    if (fixtures?.folderRoutes?.length) {
+    if (folderRoutes.length) {
+      await checkLibraryModeLayout(targetUrl, args.routeTimeoutMs);
+      await checkLibraryStateReachability(targetUrl, args.routeTimeoutMs);
+      await checkSeriesSeasonIndex(targetUrl, args.routeTimeoutMs);
+      await checkSeriesSeasonContextFailures(targetUrl, args.routeTimeoutMs);
       await checkCompletedCleanupLanguage(targetUrl, args.routeTimeoutMs);
     }
-    if (fixtures?.folderRoutes?.length) {
-      const libraryFixture = fixtures.folderRoutes.find((fixtureRoute) =>
+    if (folderRoutes.length) {
+      const libraryFixture = folderRoutes.find((fixtureRoute) =>
         fixtureRoute.route.startsWith("/folders/tv/"),
       );
       if (!libraryFixture) {
@@ -2004,7 +2661,7 @@ async function main() {
       );
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
       await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
-      const samplingFixture = fixtures.folderRoutes.find(
+      const samplingFixture = folderRoutes.find(
         (fixtureRoute) =>
           fixtureRoute.route === "/folders/tv/Sampling%20Show/Season%201",
       );
@@ -2019,7 +2676,7 @@ async function main() {
         args.routeTimeoutMs,
       );
       await checkReviewTransitionDedupe(targetUrl, args.routeTimeoutMs);
-      const reviewReadyFixture = fixtures.folderRoutes.find(
+      const reviewReadyFixture = folderRoutes.find(
         (fixtureRoute) =>
           fixtureRoute.route === "/folders/tv/Review%20Ready/Season%201",
       );
