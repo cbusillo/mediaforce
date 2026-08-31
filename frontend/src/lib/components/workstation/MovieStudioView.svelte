@@ -4,6 +4,8 @@
 	import { apiDownloadHref, fetchJson, postJson } from '$lib/api/client';
 	import type {
 		CheckedOutputPreviewPayload,
+		CompletedFolderRow,
+		CompletedPayload,
 		FolderBenchConfirmResponse,
 		FolderBenchPreviewResponse,
 		FolderPayload,
@@ -67,6 +69,10 @@
 	let actionAttentionTitle = $state('');
 	let noteInput = $state<HTMLTextAreaElement>();
 	let goalEditor = $state<HTMLDetailsElement>();
+	let reviewChangeKind = $state<'smaller' | 'improve' | ''>('');
+	let allowLargerFile = $state(false);
+	let completionRecord = $state<CompletedFolderRow | null>(null);
+	let completionRequestedPrefix = $state('');
 	let noteHasNewerText = $state(false);
 	let hydratedFolderPrefix = $state('');
 	let hydratedProposalId = $state('');
@@ -168,6 +174,15 @@
 	const reviewEstimatedOutput = $derived(
 		movieGoalFacts.estimateBasis === 'sampled' ? `about ${movieGoalFacts.expectedOutput}` : ''
 	);
+	const reviewFacts = $derived([
+		{ label: 'Current size', value: movieGoalFacts.sourceSize },
+		{ label: 'Estimated output', value: movieGoalFacts.expectedOutput },
+		{ label: 'Estimated space saved', value: movieGoalFacts.expectedSavings },
+		{
+			label: 'Estimate',
+			value: movieGoalFacts.estimateBasis === 'sampled' ? 'Sample-backed' : 'Planning estimate'
+		}
+	]);
 	const reviewPackHref = $derived(
 		apiDownloadHref(`/api/folders/${folderRoutePrefix(folder.prefix)}/review-compare/download`)
 	);
@@ -177,6 +192,9 @@
 		)
 	);
 	const exactScope = $derived(folder.media_scope.match === 'exact_item');
+	const productionFileCount = $derived(
+		exactScope ? 1 : (context?.included_item_count ?? context?.item_count ?? 0)
+	);
 	const parentTitlePrefix = $derived(
 		asText(context?.prefix) || asText(folder.media_scope.parent?.prefix)
 	);
@@ -186,6 +204,13 @@
 	const parentTitleWork = $derived(
 		exactScope ? parentTitleWorkView(folder.prefix, context, inheritedParentSample) : null
 	);
+	const completionBackupLabel = $derived.by(() => {
+		if (!completionRecord) return 'Checking…';
+		if (completionRecord.archived_backup_count > 0)
+			return `${completionRecord.archived_backup_count.toLocaleString('en-US')} in Finished`;
+		if (completionRecord.cleanup_state === 'cleaned') return 'Already deleted';
+		return 'No backup waiting';
+	});
 	const reviewRecovery = $derived(
 		!isComplete &&
 			reviewGate.status !== 'accepted' &&
@@ -235,6 +260,21 @@
 													availability: context?.availability ?? 'production'
 												})
 	);
+
+	$effect(() => {
+		if (!isComplete || completionRequestedPrefix === folder.prefix) return;
+		completionRequestedPrefix = folder.prefix;
+		completionRecord = null;
+		void fetchJson<CompletedPayload>('/api/completed')
+			.then((completed) => {
+				completionRecord =
+					completed.folders.find((completedFolder) => completedFolder.prefix === folder.prefix) ??
+					null;
+			})
+			.catch(() => {
+				completionRecord = null;
+			});
+	});
 
 	$effect(() => {
 		const folderHostKey = String(folder.sample_host_key ?? '').trim();
@@ -334,12 +374,16 @@
 	async function prepareSample() {
 		if (isBrowseOnly || isBusy) return;
 		await runAction('prepare-sample', async () => {
+			const requestedChange =
+				note.trim() ||
+				'Prepare a representative movie sample using the current size and quality policy.';
 			const response = await postJson<FolderBenchPreviewResponse>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/preview`,
 				{
 					note:
-						note.trim() ||
-						'Prepare a representative movie sample using the current size and quality policy.',
+						reviewChangeKind === 'improve' && allowLargerFile
+							? `${requestedChange} A larger file is allowed if needed.`
+							: requestedChange,
 					host_key: selectedHostKey
 				}
 			);
@@ -384,13 +428,26 @@
 		});
 	}
 
-	function editRequest() {
+	function openGoalEditor(suggestedNote = '', changeKind: 'smaller' | 'improve' | '' = '') {
 		if (isBrowseOnly) return;
+		reviewChangeKind = changeKind;
+		allowLargerFile = false;
+		if (suggestedNote && !note.trim()) note = suggestedNote;
 		if (goalEditor) goalEditor.open = true;
 		requestAnimationFrame(() => {
 			noteInput?.focus();
 			noteInput?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 		});
+	}
+
+	function editRequest() {
+		openGoalEditor();
+	}
+
+	function cancelReviewChange() {
+		reviewChangeKind = '';
+		allowLargerFile = false;
+		if (goalEditor) goalEditor.open = false;
 	}
 
 	async function startSample() {
@@ -464,6 +521,30 @@
 	async function promoteOutputs() {
 		if (conflicts.length) return;
 		await folderAction('promote-outputs');
+	}
+
+	async function rejectOutputs() {
+		if (isBrowseOnly || isBusy) return;
+		const rejectionNote =
+			'Reject the checked replacement. Preserve the current goal and prepare another sample that improves picture or sound.';
+		if (!selectedHostKey) {
+			openGoalEditor(rejectionNote, 'improve');
+			actionMessage =
+				'Nothing was replaced. Choose a computer to set up another sample, or cancel the change.';
+			return;
+		}
+		await runAction('reject-output', async () => {
+			const response = await postJson<FolderBenchPreviewResponse>(
+				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/preview`,
+				{ note: rejectionNote, host_key: selectedHostKey }
+			);
+			if (!response.ok)
+				throw new Error(response.message || 'The replacement rejection could not be saved.');
+			note = noteAfterPreview(rejectionNote, response.proposal);
+			reviewChangeKind = 'improve';
+			allowLargerFile = false;
+			return 'Replacement rejected. Nothing was replaced. Review the new sample plan before creating it.';
+		});
 	}
 
 	async function retryEncode() {
@@ -783,7 +864,11 @@
 	<title>{title} · Movie Studio · Mediaforce</title>
 </svelte:head>
 
-<main class="movie-studio" data-folder-ready-marker={title}>
+<main
+	class:movie-studio--review={reviewReady}
+	class="movie-studio"
+	data-folder-ready-marker={title}
+>
 	<nav class="breadcrumb" aria-label="Breadcrumb">
 		<a href={resolve('/movies')}>Movies</a><span aria-hidden="true">/</span><span>{title}</span>
 	</nav>
@@ -856,14 +941,25 @@
 		</div>
 	{/if}
 
-	<section class:movie-facts--limited={isComplete} class="movie-facts" aria-label="Movie facts">
-		<div><span>Runtime</span><strong>{movieGoalFacts.duration}</strong></div>
-		<div>
-			<span>{isComplete ? 'Original size' : 'Current size'}</span><strong
-				>{movieGoalFacts.sourceSize}</strong
-			>
-		</div>
-		{#if !isComplete}
+	{#if isComplete}
+		<section class="completion-summary" aria-label="Completed movie facts">
+			<div><span>Current file</span><strong>{movieGoalFacts.sourceSize}</strong></div>
+			<div>
+				<span>Space saved</span><strong
+					>{completionRecord
+						? formatMovieBytes(completionRecord.total_bytes_saved)
+						: 'Checking…'}</strong
+				>
+			</div>
+			<div><span>Original backup</span><strong>{completionBackupLabel}</strong></div>
+			<div><span>Next</span><strong>Review in Finished</strong></div>
+		</section>
+	{:else if !reviewReady}
+		<section class:movie-facts--limited={isComplete} class="movie-facts" aria-label="Movie facts">
+			<div><span>Runtime</span><strong>{movieGoalFacts.duration}</strong></div>
+			<div>
+				<span>Current size</span><strong>{movieGoalFacts.sourceSize}</strong>
+			</div>
 			<div>
 				<span>Estimated output</span><strong>{movieGoalFacts.expectedOutput}</strong>
 				<small>{movieGoalFacts.outputDetail}</small>
@@ -872,8 +968,8 @@
 				<span>Estimated space saved</span><strong>{movieGoalFacts.expectedSavings}</strong>
 				<small>{movieGoalFacts.estimateQuality}</small>
 			</div>
-		{/if}
-	</section>
+		</section>
+	{/if}
 	{#if reviewReady}
 		<section class="review-workspace" aria-label="Movie comparison">
 			<ComparisonWorkspace
@@ -888,6 +984,8 @@
 					? `${formatMovieBytes(reviewSample.smaller)} clip`
 					: 'Clip size unavailable'}
 				estimatedOutputLabel={reviewEstimatedOutput}
+				facts={reviewFacts}
+				decisionTargetId="movie-review-decision"
 				canCreateSoundSample={reviewSourceHasSound && !parentTitleWork}
 				soundSampleDisabled={isBrowseOnly || isBusy || !hostOptions.length}
 				soundSampleActionLabel="Prepare a sample with sound"
@@ -905,7 +1003,7 @@
 		</section>
 	{/if}
 
-	<div class="studio-grid">
+	<div class:studio-grid--review={reviewReady && !currentWork} class="studio-grid">
 		<div class="studio-grid__main">
 			{#if currentWork}
 				<WorkstationPanel
@@ -976,14 +1074,30 @@
 				</WorkstationPanel>
 			{:else}
 				<WorkstationPanel
-					eyebrow="Next step"
-					title="What to do next"
+					eyebrow={reviewReady && reviewGate.status !== 'accepted'
+						? 'Review decision'
+						: 'Next step'}
+					title={reviewReady && reviewGate.status !== 'accepted'
+						? 'Keep this version?'
+						: reviewGate.status === 'accepted' && primaryAction() === 'queue'
+							? exactScope
+								? 'Compress this movie?'
+								: 'Compress the whole title?'
+							: primaryAction() === 'promote'
+								? productionFileCount === 1
+									? 'Replace the original file?'
+									: 'Replace the original files?'
+								: primaryAction() === 'complete'
+									? 'Finished'
+									: 'What to do next'}
 					meta={isWorkflowBlocked ? 'Cannot start' : scopeDisplay}
 				>
-					<div class="decision-panel">
+					<div id="movie-review-decision" class="decision-panel" tabindex="-1">
 						<div class="decision-panel__row">
 							<div class="decision-copy">
-								<strong>{workflowSummary()}</strong>
+								{#if !(reviewReady && reviewGate.status !== 'accepted')}
+									<strong>{workflowSummary()}</strong>
+								{/if}
 								{#if primaryAction() === 'retry-sample'}
 									<p>{sampleFailureDetail()}</p>
 									<small class="decision-note">
@@ -993,8 +1107,9 @@
 									<p>This page stays scoped to only this file.</p>
 								{:else if primaryAction() === 'complete'}
 									<p>
-										The checked replacement is installed. The original remains in Completed until
-										you decide to delete backups.
+										{exactScope || productionFileCount === 1
+											? 'The checked replacement is installed. The original remains in Completed until you decide to delete backups.'
+											: 'The checked replacements are installed. The originals remain in Completed until you decide to delete backups.'}
 									</p>
 								{:else if primaryAction() === 'monitor-sample'}
 									<p>
@@ -1008,7 +1123,14 @@
 									<p>{sizeCapBlock.remedy}</p>
 								{:else if reviewReady && reviewGate.status !== 'accepted'}
 									<p>
-										The comparison clips are safe to review. The original movie remains unchanged.
+										Choose the result you want. Nothing is compressed or queued until you choose a
+										separate production action.
+									</p>
+								{:else if reviewGate.status === 'accepted' && primaryAction() === 'queue'}
+									<p>
+										{exactScope
+											? 'Compress this movie adds 1 file to the compression queue. The original stays unchanged until a checked replacement is installed.'
+											: `This action adds ${productionFileCount} ${productionFileCount === 1 ? 'file' : 'files'} to the compression queue. ${productionFileCount === 1 ? 'The original stays unchanged until a checked replacement is installed.' : 'Originals stay unchanged until checked replacements are installed.'}`}
 									</p>
 								{:else if !isWorkflowBlocked}
 									<p>
@@ -1024,8 +1146,13 @@
 								{/if}
 								{#if primaryAction() === 'promote'}
 									<small class="decision-note">
-										Runs immediately. Mediaforce keeps a backup of the original before installing
-										the checked replacement.
+										Runs immediately. Mediaforce keeps a backup of the {exactScope ||
+										productionFileCount === 1
+											? 'original'
+											: 'originals'} before installing the checked {exactScope ||
+										productionFileCount === 1
+											? 'replacement'
+											: 'replacements'}.
 									</small>
 								{/if}
 							</div>
@@ -1069,11 +1196,26 @@
 								{:else if primaryAction() === 'queue'}
 									{#if reviewGate.status === 'accepted'}
 										<button class="primary" disabled={isBusy} onclick={queueApproved}
-											>{exactScope ? 'Compress this file' : 'Compress the whole title'}</button
+											>{exactScope ? 'Compress this movie' : 'Compress the whole title'}</button
 										>
 									{:else}
+										<button
+											class="secondary"
+											disabled={isBusy || !canChangeGoals}
+											onclick={() =>
+												openGoalEditor(
+													'Use less space while preserving acceptable picture and sound.',
+													'smaller'
+												)}>Use less space</button
+										>
+										<button
+											class="secondary"
+											disabled={isBusy || !canChangeGoals}
+											onclick={() => openGoalEditor('Improve picture or sound.', 'improve')}
+											>Improve picture or sound</button
+										>
 										<button class="primary" disabled={isBusy} onclick={approveSample}
-											>Approve sample</button
+											>Keep this version</button
 										>
 									{/if}
 								{:else if primaryAction() === 'validate'}
@@ -1091,10 +1233,18 @@
 									>
 										{checkedPreviewOpen ? 'Hide checked output' : 'Preview checked output'}
 									</button>
+									<button class="secondary" disabled={isBusy} onclick={rejectOutputs}>
+										{exactScope || productionFileCount === 1
+											? 'Reject replacement'
+											: 'Reject replacements'}
+									</button>
 									<button
 										class="primary"
 										disabled={isBusy || conflicts.length > 0}
-										onclick={promoteOutputs}>Replace original now</button
+										onclick={promoteOutputs}
+										>{exactScope || productionFileCount === 1
+											? 'Replace original now'
+											: 'Replace originals now'}</button
 									>
 								{:else if primaryAction() === 'retry'}
 									<button class="primary" disabled={isBusy} onclick={retryEncode}
@@ -1178,7 +1328,17 @@
 								{/if}
 							</section>
 						{/if}
-						{#if !isComplete}
+						{#if !isComplete && reviewReady}
+							<details class="review-details">
+								<summary>Details</summary>
+								<div>
+									{@render goalContract(
+										isBrowseOnly ? 'Goals in view' : 'Goals for this version',
+										true
+									)}
+								</div>
+							</details>
+						{:else if !isComplete}
 							{@render goalContract(isBrowseOnly ? 'Goals in view' : 'Before you prepare', true)}
 						{/if}
 					</div>
@@ -1190,6 +1350,7 @@
 				title="Create and review a sample"
 				hidden={primaryAction() === 'complete' ||
 					Boolean(currentWork) ||
+					(reviewReady && !reviewChangeKind) ||
 					isSizeCapBlock ||
 					sampleWorkActive ||
 					Boolean(parentTitleWork)}
@@ -1292,6 +1453,17 @@
 									placeholder="Example: preserve grain and make the feature about 35% smaller."
 								></textarea>
 							</label>
+							{#if reviewChangeKind === 'improve'}
+								<label class="allow-larger-file">
+									<input type="checkbox" bind:checked={allowLargerFile} />
+									<span>
+										<strong>Allow a larger file</strong>
+										<small
+											>Use more space only if the next sample needs it for picture or sound.</small
+										>
+									</span>
+								</label>
+							{/if}
 							<div class="bench-controls">
 								<label>
 									<span>Computer</span>
@@ -1314,6 +1486,11 @@
 											? 'Set up revised sample'
 											: 'Set up sample'}</button
 								>
+								{#if reviewChangeKind}
+									<button class="secondary" type="button" onclick={cancelReviewChange}
+										>Cancel change</button
+									>
+								{/if}
 							</div>
 						</div>
 					</details>
@@ -1385,7 +1562,7 @@
 	}
 
 	.review-workspace {
-		margin-top: 18px;
+		margin: 18px 0;
 	}
 
 	.review-workspace__download {
@@ -1441,6 +1618,10 @@
 		word-break: break-all;
 	}
 
+	.movie-studio--review .studio-heading h1 {
+		font-size: clamp(24px, 3vw, 30px);
+	}
+
 	.notice {
 		background: var(--mf-bg-panel);
 		border: var(--mf-border);
@@ -1492,6 +1673,38 @@
 		display: block;
 	}
 
+	.completion-summary {
+		background: var(--mf-bg-panel);
+		border: var(--mf-border);
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		margin-bottom: var(--mf-space-6);
+	}
+
+	.completion-summary > div {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+		padding: 12px 14px;
+	}
+
+	.completion-summary > div + div {
+		border-left: var(--mf-border-muted);
+	}
+
+	.completion-summary span {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-bold);
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+	}
+
+	.completion-summary strong {
+		font-size: var(--mf-text-sm);
+		font-variant-numeric: tabular-nums;
+	}
+
 	.movie-facts span {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-2xs);
@@ -1529,10 +1742,17 @@
 		align-content: start;
 	}
 
+	.studio-grid--review {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
 	.decision-panel {
+		background: var(--mf-bg-panel);
+		border-top: 3px solid var(--mf-active-fg);
 		display: grid;
 		gap: var(--mf-space-6);
 		padding: var(--mf-space-7);
+		scroll-margin-top: var(--mf-space-6);
 	}
 
 	.decision-panel__row {
@@ -1584,6 +1804,31 @@
 
 	.decision-actions .primary {
 		min-width: 150px;
+	}
+
+	.review-details {
+		border-top: var(--mf-border-muted);
+	}
+
+	.review-details summary {
+		color: var(--mf-fg-secondary);
+		cursor: pointer;
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-bold);
+		list-style: none;
+		padding: var(--mf-space-4) 0 0;
+	}
+
+	.review-details summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.review-details summary::after {
+		content: ' +';
+	}
+
+	.review-details[open] summary::after {
+		content: ' −';
 	}
 
 	.checked-output-preview {
@@ -2084,6 +2329,31 @@
 		gap: var(--mf-space-3);
 	}
 
+	.allow-larger-file {
+		align-items: start;
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: auto minmax(0, 1fr);
+		padding: var(--mf-space-4);
+	}
+
+	.allow-larger-file input {
+		margin-top: 3px;
+	}
+
+	.allow-larger-file strong,
+	.allow-larger-file small {
+		display: block;
+	}
+
+	.allow-larger-file small {
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		margin-top: 2px;
+	}
+
 	.request-field textarea,
 	.bench-controls select {
 		background: var(--mf-bg-input);
@@ -2191,13 +2461,39 @@
 			flex-direction: column;
 		}
 
+		.decision-panel {
+			bottom: 0;
+			box-shadow: 0 -8px 22px rgb(12 16 19 / 18%);
+			position: sticky;
+			z-index: 8;
+		}
+
+		.decision-actions {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr);
+			width: 100%;
+		}
+
+		.decision-actions .primary {
+			order: -1;
+		}
+
 		.sample-facts {
 			grid-template-columns: minmax(0, 1fr);
 		}
 
 		.movie-facts,
+		.completion-summary,
 		.current-work__facts {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.completion-summary > div:nth-child(odd) {
+			border-left: 0;
+		}
+
+		.completion-summary > div:nth-child(n + 3) {
+			border-top: var(--mf-border-muted);
 		}
 
 		.current-work__facts > div:last-child:nth-child(odd) {

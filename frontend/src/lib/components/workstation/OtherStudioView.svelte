@@ -54,6 +54,8 @@
 	let confirmedMembershipToken = $state('');
 	let selectedReviewMoment = $state(0);
 	let reviewAudioChoice = $state<'original' | 'new'>('new');
+	let reviewRevision = $state<'smaller' | 'improve' | ''>('');
+	let allowLargerFile = $state(false);
 
 	const context = $derived(folder.other_context ?? null);
 	const workflow = $derived(status.workflow_state ?? folder.workflow_state ?? null);
@@ -214,15 +216,25 @@
 		return parts.join(' · ');
 	});
 	const showSampleControls = $derived(
-		scopeReady &&
-			!isBrowseOnly &&
-			!pendingProposalCanQueue &&
-			!reviewReady &&
-			!approved &&
-			!sampleWorkActive &&
-			!['failed', 'stopped'].includes(asText(calibrationJob.status)) &&
-			!['processing', 'validate', 'promote'].includes(workflow?.primary_lane ?? '')
+		Boolean(reviewRevision) ||
+			(scopeReady &&
+				!isBrowseOnly &&
+				!pendingProposalCanQueue &&
+				!reviewReady &&
+				!approved &&
+				!sampleWorkActive &&
+				!['failed', 'stopped'].includes(asText(calibrationJob.status)) &&
+				!['processing', 'validate', 'promote'].includes(workflow?.primary_lane ?? ''))
 	);
+
+	function reviseReview(direction: 'smaller' | 'improve') {
+		reviewRevision = direction;
+		allowLargerFile = false;
+		note =
+			direction === 'smaller'
+				? 'Use less space while preserving acceptable picture and sound.'
+				: 'Improve picture or sound. Allow a larger file only if needed.';
+	}
 
 	$effect(() => {
 		if (confirmedMembershipToken && confirmedMembershipToken !== context?.membership_token) {
@@ -238,12 +250,16 @@
 	async function prepareSample() {
 		if (!actionReady || isBusy) return;
 		await runAction('prepare-sample', async () => {
+			const requestedChange =
+				note.trim() ||
+				`Prepare a representative sample for this bounded ${scopeNoun} using the selected Other profile.`;
 			const response = await postJson<FolderBenchPreviewResponse>(
 				`/api/folders/${folderRoutePrefix(folder.prefix)}/ai-tune/preview`,
 				{
 					note:
-						note.trim() ||
-						`Prepare a representative sample for this bounded ${scopeNoun} using the selected Other profile.`,
+						reviewRevision === 'improve' && allowLargerFile
+							? `${requestedChange} A larger file is allowed if needed.`
+							: requestedChange,
 					host_key: selectedHostKey,
 					scope_membership_token: scopeMembershipToken()
 				}
@@ -491,7 +507,11 @@
 	<title>{title} · Other Studio · Mediaforce</title>
 </svelte:head>
 
-<main class="other-studio" data-folder-ready-marker={title}>
+<main
+	class:other-studio--review={reviewReady}
+	class="other-studio"
+	data-folder-ready-marker={title}
+>
 	<header class="studio-header">
 		<div class="studio-header__identity">
 			<a href={resolve('/other')}>← Other Library</a>
@@ -605,6 +625,16 @@
 					? `${formatBytes(reviewSample.smaller)} clip`
 					: 'Clip size unavailable'}
 				estimatedOutputLabel=""
+				facts={[
+					{ label: 'Current size', value: formatBytes(context?.total_size_bytes) },
+					{ label: 'Files included', value: scopeSummary.included },
+					{ label: 'Estimated output', value: 'No estimate' },
+					{
+						label: 'Sample clip',
+						value: reviewSample.smaller ? formatBytes(reviewSample.smaller) : 'Unavailable'
+					}
+				]}
+				decisionTargetId="other-review-decision"
 				canCreateSoundSample={reviewSourceHasSound}
 				soundSampleDisabled={isBrowseOnly || isBusy || !hostOptions.length}
 				soundSampleActionLabel="Prepare a sample with sound"
@@ -620,55 +650,67 @@
 		</section>
 	{/if}
 
-	<div class="studio-grid">
-		<section class="decision-panel">
+	<div class:studio-grid--review={reviewReady} class="studio-grid">
+		<section id="other-review-decision" class="decision-panel" tabindex="-1">
 			<header class="panel-heading">
 				<div>
 					<span class="eyebrow">Decision</span>
-					<h2>{decisionTitle}</h2>
+					<h2>{reviewReady && !approved ? 'Keep this version?' : decisionTitle}</h2>
 				</div>
-				<span>{folderPending ? 'Refreshing…' : decisionDetail}</span>
+				<span
+					>{folderPending
+						? 'Refreshing…'
+						: reviewReady && !approved
+							? 'Nothing is compressed or queued until you choose a separate production action.'
+							: decisionDetail}</span
+				>
 			</header>
 
-			<div class="scope-contract">
-				<div>
-					<span>Files included now</span><strong>{scopeSummary.included}</strong>
+			<details
+				class="scope-details"
+				open={!reviewReady || requiresMembershipConfirmation || !membershipComplete}
+			>
+				<summary>Details</summary>
+				<div class="scope-contract">
+					<div>
+						<span>Files included now</span><strong>{scopeSummary.included}</strong>
+					</div>
+					<div>
+						<span>Current size</span><strong>{formatBytes(context?.total_size_bytes)}</strong>
+					</div>
+					<div>
+						<span>What is included</span><strong
+							>{folder.media_scope.match === 'exact_item'
+								? 'Only this file'
+								: 'Files in this folder and its subfolders'}</strong
+						>
+					</div>
+					<div>
+						<span>Files left untouched now</span><strong>{scopeSummary.untouched}</strong>
+					</div>
 				</div>
-				<div>
-					<span>Current size</span><strong>{formatBytes(context?.total_size_bytes)}</strong>
-				</div>
-				<div>
-					<span>What is included</span><strong
-						>{folder.media_scope.match === 'exact_item'
-							? 'Only this file'
-							: 'Files in this folder and its subfolders'}</strong
-					>
-				</div>
-				<div>
-					<span>Files left untouched now</span><strong>{scopeSummary.untouched}</strong>
-				</div>
-			</div>
 
-			{#if !membershipComplete}
-				<div class="scope-warning" role="status">
-					<strong>This folder is too large to confirm safely.</strong>
-					<span>{scopeSummary.confirmation}</span>
-				</div>
-			{:else if requiresMembershipConfirmation}
-				<label class="confirmation" class:is-disabled={!scopeReady}>
-					<input
-						type="checkbox"
-						checked={membershipConfirmed}
-						disabled={!scopeReady}
-						onchange={(event) =>
-							updateMembershipConfirmation((event.currentTarget as HTMLInputElement).checked)}
-					/>
-					<span>
-						<strong>{membershipReviewLabel}</strong>
-						<small>{scopeConfirmationDetail}</small>
-					</span>
-				</label>
-			{/if}
+				{#if !membershipComplete}
+					<div class="scope-warning" role="status">
+						<strong>This folder is too large to confirm safely.</strong>
+						<span>{scopeSummary.confirmation}</span>
+					</div>
+				{:else if requiresMembershipConfirmation}
+					<label class="confirmation" class:is-disabled={!scopeReady}>
+						<input
+							type="checkbox"
+							checked={membershipConfirmed}
+							disabled={!scopeReady}
+							onchange={(event) =>
+								updateMembershipConfirmation((event.currentTarget as HTMLInputElement).checked)}
+						/>
+						<span>
+							<strong>{membershipReviewLabel}</strong>
+							<small>{scopeConfirmationDetail}</small>
+						</span>
+					</label>
+				{/if}
+			</details>
 
 			{#if showSampleControls}
 				<div class="sample-form">
@@ -679,6 +721,15 @@
 							rows="3"
 							placeholder="Optional quality or size direction for this scope"></textarea>
 					</label>
+					{#if reviewRevision === 'improve'}
+						<label class="allow-larger-file">
+							<input type="checkbox" bind:checked={allowLargerFile} />
+							<span>
+								<strong>Allow a larger file</strong>
+								<small>Use more space only if the next sample needs it for picture or sound.</small>
+							</span>
+						</label>
+					{/if}
 					<label>
 						<span>Computer</span>
 						<select bind:value={selectedHostKey} disabled={!hostOptions.length}>
@@ -693,7 +744,21 @@
 			{/if}
 
 			<div class="action-row">
-				{#if sampleWorkActive}
+				{#if reviewRevision}
+					<button
+						class="primary"
+						disabled={!actionReady || isBusy || !hostOptions.length}
+						onclick={prepareSample}>Set up revised sample</button
+					>
+					<button
+						class="secondary"
+						type="button"
+						onclick={() => {
+							reviewRevision = '';
+							allowLargerFile = false;
+						}}>Cancel change</button
+					>
+				{:else if sampleWorkActive}
 					<span class="operation-state"><strong>{sampleState()}.</strong>{decisionDetail}</span>
 				{:else if workflow?.primary_lane === 'processing'}
 					<span class="operation-state"><strong>Compressing now.</strong>{activeOperationCopy}</span
@@ -713,10 +778,25 @@
 						>{actionFileCount === 1 ? 'Replace original file' : 'Replace original files'}</button
 					>
 				{:else if reviewReady && !approved}
+					<button
+						class="secondary"
+						disabled={!actionReady || isBusy}
+						onclick={() => reviseReview('smaller')}>Use less space</button
+					>
+					<button
+						class="secondary"
+						disabled={!actionReady || isBusy}
+						onclick={() => reviseReview('improve')}>Improve picture or sound</button
+					>
 					<button class="primary" disabled={!actionReady || isBusy} onclick={approveSample}
-						>Approve sample</button
+						>Keep this version</button
 					>
 				{:else if approved && workflow?.primary_lane === 'encode'}
+					<span class="action-consequence">
+						{actionFileCount === 1
+							? 'Compress this file adds 1 file to the compression queue. The original stays unchanged until a checked replacement is installed.'
+							: `This action adds ${actionFileCount} files to the compression queue. Originals stay unchanged until checked replacements are installed.`}
+					</span>
 					<button class="primary" disabled={!actionReady || isBusy} onclick={queueApproved}
 						>{!membershipComplete
 							? 'Compress files'
@@ -959,6 +1039,10 @@
 		margin-top: 14px;
 	}
 
+	.studio-grid--review {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
 	.decision-panel,
 	.membership-panel {
 		background: var(--mf-bg-panel);
@@ -967,7 +1051,37 @@
 	}
 
 	.decision-panel {
+		border-top: 3px solid var(--mf-active-fg);
 		padding: 20px;
+		scroll-margin-top: 18px;
+	}
+
+	.other-studio--review .studio-header h1 {
+		font-size: clamp(24px, 3vw, 30px);
+	}
+
+	.scope-details {
+		margin-top: 14px;
+	}
+
+	.scope-details summary {
+		color: var(--mf-fg-secondary);
+		cursor: pointer;
+		font-size: 11px;
+		font-weight: 750;
+		list-style: none;
+	}
+
+	.scope-details summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.scope-details summary::after {
+		content: ' +';
+	}
+
+	.scope-details[open] summary::after {
+		content: ' −';
 	}
 
 	.panel-heading {
@@ -1078,6 +1192,32 @@
 	.sample-form label {
 		display: grid;
 		gap: 5px;
+	}
+
+	.sample-form .allow-larger-file {
+		align-items: start;
+		background: var(--mf-wait-bg);
+		border: 1px solid var(--mf-wait-line);
+		display: grid;
+		gap: 8px;
+		grid-column: 1 / -1;
+		grid-template-columns: auto minmax(0, 1fr);
+		padding: 10px;
+	}
+
+	.allow-larger-file input {
+		margin-top: 3px;
+	}
+
+	.allow-larger-file strong,
+	.allow-larger-file small {
+		display: block;
+	}
+
+	.allow-larger-file small {
+		color: var(--mf-fg-secondary);
+		font-size: 10px;
+		margin-top: 2px;
 	}
 
 	.sample-form textarea,
@@ -1312,7 +1452,20 @@
 		}
 
 		.decision-panel {
+			bottom: 0;
+			box-shadow: 0 -8px 22px rgb(12 16 19 / 18%);
 			padding: 16px;
+			position: sticky;
+			z-index: 8;
+		}
+
+		.action-row {
+			align-items: stretch;
+			flex-direction: column;
+		}
+
+		.action-row .primary {
+			order: -1;
 		}
 
 		.panel-heading {
