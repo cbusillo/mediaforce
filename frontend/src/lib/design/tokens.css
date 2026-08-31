@@ -86,6 +86,7 @@
 	--mf-active-line: #8bbab0;
 	--mf-active-solid: #0e6b5e;
 	--mf-active-solid-hi: #0a554b;
+	--mf-active-contrast: #ffffff;
 
 	--mf-ready-fg: #1e7a4a;
 	--mf-ready-fg-bright: #17613b;
@@ -163,6 +164,8 @@
 	--mf-control-sm: 24px;
 	--mf-control-md: 30px;
 	--mf-control-lg: 36px;
+	--mf-shell-max: 1280px;
+	--mf-shell-pad: var(--mf-space-9);
 	--mf-workstation-rail-width: 280px;
 
 	--mf-radius-sharp: 0;
@@ -225,6 +228,7 @@
 	--mf-active-line: #397c70;
 	--mf-active-solid: #2b8f7e;
 	--mf-active-solid-hi: #36a08d;
+	--mf-active-contrast: #071b18;
 
 	--mf-ready-fg: #74d99c;
 	--mf-ready-fg-bright: #9aebb9;
@@ -273,7 +277,7 @@ body {
 	color: var(--mf-fg-primary);
 	font-size: var(--mf-text-sm);
 	line-height: var(--mf-leading-normal);
-	overflow-x: hidden;
+	overflow-x: clip;
 }
 
 body {

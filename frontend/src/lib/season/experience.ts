@@ -1863,6 +1863,23 @@ export function librarySeasonState(
 			recoveryKind: 'season'
 		};
 	}
+	if (card.workflow_state?.primary_lane === 'blocked') {
+		return {
+			key: 'needs_help',
+			label: 'Cannot start',
+			detail: 'Open the season to see what must be fixed before work can continue.',
+			tone: 'attention',
+			recoveryKind: 'season'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'encode') {
+		return {
+			key: 'ready_to_make',
+			label: 'Ready to compress',
+			detail: 'The season has an approved setup and can be compressed.',
+			tone: 'ready'
+		};
+	}
 	if (card.workflow_state?.primary_lane === 'validate') {
 		return {
 			key: 'ready_to_check',
@@ -1885,6 +1902,14 @@ export function librarySeasonState(
 			label: 'Compressing the season',
 			detail: 'The smaller episodes are being compressed now.',
 			tone: 'active'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'mixed') {
+		return {
+			key: 'ready_to_make',
+			label: 'Ready to act on',
+			detail: 'This season has more than one step ready in Studio.',
+			tone: 'ready'
 		};
 	}
 

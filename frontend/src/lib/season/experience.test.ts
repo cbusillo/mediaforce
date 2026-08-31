@@ -1274,9 +1274,12 @@ describe('season experience translation', () => {
 
 	it.each([
 		['attention', 'needs_help'],
+		['blocked', 'needs_help'],
+		['encode', 'ready_to_make'],
 		['validate', 'ready_to_check'],
 		['promote', 'ready_to_finish'],
 		['processing', 'making_season'],
+		['mixed', 'ready_to_make'],
 		['complete', 'finished']
 	] as const)('shows the %s workflow before an older approved-test badge', (lane, expectedKey) => {
 		expect(
