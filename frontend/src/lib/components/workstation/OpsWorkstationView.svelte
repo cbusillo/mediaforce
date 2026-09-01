@@ -377,7 +377,7 @@
 					</div>
 
 					{#if blockers.length > 0}
-						<div class="blocker-list" aria-label="Needs attention">
+						<div class="blocker-list" role="group" aria-label="Needs attention">
 							{#each blockers as blocker (blocker.key)}
 								<div class="blocker-row blocker-row--{blocker.tone}">
 									<StateBadge
@@ -407,12 +407,12 @@
 					{/if}
 
 					{#if workControlCommands.length > 0 || actionPending || actionMessage || actionError}
-						<div class="scheduler-console">
+						<div class="scheduler-console" role="group" aria-labelledby="queue-controls-heading">
 							<div class="scheduler-console__heading">
-								<strong>Queue controls</strong>
+								<h4 id="queue-controls-heading">Queue controls</h4>
 								<span>Only actions that make sense for the current work are shown.</span>
 							</div>
-							<div class="scheduler-console__actions" aria-label="Work controls">
+							<div class="scheduler-console__actions">
 								{#each workControlCommands as command (command.id)}
 									<button
 										type="button"
@@ -795,7 +795,6 @@
 		padding: var(--mf-space-5);
 	}
 
-	.queue-toolbar,
 	.blocker-row,
 	.current-standby {
 		align-items: center;
@@ -812,13 +811,14 @@
 		min-width: 0;
 	}
 
-	.scheduler-console__heading strong,
+	.scheduler-console__heading h4,
 	.blocker-row strong,
 	.current-standby strong,
 	.host-row strong,
 	.scope-row strong {
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-semibold);
+		margin: 0;
 		overflow-wrap: anywhere;
 	}
 
@@ -833,8 +833,12 @@
 	}
 
 	.queue-toolbar {
+		align-items: center;
 		background: var(--mf-bg-strip);
 		border-bottom: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(0, 1fr) auto;
 		padding: var(--mf-space-4) var(--mf-space-5);
 	}
 
@@ -1494,6 +1498,11 @@
 		padding: 12px;
 	}
 
+	.queue-toolbar {
+		gap: 12px;
+		padding: 12px;
+	}
+
 	.blocker-row,
 	.scheduler-console__heading,
 	.command-standby,
@@ -1520,22 +1529,21 @@
 	}
 
 	.blocker-row strong,
-	.scheduler-console strong,
+	.scheduler-console h4,
 	.host-row strong,
 	.scope-row strong,
-	.current-standby strong,
-	.empty-note strong {
+	.current-standby strong {
 		color: var(--mf-fg-primary);
 		font-family: var(--mf-font-sans);
 	}
 
 	.blocker-row span,
+	.queue-toolbar__state span,
 	.scheduler-console span,
 	.host-row span,
 	.scope-row span,
 	.scope-row small,
-	.current-standby span,
-	.empty-note span {
+	.current-standby span {
 		color: var(--mf-fg-secondary);
 		font-family: var(--mf-font-sans);
 	}

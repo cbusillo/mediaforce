@@ -680,6 +680,8 @@ async function checkActivityQueueFirst(page, label) {
     const queuePanel = main?.querySelector(":scope > .panel");
     const queueHeading = queuePanel?.querySelector(".panel__header h3");
     const queueRect = queuePanel?.getBoundingClientRect();
+    const mainChildren = Array.from(main?.children ?? []);
+    const queuePanelIndex = queuePanel ? mainChildren.indexOf(queuePanel) : -1;
     const blockerList = document.querySelector(".blocker-list");
     const schedulerConsole = document.querySelector(".scheduler-console");
     const systemDetails = document.querySelector(".system-details");
@@ -690,7 +692,20 @@ async function checkActivityQueueFirst(page, label) {
         Boolean(queueRect) &&
         queueRect.top >= 0 &&
         queueRect.top < window.innerHeight,
-      hasVisibleHero: Boolean(document.querySelector(".ops-header")),
+      queueStartsNearTop: Boolean(queueRect) && queueRect.top < 180,
+      visibleContentBeforeQueue:
+        queuePanelIndex >= 0
+          ? mainChildren.slice(0, queuePanelIndex).flatMap((element) => {
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                rect.width > 2 &&
+                rect.height > 2
+                ? [element.tagName.toLowerCase()]
+                : [];
+            })
+          : ["queue-panel-missing"],
       refreshControls: document.querySelectorAll(
         'button[title="Refresh activity now"]',
       ).length,
@@ -708,7 +723,8 @@ async function checkActivityQueueFirst(page, label) {
   if (
     activityState.firstPanelTitle !== "Working now" ||
     !activityState.queueBeginsInViewport ||
-    activityState.hasVisibleHero ||
+    !activityState.queueStartsNearTop ||
+    activityState.visibleContentBeforeQueue.length > 0 ||
     activityState.refreshControls !== 1 ||
     !activityState.blockersStayWithQueue ||
     !activityState.controlsStayWithQueue ||
@@ -809,6 +825,8 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
             );
           }
         }
+      }
+      if (route === "/ops") {
         await checkActivityQueueFirst(page, label);
       }
       if (route === "/settings") {
@@ -2415,7 +2433,7 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
           `${label} narrow`,
         );
       }
-      if (route === "/ops" && label === "Activity") {
+      if (route === "/ops") {
         await checkActivityQueueFirst(page, `${label} narrow`);
       }
       const elapsedMs = Math.round(performance.now() - started);
