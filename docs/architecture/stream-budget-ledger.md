@@ -96,16 +96,22 @@ Production encodes verify actual output bytes against the resolved final band
 from the same size goal, currently ±5% by default. A final miss can retry only
 once. The completed output calibrates the sample curve's video-byte projection;
 an already measured candidate may be reused when that corrected projection is
-inside the final band. Otherwise Mediaforce may interpolate one integer CRF
-between measured quality-safe candidates, or run up to two bounded directional
-samples. The second directional sample must be adjacent to the first and is
-allowed only when the first remains outside the final band on the same side as
-the completed output. The replacement full encode starts only when a new sample
-supplies a real quality score that meets the configured floor, remains under
-the source-relative cap, and its calibrated total projection is inside the
-final band. If no bounded measured retry is available, or if the retry budget is
-exhausted, the item enters a needs-review failure state rather than falling back
-to quality-first encoding or silently relaxing the approved constraint.
+inside the final band. Otherwise Mediaforce may first interpolate one integer
+CRF inside an existing calibrated bracket. Without a bracket, it runs a bounded
+directional seed using calibrated same-side evidence when available and the
+conservative bitrate-halving prior otherwise. It may then place a second sample
+with a content-derived log-space secant between the completed output anchor and
+the first measured/calibrated point. Only when the first and second measured
+probes straddle the final band may it place a third sample by strict log-space
+interpolation between them; it never performs a third same-side extrapolation.
+The retry planner allows at most three sample measurements and one replacement
+full encode. The replacement
+full encode starts only when a new sample supplies a real quality score that
+meets the configured floor, remains under the source-relative cap, and its
+calibrated total projection is inside the final band. If no bounded measured
+retry is available, or if the retry budget is exhausted, the item enters a
+needs-review failure state rather than falling back to quality-first encoding
+or silently relaxing the approved constraint.
 When retry planning declines, the target-size trace keeps the item fail-closed
 and records a stable `final_retry_skipped_*` `selection_reason` plus a bounded
 `final_retry_skip` detail block. The reason distinguishes invalid trace inputs,
