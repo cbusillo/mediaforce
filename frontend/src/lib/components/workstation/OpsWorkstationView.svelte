@@ -1407,9 +1407,9 @@
 	.ops {
 		display: grid;
 		gap: 18px;
-		grid-template-columns: minmax(0, 1fr) 296px;
+		grid-template-columns: minmax(0, 1fr) var(--mf-workstation-rail-width);
 		margin: 0 auto;
-		max-width: 1088px;
+		max-width: 1440px;
 		min-height: 0;
 		padding: 34px 24px 64px;
 	}
@@ -1686,7 +1686,7 @@
 		outline: none;
 	}
 
-	@media (max-width: 1100px) {
+	@media (max-width: 1280px) {
 		.ops {
 			grid-template-columns: 1fr;
 		}

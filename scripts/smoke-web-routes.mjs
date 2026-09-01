@@ -677,9 +677,11 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
 async function checkActivityQueueFirst(page, label) {
   const activityState = await page.evaluate(() => {
     const main = document.querySelector(".ops__main");
+    const workstation = document.querySelector(".ops");
     const queuePanel = main?.querySelector(":scope > .panel");
     const queueHeading = queuePanel?.querySelector(".panel__header h3");
     const queueRect = queuePanel?.getBoundingClientRect();
+    const workstationRect = workstation?.getBoundingClientRect();
     const mainChildren = Array.from(main?.children ?? []);
     const queuePanelIndex = queuePanel ? mainChildren.indexOf(queuePanel) : -1;
     const blockerList = document.querySelector(".blocker-list");
@@ -692,6 +694,10 @@ async function checkActivityQueueFirst(page, label) {
         Boolean(queueRect) &&
         queueRect.top >= 0 &&
         queueRect.top < window.innerHeight,
+      queueHasWorkingWidth:
+        Boolean(queueRect) &&
+        Boolean(workstationRect) &&
+        queueRect.width / workstationRect.width >= 0.7,
       queueStartsNearTop: Boolean(queueRect) && queueRect.top < 180,
       visibleContentBeforeQueue:
         queuePanelIndex >= 0
@@ -723,6 +729,7 @@ async function checkActivityQueueFirst(page, label) {
   if (
     activityState.firstPanelTitle !== "Working now" ||
     !activityState.queueBeginsInViewport ||
+    !activityState.queueHasWorkingWidth ||
     !activityState.queueStartsNearTop ||
     activityState.visibleContentBeforeQueue.length > 0 ||
     activityState.refreshControls !== 1 ||
