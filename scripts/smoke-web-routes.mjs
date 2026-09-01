@@ -674,6 +674,68 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   }
 }
 
+async function checkActivityQueueFirst(page, label) {
+  const activityState = await page.evaluate(() => {
+    const main = document.querySelector(".ops__main");
+    const queuePanel = main?.querySelector(":scope > .panel");
+    const queueHeading = queuePanel?.querySelector(".panel__header h3");
+    const queueRect = queuePanel?.getBoundingClientRect();
+    const mainChildren = Array.from(main?.children ?? []);
+    const queuePanelIndex = queuePanel ? mainChildren.indexOf(queuePanel) : -1;
+    const blockerList = document.querySelector(".blocker-list");
+    const schedulerConsole = document.querySelector(".scheduler-console");
+    const systemDetails = document.querySelector(".system-details");
+
+    return {
+      firstPanelTitle: queueHeading?.textContent?.trim() ?? "",
+      queueBeginsInViewport:
+        Boolean(queueRect) &&
+        queueRect.top >= 0 &&
+        queueRect.top < window.innerHeight,
+      queueStartsNearTop: Boolean(queueRect) && queueRect.top < 180,
+      visibleContentBeforeQueue:
+        queuePanelIndex >= 0
+          ? mainChildren.slice(0, queuePanelIndex).flatMap((element) => {
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              return style.display !== "none" &&
+                style.visibility !== "hidden" &&
+                rect.width > 2 &&
+                rect.height > 2
+                ? [element.tagName.toLowerCase()]
+                : [];
+            })
+          : ["queue-panel-missing"],
+      refreshControls: document.querySelectorAll(
+        'button[title="Refresh activity now"]',
+      ).length,
+      blockersStayWithQueue:
+        !blockerList || Boolean(queuePanel?.contains(blockerList)),
+      controlsStayWithQueue:
+        !schedulerConsole || Boolean(queuePanel?.contains(schedulerConsole)),
+      systemDetailsCollapsed:
+        systemDetails instanceof HTMLDetailsElement
+          ? !systemDetails.open
+          : false,
+    };
+  });
+
+  if (
+    activityState.firstPanelTitle !== "Working now" ||
+    !activityState.queueBeginsInViewport ||
+    !activityState.queueStartsNearTop ||
+    activityState.visibleContentBeforeQueue.length > 0 ||
+    activityState.refreshControls !== 1 ||
+    !activityState.blockersStayWithQueue ||
+    !activityState.controlsStayWithQueue ||
+    !activityState.systemDetailsCollapsed
+  ) {
+    throw new Error(
+      `${label} did not keep the queue-first Activity contract: ${JSON.stringify(activityState)}`,
+    );
+  }
+}
+
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
@@ -728,7 +790,12 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         await checkCompressionIntentContract(page, timeoutMs, label);
       }
       if (route === "/ops" && label === "Activity") {
-        const requiredCopies = ["Computers", "Stop processing", "Stop samples"];
+        const requiredCopies = [
+          "Working now",
+          "Computers",
+          "Stop processing",
+          "Stop samples",
+        ];
         await page.waitForFunction(
           (required) =>
             required.every((copy) => document.body.innerText.includes(copy)),
@@ -758,6 +825,9 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
             );
           }
         }
+      }
+      if (route === "/ops") {
+        await checkActivityQueueFirst(page, label);
       }
       if (route === "/settings") {
         const requiredCopies = [
@@ -2362,6 +2432,9 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
           timeoutMs,
           `${label} narrow`,
         );
+      }
+      if (route === "/ops") {
+        await checkActivityQueueFirst(page, `${label} narrow`);
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`narrow route ok: ${label} ${elapsedMs}ms`);
