@@ -936,44 +936,56 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
             state: "visible",
             timeout: timeoutMs,
           });
-          const highSeasonState = await highSeasonInspector.evaluate((inspector) => {
-            const visibleSeasonRows = Array.from(
-              inspector.querySelectorAll(".season-row"),
-            ).filter((row) => window.getComputedStyle(row).display !== "none");
-            const inspectorRect = inspector.getBoundingClientRect();
-            const firstSeasonRect = visibleSeasonRows[0]?.getBoundingClientRect();
-            const arrowInsets = visibleSeasonRows.map((row) => {
-              const arrowRect = row.querySelector("svg")?.getBoundingClientRect();
-              return arrowRect
-                ? row.getBoundingClientRect().right - arrowRect.right
-                : Number.POSITIVE_INFINITY;
-            });
-            const nestedScrollCount = Array.from(inspector.querySelectorAll("*")).filter(
-              (element) => {
+          const highSeasonState = await highSeasonInspector.evaluate(
+            (inspector) => {
+              const visibleSeasonRows = Array.from(
+                inspector.querySelectorAll(".season-row"),
+              ).filter(
+                (row) => window.getComputedStyle(row).display !== "none",
+              );
+              const inspectorRect = inspector.getBoundingClientRect();
+              const firstSeasonRect =
+                visibleSeasonRows[0]?.getBoundingClientRect();
+              const arrowInsets = visibleSeasonRows.map((row) => {
+                const arrowRect = row
+                  .querySelector("svg")
+                  ?.getBoundingClientRect();
+                return arrowRect
+                  ? row.getBoundingClientRect().right - arrowRect.right
+                  : Number.POSITIVE_INFINITY;
+              });
+              const nestedScrollCount = Array.from(
+                inspector.querySelectorAll("*"),
+              ).filter((element) => {
                 const style = window.getComputedStyle(element);
                 return (
                   ["auto", "scroll"].includes(style.overflowY) &&
                   element.scrollHeight > element.clientHeight + 2
                 );
-              },
-            ).length;
-            return {
-              height: inspector.getBoundingClientRect().height,
-              seasonInset: firstSeasonRect
-                ? firstSeasonRect.left - inspectorRect.left
-                : Number.POSITIVE_INFINITY,
-              seasonWidthRatio: firstSeasonRect
-                ? firstSeasonRect.width / inspectorRect.width
-                : 0,
-              maximumArrowInset: Math.max(...arrowInsets),
-              nestedScrollCount,
-              omittedCopy:
-                inspector.querySelector(".season-list__more")?.textContent?.trim() ?? "",
-              seasonLabels: visibleSeasonRows.map(
-                (row) => row.querySelector(".season-copy strong")?.textContent?.trim() ?? "",
-              ),
-            };
-          });
+              }).length;
+              return {
+                height: inspector.getBoundingClientRect().height,
+                seasonInset: firstSeasonRect
+                  ? firstSeasonRect.left - inspectorRect.left
+                  : Number.POSITIVE_INFINITY,
+                seasonWidthRatio: firstSeasonRect
+                  ? firstSeasonRect.width / inspectorRect.width
+                  : 0,
+                maximumArrowInset: Math.max(...arrowInsets),
+                nestedScrollCount,
+                omittedCopy:
+                  inspector
+                    .querySelector(".season-list__more")
+                    ?.textContent?.trim() ?? "",
+                seasonLabels: visibleSeasonRows.map(
+                  (row) =>
+                    row
+                      .querySelector(".season-copy strong")
+                      ?.textContent?.trim() ?? "",
+                ),
+              };
+            },
+          );
           const expectedSeasonLabels =
             viewport.width <= 760
               ? ["Season 1", "Season 14"]
@@ -1048,9 +1060,8 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
                 ? "data-movie-title-row"
                 : "data-other-unit-row";
           const candidateRow = page.locator(rowSelector).nth(1);
-          const rowIdentity = await candidateRow.getAttribute(
-            rowIdentityAttribute,
-          );
+          const rowIdentity =
+            await candidateRow.getAttribute(rowIdentityAttribute);
           if (!rowIdentity) {
             throw new Error(
               `Narrow Library row is missing ${rowIdentityAttribute}: ${route}`,
@@ -1092,26 +1103,30 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
             undefined,
             { timeout: timeoutMs },
           );
-          await expect(inspectControl).toHaveAttribute("aria-expanded", "true", {
-            timeout: timeoutMs,
-          });
+          await expect(inspectControl).toHaveAttribute(
+            "aria-expanded",
+            "true",
+            {
+              timeout: timeoutMs,
+            },
+          );
           await expect(inspectControl).toHaveAttribute(
             "aria-label",
             /^Close\s+\S/,
             { timeout: timeoutMs },
           );
           const inspectState = await inspectControl.evaluate((button) => ({
-			  expanded: button.getAttribute("aria-expanded"),
-			  label: button.getAttribute("aria-label") ?? "",
-			}));
+            expanded: button.getAttribute("aria-expanded"),
+            label: button.getAttribute("aria-label") ?? "",
+          }));
           if (
-			inspectState.expanded !== "true" ||
-			!/^Close\s+\S/.test(inspectState.label)
-		  ) {
-			throw new Error(
-			  `Narrow Library Inspect control did not expose its target state: ${route} ${JSON.stringify(inspectState)}`,
-			);
-		  }
+            inspectState.expanded !== "true" ||
+            !/^Close\s+\S/.test(inspectState.label)
+          ) {
+            throw new Error(
+              `Narrow Library Inspect control did not expose its target state: ${route} ${JSON.stringify(inspectState)}`,
+            );
+          }
         }
         if (viewport.width === 1440) {
           await page.waitForFunction(
@@ -1154,9 +1169,7 @@ async function checkLibraryModeLayout(baseUrl, timeoutMs) {
             const header = document.querySelector(".library-register__header");
             const visibleBadgeStarts = new Set(
               Array.from(
-                document.querySelectorAll(
-                  "[data-library-state] .state-badge",
-                ),
+                document.querySelectorAll("[data-library-state] .state-badge"),
               )
                 .filter((badge) => {
                   const rect = badge.getBoundingClientRect();
@@ -1234,13 +1247,21 @@ async function checkLibraryStateReachability(baseUrl, timeoutMs) {
       for (const segment of segments) {
         if (!segment.key || segment.count <= 0) continue;
         if (segment.label.includes("Cannot start")) foundCannotStart = true;
-        await page.locator(`button.work-segment[data-state="${segment.key}"]`).click();
+        await page
+          .locator(`button.work-segment[data-state="${segment.key}"]`)
+          .click();
         await page.waitForTimeout(100);
         const rowState = await page.evaluate((key) => {
-          const rows = Array.from(document.querySelectorAll("[data-library-state]"));
+          const rows = Array.from(
+            document.querySelectorAll("[data-library-state]"),
+          );
           return {
             count: rows.length,
-            keys: [...new Set(rows.map((row) => row.getAttribute("data-library-state")))],
+            keys: [
+              ...new Set(
+                rows.map((row) => row.getAttribute("data-library-state")),
+              ),
+            ],
             active:
               document
                 .querySelector(`button.work-segment[data-state="${key}"]`)
@@ -1265,7 +1286,9 @@ async function checkLibraryStateReachability(baseUrl, timeoutMs) {
       }
     }
     await page.close();
-    console.log("route ok: Shared Library state filters reach every summarized row");
+    console.log(
+      "route ok: Shared Library state filters reach every summarized row",
+    );
   } finally {
     await browser.close();
   }
@@ -1315,8 +1338,7 @@ async function checkSeriesSeasonIndex(baseUrl, timeoutMs) {
         JSON.stringify(state.prefixes) !== JSON.stringify(expectedPrefixes) ||
         state.hrefs.some(
           (href, index) =>
-            href !==
-            `/folders/tv/Long%20Running%20Show/Season%20${index + 1}`,
+            href !== `/folders/tv/Long%20Running%20Show/Season%20${index + 1}`,
         ) ||
         state.nestedScrollCount !== 0
       ) {
@@ -1365,7 +1387,9 @@ async function checkSeriesSeasonContextFailures(baseUrl, timeoutMs) {
     const showPage = await browser.newPage({
       viewport: { width: 1024, height: 768 },
     });
-    await showPage.route("**/api/dashboard/library/details", (route) => route.abort());
+    await showPage.route("**/api/dashboard/library/details", (route) =>
+      route.abort(),
+    );
     await openRoute(
       showPage,
       baseUrl,
@@ -1376,7 +1400,9 @@ async function checkSeriesSeasonContextFailures(baseUrl, timeoutMs) {
       state: "visible",
       timeout: timeoutMs,
     });
-    const indexText = await showPage.locator(".series-season-index").innerText();
+    const indexText = await showPage
+      .locator(".series-season-index")
+      .innerText();
     if (
       !indexText.includes("The complete season list is unavailable.") ||
       indexText.includes("No catalog seasons found for this show.")
@@ -1386,7 +1412,9 @@ async function checkSeriesSeasonContextFailures(baseUrl, timeoutMs) {
       );
     }
     await showPage.close();
-    console.log("route ok: TV Studio scopes and reports complete-season context");
+    console.log(
+      "route ok: TV Studio scopes and reports complete-season context",
+    );
   } finally {
     await browser.close();
   }
@@ -2413,7 +2441,9 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       "xpath=ancestor::section[contains(concat(' ', normalize-space(@class), ' '), ' panel ')]",
     );
     if ((await completedPanel.count()) !== 1) {
-      throw new Error("Finished media did not render as one coherent register panel.");
+      throw new Error(
+        "Finished media did not render as one coherent register panel.",
+      );
     }
     for (const selector of [
       ".completed-filter",
@@ -2463,9 +2493,26 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     const reviewTrigger = page.getByRole("button", {
       name: "Mark backups already gone as handled",
     });
+    const globalDeleteTrigger = page.getByRole("button", {
+      name: "Delete all original backups",
+    });
+    for (const trigger of [
+      selectedDeleteTrigger,
+      reviewTrigger,
+      globalDeleteTrigger,
+    ]) {
+      if ((await trigger.getAttribute("aria-controls")) !== null) {
+        throw new Error(
+          "A resting Finished action references a confirmation panel that is not rendered.",
+        );
+      }
+    }
     for (const trigger of [selectedDeleteTrigger, reviewTrigger]) {
       const describedBy = await trigger.getAttribute("aria-describedby");
-      if (!describedBy || !(await page.locator(`#${describedBy}`).isVisible())) {
+      if (
+        !describedBy ||
+        !(await page.locator(`#${describedBy}`).isVisible())
+      ) {
         throw new Error(
           "A disabled Finished action is not bound to its visible reason.",
         );
@@ -2481,11 +2528,33 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     });
     await selectedDeleteConfirm.waitFor();
     if (
-      !(await selectedDeleteConfirm.evaluate(
-        (button) => button === document.activeElement,
+      !(await completedDeleteDialog.evaluate(
+        (dialog) => dialog === document.activeElement,
       ))
     ) {
-      throw new Error("Finished delete confirmation did not receive focus.");
+      throw new Error(
+        "Finished delete confirmation panel did not receive focus.",
+      );
+    }
+    if (
+      (await selectedDeleteTrigger.getAttribute("aria-controls")) !==
+      "selected-cleanup-confirm"
+    ) {
+      throw new Error(
+        "Finished delete trigger did not bind to its rendered confirmation.",
+      );
+    }
+    await selectedDeleteTrigger.hover();
+    const [armedDeleteColor, unarmedDeleteColor] = await Promise.all([
+      selectedDeleteTrigger.evaluate(
+        (button) => getComputedStyle(button).color,
+      ),
+      globalDeleteTrigger.evaluate((button) => getComputedStyle(button).color),
+    ]);
+    if (armedDeleteColor !== unarmedDeleteColor) {
+      throw new Error(
+        "Armed Finished delete action lost its destructive color on hover.",
+      );
     }
     await completedDeleteDialog
       .getByText("This cannot be undone.", { exact: true })
@@ -2499,9 +2568,7 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     await completedDeleteDialog.waitFor({ state: "hidden" });
     await readyCleanupCheckbox.check();
 
-    await page
-      .getByRole("button", { name: "Delete all original backups" })
-      .click();
+    await globalDeleteTrigger.click();
     await completedDeleteDialog
       .getByText(/including folders hidden by your current filters/)
       .waitFor();
@@ -2525,12 +2592,20 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     });
     await markHandledConfirm.waitFor();
     if (
-      !(await markHandledConfirm.evaluate(
-        (button) => button === document.activeElement,
+      !(await completedReviewDialog.evaluate(
+        (dialog) => dialog === document.activeElement,
       ))
     ) {
       throw new Error(
-        "Finished mark-handled confirmation did not receive focus.",
+        "Finished mark-handled confirmation panel did not receive focus.",
+      );
+    }
+    if (
+      (await reviewTrigger.getAttribute("aria-controls")) !==
+      "review-cleanup-confirm"
+    ) {
+      throw new Error(
+        "Finished review trigger did not bind to its rendered confirmation.",
       );
     }
     await completedReviewDialog
@@ -2550,13 +2625,18 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       );
     }
 
-    const completedHistoryPayload = await fetch(`${baseUrl}/api/completed`).then(
-      (response) => response.json(),
-    );
+    const completedHistoryPayload = await fetch(
+      `${baseUrl}/api/completed`,
+    ).then((response) => response.json());
     await page.getByRole("tab", { name: "History" }).click();
-    const renderedHistoryRows = page.locator(".history-list--wide .history-row");
+    const renderedHistoryRows = page.locator(
+      ".history-list--wide .history-row",
+    );
     await renderedHistoryRows.first().waitFor();
-    if ((await renderedHistoryRows.count()) !== completedHistoryPayload.history.length) {
+    if (
+      (await renderedHistoryRows.count()) !==
+      completedHistoryPayload.history.length
+    ) {
       throw new Error(
         "Finished history did not render every event returned by the completed API.",
       );

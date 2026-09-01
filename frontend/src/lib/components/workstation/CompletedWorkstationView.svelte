@@ -71,8 +71,8 @@
 	let selectedCleanupTrigger = $state<HTMLButtonElement | null>(null);
 	let globalCleanupTrigger = $state<HTMLButtonElement | null>(null);
 	let reviewCleanupTrigger = $state<HTMLButtonElement | null>(null);
-	let deleteConfirmButton = $state<HTMLButtonElement | null>(null);
-	let reviewConfirmButton = $state<HTMLButtonElement | null>(null);
+	let deleteConfirmPanel = $state<HTMLElement | null>(null);
+	let reviewConfirmPanel = $state<HTMLElement | null>(null);
 	let actionStatusMessage = $state<HTMLParagraphElement | null>(null);
 	let cleanupPending = $state(false);
 	let reviewPending = $state(false);
@@ -161,12 +161,12 @@
 	);
 	const selectedSummary = $derived(
 		selectedFolders.length
-			? `${selectedFolders.length.toLocaleString('en-US')} folders · ${selectedBackupCount.toLocaleString('en-US')} files · ${formatBytes(selectedBackupSize)}`
+			? `${countLabel(selectedFolders.length, 'folder')} · ${countLabel(selectedBackupCount, 'file')} · ${formatBytes(selectedBackupSize)}`
 			: 'None selected'
 	);
 	const reviewSummary = $derived(
 		reviewFolders.length
-			? `${reviewFolders.length.toLocaleString('en-US')} folders · ${reviewItemCount.toLocaleString('en-US')} original backups already gone`
+			? `${countLabel(reviewFolders.length, 'folder')} · ${countLabel(reviewItemCount, 'original backup')} already gone`
 			: 'None selected'
 	);
 	const actionBlockers = $derived(
@@ -209,6 +209,10 @@
 
 	function libraryKey(label: string): string {
 		return label.trim().toLowerCase() || 'library';
+	}
+
+	function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+		return `${count.toLocaleString('en-US')} ${count === 1 ? singular : plural}`;
 	}
 
 	function libraryIncluded(key: string): boolean {
@@ -311,7 +315,7 @@
 		armedReview = null;
 		await tick();
 		(shouldArm
-			? deleteConfirmButton
+			? deleteConfirmPanel
 			: scope === 'selected'
 				? selectedCleanupTrigger
 				: globalCleanupTrigger
@@ -327,7 +331,7 @@
 		const shouldArm = armedReview !== scope;
 		armedReview = shouldArm ? scope : null;
 		await tick();
-		(shouldArm ? reviewConfirmButton : reviewCleanupTrigger)?.focus();
+		(shouldArm ? reviewConfirmPanel : reviewCleanupTrigger)?.focus();
 	}
 
 	async function cancelCleanupConfirmation(scope: CompletedCleanupScope) {
@@ -392,7 +396,7 @@
 		} finally {
 			reviewPending = false;
 			await tick();
-			(armedReview ? reviewConfirmButton : actionStatusMessage)?.focus();
+			(armedReview ? reviewConfirmPanel : actionStatusMessage)?.focus();
 		}
 	}
 
@@ -446,7 +450,7 @@
 		} finally {
 			cleanupPending = false;
 			await tick();
-			(armedScope ? deleteConfirmButton : actionStatusMessage)?.focus();
+			(armedScope ? deleteConfirmPanel : actionStatusMessage)?.focus();
 		}
 	}
 
@@ -545,7 +549,12 @@
 						<details class="completed-filter__advanced">
 							<summary>
 								<span>Filters</span>
-								<small>{libraryOptions.length} libraries · {stateOptions.length} states</small>
+								<small
+									>{countLabel(libraryOptions.length, 'library', 'libraries')} · {countLabel(
+										stateOptions.length,
+										'state'
+									)}</small
+								>
 							</summary>
 							<div class="completed-filter__advanced-body">
 								<div class="completed-filter__group">
@@ -701,7 +710,9 @@
 													? 'review-cleanup-blocker'
 													: undefined}
 												aria-expanded={armedReview === 'already-removed'}
-												aria-controls="review-cleanup-confirm"
+												aria-controls={armedReview === 'already-removed'
+													? 'review-cleanup-confirm'
+													: undefined}
 												bind:this={reviewCleanupTrigger}
 												onclick={() => armReview('already-removed')}
 												>Mark backups already gone as handled</button
@@ -733,7 +744,9 @@
 														? 'selected-cleanup-blocker'
 														: undefined}
 													aria-expanded={armedScope === 'selected'}
-													aria-controls="selected-cleanup-confirm"
+													aria-controls={armedScope === 'selected'
+														? 'selected-cleanup-confirm'
+														: undefined}
 													bind:this={selectedCleanupTrigger}
 													onclick={() => armCleanup('selected')}
 													>Delete selected original backups</button
@@ -754,7 +767,9 @@
 														? 'global-cleanup-blocker'
 														: undefined}
 													aria-expanded={armedScope === 'global'}
-													aria-controls="global-cleanup-confirm"
+													aria-controls={armedScope === 'global'
+														? 'global-cleanup-confirm'
+														: undefined}
 													bind:this={globalCleanupTrigger}
 													onclick={() => armCleanup('global')}>Delete all original backups</button
 												>
@@ -777,6 +792,7 @@
 									role="alertdialog"
 									aria-label="Confirm original backup deletion"
 									tabindex="-1"
+									bind:this={deleteConfirmPanel}
 									onkeydown={(event) => {
 										if (event.key === 'Escape' && !cleanupPending) {
 											event.preventDefault();
@@ -795,7 +811,6 @@
 											type="button"
 											class="control control--danger armed"
 											disabled={cleanupPending}
-											bind:this={deleteConfirmButton}
 											onclick={() => confirmCleanup(scope)}
 											>{cleanupPending ? 'Deleting…' : deleteConfirmCopy.confirmLabel}</button
 										>
@@ -816,6 +831,7 @@
 									role="alertdialog"
 									aria-label="Confirm already-gone original backups"
 									tabindex="-1"
+									bind:this={reviewConfirmPanel}
 									onkeydown={(event) => {
 										if (event.key === 'Escape' && !reviewPending) {
 											event.preventDefault();
@@ -833,7 +849,6 @@
 											type="button"
 											class="control control--primary armed"
 											disabled={reviewPending}
-											bind:this={reviewConfirmButton}
 											onclick={confirmAlreadyRemoved}
 											>{reviewPending
 												? 'Marking handled…'
@@ -932,8 +947,7 @@
 											</div>
 										</td>
 										<td class="originals-cell" data-label="Original backups">
-											<strong>{folder.archived_backup_count.toLocaleString('en-US')} backups</strong
-											>
+											<strong>{countLabel(folder.archived_backup_count, 'backup')}</strong>
 											<span
 												>{formatBytes(folder.archived_backup_size_bytes)} reclaim · {folder.promoted_item_count.toLocaleString(
 													'en-US'
@@ -2071,7 +2085,7 @@
 		padding: 0 11px;
 	}
 
-	.control:hover {
+	.control:not(.control--danger):hover:not(:disabled) {
 		background: var(--mf-bg-panel-2);
 		border-color: var(--mf-active-line);
 		color: var(--mf-active-fg);
@@ -2086,6 +2100,12 @@
 	.control--danger {
 		background: var(--mf-bg-panel);
 		border-color: var(--mf-fail-line);
+		color: var(--mf-fail-fg);
+	}
+
+	.control--danger:hover:not(:disabled) {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-fg);
 		color: var(--mf-fail-fg);
 	}
 
