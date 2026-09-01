@@ -354,8 +354,11 @@ whether work is still running.
 
 On Activity, `Working now` must own or begin the first viewport at desktop and
 390px widths; do not place a visible hero or separate dashboard summary ahead of
-the current queue. Keep unresolved processing failures newest first and inside
-the queue surface with their actions. A missing controller media mount must
+the current queue. At wide desktop widths, the collapsed System details rail
+must not compress the current-work register below 70% of the workstation canvas;
+stack the rail beneath the register at ordinary desktop widths. Keep unresolved
+processing failures newest first and inside the queue surface with their actions.
+A missing controller media mount must
 remain queued instead of dispatching futile SSH retries, identify storage as the
 blocker, and show `Selecting computer` or `Unassigned` rather than a placeholder
 host name. Keep queue controls adjacent to the affected current work, show one
