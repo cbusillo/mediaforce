@@ -2545,15 +2545,43 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       );
     }
     await selectedDeleteTrigger.hover();
-    const [armedDeleteColor, unarmedDeleteColor] = await Promise.all([
-      selectedDeleteTrigger.evaluate(
-        (button) => getComputedStyle(button).color,
-      ),
-      globalDeleteTrigger.evaluate((button) => getComputedStyle(button).color),
-    ]);
-    if (armedDeleteColor !== unarmedDeleteColor) {
+    const [armedDeleteStyle, unarmedDeleteStyle, reviewStyle] =
+      await Promise.all([
+        selectedDeleteTrigger.evaluate((button) => {
+          const style = getComputedStyle(button);
+          return {
+            background: style.backgroundColor,
+            border: style.borderColor,
+            color: style.color,
+          };
+        }),
+        globalDeleteTrigger.evaluate((button) => {
+          const style = getComputedStyle(button);
+          return {
+            background: style.backgroundColor,
+            border: style.borderColor,
+            color: style.color,
+          };
+        }),
+        reviewTrigger.evaluate((button) => {
+          const style = getComputedStyle(button);
+          return {
+            background: style.backgroundColor,
+            border: style.borderColor,
+            color: style.color,
+          };
+        }),
+      ]);
+    if (
+      JSON.stringify(armedDeleteStyle) === JSON.stringify(unarmedDeleteStyle)
+    ) {
       throw new Error(
-        "Armed Finished delete action lost its destructive color on hover.",
+        "Armed Finished delete action lost its stronger state on hover.",
+      );
+    }
+    if (JSON.stringify(armedDeleteStyle) === JSON.stringify(reviewStyle)) {
+      throw new Error(
+        "Armed Finished delete action incorrectly uses the review action palette.",
       );
     }
     await completedDeleteDialog

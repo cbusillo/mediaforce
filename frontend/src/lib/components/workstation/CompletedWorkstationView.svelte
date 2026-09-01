@@ -578,10 +578,10 @@
 											<span>
 												<strong>{option.label}</strong>
 												<small
-													>{option.folders.toLocaleString('en-US')} folders · {option.backups.toLocaleString(
-														'en-US'
-													)}
-													original backups</small
+													>{countLabel(option.folders, 'folder')} · {countLabel(
+														option.backups,
+														'original backup'
+													)}</small
 												>
 											</span>
 											<em>{formatBytes(option.size)}</em>
@@ -610,10 +610,10 @@
 											<span>
 												<strong>{option.label}</strong>
 												<small
-													>{option.folders.toLocaleString('en-US')} folders · {option.backups.toLocaleString(
-														'en-US'
-													)}
-													original backups</small
+													>{countLabel(option.folders, 'folder')} · {countLabel(
+														option.backups,
+														'original backup'
+													)}</small
 												>
 											</span>
 											<em>{formatBytes(option.size)}</em>
@@ -1028,24 +1028,24 @@
 				<div class="scope-list">
 					<div class="scope-row scope-row--ready">
 						<span>Ready to delete</span>
-						<strong>{counts.ready.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.ready, 'folder')}</strong>
 						<small
 							>{formatBytes(totalArchivedBackupSize(cleanupReadyFolders))} in the Cleanup folder</small
 						>
 					</div>
 					<div class="scope-row" class:scope-row--fail={counts.blocked > 0}>
 						<span>Check before deleting</span>
-						<strong>{counts.blocked.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.blocked, 'folder')}</strong>
 						<small>Mediaforce cannot verify these original backups</small>
 					</div>
 					<div class="scope-row" class:scope-row--wait={counts.unknown > 0}>
 						<span>Already gone</span>
-						<strong>{counts.unknown.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.unknown, 'folder')}</strong>
 						<small>nothing to delete; mark handled after checking</small>
 					</div>
 					<div class="scope-row">
 						<span>Nothing to delete</span>
-						<strong>{counts.cleaned.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.cleaned, 'folder')}</strong>
 						<small>no original backups are waiting</small>
 					</div>
 				</div>
@@ -1434,6 +1434,7 @@
 	}
 
 	.action-command__control .control {
+		align-self: start;
 		justify-self: stretch;
 		white-space: normal;
 		width: 100%;
@@ -2109,6 +2110,18 @@
 		color: var(--mf-fail-fg);
 	}
 
+	.control--danger.armed:hover:not(:disabled) {
+		background: var(--mf-fail-bg-strong);
+		border-color: var(--mf-fail-fg);
+		color: var(--mf-fail-fg-bright);
+	}
+
+	.control--primary.armed:hover:not(:disabled) {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
 	.confirm-panel {
 		background: var(--mf-bg-panel);
 		border: 1px solid var(--mf-fail-line);
@@ -2215,6 +2228,10 @@
 
 		.completed-filter {
 			grid-template-columns: 1fr;
+		}
+
+		.control {
+			min-height: 44px;
 		}
 	}
 </style>
