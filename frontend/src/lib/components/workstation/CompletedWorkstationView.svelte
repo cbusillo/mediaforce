@@ -2138,11 +2138,23 @@
 		color: var(--mf-fg-on-accent);
 	}
 
+	.confirm-panel .control--danger.armed:hover:not(:disabled) {
+		background: var(--mf-fail-solid);
+		border-color: var(--mf-fail-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
 	.confirm-panel--review {
 		border-color: var(--mf-active-line);
 	}
 
 	.confirm-panel--review .control--primary.armed {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.confirm-panel--review .control--primary.armed:hover:not(:disabled) {
 		background: var(--mf-active-solid);
 		border-color: var(--mf-active-solid);
 		color: var(--mf-fg-on-accent);
@@ -2230,7 +2242,10 @@
 			grid-template-columns: 1fr;
 		}
 
-		.control {
+		.control,
+		.modebar button,
+		.completed-filter__search input,
+		.history-search input {
 			min-height: 44px;
 		}
 	}

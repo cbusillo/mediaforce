@@ -2437,6 +2437,7 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
       timeout: timeoutMs,
     });
     const completedRegister = page.locator(".completed-table");
+    await completedRegister.waitFor();
     const completedPanel = completedRegister.locator(
       "xpath=ancestor::section[contains(concat(' ', normalize-space(@class), ' '), ' panel ')]",
     );
@@ -2542,6 +2543,30 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
     ) {
       throw new Error(
         "Finished delete trigger did not bind to its rendered confirmation.",
+      );
+    }
+    const confirmRestStyle = await selectedDeleteConfirm.evaluate((button) => {
+      const style = getComputedStyle(button);
+      return {
+        background: style.backgroundColor,
+        border: style.borderColor,
+        color: style.color,
+      };
+    });
+    await selectedDeleteConfirm.hover();
+    const confirmHoverStyle = await selectedDeleteConfirm.evaluate((button) => {
+      const style = getComputedStyle(button);
+      return {
+        background: style.backgroundColor,
+        border: style.borderColor,
+        color: style.color,
+      };
+    });
+    if (
+      JSON.stringify(confirmRestStyle) !== JSON.stringify(confirmHoverStyle)
+    ) {
+      throw new Error(
+        "Finished irreversible confirmation weakened its destructive state on hover.",
       );
     }
     await selectedDeleteTrigger.hover();
