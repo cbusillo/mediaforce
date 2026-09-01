@@ -20,7 +20,6 @@
 		buildMarkHandledConfirmCopy,
 		buildCompletedFooterSignals,
 		buildCompletedHistoryRows,
-		buildCompletedReadinessSummary,
 		buildCompletedStatusTiles,
 		cleanupDetail,
 		cleanupActionBlockers,
@@ -72,8 +71,8 @@
 	let selectedCleanupTrigger = $state<HTMLButtonElement | null>(null);
 	let globalCleanupTrigger = $state<HTMLButtonElement | null>(null);
 	let reviewCleanupTrigger = $state<HTMLButtonElement | null>(null);
-	let deleteConfirmButton = $state<HTMLButtonElement | null>(null);
-	let reviewConfirmButton = $state<HTMLButtonElement | null>(null);
+	let deleteConfirmPanel = $state<HTMLElement | null>(null);
+	let reviewConfirmPanel = $state<HTMLElement | null>(null);
 	let actionStatusMessage = $state<HTMLParagraphElement | null>(null);
 	let cleanupPending = $state(false);
 	let reviewPending = $state(false);
@@ -98,7 +97,6 @@
 	);
 	const statusTiles = $derived(buildCompletedStatusTiles(completed, actionError || loadError));
 	const footerSignals = $derived(buildCompletedFooterSignals(completed));
-	const readiness = $derived(buildCompletedReadinessSummary(completed, actionError || loadError));
 	const libraryOptions = $derived(completedLibraryOptions(folders));
 	const stateOptions = $derived(completedStateOptions(folders, archive));
 	const normalizedSearchQuery = $derived(searchQuery.trim().toLowerCase());
@@ -144,37 +142,16 @@
 	const counts = $derived(cleanupStateCounts(folders, archive));
 	const recommendedFolder = $derived(cleanupReadyFolders[0] ?? null);
 	const cleanupWorkAvailable = $derived(archive.has_cleanup || cleanupReadyFolders.length > 0);
+	const cleanupDeleteRelevant = $derived(cleanupWorkAvailable || counts.blocked > 0);
 	const cleanupReviewCount = $derived(counts.blocked + counts.unknown);
 	const cleanupNeedsAction = $derived(cleanupWorkAvailable || cleanupReviewCount > 0);
 	const cleanupStatusTone = $derived(
 		cleanupReadyFolders.length > 0 ? 'ready' : cleanupReviewCount > 0 ? 'wait' : 'idle'
 	);
-	const cleanupStatusLabel = $derived(
-		cleanupReadyFolders.length > 0
-			? 'Backups ready to delete'
-			: cleanupReviewCount > 0
-				? 'Review needed'
-				: 'Settled'
-	);
-	const cleanupStatusTitle = $derived(
-		cleanupReadyFolders.length > 0
-			? `${cleanupReadyFolders.length.toLocaleString('en-US')} finished items have original backups ready to delete.`
-			: cleanupReviewCount > 0
-				? `${cleanupReviewCount.toLocaleString('en-US')} finished items need review.`
-				: 'No original backups are waiting.'
-	);
-	const cleanupStatusDetail = $derived(
-		cleanupReadyFolders.length > 0
-			? 'Review the media below before deleting its original backups.'
-			: cleanupReviewCount > 0
-				? 'Check the finished files, then mark backups already gone as handled.'
-				: 'Past changes remain available in History.'
-	);
 	const historyRows = $derived([
 		...localHistory.map((event) => ({ ...event, source: 'api' as const })),
 		...(completed ? buildCompletedHistoryRows(completed) : [])
 	]);
-	const showMainHistorySummary = $derived(!cleanupNeedsAction && historyRows.length > 0);
 	const normalizedHistoryQuery = $derived(historyQuery.trim().toLowerCase());
 	const visibleHistory = $derived(
 		historyRows.filter((event) => {
@@ -184,13 +161,13 @@
 	);
 	const selectedSummary = $derived(
 		selectedFolders.length
-			? `${selectedFolders.length.toLocaleString('en-US')} folders · ${selectedBackupCount.toLocaleString('en-US')} files · ${formatBytes(selectedBackupSize)}`
-			: 'No folders with original backups are selected'
+			? `${countLabel(selectedFolders.length, 'folder')} · ${countLabel(selectedBackupCount, 'file')} · ${formatBytes(selectedBackupSize)}`
+			: 'None selected'
 	);
 	const reviewSummary = $derived(
 		reviewFolders.length
-			? `${reviewFolders.length.toLocaleString('en-US')} folders · ${reviewItemCount.toLocaleString('en-US')} original backups already gone`
-			: 'No folders selected for review'
+			? `${countLabel(reviewFolders.length, 'folder')} · ${countLabel(reviewItemCount, 'original backup')} already gone`
+			: 'None selected'
 	);
 	const actionBlockers = $derived(
 		cleanupActionBlockers({
@@ -201,13 +178,6 @@
 			cleanupPending,
 			reviewPending
 		})
-	);
-	const globalCleanupBlockerId = $derived(
-		actionBlockers.global
-			? actionBlockers.global === actionBlockers.selected
-				? 'selected-cleanup-blocker'
-				: 'global-cleanup-blocker'
-			: undefined
 	);
 	$effect(() => {
 		if (armedScope && !cleanupPending && cleanupDisabled(armedScope)) {
@@ -239,6 +209,10 @@
 
 	function libraryKey(label: string): string {
 		return label.trim().toLowerCase() || 'library';
+	}
+
+	function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+		return `${count.toLocaleString('en-US')} ${count === 1 ? singular : plural}`;
 	}
 
 	function libraryIncluded(key: string): boolean {
@@ -341,7 +315,7 @@
 		armedReview = null;
 		await tick();
 		(shouldArm
-			? deleteConfirmButton
+			? deleteConfirmPanel
 			: scope === 'selected'
 				? selectedCleanupTrigger
 				: globalCleanupTrigger
@@ -357,7 +331,7 @@
 		const shouldArm = armedReview !== scope;
 		armedReview = shouldArm ? scope : null;
 		await tick();
-		(shouldArm ? reviewConfirmButton : reviewCleanupTrigger)?.focus();
+		(shouldArm ? reviewConfirmPanel : reviewCleanupTrigger)?.focus();
 	}
 
 	async function cancelCleanupConfirmation(scope: CompletedCleanupScope) {
@@ -422,7 +396,7 @@
 		} finally {
 			reviewPending = false;
 			await tick();
-			(armedReview ? reviewConfirmButton : actionStatusMessage)?.focus();
+			(armedReview ? reviewConfirmPanel : actionStatusMessage)?.focus();
 		}
 	}
 
@@ -476,7 +450,7 @@
 		} finally {
 			cleanupPending = false;
 			await tick();
-			(armedScope ? deleteConfirmButton : actionStatusMessage)?.focus();
+			(armedScope ? deleteConfirmPanel : actionStatusMessage)?.focus();
 		}
 	}
 
@@ -513,32 +487,25 @@
 >
 	<main class="completed">
 		<section class="completed__main" aria-label="Finished media">
-			<header class="completed-header">
+			<h1 class="sr-only">Finished media</h1>
+			<div class="completed-metrics" aria-label="Finished media summary">
 				<div>
-					<span class="mf-eyebrow">Finished</span>
-					<h1>Finished media</h1>
-					<p>{readiness.detail}</p>
+					<span>Finished</span>
+					<strong>{folders.length.toLocaleString('en-US')}</strong>
 				</div>
-				<div class="completed-header__facts" aria-label="Finished backup totals">
-					<div>
-						<span>Finished</span>
-						<strong>{folders.length.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Backups to delete</span>
-						<strong>{counts.ready.toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Needs review</span>
-						<strong>{(counts.blocked + counts.unknown).toLocaleString('en-US')}</strong>
-					</div>
-					<div>
-						<span>Space saved</span>
-						<strong>{formatBytes(totalSavedSize(folders))}</strong>
-					</div>
+				<div class:completed-metrics__attention={counts.ready > 0}>
+					<span>Backups to delete</span>
+					<strong>{counts.ready.toLocaleString('en-US')}</strong>
 				</div>
-			</header>
-
+				<div class:completed-metrics__attention={counts.blocked + counts.unknown > 0}>
+					<span>Needs review</span>
+					<strong>{(counts.blocked + counts.unknown).toLocaleString('en-US')}</strong>
+				</div>
+				<div>
+					<span>Space saved</span>
+					<strong>{formatBytes(totalSavedSize(folders))}</strong>
+				</div>
+			</div>
 			<div class="modebar" role="tablist" aria-label="Finished media views">
 				<button
 					type="button"
@@ -563,55 +530,12 @@
 					</div>
 				</WorkstationPanel>
 			{:else if mode === 'completed'}
-				<WorkstationPanel eyebrow="Backups" title="What needs attention">
-					<div class="cleanup-status cleanup-status--{cleanupStatusTone}">
-						<StateBadge tone={cleanupStatusTone} label={cleanupStatusLabel} />
-						<div>
-							<strong>{cleanupStatusTitle}</strong>
-							<span>{cleanupStatusDetail}</span>
-						</div>
-					</div>
-				</WorkstationPanel>
-
-				{#if showMainHistorySummary}
-					<WorkstationPanel
-						eyebrow="History"
-						title="Recent changes"
-						meta={`${historyRows.length.toLocaleString('en-US')} events`}
-					>
-						<div class="history-list history-list--summary">
-							{#each historyRows.slice(0, 5) as event (`summary:${event.source}:${event.id}:${event.created_at}`)}
-								<div class="history-row">
-									<StateBadge
-										compact
-										tone={eventTone(event.tone)}
-										label={completedHistoryLabel(event)}
-									/>
-									<div>
-										<strong>{event.title}</strong>
-										<span>{event.prefix}</span>
-									</div>
-									<p>{completedHistoryDetail(event.detail, event)}</p>
-									<time>{formatTimestamp(event.created_at)}</time>
-								</div>
-							{/each}
-						</div>
-					</WorkstationPanel>
-				{/if}
-
-				<WorkstationPanel eyebrow="Library" title="Find finished media">
+				<WorkstationPanel
+					eyebrow="Register"
+					title="Finished media"
+					meta={`${filteredFolders.length.toLocaleString('en-US')} of ${folders.length.toLocaleString('en-US')} visible`}
+				>
 					<div class="completed-filter" aria-label="Finished backup filters">
-						<div class="completed-filter__summary">
-							<span>Visible media</span>
-							<strong
-								>{filteredFolders.length.toLocaleString('en-US')} / {folders.length.toLocaleString(
-									'en-US'
-								)}
-								items</strong
-							>
-							<small>{reviewFolders.length > 0 ? reviewSummary : selectedSummary}</small>
-						</div>
-
 						<label class="completed-filter__search">
 							<span>Search</span>
 							<input
@@ -622,191 +546,243 @@
 							/>
 						</label>
 
-						<div class="completed-filter__group">
-							<div class="completed-filter__group-head">
-								<span>Libraries</span>
-								<div class="completed-filter__actions" aria-label="Bulk library filters">
-									<button type="button" onclick={() => setAllLibraries(true)}>All</button>
-									<button type="button" onclick={() => setAllLibraries(false)}>None</button>
-								</div>
-							</div>
-							{#each libraryOptions as option (option.key)}
-								<label class="completed-filter__row" class:excluded={!libraryIncluded(option.key)}>
-									<input
-										type="checkbox"
-										checked={libraryIncluded(option.key)}
-										onchange={(event) => handleLibraryFilterChange(option.key, event)}
-									/>
-									<span>
-										<strong>{option.label}</strong>
-										<small
-											>{option.folders.toLocaleString('en-US')} folders · {option.backups.toLocaleString(
-												'en-US'
-											)}
-											original backups</small
-										>
-									</span>
-									<em>{formatBytes(option.size)}</em>
-								</label>
-							{/each}
-						</div>
-
-						<div class="completed-filter__group">
-							<div class="completed-filter__group-head">
-								<span>Folder state</span>
-								<div class="completed-filter__actions" aria-label="Bulk cleanup state filters">
-									<button type="button" onclick={() => setAllStates(true)}>All</button>
-									<button type="button" onclick={() => setAllStates(false)}>None</button>
-								</div>
-							</div>
-							{#each stateOptions as option (option.key)}
-								<label
-									class="completed-filter__row"
-									class:excluded={!stateIncluded(option.key as CleanupState)}
+						<details class="completed-filter__advanced">
+							<summary>
+								<span>Filters</span>
+								<small
+									>{countLabel(libraryOptions.length, 'library', 'libraries')} · {countLabel(
+										stateOptions.length,
+										'state'
+									)}</small
 								>
-									<input
-										type="checkbox"
-										checked={stateIncluded(option.key as CleanupState)}
-										onchange={(event) => handleStateFilterChange(option.key, event)}
-									/>
-									<span>
-										<strong>{option.label}</strong>
-										<small
-											>{option.folders.toLocaleString('en-US')} folders · {option.backups.toLocaleString(
-												'en-US'
-											)}
-											original backups</small
+							</summary>
+							<div class="completed-filter__advanced-body">
+								<div class="completed-filter__group">
+									<div class="completed-filter__group-head">
+										<span>Libraries</span>
+										<div class="completed-filter__actions" aria-label="Bulk library filters">
+											<button type="button" onclick={() => setAllLibraries(true)}>All</button>
+											<button type="button" onclick={() => setAllLibraries(false)}>None</button>
+										</div>
+									</div>
+									{#each libraryOptions as option (option.key)}
+										<label
+											class="completed-filter__row"
+											class:excluded={!libraryIncluded(option.key)}
 										>
-									</span>
-									<em>{formatBytes(option.size)}</em>
-								</label>
-							{/each}
+											<input
+												type="checkbox"
+												checked={libraryIncluded(option.key)}
+												onchange={(event) => handleLibraryFilterChange(option.key, event)}
+											/>
+											<span>
+												<strong>{option.label}</strong>
+												<small
+													>{countLabel(option.folders, 'folder')} · {countLabel(
+														option.backups,
+														'original backup'
+													)}</small
+												>
+											</span>
+											<em>{formatBytes(option.size)}</em>
+										</label>
+									{/each}
+								</div>
+
+								<div class="completed-filter__group">
+									<div class="completed-filter__group-head">
+										<span>Folder state</span>
+										<div class="completed-filter__actions" aria-label="Bulk cleanup state filters">
+											<button type="button" onclick={() => setAllStates(true)}>All</button>
+											<button type="button" onclick={() => setAllStates(false)}>None</button>
+										</div>
+									</div>
+									{#each stateOptions as option (option.key)}
+										<label
+											class="completed-filter__row"
+											class:excluded={!stateIncluded(option.key as CleanupState)}
+										>
+											<input
+												type="checkbox"
+												checked={stateIncluded(option.key as CleanupState)}
+												onchange={(event) => handleStateFilterChange(option.key, event)}
+											/>
+											<span>
+												<strong>{option.label}</strong>
+												<small
+													>{countLabel(option.folders, 'folder')} · {countLabel(
+														option.backups,
+														'original backup'
+													)}</small
+												>
+											</span>
+											<em>{formatBytes(option.size)}</em>
+										</label>
+									{/each}
+								</div>
+							</div>
+						</details>
+
+						<div class="selection-bar" aria-label="Finished media selection">
+							<div class="selection-bar__summary">
+								<span>Selected for deletion</span>
+								<strong>{selectedSummary}</strong>
+							</div>
+							<div class="selection-bar__summary">
+								<span>Selected for review</span>
+								<strong>{reviewSummary}</strong>
+							</div>
+							<div class="selection-bar__actions">
+								<button
+									type="button"
+									class="control"
+									disabled={filteredReadyFolders.length === 0}
+									onclick={selectVisibleReady}>Select visible backups</button
+								>
+								<button
+									type="button"
+									class="control"
+									disabled={filteredReviewFolders.length === 0}
+									onclick={selectVisibleReview}>Select visible already-gone folders</button
+								>
+								<button
+									type="button"
+									class="control"
+									disabled={selectedFolders.length === 0 && reviewFolders.length === 0}
+									onclick={clearSelection}>Clear selection</button
+								>
+							</div>
 						</div>
 					</div>
-				</WorkstationPanel>
 
-				{#if cleanupNeedsAction}
-					<WorkstationPanel
-						eyebrow="Backups"
-						title={cleanupWorkAvailable
-							? 'Choose what to do with original backups'
-							: cleanupReviewCount > 0
-								? 'Review original backups that are already gone'
-								: 'Nothing to delete'}
-					>
+					{#if cleanupNeedsAction}
 						<div class="cleanup-command">
 							<div class="cleanup-command__state">
 								<StateBadge
 									tone={cleanupStatusTone}
 									label={recommendedFolder
 										? 'Backups ready to delete'
-										: cleanupReviewCount > 0
-											? 'Needs review'
-											: 'No action'}
+										: counts.blocked > 0
+											? 'Check before deleting'
+											: counts.unknown > 0
+												? 'Needs review'
+												: 'No action'}
 								/>
 								<div>
 									<strong
 										>{recommendedFolder
 											? `${recommendedFolder.title} is ready for your decision`
-											: cleanupReviewCount > 0
-												? 'Some original backups are already gone'
-												: 'Completed work is handled'}</strong
+											: counts.blocked > 0
+												? 'Some original backups need a location check'
+												: counts.unknown > 0
+													? 'Some original backups are already gone'
+													: 'Completed work is handled'}</strong
 									>
 									<span
 										>{recommendedFolder
 											? cleanupDetail(recommendedFolder, archive)
-											: cleanupReviewCount > 0
-												? 'After checking the finished files, mark these folders handled so they leave review.'
-												: archive.archive_root
-													? `No original backups are waiting in ${archive.archive_root}.`
-													: 'Cleanup folder is not set, and no finished folder needs action.'}</span
+											: counts.blocked > 0
+												? 'Mediaforce cannot verify these original backups until their Cleanup folder is available.'
+												: counts.unknown > 0
+													? 'After checking the finished files, mark these folders handled so they leave review.'
+													: archive.archive_root
+														? `No original backups are waiting in ${archive.archive_root}.`
+														: 'Cleanup folder is not set, and no finished folder needs action.'}</span
 									>
 								</div>
 							</div>
 
-							{#if cleanupWorkAvailable || cleanupReviewCount > 0}
-								<div class="cleanup-command__actions" aria-label="Original backup actions">
-									<button
-										type="button"
-										class="control"
-										disabled={filteredReadyFolders.length === 0}
-										onclick={selectVisibleReady}>Select visible backups</button
-									>
-									<button
-										type="button"
-										class="control"
-										disabled={filteredReviewFolders.length === 0}
-										onclick={selectVisibleReview}>Select visible already-gone folders</button
-									>
-									<button
-										type="button"
-										class="control"
-										disabled={selectedFolders.length === 0 && reviewFolders.length === 0}
-										onclick={clearSelection}>Clear selection</button
-									>
-									<button
-										type="button"
-										class="control control--danger"
-										class:armed={armedScope === 'selected'}
-										disabled={cleanupDisabled('selected')}
-										aria-expanded={armedScope === 'selected'}
-										aria-controls="selected-cleanup-confirm"
-										aria-describedby={actionBlockers.selected
-											? 'selected-cleanup-blocker'
-											: undefined}
-										bind:this={selectedCleanupTrigger}
-										onclick={() => armCleanup('selected')}>Delete selected original backups</button
-									>
-									<button
-										type="button"
-										class="control control--danger"
-										class:armed={armedScope === 'global'}
-										disabled={cleanupDisabled('global')}
-										aria-expanded={armedScope === 'global'}
-										aria-controls="global-cleanup-confirm"
-										aria-describedby={globalCleanupBlockerId}
-										bind:this={globalCleanupTrigger}
-										onclick={() => armCleanup('global')}>Delete all original backups</button
-									>
-									<button
-										type="button"
-										class="control control--primary"
-										class:armed={armedReview === 'already-removed'}
-										disabled={actionBlockers.review !== null}
-										aria-expanded={armedReview === 'already-removed'}
-										aria-controls="review-cleanup-confirm"
-										aria-describedby={actionBlockers.review ? 'review-cleanup-blocker' : undefined}
-										bind:this={reviewCleanupTrigger}
-										onclick={() => armReview('already-removed')}
-										>Mark backups already gone as handled</button
-									>
-								</div>
-								<div class="control-notes" aria-live="polite">
-									{#if actionBlockers.selected}
-										<p id="selected-cleanup-blocker">{actionBlockers.selected}</p>
-									{/if}
-									{#if actionBlockers.global && actionBlockers.global !== actionBlockers.selected}
-										<p id="global-cleanup-blocker">{actionBlockers.global}</p>
-									{/if}
-									{#if actionBlockers.review}
-										<p id="review-cleanup-blocker">{actionBlockers.review}</p>
-									{/if}
-								</div>
-							{:else}
-								<div class="cleanup-standby" aria-label="Cleanup standby state">
-									<span>Nothing to delete</span>
-									<strong
-										>{cleanupReviewCount > 0
-											? `${cleanupReviewCount.toLocaleString('en-US')} finished folders need review.`
-											: `${folders.length.toLocaleString('en-US')} finished folders are handled and shown only as history.`}</strong
-									>
-									<small
-										>{cleanupReviewCount > 0
-											? 'Check the finished files, then mark the already-gone original backups as handled.'
-											: 'Scoped delete controls return when original backups are waiting.'}</small
-									>
-								</div>
-							{/if}
+							<div class="cleanup-actions" aria-label="Original backup actions">
+								{#if cleanupReviewCount > 0}
+									<section class="action-command action-command--review">
+										<div class="action-command__copy">
+											<span>Review resolution</span>
+											<strong>Record backups that are already gone</strong>
+											<small>This updates the audit state. It does not delete files.</small>
+										</div>
+										<div class="action-command__control">
+											<button
+												type="button"
+												class="control control--primary"
+												class:armed={armedReview === 'already-removed'}
+												disabled={actionBlockers.review !== null}
+												aria-describedby={actionBlockers.review
+													? 'review-cleanup-blocker'
+													: undefined}
+												aria-expanded={armedReview === 'already-removed'}
+												aria-controls={armedReview === 'already-removed'
+													? 'review-cleanup-confirm'
+													: undefined}
+												bind:this={reviewCleanupTrigger}
+												onclick={() => armReview('already-removed')}
+												>Mark backups already gone as handled</button
+											>
+											{#if actionBlockers.review}
+												<span id="review-cleanup-blocker" class="action-blocker"
+													>{actionBlockers.review}</span
+												>
+											{/if}
+										</div>
+									</section>
+								{/if}
+
+								{#if cleanupDeleteRelevant}
+									<section class="action-command action-command--danger">
+										<div class="action-command__copy">
+											<span>Destructive cleanup</span>
+											<strong>Delete original backups</strong>
+											<small>Deletion is permanent and always requires confirmation.</small>
+										</div>
+										<div class="action-command__options">
+											<div class="action-command__control">
+												<button
+													type="button"
+													class="control control--danger"
+													class:armed={armedScope === 'selected'}
+													disabled={cleanupDisabled('selected')}
+													aria-describedby={actionBlockers.selected
+														? 'selected-cleanup-blocker'
+														: undefined}
+													aria-expanded={armedScope === 'selected'}
+													aria-controls={armedScope === 'selected'
+														? 'selected-cleanup-confirm'
+														: undefined}
+													bind:this={selectedCleanupTrigger}
+													onclick={() => armCleanup('selected')}
+													>Delete selected original backups</button
+												>
+												{#if actionBlockers.selected}
+													<span id="selected-cleanup-blocker" class="action-blocker"
+														>{actionBlockers.selected}</span
+													>
+												{/if}
+											</div>
+											<div class="action-command__control">
+												<button
+													type="button"
+													class="control control--danger"
+													class:armed={armedScope === 'global'}
+													disabled={cleanupDisabled('global')}
+													aria-describedby={actionBlockers.global
+														? 'global-cleanup-blocker'
+														: undefined}
+													aria-expanded={armedScope === 'global'}
+													aria-controls={armedScope === 'global'
+														? 'global-cleanup-confirm'
+														: undefined}
+													bind:this={globalCleanupTrigger}
+													onclick={() => armCleanup('global')}>Delete all original backups</button
+												>
+												{#if actionBlockers.global}
+													<span id="global-cleanup-blocker" class="action-blocker"
+														>{actionBlockers.global}</span
+													>
+												{/if}
+											</div>
+										</div>
+									</section>
+								{/if}
+							</div>
 
 							{#if armedScope && deleteConfirmCopy}
 								{@const scope = armedScope}
@@ -816,6 +792,7 @@
 									role="alertdialog"
 									aria-label="Confirm original backup deletion"
 									tabindex="-1"
+									bind:this={deleteConfirmPanel}
 									onkeydown={(event) => {
 										if (event.key === 'Escape' && !cleanupPending) {
 											event.preventDefault();
@@ -834,7 +811,6 @@
 											type="button"
 											class="control control--danger armed"
 											disabled={cleanupPending}
-											bind:this={deleteConfirmButton}
 											onclick={() => confirmCleanup(scope)}
 											>{cleanupPending ? 'Deleting…' : deleteConfirmCopy.confirmLabel}</button
 										>
@@ -855,6 +831,7 @@
 									role="alertdialog"
 									aria-label="Confirm already-gone original backups"
 									tabindex="-1"
+									bind:this={reviewConfirmPanel}
 									onkeydown={(event) => {
 										if (event.key === 'Escape' && !reviewPending) {
 											event.preventDefault();
@@ -872,7 +849,6 @@
 											type="button"
 											class="control control--primary armed"
 											disabled={reviewPending}
-											bind:this={reviewConfirmButton}
 											onclick={confirmAlreadyRemoved}
 											>{reviewPending
 												? 'Marking handled…'
@@ -916,14 +892,8 @@
 								</div>
 							{/if}
 						</div>
-					</WorkstationPanel>
-				{/if}
+					{/if}
 
-				<WorkstationPanel
-					eyebrow="Media"
-					title="Finished media list"
-					meta={`${filteredFolders.length.toLocaleString('en-US')} visible`}
-				>
 					<div class="table-wrap">
 						<table class="completed-table">
 							<colgroup>
@@ -977,8 +947,7 @@
 											</div>
 										</td>
 										<td class="originals-cell" data-label="Original backups">
-											<strong>{folder.archived_backup_count.toLocaleString('en-US')} backups</strong
-											>
+											<strong>{countLabel(folder.archived_backup_count, 'backup')}</strong>
 											<span
 												>{formatBytes(folder.archived_backup_size_bytes)} reclaim · {folder.promoted_item_count.toLocaleString(
 													'en-US'
@@ -1005,7 +974,7 @@
 				<WorkstationPanel
 					eyebrow="History"
 					title="Handled history"
-					meta={`${visibleHistory.length.toLocaleString('en-US')} visible`}
+					meta={`${visibleHistory.length.toLocaleString('en-US')} of ${historyRows.length.toLocaleString('en-US')} events`}
 				>
 					<div class="history-workspace">
 						<label class="history-search">
@@ -1059,24 +1028,24 @@
 				<div class="scope-list">
 					<div class="scope-row scope-row--ready">
 						<span>Ready to delete</span>
-						<strong>{counts.ready.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.ready, 'folder')}</strong>
 						<small
 							>{formatBytes(totalArchivedBackupSize(cleanupReadyFolders))} in the Cleanup folder</small
 						>
 					</div>
 					<div class="scope-row" class:scope-row--fail={counts.blocked > 0}>
 						<span>Check before deleting</span>
-						<strong>{counts.blocked.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.blocked, 'folder')}</strong>
 						<small>Mediaforce cannot verify these original backups</small>
 					</div>
 					<div class="scope-row" class:scope-row--wait={counts.unknown > 0}>
 						<span>Already gone</span>
-						<strong>{counts.unknown.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.unknown, 'folder')}</strong>
 						<small>nothing to delete; mark handled after checking</small>
 					</div>
 					<div class="scope-row">
 						<span>Nothing to delete</span>
-						<strong>{counts.cleaned.toLocaleString('en-US')} folders</strong>
+						<strong>{countLabel(counts.cleaned, 'folder')}</strong>
 						<small>no original backups are waiting</small>
 					</div>
 				</div>
@@ -1120,6 +1089,16 @@
 </OperatorShell>
 
 <style>
+	.sr-only {
+		clip: rect(0, 0, 0, 0);
+		clip-path: inset(50%);
+		height: 1px;
+		overflow: hidden;
+		position: absolute;
+		white-space: nowrap;
+		width: 1px;
+	}
+
 	.completed {
 		display: grid;
 		grid-template-columns: minmax(0, 1fr) var(--mf-workstation-rail-width);
@@ -1145,41 +1124,12 @@
 		padding: var(--mf-space-5);
 	}
 
-	.completed-header {
-		align-items: end;
-		border-bottom: var(--mf-border);
-		display: grid;
-		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr) auto;
-		padding-bottom: var(--mf-space-5);
-	}
-
-	.completed-header h1 {
-		margin-top: var(--mf-space-3);
-	}
-
-	.completed-header p {
-		margin-top: var(--mf-space-3);
-		max-width: 78ch;
-	}
-
-	.completed-header__facts {
-		display: flex;
-		flex-wrap: wrap;
-		gap: var(--mf-space-5);
-	}
-
-	.completed-header__facts div {
-		display: grid;
-		gap: var(--mf-space-2);
-		min-width: 82px;
-	}
-
-	.completed-header__facts span,
-	.completed-filter__summary span,
+	.completed-metrics span,
 	.completed-filter__search span,
 	.completed-filter__group-head > span,
 	.completed-filter__row small,
+	.selection-bar__summary span,
+	.action-command__copy > span,
 	.history-search span,
 	.scope-row span,
 	.kv dt {
@@ -1190,8 +1140,8 @@
 		text-transform: uppercase;
 	}
 
-	.completed-header__facts strong,
-	.completed-filter__summary strong,
+	.completed-metrics strong,
+	.selection-bar__summary strong,
 	.kv dd {
 		font-family: var(--mf-font-mono), monospace;
 		font-size: var(--mf-text-sm);
@@ -1226,7 +1176,6 @@
 	}
 
 	.completed-filter,
-	.cleanup-status,
 	.cleanup-command,
 	.scope-list,
 	.history-workspace,
@@ -1239,29 +1188,17 @@
 
 	.completed-filter {
 		align-items: start;
-		grid-template-columns:
-			minmax(170px, 0.7fr) minmax(240px, 1fr) minmax(220px, 0.85fr)
-			minmax(220px, 0.85fr);
+		grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.7fr);
 	}
 
-	.completed-filter__summary,
 	.completed-filter__search,
 	.completed-filter__group,
-	.cleanup-status > div,
 	.cleanup-command__state > div {
 		min-width: 0;
 	}
 
-	.completed-filter__summary {
-		border-left: 2px solid var(--mf-active-fg);
-		display: grid;
-		gap: var(--mf-space-2);
-		padding: var(--mf-space-3) var(--mf-space-4);
-	}
-
-	.completed-filter__summary small,
-	.cleanup-status span,
 	.cleanup-command__state span,
+	.action-command__copy small,
 	.scope-row small,
 	.folder-link span,
 	.state-detail,
@@ -1289,6 +1226,41 @@
 		min-height: var(--mf-control-lg);
 		padding: 0 var(--mf-space-4);
 		width: 100%;
+	}
+
+	.completed-filter__advanced {
+		background: var(--mf-bg-panel-2);
+		border: var(--mf-border-muted);
+		border-radius: var(--mf-radius-1);
+		min-width: 0;
+	}
+
+	.completed-filter__advanced summary {
+		align-items: center;
+		cursor: pointer;
+		display: flex;
+		gap: var(--mf-space-3);
+		justify-content: space-between;
+		min-height: var(--mf-control-lg);
+		padding: 0 var(--mf-space-4);
+	}
+
+	.completed-filter__advanced summary span {
+		font-size: var(--mf-text-xs);
+		font-weight: var(--mf-weight-semibold);
+	}
+
+	.completed-filter__advanced summary small {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+	}
+
+	.completed-filter__advanced-body {
+		border-top: var(--mf-border-muted);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		padding: var(--mf-space-4);
 	}
 
 	.completed-filter__group-head {
@@ -1356,6 +1328,35 @@
 		font-style: normal;
 	}
 
+	.selection-bar {
+		align-items: start;
+		background: var(--mf-bg-strip);
+		border: var(--mf-border-muted);
+		border-radius: var(--mf-radius-1);
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-column: 1 / -1;
+		grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+		padding: var(--mf-space-4);
+	}
+
+	.selection-bar__summary {
+		display: grid;
+		gap: var(--mf-space-1);
+		min-width: 0;
+	}
+
+	.selection-bar__summary strong {
+		overflow-wrap: anywhere;
+	}
+
+	.selection-bar__actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--mf-space-2);
+		justify-content: flex-end;
+	}
+
 	.cleanup-command__state {
 		align-items: center;
 		display: grid;
@@ -1363,31 +1364,11 @@
 		grid-template-columns: auto minmax(0, 1fr);
 	}
 
-	.cleanup-status {
-		align-items: center;
-		background: var(--mf-bg-strip);
-		border-left: 2px solid var(--mf-line-strong);
-		grid-template-columns: auto minmax(0, 1fr);
-		min-height: var(--mf-row-comfy);
-	}
-
-	.cleanup-status--ready {
-		background: var(--mf-ready-bg);
-		border-left-color: var(--mf-ready-fg);
-	}
-
-	.cleanup-status--wait {
-		background: var(--mf-wait-bg);
-		border-left-color: var(--mf-wait-fg);
-	}
-
-	.cleanup-status > div,
 	.cleanup-command__state > div {
 		display: grid;
 		gap: var(--mf-space-1);
 	}
 
-	.cleanup-status strong,
 	.cleanup-command__state strong,
 	.scope-row strong,
 	.history-row strong,
@@ -1403,49 +1384,66 @@
 		gap: var(--mf-space-1);
 	}
 
-	.cleanup-command__actions,
 	.confirm-panel__actions {
 		display: flex;
 		flex-wrap: wrap;
 		gap: var(--mf-space-3);
 	}
 
-	.control-notes {
+	.cleanup-actions {
 		display: grid;
-		gap: var(--mf-space-1);
+		gap: var(--mf-space-3);
 	}
 
-	.control-notes p {
-		color: var(--mf-fg-tertiary);
-		font-size: var(--mf-text-xs);
-		margin: 0;
-	}
-
-	.cleanup-standby {
+	.action-command {
+		align-items: start;
 		background: var(--mf-bg-panel-2);
 		border: var(--mf-border-muted);
-		border-left: 2px solid var(--mf-line-strong);
+		border-left: 3px solid var(--mf-line-strong);
 		display: grid;
-		gap: var(--mf-space-2);
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
 		padding: var(--mf-space-4);
 	}
 
-	.cleanup-standby span {
-		color: var(--mf-fg-tertiary);
-		font-size: var(--mf-text-2xs);
-		font-weight: var(--mf-weight-semibold);
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
+	.action-command--review {
+		border-left-color: var(--mf-active-fg);
 	}
 
-	.cleanup-standby strong {
+	.action-command--danger {
+		border-left-color: var(--mf-fail-fg);
+	}
+
+	.action-command__copy,
+	.action-command__control {
+		display: grid;
+		gap: var(--mf-space-2);
+		min-width: 0;
+	}
+
+	.action-command__copy strong {
 		font-size: var(--mf-text-sm);
 		font-weight: var(--mf-weight-semibold);
 	}
 
-	.cleanup-standby small {
+	.action-command__options {
+		display: grid;
+		gap: var(--mf-space-3);
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		min-width: 0;
+	}
+
+	.action-command__control .control {
+		align-self: start;
+		justify-self: stretch;
+		white-space: normal;
+		width: 100%;
+	}
+
+	.action-blocker {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
+		overflow-wrap: anywhere;
 	}
 
 	.confirm-panel {
@@ -1718,10 +1716,6 @@
 		padding: 0;
 	}
 
-	.history-list--summary {
-		padding: var(--mf-space-5);
-	}
-
 	.history-row {
 		background: var(--mf-bg-panel-2);
 		border: var(--mf-border-muted);
@@ -1782,7 +1776,6 @@
 			border-top: var(--mf-border);
 		}
 
-		.completed-header,
 		.confirm-panel {
 			grid-template-columns: 1fr;
 		}
@@ -1799,23 +1792,34 @@
 		}
 
 		.cleanup-command__state,
-		.cleanup-status,
+		.action-command,
+		.action-command__options,
+		.completed-filter__advanced-body,
+		.selection-bar,
 		.history-row,
 		.history-list--wide .history-row {
 			align-items: start;
 			grid-template-columns: 1fr;
 		}
 
-		.cleanup-command__actions,
 		.confirm-panel__actions {
 			align-items: stretch;
 			flex-direction: column;
 		}
 
-		.cleanup-command__actions .control,
 		.confirm-panel__actions .control {
 			justify-content: center;
 			white-space: normal;
+			width: 100%;
+		}
+
+		.selection-bar__actions {
+			justify-content: stretch;
+		}
+
+		.selection-bar__actions .control,
+		.action-command__control .control {
+			justify-self: stretch;
 			width: 100%;
 		}
 
@@ -1913,31 +1917,6 @@
 		display: none;
 	}
 
-	.completed-header {
-		align-items: flex-end;
-		border: 0;
-		display: flex;
-		gap: 20px;
-		justify-content: space-between;
-		padding: 0 0 8px;
-	}
-
-	.completed-header > div:first-child {
-		display: grid;
-		gap: 5px;
-	}
-
-	.completed-header h1 {
-		font-size: clamp(22px, 2.5vw, 28px);
-		font-weight: 600;
-		letter-spacing: -0.02em;
-	}
-
-	.completed-header p {
-		color: var(--mf-fg-secondary);
-		font-size: 14px;
-	}
-
 	:global(.completed .mf-eyebrow) {
 		background: var(--mf-ready-bg);
 		border-radius: 999px;
@@ -1951,7 +1930,7 @@
 		width: fit-content;
 	}
 
-	.completed-header__facts {
+	.completed-metrics {
 		background: var(--mf-bg-panel);
 		border: 1px solid var(--mf-line);
 		border-radius: var(--mf-radius-3);
@@ -1960,18 +1939,18 @@
 		overflow: hidden;
 	}
 
-	.completed-header__facts div {
+	.completed-metrics div {
 		border-right: 1px solid var(--mf-line-muted);
 		display: grid;
 		gap: 2px;
 		padding: 9px 11px;
 	}
 
-	.completed-header__facts div:last-child {
+	.completed-metrics div:last-child {
 		border-right: 0;
 	}
 
-	.completed-header__facts span {
+	.completed-metrics span {
 		color: var(--mf-fg-tertiary);
 		font-family: var(--mf-font-sans);
 		font-size: 10px;
@@ -1979,10 +1958,14 @@
 		text-transform: none;
 	}
 
-	.completed-header__facts strong {
+	.completed-metrics strong {
 		color: var(--mf-fg-primary);
 		font-family: var(--mf-font-sans);
 		font-size: 15px;
+	}
+
+	.completed-metrics__attention {
+		background: var(--mf-wait-bg);
 	}
 
 	.modebar {
@@ -2013,9 +1996,7 @@
 		color: var(--mf-active-fg);
 	}
 
-	.cleanup-status,
 	.cleanup-command__state,
-	.cleanup-standby,
 	.scope-row,
 	.audit-note,
 	.history-row,
@@ -2026,14 +2007,6 @@
 		color: var(--mf-fg-primary);
 	}
 
-	.cleanup-status {
-		border-left: 0;
-		gap: 12px;
-		margin: 12px;
-		padding: 12px;
-	}
-
-	.cleanup-status strong,
 	.cleanup-command strong,
 	.scope-row strong,
 	.audit-note strong,
@@ -2042,7 +2015,6 @@
 		font-family: var(--mf-font-sans);
 	}
 
-	.cleanup-status span,
 	.cleanup-command span,
 	.cleanup-command small,
 	.scope-row span,
@@ -2055,7 +2027,6 @@
 		font-family: var(--mf-font-sans);
 	}
 
-	.history-list--summary .history-row > div span,
 	.history-row--rail > div span {
 		display: none;
 	}
@@ -2067,11 +2038,6 @@
 		padding: 12px;
 	}
 
-	.completed-filter__group {
-		display: none;
-	}
-
-	.completed-filter__summary,
 	.completed-filter__search {
 		background: var(--mf-bg-panel-2);
 		border: 1px solid var(--mf-line-muted);
@@ -2079,16 +2045,10 @@
 		padding: 11px 12px;
 	}
 
-	.completed-filter__summary span,
 	.completed-filter__search span {
 		color: var(--mf-fg-tertiary);
 		font-family: var(--mf-font-sans);
 		font-size: 11px;
-	}
-
-	.completed-filter__summary strong {
-		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-sans);
 	}
 
 	.completed-filter input,
@@ -2115,13 +2075,6 @@
 		padding: 12px;
 	}
 
-	.cleanup-command__actions {
-		background: transparent;
-		border: 0;
-		gap: 7px;
-		padding: 0;
-	}
-
 	.control {
 		background: var(--mf-bg-panel);
 		border: 1px solid var(--mf-line-strong);
@@ -2133,7 +2086,7 @@
 		padding: 0 11px;
 	}
 
-	.control:hover {
+	.control:not(.control--danger):hover:not(:disabled) {
 		background: var(--mf-bg-panel-2);
 		border-color: var(--mf-active-line);
 		color: var(--mf-active-fg);
@@ -2149,6 +2102,24 @@
 		background: var(--mf-bg-panel);
 		border-color: var(--mf-fail-line);
 		color: var(--mf-fail-fg);
+	}
+
+	.control--danger:hover:not(:disabled) {
+		background: var(--mf-fail-bg);
+		border-color: var(--mf-fail-fg);
+		color: var(--mf-fail-fg);
+	}
+
+	.control--danger.armed:hover:not(:disabled) {
+		background: var(--mf-fail-bg-strong);
+		border-color: var(--mf-fail-fg);
+		color: var(--mf-fail-fg-bright);
+	}
+
+	.control--primary.armed:hover:not(:disabled) {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
 	}
 
 	.confirm-panel {
@@ -2167,11 +2138,23 @@
 		color: var(--mf-fg-on-accent);
 	}
 
+	.confirm-panel .control--danger.armed:hover:not(:disabled) {
+		background: var(--mf-fail-solid);
+		border-color: var(--mf-fail-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
 	.confirm-panel--review {
 		border-color: var(--mf-active-line);
 	}
 
 	.confirm-panel--review .control--primary.armed {
+		background: var(--mf-active-solid);
+		border-color: var(--mf-active-solid);
+		color: var(--mf-fg-on-accent);
+	}
+
+	.confirm-panel--review .control--primary.armed:hover:not(:disabled) {
 		background: var(--mf-active-solid);
 		border-color: var(--mf-active-solid);
 		color: var(--mf-fg-on-accent);
@@ -2205,8 +2188,7 @@
 		font-size: 13px;
 	}
 
-	.folder-link strong,
-	.state-cell strong {
+	.folder-link strong {
 		color: var(--mf-fg-primary);
 		font-family: var(--mf-font-sans);
 	}
@@ -2244,25 +2226,27 @@
 			padding: 26px 12px 48px;
 		}
 
-		.completed-header {
-			align-items: stretch;
-			flex-direction: column;
-		}
-
-		.completed-header__facts {
+		.completed-metrics {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 
-		.completed-header__facts div:nth-child(2) {
+		.completed-metrics div:nth-child(2) {
 			border-right: 0;
 		}
 
-		.completed-header__facts div:nth-child(-n + 2) {
+		.completed-metrics div:nth-child(-n + 2) {
 			border-bottom: 1px solid var(--mf-line-muted);
 		}
 
 		.completed-filter {
 			grid-template-columns: 1fr;
+		}
+
+		.control,
+		.modebar button,
+		.completed-filter__search input,
+		.history-search input {
+			min-height: 44px;
 		}
 	}
 </style>

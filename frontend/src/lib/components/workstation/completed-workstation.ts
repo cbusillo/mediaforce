@@ -44,14 +44,6 @@ export type CompletedFilterOption = {
 	size: number;
 };
 
-export type CompletedReadinessSummary = {
-	tone: ShellTone;
-	title: string;
-	detail: string;
-	metricLabel: string;
-	metricValue: string;
-};
-
 export function cleanupState(
 	folder: CompletedFolderRow,
 	archive: ArchiveCleanupSummary
@@ -286,53 +278,6 @@ export function cleanupStateCounts(folders: CompletedFolderRow[], archive: Archi
 		},
 		{ ready: 0, blocked: 0, unknown: 0, cleaned: 0 } satisfies Record<CleanupState, number>
 	);
-}
-
-export function buildCompletedReadinessSummary(
-	payload: CompletedPayload | null,
-	loadError: string | null
-): CompletedReadinessSummary {
-	if (!payload) {
-		return {
-			tone: loadError ? 'fail' : 'idle',
-			title: loadError ? 'Finished media is unavailable' : 'Finished media is loading',
-			detail: loadError ?? 'Opening finished media and its original-backup status.',
-			metricLabel: 'Finished',
-			metricValue: loadError ? 'offline' : 'loading'
-		};
-	}
-	const folders = payload.folders;
-	const archive = payload.archive_cleanup;
-	const counts = cleanupStateCounts(folders, archive);
-	const reviewCount = counts.blocked + counts.unknown;
-	if (counts.ready > 0) {
-		return {
-			tone: 'ready',
-			title: 'Original backups are ready to delete',
-			detail: `${counts.ready.toLocaleString('en-US')} finished ${counts.ready === 1 ? 'item has' : 'items have'} original backups waiting in the Cleanup folder.`,
-			metricLabel: 'Ready to delete',
-			metricValue: String(counts.ready)
-		};
-	}
-	if (reviewCount > 0) {
-		return {
-			tone: counts.blocked > 0 ? 'fail' : 'wait',
-			title: counts.blocked > 0 ? 'Check before deleting' : 'Backups already gone',
-			detail:
-				counts.blocked > 0
-					? `${counts.blocked.toLocaleString('en-US')} finished ${counts.blocked === 1 ? 'item needs' : 'items need'} settings checked before original backups can be deleted.`
-					: `${counts.unknown.toLocaleString('en-US')} finished ${counts.unknown === 1 ? 'item has' : 'items have'} original backups already gone; nothing will be deleted.`,
-			metricLabel: counts.blocked > 0 ? 'Check' : 'Mark handled',
-			metricValue: String(reviewCount)
-		};
-	}
-	return {
-		tone: 'idle',
-		title: 'Nothing to delete',
-		detail: `${folders.length.toLocaleString('en-US')} finished ${folders.length === 1 ? 'item is' : 'items are'} settled. Recent changes remain available in History.`,
-		metricLabel: 'Finished',
-		metricValue: String(counts.cleaned)
-	};
 }
 
 export function buildCompletedStatusTiles(
