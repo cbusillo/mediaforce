@@ -358,7 +358,9 @@ the current queue. At wide desktop widths, the collapsed System details rail
 must not compress the current-work register below 70% of the workstation canvas;
 stack the rail beneath the register at ordinary desktop widths. Keep unresolved
 processing failures newest first and inside the queue surface with their actions.
-A missing controller media mount must
+A wide Activity register keeps each row divider aligned across every column even
+when work-window copy is taller than progress or next-step content. A missing
+controller media mount must
 remain queued instead of dispatching futile SSH retries, identify storage as the
 blocker, and show `Selecting computer` or `Unassigned` rather than a placeholder
 host name. Keep queue controls adjacent to the affected current work, show one

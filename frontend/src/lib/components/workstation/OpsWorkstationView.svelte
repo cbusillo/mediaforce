@@ -580,8 +580,10 @@
 											</td>
 											<td data-label="Computer">{row.host}</td>
 											<td data-label="Last note">
-												<strong>{row.progress}</strong>
-												<span>{row.detail}</span>
+												<div class="cell-stack">
+													<strong>{row.progress}</strong>
+													<span>{row.detail}</span>
+												</div>
 											</td>
 											<td data-label="When">{row.scheduler}</td>
 										</tr>
@@ -1096,11 +1098,6 @@
 	td:nth-child(4),
 	td:nth-child(5) {
 		font-family: var(--mf-font-mono), monospace;
-	}
-
-	td:nth-child(4) {
-		display: grid;
-		gap: var(--mf-space-1);
 	}
 
 	td:nth-child(4) span {

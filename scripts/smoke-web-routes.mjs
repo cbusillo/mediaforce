@@ -674,8 +674,8 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   }
 }
 
-async function checkActivityQueueFirst(page, label) {
-  const activityState = await page.evaluate(() => {
+async function checkActivityQueueFirst(page, label, expectQueueRows = false) {
+  const activityState = await page.evaluate((rowsExpected) => {
     const main = document.querySelector(".ops__main");
     const workstation = document.querySelector(".ops");
     const queuePanel = main?.querySelector(":scope > .panel");
@@ -687,6 +687,9 @@ async function checkActivityQueueFirst(page, label) {
     const blockerList = document.querySelector(".blocker-list");
     const schedulerConsole = document.querySelector(".scheduler-console");
     const systemDetails = document.querySelector(".system-details");
+    const queueRows = Array.from(
+      document.querySelectorAll(".ops-table--jobs tbody tr"),
+    );
 
     return {
       firstPanelTitle: queueHeading?.textContent?.trim() ?? "",
@@ -719,12 +722,22 @@ async function checkActivityQueueFirst(page, label) {
         !blockerList || Boolean(queuePanel?.contains(blockerList)),
       controlsStayWithQueue:
         !schedulerConsole || Boolean(queuePanel?.contains(schedulerConsole)),
+      rowDividersAligned:
+        queueRows.length === 0
+          ? !rowsExpected
+          : window.innerWidth <= 720 ||
+            queueRows.every((row) => {
+              const cellBottoms = Array.from(row.children).map(
+                (cell) => cell.getBoundingClientRect().bottom,
+              );
+              return Math.max(...cellBottoms) - Math.min(...cellBottoms) <= 1;
+            }),
       systemDetailsCollapsed:
         systemDetails instanceof HTMLDetailsElement
           ? !systemDetails.open
           : false,
     };
-  });
+  }, expectQueueRows);
 
   if (
     activityState.firstPanelTitle !== "Working now" ||
@@ -735,6 +748,7 @@ async function checkActivityQueueFirst(page, label) {
     activityState.refreshControls !== 1 ||
     !activityState.blockersStayWithQueue ||
     !activityState.controlsStayWithQueue ||
+    !activityState.rowDividersAligned ||
     !activityState.systemDetailsCollapsed
   ) {
     throw new Error(
@@ -834,7 +848,7 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         }
       }
       if (route === "/ops") {
-        await checkActivityQueueFirst(page, label);
+        await checkActivityQueueFirst(page, label, label === "Activity");
       }
       if (route === "/settings") {
         const requiredCopies = [
@@ -2441,7 +2455,11 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         );
       }
       if (route === "/ops") {
-        await checkActivityQueueFirst(page, `${label} narrow`);
+        await checkActivityQueueFirst(
+          page,
+          `${label} narrow`,
+          label === "Activity",
+        );
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`narrow route ok: ${label} ${elapsedMs}ms`);
