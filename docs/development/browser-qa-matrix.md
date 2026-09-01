@@ -352,10 +352,15 @@ show progress only for a bounded measurable stage, and label historical ETA as
 an estimate. Operators must not need to scroll past old evidence to learn
 whether work is still running.
 
-On Activity, unresolved processing failures must appear newest first. A missing
-controller media mount must remain queued instead of dispatching futile SSH
-retries, identify storage as the blocker, and show `Selecting computer` or
-`Unassigned` rather than a placeholder host name. When one sample transitions
+On Activity, `Working now` must own or begin the first viewport at desktop and
+390px widths; do not place a visible hero or separate dashboard summary ahead of
+the current queue. Keep unresolved processing failures newest first and inside
+the queue surface with their actions. A missing controller media mount must
+remain queued instead of dispatching futile SSH retries, identify storage as the
+blocker, and show `Selecting computer` or `Unassigned` rather than a placeholder
+host name. Keep queue controls adjacent to the affected current work, show one
+refresh control, and retain work-window detail with the row it governs; computer
+and schedule detail stays collapsed until requested. When one sample transitions
 out of processing, the exact item's stale encode row must disappear, but another
 active item under the same folder must remain visible. A review-ready item moves
 to the attention list; a completed sample without available review media remains

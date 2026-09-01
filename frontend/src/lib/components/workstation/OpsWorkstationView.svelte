@@ -32,7 +32,6 @@
 		rowRecoveryLabel,
 		rowRecoveryTitle,
 		RefreshCoordinator,
-		visibleEncodeQueueCounts,
 		workerCapabilitiesSummary,
 		type OpsActionId,
 		type OpsQueueRow
@@ -61,7 +60,6 @@
 	const readiness = $derived(buildOpsReadinessSummary(dashboard, hosts, loadError));
 	const statusTiles = $derived(buildOpsStatusTiles(dashboard, hosts, loadError));
 	const footerSignals = $derived(buildOpsFooterSignals(dashboard, hosts));
-	const visibleEncodeCounts = $derived(visibleEncodeQueueCounts(dashboard));
 	const encodeQueue = $derived(dashboard?.encode_queue ?? null);
 	const calibrationQueue = $derived(dashboard?.calibration_queue ?? null);
 	const queuedWaitingCount = $derived(encodeQueue?.queued_waiting_count ?? 0);
@@ -347,236 +345,196 @@
 <OperatorShell route="ops" subject="Activity" crumb="/ops" {statusTiles} {footerSignals}>
 	<main class="ops">
 		<section class="ops__main" aria-label="Mediaforce activity">
-			<header class="ops-header">
-				<div>
-					<h1>Activity</h1>
-					<button
-						type="button"
-						class="control control--compact ops-header__mobile-refresh"
-						disabled={manualRefreshPending}
-						aria-busy={manualRefreshPending}
-						title="Refresh activity now"
-						onclick={() => refreshOps()}>Refresh activity</button
-					>
-				</div>
-				<div class="ops-header__status ops-header__status--{readiness.tone}">
-					<StateBadge tone={readiness.tone} label={readiness.title} />
-					<button
-						type="button"
-						class="control control--compact"
-						disabled={manualRefreshPending}
-						aria-busy={manualRefreshPending}
-						title="Refresh activity now"
-						onclick={() => refreshOps()}>Refresh</button
-					>
-				</div>
-			</header>
-
-			<WorkstationPanel eyebrow="Attention" title="Needs your attention">
-				<div class="blocker-list">
-					{#each blockers as blocker (blocker.key)}
-						<div class="blocker-row blocker-row--{blocker.tone}">
-							<StateBadge
-								tone={blocker.tone}
-								label={blocker.tone === 'fail' ? 'Problem' : 'Needs you'}
-							/>
-							<div>
-								<strong>{blocker.title}</strong>
-								<span>{blocker.detail}</span>
-							</div>
-							{#if blocker.action}
-								{@const action = blocker.action}
-								<button
-									type="button"
-									class="control"
-									disabled={actionPending !== null}
-									title={actionTitle(action)}
-									onclick={() => runAction(action)}>{queueActionLabel(action)}</button
-								>
-							{:else if blocker.href}
-								<a class="control" href={resolve(blocker.href)}>{blocker.linkLabel ?? 'Open'}</a>
-							{/if}
-						</div>
-					{:else}
-						<div class="empty-note empty-note--ready">
-							<StateBadge compact tone="ready" label="Clear" />
-							<div>
-								<strong>Nothing needs you right now.</strong>
-								<span>Mediaforce will keep working when a computer is available.</span>
-							</div>
-						</div>
-					{/each}
-				</div>
-			</WorkstationPanel>
-
-			{#if workControlCommands.length > 0 || actionPending || actionMessage || actionError}
-				<WorkstationPanel eyebrow="Controls" title="Work controls">
-					<div class="scheduler-console">
-						<div class="scheduler-console__state">
-							<StateBadge
-								tone={encodeQueue?.state.stop_requested
-									? 'fail'
-									: encodeQueue?.state.is_paused
-										? 'wait'
-										: 'ready'}
-								label={encodeQueue?.state.stop_requested
-									? 'Stopping'
-									: encodeQueue?.state.is_paused
-										? 'Paused'
-										: 'Ready'}
-							/>
-							<div>
-								<strong>
-									{workScheduleSummaryCopy(encodeQueue?.state.scheduler_summary) ||
-										'Work schedule is unavailable'}
-								</strong>
-								<span
-									>{visibleEncodeCounts.queued.toLocaleString('en-US')} queued · {needsAttentionCount.toLocaleString(
-										'en-US'
-									)}
-									need attention</span
-								>
-							</div>
-						</div>
-						<div class="scheduler-console__scope">
-							<strong>Pause or restart work</strong>
-							<span
-								>{workControlCommands.length > 0
-									? 'Only actions that make sense right now are shown.'
-									: 'No action is needed in the current state.'}</span
-							>
-						</div>
-						<div class="scheduler-console__actions" aria-label="Work controls">
-							{#each workControlCommands as command (command.id)}
-								<button
-									type="button"
-									class="control"
-									class:control--ready={command.tone === 'ready'}
-									class:control--warn={command.tone === 'warn'}
-									class:control--danger={command.tone === 'danger'}
-									class:control--armed={confirmationAction === command.id}
-									title={actionTitle(command.id)}
-									onclick={() => runAction(command.id)}>{queueActionLabel(command.id)}</button
-								>
-							{:else}
-								<div class="command-standby">
-									<StateBadge compact tone="ready" label="No command" />
-									<span>Mediaforce does not need a command right now.</span>
-								</div>
-							{/each}
-						</div>
-						{#if unavailableGlobalCommands.length > 0}
-							<details class="command-details">
-								<summary>{unavailableGlobalCommands.length} unavailable controls</summary>
-								<ul>
-									{#each unavailableGlobalCommands as command (command.id)}
-										<li>
-											<strong>{queueActionLabel(command.id)}</strong>
-											<span>{command.unavailable}</span>
-										</li>
-									{/each}
-								</ul>
-							</details>
-						{/if}
-						{#if actionMessage}
-							<p class="action-message">{actionMessage}</p>
-						{/if}
-						{#if actionError}
-							<p class="action-error">{actionError}</p>
-						{/if}
-						<p class="refresh-note" class:refresh-note--error={Boolean(refreshError)}>
-							{refreshError || refreshCopy()}
-						</p>
-					</div>
-				</WorkstationPanel>
-			{/if}
-
+			<h1 class="ops__title">Activity</h1>
 			<WorkstationPanel
 				eyebrow="Current work"
 				title="Working now"
 				meta={queueRows.length ? `${queueRows.length.toLocaleString('en-US')} current` : undefined}
 			>
-				{#if queueRows.length > 0}
-					<div class="table-wrap">
-						<table class="ops-table ops-table--jobs">
-							<thead>
-								<tr>
-									<th>State</th>
-									<th>Work</th>
-									<th>Computer</th>
-									<th>Progress</th>
-									<th>Work window</th>
-									<th>Next step</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each queueRows as row (row.key)}
-									<tr class:job-row--blocked={row.tone === 'fail'}>
-										<td data-label="State"
-											><StateBadge compact tone={row.tone} label={row.status} /></td
-										>
-										<td data-label="Work">
-											{#if canOpenFolder(row)}
-												<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
-													<strong>{opsWorkLabel(row.prefix)}</strong>
-													<span>{queueKindLabel(row)} · {row.phase}</span>
-												</a>
-											{:else}
-												<div class="work-link">
-													<strong>{opsWorkLabel(row.prefix)}</strong>
-													<span>{queueKindLabel(row)} · {row.phase}</span>
-												</div>
-											{/if}
-										</td>
-										<td data-label="Computer">{row.host}</td>
-										<td data-label="Progress">
-											<div class="cell-stack">
-												<strong>{row.progress}</strong>
-												<span title={row.detail}>{row.detail}</span>
-											</div>
-										</td>
-										<td data-label="Work window" class="schedule-cell">
-											<div class="cell-stack schedule-cell__content">
-												<StateBadge compact tone={row.schedulerTone} label={row.scheduler} />
-												<span>{row.schedulerDetail}</span>
-												{#if row.scheduleState === 'draining_impossible'}
-													<a class="inline-link" href={resolve('/settings')}>Edit work windows</a>
-												{/if}
-											</div>
-										</td>
-										<td data-label="Next step">
-											{#if row.action}
-												{@const action = row.action}
-												<button
-													type="button"
-													class="control control--compact"
-													disabled={rowActionDisabled(row)}
-													title={rowRecoveryTitle(row)}
-													onclick={() => runAction(action, undefined, row)}
-													>{rowRecoveryLabel(row)}</button
-												>
-											{:else if row.status === 'Needs review' && canOpenFolder(row)}
-												<a class="inline-link" href={resolve(folderRoutePath(row.prefix))}
-													>Review item</a
-												>
-											{:else}
-												<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
-											{/if}
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
-				{:else}
-					<div class="current-standby">
-						<StateBadge tone="ready" label="No current work" />
-						<div>
-							<strong>Nothing is running.</strong>
-							<span>New work will appear here when it starts.</span>
+				<div class="queue-surface">
+					<div class="queue-toolbar">
+						<div class="queue-toolbar__state">
+							<StateBadge tone={readiness.tone} label={readiness.title} />
+							<span
+								>{queueRows.length
+									? 'Live queue and current media work.'
+									: 'New work will appear here when it starts.'}</span
+							>
+						</div>
+						<div class="queue-toolbar__refresh">
+							<span class="refresh-note" class:refresh-note--error={Boolean(refreshError)}>
+								{refreshError || refreshCopy()}
+							</span>
+							<button
+								type="button"
+								class="control control--compact"
+								disabled={manualRefreshPending}
+								aria-busy={manualRefreshPending}
+								title="Refresh activity now"
+								onclick={() => refreshOps()}>Refresh</button
+							>
 						</div>
 					</div>
-				{/if}
+
+					{#if blockers.length > 0}
+						<div class="blocker-list" aria-label="Needs attention">
+							{#each blockers as blocker (blocker.key)}
+								<div class="blocker-row blocker-row--{blocker.tone}">
+									<StateBadge
+										tone={blocker.tone}
+										label={blocker.tone === 'fail' ? 'Problem' : 'Needs you'}
+									/>
+									<div>
+										<strong>{blocker.title}</strong>
+										<span>{blocker.detail}</span>
+									</div>
+									{#if blocker.action}
+										{@const action = blocker.action}
+										<button
+											type="button"
+											class="control"
+											disabled={actionPending !== null}
+											title={actionTitle(action)}
+											onclick={() => runAction(action)}>{queueActionLabel(action)}</button
+										>
+									{:else if blocker.href}
+										<a class="control" href={resolve(blocker.href)}>{blocker.linkLabel ?? 'Open'}</a
+										>
+									{/if}
+								</div>
+							{/each}
+						</div>
+					{/if}
+
+					{#if workControlCommands.length > 0 || actionPending || actionMessage || actionError}
+						<div class="scheduler-console">
+							<div class="scheduler-console__heading">
+								<strong>Queue controls</strong>
+								<span>Only actions that make sense for the current work are shown.</span>
+							</div>
+							<div class="scheduler-console__actions" aria-label="Work controls">
+								{#each workControlCommands as command (command.id)}
+									<button
+										type="button"
+										class="control"
+										class:control--ready={command.tone === 'ready'}
+										class:control--warn={command.tone === 'warn'}
+										class:control--danger={command.tone === 'danger'}
+										class:control--armed={confirmationAction === command.id}
+										title={actionTitle(command.id)}
+										onclick={() => runAction(command.id)}>{queueActionLabel(command.id)}</button
+									>
+								{:else}
+									<div class="command-standby">
+										<StateBadge compact tone="ready" label="No command" />
+										<span>Mediaforce does not need a command right now.</span>
+									</div>
+								{/each}
+							</div>
+							{#if unavailableGlobalCommands.length > 0}
+								<details class="command-details">
+									<summary>{unavailableGlobalCommands.length} unavailable controls</summary>
+									<ul>
+										{#each unavailableGlobalCommands as command (command.id)}
+											<li>
+												<strong>{queueActionLabel(command.id)}</strong>
+												<span>{command.unavailable}</span>
+											</li>
+										{/each}
+									</ul>
+								</details>
+							{/if}
+							{#if actionMessage}
+								<p class="action-message">{actionMessage}</p>
+							{/if}
+							{#if actionError}
+								<p class="action-error">{actionError}</p>
+							{/if}
+						</div>
+					{/if}
+
+					{#if queueRows.length > 0}
+						<div class="table-wrap">
+							<table class="ops-table ops-table--jobs">
+								<thead>
+									<tr>
+										<th>State</th>
+										<th>Work</th>
+										<th>Computer</th>
+										<th>Progress</th>
+										<th>Work window</th>
+										<th>Next step</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#each queueRows as row (row.key)}
+										<tr class:job-row--blocked={row.tone === 'fail'}>
+											<td data-label="State"
+												><StateBadge compact tone={row.tone} label={row.status} /></td
+											>
+											<td data-label="Work">
+												{#if canOpenFolder(row)}
+													<a class="work-link" href={resolve(folderRoutePath(row.prefix))}>
+														<strong>{opsWorkLabel(row.prefix)}</strong>
+														<span>{queueKindLabel(row)} · {row.phase}</span>
+													</a>
+												{:else}
+													<div class="work-link">
+														<strong>{opsWorkLabel(row.prefix)}</strong>
+														<span>{queueKindLabel(row)} · {row.phase}</span>
+													</div>
+												{/if}
+											</td>
+											<td data-label="Computer">{row.host}</td>
+											<td data-label="Progress">
+												<div class="cell-stack">
+													<strong>{row.progress}</strong>
+													<span title={row.detail}>{row.detail}</span>
+												</div>
+											</td>
+											<td data-label="Work window" class="schedule-cell">
+												<div class="cell-stack schedule-cell__content">
+													<StateBadge compact tone={row.schedulerTone} label={row.scheduler} />
+													<span>{row.schedulerDetail}</span>
+													{#if row.scheduleState === 'draining_impossible'}
+														<a class="inline-link" href={resolve('/settings')}>Edit work windows</a>
+													{/if}
+												</div>
+											</td>
+											<td data-label="Next step">
+												{#if row.action}
+													{@const action = row.action}
+													<button
+														type="button"
+														class="control control--compact"
+														disabled={rowActionDisabled(row)}
+														title={rowRecoveryTitle(row)}
+														onclick={() => runAction(action, undefined, row)}
+														>{rowRecoveryLabel(row)}</button
+													>
+												{:else if row.status === 'Needs review' && canOpenFolder(row)}
+													<a class="inline-link" href={resolve(folderRoutePath(row.prefix))}
+														>Review item</a
+													>
+												{:else}
+													<span class="disabled-copy">{rowRecoveryLabel(row)}</span>
+												{/if}
+											</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					{:else}
+						<div class="current-standby">
+							<StateBadge tone="ready" label="No current work" />
+							<div>
+								<strong>Nothing is running.</strong>
+								<span>New work will appear here when it starts.</span>
+							</div>
+						</div>
+					{/if}
+				</div>
 			</WorkstationPanel>
 
 			{#if historyRows.length > 0}
@@ -800,63 +758,16 @@
 		padding: var(--mf-space-5);
 	}
 
-	.ops-header {
-		align-items: end;
-		border-bottom: var(--mf-border);
-		display: grid;
-		gap: var(--mf-space-6);
-		grid-template-columns: minmax(0, 1fr) auto;
-		padding-bottom: var(--mf-space-5);
+	.ops__title {
+		clip: rect(0 0 0 0);
+		clip-path: inset(50%);
+		height: 1px;
+		overflow: hidden;
+		position: absolute;
+		white-space: nowrap;
+		width: 1px;
 	}
 
-	.ops-header h1 {
-		margin-top: var(--mf-space-3);
-	}
-
-	.ops-header p {
-		margin-top: var(--mf-space-3);
-		max-width: 74ch;
-	}
-
-	.ops-header__status {
-		align-items: center;
-		background: var(--mf-bg-panel-2);
-		border: var(--mf-border-strong);
-		border-left: 3px solid var(--mf-line-strong);
-		display: grid;
-		gap: var(--mf-space-4);
-		grid-template-columns: auto minmax(88px, 1fr) auto;
-		min-width: min(100%, 360px);
-		padding: var(--mf-space-4);
-	}
-
-	.ops-header__status--active {
-		background: var(--mf-active-bg);
-		border-left-color: var(--mf-active-fg);
-	}
-
-	.ops-header__status--fail {
-		background: var(--mf-fail-bg);
-		border-left-color: var(--mf-fail-fg);
-	}
-
-	.ops-header__status--ready {
-		background: var(--mf-ready-bg);
-		border-left-color: var(--mf-ready-fg);
-	}
-
-	.ops-header__status--wait {
-		background: var(--mf-wait-bg);
-		border-left-color: var(--mf-wait-fg);
-	}
-
-	.ops-header__status div {
-		display: grid;
-		gap: var(--mf-space-2);
-		min-width: 0;
-	}
-
-	.ops-header__status span,
 	.scope-row span,
 	.host-row dt {
 		color: var(--mf-fg-tertiary);
@@ -866,12 +777,6 @@
 		text-transform: uppercase;
 	}
 
-	.ops-header__status strong {
-		font-family: var(--mf-font-mono), monospace;
-		font-size: var(--mf-text-lg);
-		font-weight: var(--mf-weight-medium);
-	}
-
 	.host-row dd {
 		color: var(--mf-fg-secondary);
 		font-size: var(--mf-text-xs);
@@ -879,8 +784,8 @@
 		line-height: var(--mf-leading-snug);
 	}
 
-	.scheduler-console,
 	.blocker-list,
+	.scheduler-console,
 	.current-standby,
 	.host-list,
 	.schedule-list,
@@ -890,7 +795,7 @@
 		padding: var(--mf-space-5);
 	}
 
-	.scheduler-console__state,
+	.queue-toolbar,
 	.blocker-row,
 	.current-standby {
 		align-items: center;
@@ -899,7 +804,7 @@
 		grid-template-columns: auto minmax(0, 1fr) auto;
 	}
 
-	.scheduler-console__state > div,
+	.queue-toolbar__state,
 	.blocker-row > div,
 	.current-standby > div {
 		display: grid;
@@ -907,8 +812,7 @@
 		min-width: 0;
 	}
 
-	.scheduler-console__scope strong,
-	.scheduler-console__state strong,
+	.scheduler-console__heading strong,
 	.blocker-row strong,
 	.current-standby strong,
 	.host-row strong,
@@ -918,14 +822,28 @@
 		overflow-wrap: anywhere;
 	}
 
-	.scheduler-console__scope span,
-	.scheduler-console__state span,
+	.queue-toolbar__state span,
+	.scheduler-console__heading span,
 	.blocker-row span,
 	.current-standby span,
 	.history-disclosure summary span,
 	.scope-row small {
 		color: var(--mf-fg-tertiary);
 		font-size: var(--mf-text-xs);
+	}
+
+	.queue-toolbar {
+		background: var(--mf-bg-strip);
+		border-bottom: var(--mf-border-muted);
+		padding: var(--mf-space-4) var(--mf-space-5);
+	}
+
+	.queue-toolbar__refresh {
+		align-items: center;
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--mf-space-3);
+		justify-content: end;
 	}
 
 	.scheduler-console__actions,
@@ -1015,7 +933,7 @@
 		padding: var(--mf-space-4);
 	}
 
-	.scheduler-console__scope {
+	.scheduler-console__heading {
 		background: var(--mf-bg-strip);
 		border-left: 2px solid var(--mf-wait-fg);
 		display: grid;
@@ -1028,36 +946,6 @@
 		border-left: 2px solid var(--mf-ready-fg);
 		grid-template-columns: auto minmax(0, 1fr);
 		min-height: var(--mf-row-comfy);
-	}
-
-	.empty-note--ready {
-		align-items: center;
-		background: var(--mf-ready-bg);
-		border-left: 2px solid var(--mf-ready-fg);
-		display: grid;
-		gap: var(--mf-space-4);
-		grid-template-columns: auto minmax(0, 1fr);
-		padding: var(--mf-space-3) var(--mf-space-4);
-	}
-
-	:global(.panel:has(.empty-note--ready)) {
-		background: transparent;
-		border: 0;
-		box-shadow: none;
-		overflow: visible;
-	}
-
-	:global(.panel:has(.empty-note--ready) .panel__header) {
-		display: none;
-	}
-
-	.blocker-list:has(.empty-note--ready) {
-		padding: 0;
-	}
-
-	.empty-note--ready div {
-		display: grid;
-		gap: var(--mf-space-1);
 	}
 
 	.history-disclosure {
@@ -1270,12 +1158,6 @@
 		min-height: var(--mf-control-md);
 		padding: 0 var(--mf-space-4);
 		white-space: nowrap;
-	}
-
-	.ops-header__mobile-refresh {
-		display: none;
-		justify-self: start;
-		width: fit-content;
 	}
 
 	.control:hover:not(:disabled) {
@@ -1498,23 +1380,18 @@
 			border-left: 0;
 			border-top: var(--mf-border);
 		}
-
-		.ops-header {
-			grid-template-columns: 1fr;
-		}
-
-		.ops-header__status {
-			width: 100%;
-		}
 	}
 
 	@media (max-width: 680px) {
-		.scheduler-console__state,
+		.queue-toolbar,
 		.blocker-row,
-		.current-standby,
-		.ops-header__status {
+		.current-standby {
 			align-items: start;
 			grid-template-columns: 1fr;
+		}
+
+		.queue-toolbar__refresh {
+			justify-content: start;
 		}
 
 		.command-details li {
@@ -1596,31 +1473,6 @@
 		padding-top: 12px;
 	}
 
-	.ops-header {
-		align-items: flex-end;
-		border: 0;
-		display: flex;
-		gap: 20px;
-		justify-content: space-between;
-		padding: 0 0 8px;
-	}
-
-	.ops-header > div:first-child {
-		display: grid;
-		gap: 5px;
-	}
-
-	.ops-header h1 {
-		font-size: clamp(22px, 2.5vw, 28px);
-		font-weight: 600;
-		letter-spacing: -0.02em;
-	}
-
-	.ops-header p {
-		color: var(--mf-fg-secondary);
-		font-size: 14px;
-	}
-
 	:global(.ops .mf-eyebrow) {
 		background: var(--mf-active-bg);
 		border-radius: 999px;
@@ -1634,50 +1486,6 @@
 		width: fit-content;
 	}
 
-	.ops-header__status {
-		align-items: center;
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line);
-		border-radius: var(--mf-radius-3);
-		display: flex;
-		flex-wrap: wrap;
-		gap: 12px;
-		max-width: min(100%, 420px);
-		min-width: 0;
-		padding: 10px 11px;
-	}
-
-	:global(.ops-header__status .state-badge) {
-		line-height: 1.25;
-		min-width: 0;
-		overflow-wrap: anywhere;
-		white-space: normal;
-	}
-
-	.ops-header__status::before {
-		display: none;
-	}
-
-	.ops-header__status div {
-		display: grid;
-		gap: 1px;
-		margin-left: auto;
-	}
-
-	.ops-header__status div span {
-		color: var(--mf-fg-tertiary);
-		font-family: var(--mf-font-sans);
-		font-size: 10px;
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-	}
-
-	.ops-header__status div strong {
-		color: var(--mf-fg-primary);
-		font-family: var(--mf-font-sans);
-		font-size: 16px;
-	}
-
 	.blocker-list,
 	.scheduler-console,
 	.host-list,
@@ -1687,8 +1495,7 @@
 	}
 
 	.blocker-row,
-	.scheduler-console__state,
-	.scheduler-console__scope,
+	.scheduler-console__heading,
 	.command-standby,
 	.host-row,
 	.scope-row,
@@ -1738,8 +1545,7 @@
 		grid-template-columns: minmax(0, 1fr);
 	}
 
-	.scheduler-console__state,
-	.scheduler-console__scope {
+	.scheduler-console__heading {
 		padding: 12px;
 	}
 
@@ -1885,26 +1691,6 @@
 	@media (max-width: 680px) {
 		.ops {
 			padding: 26px 12px 48px;
-		}
-
-		.ops-header {
-			align-items: stretch;
-			flex-direction: column;
-		}
-
-		.ops-header__status {
-			display: flex;
-			max-width: none;
-			min-width: 0;
-			width: 100%;
-		}
-
-		.ops-header__status > .control {
-			display: none;
-		}
-
-		.ops-header__mobile-refresh {
-			display: inline-flex;
 		}
 
 		.blocker-row {

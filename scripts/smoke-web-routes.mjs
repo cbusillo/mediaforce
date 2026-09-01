@@ -674,6 +674,52 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   }
 }
 
+async function checkActivityQueueFirst(page, label) {
+  const activityState = await page.evaluate(() => {
+    const main = document.querySelector(".ops__main");
+    const queuePanel = main?.querySelector(":scope > .panel");
+    const queueHeading = queuePanel?.querySelector(".panel__header h3");
+    const queueRect = queuePanel?.getBoundingClientRect();
+    const blockerList = document.querySelector(".blocker-list");
+    const schedulerConsole = document.querySelector(".scheduler-console");
+    const systemDetails = document.querySelector(".system-details");
+
+    return {
+      firstPanelTitle: queueHeading?.textContent?.trim() ?? "",
+      queueBeginsInViewport:
+        Boolean(queueRect) &&
+        queueRect.top >= 0 &&
+        queueRect.top < window.innerHeight,
+      hasVisibleHero: Boolean(document.querySelector(".ops-header")),
+      refreshControls: document.querySelectorAll(
+        'button[title="Refresh activity now"]',
+      ).length,
+      blockersStayWithQueue:
+        !blockerList || Boolean(queuePanel?.contains(blockerList)),
+      controlsStayWithQueue:
+        !schedulerConsole || Boolean(queuePanel?.contains(schedulerConsole)),
+      systemDetailsCollapsed:
+        systemDetails instanceof HTMLDetailsElement
+          ? !systemDetails.open
+          : false,
+    };
+  });
+
+  if (
+    activityState.firstPanelTitle !== "Working now" ||
+    !activityState.queueBeginsInViewport ||
+    activityState.hasVisibleHero ||
+    activityState.refreshControls !== 1 ||
+    !activityState.blockersStayWithQueue ||
+    !activityState.controlsStayWithQueue ||
+    !activityState.systemDetailsCollapsed
+  ) {
+    throw new Error(
+      `${label} did not keep the queue-first Activity contract: ${JSON.stringify(activityState)}`,
+    );
+  }
+}
+
 async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
   const browser = await launchSmokeBrowser();
   try {
@@ -728,7 +774,12 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
         await checkCompressionIntentContract(page, timeoutMs, label);
       }
       if (route === "/ops" && label === "Activity") {
-        const requiredCopies = ["Computers", "Stop processing", "Stop samples"];
+        const requiredCopies = [
+          "Working now",
+          "Computers",
+          "Stop processing",
+          "Stop samples",
+        ];
         await page.waitForFunction(
           (required) =>
             required.every((copy) => document.body.innerText.includes(copy)),
@@ -758,6 +809,7 @@ async function checkRoutes(baseUrl, routeChecksForBrowser, timeoutMs) {
             );
           }
         }
+        await checkActivityQueueFirst(page, label);
       }
       if (route === "/settings") {
         const requiredCopies = [
@@ -2362,6 +2414,9 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
           timeoutMs,
           `${label} narrow`,
         );
+      }
+      if (route === "/ops" && label === "Activity") {
+        await checkActivityQueueFirst(page, `${label} narrow`);
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`narrow route ok: ${label} ${elapsedMs}ms`);
