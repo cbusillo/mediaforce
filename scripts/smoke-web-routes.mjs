@@ -690,6 +690,10 @@ async function checkActivityQueueFirst(page, label, expectQueueRows = false) {
     const queueRows = Array.from(
       document.querySelectorAll(".ops-table--jobs tbody tr"),
     );
+    const queueUsesTableCells =
+      queueRows.length > 0 &&
+      window.getComputedStyle(queueRows[0].children[0]).display ===
+        "table-cell";
 
     return {
       firstPanelTitle: queueHeading?.textContent?.trim() ?? "",
@@ -725,7 +729,7 @@ async function checkActivityQueueFirst(page, label, expectQueueRows = false) {
       rowDividersAligned:
         queueRows.length === 0
           ? !rowsExpected
-          : window.innerWidth <= 720 ||
+          : !queueUsesTableCells ||
             queueRows.every((row) => {
               const cellBottoms = Array.from(row.children).map(
                 (cell) => cell.getBoundingClientRect().bottom,
@@ -2455,11 +2459,7 @@ async function checkNarrowRoutes(baseUrl, routeChecksForNarrow, timeoutMs) {
         );
       }
       if (route === "/ops") {
-        await checkActivityQueueFirst(
-          page,
-          `${label} narrow`,
-          label === "Activity",
-        );
+        await checkActivityQueueFirst(page, `${label} narrow`);
       }
       const elapsedMs = Math.round(performance.now() - started);
       console.log(`narrow route ok: ${label} ${elapsedMs}ms`);
