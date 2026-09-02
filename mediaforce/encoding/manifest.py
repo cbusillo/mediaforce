@@ -13,7 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
-from mediaforce.core.process_control import ProcessCancelledError
+from mediaforce.core.process_control import ProcessCancelledError, ProcessDeadlineEnforcementError
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.cadence import CadenceResolutionError, cadence_filter
 from mediaforce.encoding.quality import (
@@ -1614,6 +1614,8 @@ def _final_size_miss_message(verification: FinalSizeVerification) -> str:
 def _failure_kind_for_exception(exc: BaseException, verification: FinalSizeVerification | None) -> str:
     if isinstance(exc, ProcessCancelledError):
         return "cancelled"
+    if isinstance(exc, ProcessDeadlineEnforcementError):
+        return "containment_unproven"
     if verification is not None and not verification.passed:
         return "target_size_needs_review"
     return "deterministic"

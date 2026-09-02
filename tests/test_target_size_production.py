@@ -17,7 +17,12 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, quality_search_observations, staged_artifacts
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.models import ProbeSummary
-from mediaforce.core.process_control import ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.process_control import (
+    ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
+    ScheduleWindowClosedError,
+)
+from mediaforce.encoding import manifest as manifest_module
 from mediaforce.encoding.quality import (
     QualitySearchError,
     QualitySearchResult,
@@ -27,7 +32,7 @@ from mediaforce.encoding.quality import (
 from mediaforce.tuning.quality_memory import quality_search_context_from_command, rounded_target_video_bitrate
 from mediaforce.tuning.quality_shadow import QualityShadowMetrics, QualityShadowRecommendation
 from mediaforce.tuning.quality_warm_start import QualityWarmStartBlockReason, QualityWarmStartPlan
-from mediaforce.tuning.target_size_search import FinalSizeMissError, TargetSizeSearchError
+from mediaforce.tuning.target_size_search import FinalSizeMissError, FinalSizeVerification, TargetSizeSearchError
 
 
 class TargetSizeProductionTests(unittest.TestCase):
@@ -38,6 +43,25 @@ class TargetSizeProductionTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def test_containment_failure_precedes_final_size_miss_classification(self) -> None:
+        verification = FinalSizeVerification(
+            status="over_target",
+            target_size_bytes=5_000_000,
+            lower_bound_bytes=4_750_000,
+            upper_bound_bytes=5_250_000,
+            actual_output_bytes=5_400_000,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason="A bounded measured retry is allowed for this final-size miss.",
+        )
+
+        failure_kind = manifest_module._failure_kind_for_exception(
+            ProcessDeadlineEnforcementError("containment cleanup is unproven"),
+            verification,
+        )
+
+        self.assertEqual(failure_kind, "containment_unproven")
 
     def test_encode_persists_final_size_verification_inside_approved_band(self) -> None:
         source_path = self._source_file("episode-target-ok.mkv")

@@ -35,7 +35,7 @@ class _ContainmentReportedUnavailableError(ProcessDeadlineEnforcementError):
 
 _PROCESS_COMMUNICATION_POLL_SECONDS = 0.05
 _PROCESS_REAP_TIMEOUT_SECONDS = 2.0
-_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 4.0
+_PROCESS_STATUS_CLEANUP_TIMEOUT_SECONDS = 8.0
 _PROCESS_DEADLINE_HELPER_MAXIMUM_BYTES = 1024 * 1024
 _TRUSTED_PROCESS_GROUP_CONTAINMENT_MODE = "trusted-process-group"
 _MEDIA_TOOL_NAMES = {"ffmpeg", "ffprobe"}
@@ -497,6 +497,13 @@ def _read_deadline_status(status_descriptor: int) -> bytes:
         ) from exc
     status = b"".join(chunks)
     if status not in {b"C", b"E", b"U"}:
+        if status.startswith(b"U:") and len(status) > 2:
+            reason = status[2:].decode(errors="replace").strip()
+            if reason:
+                raise _ContainmentReportedUnavailableError(
+                    "Managed process containment cleanup is unproven. "
+                    f"Reason: {reason}"
+                )
         raise ProcessDeadlineEnforcementError(
             "Managed process containment failed closed."
         )
@@ -698,10 +705,7 @@ def _containment_status_proves_cleanup(
     monitor.add_cleanup_notes(error)
     status_error = monitor.error()
     if status_error is not None:
-        if (
-            status_error is not error
-            and not isinstance(status_error, _ContainmentReportedUnavailableError)
-        ):
+        if status_error is not error:
             _add_managed_process_cleanup_note(error, status_error)
         return False
     try:
