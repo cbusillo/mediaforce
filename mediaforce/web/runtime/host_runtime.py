@@ -88,6 +88,7 @@ def host_runtime_rows(
         policy = object_dict(profiles.get(schedule_profile) or profiles[default_host_schedule_profile])
         active_encode_count = running_counts.get(status.key, 0)
         status_payload = asdict(status)
+        probe_available = status.probe_available if status.probe_available is not None else status.available
         schedule_transition = evaluate_encode_schedule_transition(
             policy,
             now=current_time,
@@ -97,7 +98,7 @@ def host_runtime_rows(
         encode_capable = "encode_queue" in capabilities
         queue_active = status.available and encode_capable and schedule_open and active_encode_count < max_parallel_encodes
         host_running_jobs = [job for job in running_jobs if str(job.get("host_key") or "") == status.key]
-        active_probe_degraded = bool(active_encode_count > 0 and not status.available and host_running_jobs)
+        active_probe_degraded = bool(active_encode_count > 0 and not probe_available and host_running_jobs)
         if active_probe_degraded:
             active_reason = "status check deferred while encode is running"
         elif not status.available:
@@ -137,7 +138,7 @@ def host_runtime_rows(
         else:
             status_payload = {
                 **status_payload,
-                "probe_available": status.available,
+                "probe_available": probe_available,
                 "probe_message": status.message,
                 "probe_issues": list(status.issues),
             }

@@ -36,6 +36,7 @@ class HostStatus:
     setup_supported: bool = False
     setup_requires_password: bool = False
     trust_reset_supported: bool = False
+    probe_available: bool | None = None
 
 
 @dataclass(slots=True)
