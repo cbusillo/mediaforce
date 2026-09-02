@@ -180,8 +180,10 @@ Guidance:
 
 - `transport.py`
   - SSH command execution, SCP/rsync helpers, shell/path helpers
-- `readiness.py`
-  - host probe scripts, capability checks, status parsing
+- `status_helpers.py` and `status_runtime.py`
+  - host probe scripts, capability checks, and status parsing
+  - successful status probes remain distinct from full encode readiness, so a
+    reachable host with recoverable storage is not reported as unreachable
 - `lifecycle.py`
   - wake/start/stop commands, cooldown behavior
 - `mount_runtime.py`
