@@ -2850,6 +2850,29 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(failure_kind, "host_configuration")
         self.assertFalse(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
 
+    def test_containment_failure_is_not_retried_from_embedded_ssh_markers(self) -> None:
+        host = {"key": "remote-a", "label": "Remote A", "mode": "ssh"}
+        exc = ProcessDeadlineEnforcementError(
+            "containment failed after ssh connection reset by remote host"
+        )
+        failure_kind = encode_runtime._classify_encode_failure(exc, {"host": host})
+
+        self.assertEqual(failure_kind, "containment_unproven")
+        self.assertFalse(
+            encode_runtime._encode_failure_is_retryable(
+                failure_kind,
+                str(exc),
+                host,
+            )
+        )
+        self.assertFalse(
+            encode_runtime._encode_failure_retries_after_attempt_cap(
+                failure_kind,
+                str(exc),
+                host,
+            )
+        )
+
     def test_controller_storage_failure_retries_other_hosts_within_attempt_cap(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
         exc = remote.HostReadinessError(
@@ -18375,6 +18398,8 @@ raise SystemExit(0)
             job = load_encode_job(connection, "job-containment-failure")
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["last_failure_kind"], "containment_unproven")
+        self.assertIsNone(job["retry_not_before"])
         self.assertIn("first containment cleanup is unproven", str(job["error"]))
         self.assertTrue(controller.cleanup_unproven)
 

@@ -52,7 +52,10 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     exit race only when the pinned pidfd independently proves exit
   - macOS uses Darwin unique parent identities plus audit-token signaling; a
     uniquely live process that cannot provide a signal token remains live and
-    makes cleanup unprovable rather than being classified as exited
+    makes cleanup unprovable rather than being classified as exited. Signal-token
+    pinning tolerates bounded short-lived task-port churn before failing closed;
+    each discovery or signaling pass shares one retry deadline across all
+    observed identities so process fan-out cannot multiply the wait per PID
   - each supervisor receives the read side of a parent-liveness pipe whose write
     side exists only in the Mediaforce parent; parent exit therefore produces
     EOF even when the target forks or detaches, and a surviving supervisor must
@@ -98,7 +101,10 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     runtime temp area instead of mounted staging
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
-    back to same-user process scans or signals
+    back to same-user process scans or signals. Unavailable containment statuses
+    carry bounded diagnostic reasons while retaining compatibility with legacy
+    bare unavailable statuses, and cleanup failures preserve the first concrete
+    signaling or identity-pin failure when one is available
 
 Guidance:
 
