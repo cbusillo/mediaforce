@@ -1558,7 +1558,6 @@ def select_encode_host(
         host
         for host in host_rows
         if not bool(host.get("available"))
-        and not _probe_available(host)
         and not object_list(host.get("issues"))
         and (
             bool(deps.host_lifecycle_start_command(host))

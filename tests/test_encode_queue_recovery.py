@@ -4095,6 +4095,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             available=False,
             message="Missing required paths",
             missing_paths=["/Volumes/media/tv"],
+            probe_available=True,
             missing_mounts=["/Volumes/media"],
             platform="macos",
             setup_supported=True,
@@ -4108,6 +4109,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             rows = web_app._host_runtime_rows(connection, self.config)
 
         self.assertTrue(rows[0]["storage_recovery_available"])
+        self.assertTrue(rows[0]["probe_available"])
         self.assertEqual(rows[0]["message"], "Storage will reconnect when work starts")
         self.assertEqual(rows[0]["active_reason"], "shared storage will reconnect when work starts")
 
@@ -4138,7 +4140,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "host": "remote@mac",
             "label": "Remote Mac",
             "available": False,
-            "probe_available": False,
+            "probe_available": True,
             "priority": 50,
             "capabilities": ["encode_queue"],
             "active_encode_count": 0,
@@ -10764,6 +10766,7 @@ raise SystemExit(0)
             status = remote._remote_host_status(self.config, host)
 
         self.assertFalse(status.available)
+        self.assertTrue(status.probe_available)
         self.assertEqual(status.message, "Shared storage disconnected")
         self.assertEqual(status.missing_paths, ["/Volumes/My Share/tv"])
         self.assertEqual(status.missing_mounts, ["/Volumes/My Share"])
@@ -10773,6 +10776,57 @@ raise SystemExit(0)
             run_remote_ssh_mock.call_args.kwargs["input_text"],
         )
         self.assertIn(' on $mount_path (', run_remote_ssh_mock.call_args.kwargs["input_text"])
+
+    def test_remote_host_status_marks_failed_probe_unavailable(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"], returncode=255, stdout="", stderr="Connection refused"
+                ),
+        ), patch("mediaforce.hosts.status_runtime.time.sleep"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertFalse(status.probe_available)
+
+    def test_remote_host_status_marks_unreadable_probe_unavailable(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"], returncode=0, stdout="unexpected output", stderr=""
+                ),
+        ):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertFalse(status.probe_available)
+        self.assertEqual(status.message, "Remote check returned unreadable output")
+
+    def test_host_status_positional_optional_fields_remain_compatible(self) -> None:
+        status = HostStatus(
+            "remote-a",
+            "Remote A",
+            "ssh",
+            20,
+            ["encode_queue"],
+            True,
+            "Mounted and ready",
+            [],
+            "/srv/mediaforce",
+        )
+
+        self.assertEqual(status.repo_path, "/srv/mediaforce")
+        self.assertIsNone(status.probe_available)
 
     def test_remote_host_status_rejects_unwritable_staging_root(self) -> None:
         host: dict[str, object] = {
@@ -10924,13 +10978,14 @@ raise SystemExit(0)
             "host": "cbusillo@encode-host",
             "label": "Encode Host",
             "capabilities": ["encode_queue"],
-            "source_roots": {"tv": "/srv/media/tv"},
-            "staging_root": "/srv/media/transcode",
+            "source_roots": {"tv": "/Volumes/media/tv"},
+            "staging_root": "/Volumes/media/transcode",
         }
         full_stdout = "\n".join(
             [
-                "path|/srv/media/tv|1",
-                "path|/srv/media/transcode|1",
+                "mount|/Volumes/media|1",
+                "path|/Volumes/media/tv|1",
+                "path|/Volumes/media/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -10948,8 +11003,9 @@ raise SystemExit(0)
         )
         changed_cheap_stdout = "\n".join(
             [
-                "path|/srv/media/tv|1",
-                "path|/srv/media/transcode|1",
+                "mount|/Volumes/media|1",
+                "path|/Volumes/media/tv|1",
+                "path|/Volumes/media/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -10963,8 +11019,9 @@ raise SystemExit(0)
         )
         refreshed_full_stdout = "\n".join(
             [
-                "path|/srv/media/tv|1",
-                "path|/srv/media/transcode|1",
+                "mount|/Volumes/media|1",
+                "path|/Volumes/media/tv|1",
+                "path|/Volumes/media/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -11001,6 +11058,7 @@ raise SystemExit(0)
         self.assertIn("-filters", scripts[0])
         self.assertNotIn("-filters", scripts[1])
         self.assertIn("-filters", scripts[2])
+        self.assertIn("mount_path=/Volumes/media", scripts[2])
 
     def test_remote_host_status_requires_metric_for_mounted_encode_hosts(self) -> None:
         host: dict[str, object] = {
