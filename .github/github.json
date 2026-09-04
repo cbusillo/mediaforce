@@ -48,22 +48,55 @@
     },
     "inspection": {
       "tool": "jetbrains",
-      "ide": "PyCharm",
       "scopePreference": ["changed_files", "directory", "whole_project"],
-      "prepare": {
-        "python": {
-          "version": "3.13",
-          "moduleName": "mediaforce",
-          "testRoots": ["tests"],
-          "sync": true,
-          "requiredGeneratedState": [
-            ".venv",
-            ".idea/mediaforce.iml",
-            ".idea/modules.xml",
-            ".idea/misc.xml"
+      "profile": "Mediaforce",
+      "prepare": "bash scripts/prepare-jetbrains-inspection.sh",
+      "requiredGeneratedState": [
+        ".venv",
+        ".idea/mediaforce.iml",
+        ".idea/modules.xml",
+        ".idea/misc.xml",
+        ".idea/inspectionProfiles/Mediaforce.xml",
+        "frontend/.idea/inspectionProfiles/Mediaforce.xml",
+        "frontend/node_modules",
+        "frontend/.svelte-kit"
+      ],
+      "lanes": [
+        {
+          "id": "python",
+          "ide": "PyCharm",
+          "required": true,
+          "include": [
+            "*.py",
+            "bin/**/*.py",
+            "mediaforce/**/*.py",
+            "scripts/**/*.py",
+            "tests/**/*.py"
+          ]
+        },
+        {
+          "id": "frontend",
+          "ide": "WebStorm",
+          "required": false,
+          "projectPath": "frontend",
+          "include": [
+            "frontend/**/*.svelte",
+            "frontend/**/*.ts",
+            "frontend/**/*.js",
+            "frontend/**/*.mjs",
+            "frontend/**/*.cjs",
+            "frontend/**/*.css",
+            "frontend/**/*.html",
+            "frontend/package.json",
+            "frontend/tsconfig.json"
+          ],
+          "exclude": [
+            "frontend/build/**",
+            "frontend/.svelte-kit/**",
+            "frontend/node_modules/**"
           ]
         }
-      }
+      ]
     },
     "docsRequiredWhen": [
       "behavior changes",
