@@ -338,6 +338,11 @@ Guidance:
   - request/runtime compatibility, compatible local content-intent replay,
     bounded passive CRF prediction, narrow-to-broad scope eligibility,
     confidence, provenance, and no-recommendation behavior
+- `target_defaults.py`
+  - read-only total-byte target proposals from current visual boundaries,
+    normalized duration, independent-source thresholds, conflict/dispersion
+    gates, and operator-visible evidence and fallback reporting
+  - no CRF posterior input, settings writes, or production target authority
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints

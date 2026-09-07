@@ -38,6 +38,7 @@ from mediaforce.library.metadata_sync import sync_external_metadata
 from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.quality_acceptance import format_quality_acceptance_report, load_quality_acceptance_report
+from mediaforce.tuning.target_defaults import load_target_default_report
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
@@ -146,6 +147,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="json_output",
         help="Print the stable JSON report",
     )
+
+    target_defaults_parser = subparsers.add_parser(
+        "target-defaults",
+        help="Report review-only target-size proposals from stored visual boundaries as JSON",
+    )
+    target_defaults_parser.add_argument("observation_id", help="Current visual boundary observation ID to use as context")
 
     plan_parser = subparsers.add_parser("plan", help="Generate a run manifest from current state")
     plan_parser.add_argument("--limit", type=int, help="Maximum items in the run manifest")
@@ -257,6 +264,15 @@ def _main(
         args: argparse.Namespace,
         config: MediaforceConfig,
 ) -> int:
+    if args.command == "target-defaults":
+        try:
+            with open_readonly_db(config.paths.db_path) as connection:
+                report = load_target_default_report(connection, observation_id=args.observation_id)
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}, sort_keys=True))
+            return 2
+        print(json.dumps(report.to_payload(), indent=2, sort_keys=True))
+        return 0
     if args.command == "quality-memory":
         with open_readonly_db(config.paths.db_path) as connection:
             report = load_quality_acceptance_report(
