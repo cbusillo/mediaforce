@@ -3127,6 +3127,23 @@ async function main() {
       targetUrl = managedServer.baseUrl;
     }
     const folderRoutes = fixtures?.folderRoutes ?? [];
+    // The seeded heartbeat expires after 45 seconds; prove liveness first.
+    if (folderRoutes.length) {
+      const samplingFixture = folderRoutes.find(
+        (fixtureRoute) =>
+          fixtureRoute.route === "/folders/tv/Sampling%20Show/Season%201",
+      );
+      if (!samplingFixture) {
+        throw new Error(
+          "Fixture payload did not include the active-test route.",
+        );
+      }
+      await checkActiveTestProgress(
+        targetUrl,
+        samplingFixture.route,
+        args.routeTimeoutMs,
+      );
+    }
     if (process.env.GITHUB_ACTIONS === "true" && managedServer && fixtures) {
       await captureReviewFixtures(targetUrl, folderRoutes);
     }
@@ -3164,20 +3181,6 @@ async function main() {
       );
       await checkLifecyclePolicyShowIsolation(targetUrl, args.routeTimeoutMs);
       await checkOlderSeasonConfirmation(targetUrl, args.routeTimeoutMs);
-      const samplingFixture = folderRoutes.find(
-        (fixtureRoute) =>
-          fixtureRoute.route === "/folders/tv/Sampling%20Show/Season%201",
-      );
-      if (!samplingFixture) {
-        throw new Error(
-          "Fixture payload did not include the active-test route.",
-        );
-      }
-      await checkActiveTestProgress(
-        targetUrl,
-        samplingFixture.route,
-        args.routeTimeoutMs,
-      );
       await checkReviewTransitionDedupe(targetUrl, args.routeTimeoutMs);
       const reviewReadyFixture = folderRoutes.find(
         (fixtureRoute) =>
