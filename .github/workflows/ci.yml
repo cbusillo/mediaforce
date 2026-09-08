@@ -98,7 +98,20 @@ jobs:
           dist/*.whl dist/*.tar.gz
 
       - name: Run web route smoke
+        env:
+          MEDIAFORCE_WEB_REVIEW_ARTIFACTS: scratch/web-review
         run: npm --prefix frontend run smoke:web
+
+      - name: Retain built frontend and synthetic review fixtures
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: web-review-${{ github.event.pull_request.head.sha }}
+          path: |
+            frontend/build/
+            scratch/web-review/
+          if-no-files-found: error
+          retention-days: 3
 
   file-integrity-macos:
     name: file-integrity-macos

@@ -3,7 +3,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import net from "node:net";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -2950,6 +2950,36 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
   }
 }
 
+async function captureReviewFixtures(baseUrl, folderRoutes) {
+  const outputDir = process.env.MEDIAFORCE_WEB_REVIEW_ARTIFACTS;
+  if (!outputDir) return;
+  const routes = new Set([
+    ...endpointChecks
+      .map(([, route]) => route)
+      .filter((route) => !route.startsWith("/api/settings")),
+    "/api/hosts",
+    ...folderRoutes.flatMap(({ route }) => [
+      `/api${route}`,
+      `/api${route}/status`,
+    ]),
+  ]);
+  const responses = {};
+  for (const route of routes) {
+    const response = await fetch(`${baseUrl}${route}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    responses[decodeURIComponent(route)] = {
+      status: response.status,
+      body: await response.json(),
+    };
+  }
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "responses.json"),
+    JSON.stringify(responses),
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   let managedServer = null;
@@ -2966,6 +2996,9 @@ async function main() {
       targetUrl = managedServer.baseUrl;
     }
     const folderRoutes = fixtures?.folderRoutes ?? [];
+    if (process.env.GITHUB_ACTIONS === "true" && managedServer && fixtures) {
+      await captureReviewFixtures(targetUrl, folderRoutes);
+    }
     const browserRouteChecks = [...routeChecks];
     for (const fixtureRoute of folderRoutes) {
       browserRouteChecks.push([
