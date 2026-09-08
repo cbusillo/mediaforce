@@ -119,7 +119,7 @@ Superseded, withdrawn, quarantined, incompatible, or corrupted rows cannot vote.
 The command uses the read-only database path before runtime locking, migration,
 cleanup, or scheduling. It does not inspect media or change configuration.
 
-Rule version 1 is a conservative proposal policy, not an empirically calibrated
+Rule version 2 is a conservative proposal policy, not an empirically calibrated
 population default. It uses total boundary bytes (including retained audio and
 attachments), normalized to 2,700 seconds using decimal bytes. It never consumes
 the video-bitrate or CRF posterior. Each source contributes its smallest
@@ -131,9 +131,14 @@ heavily. The original authoritative target is preserved separately in the report
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Exact content version | 1 | 2 | 0 | 1 | 25% |
 | Same folder and measured profile | 3 | 3 | 0 | 1 | 25% |
-| Measured profile outside that folder | 8 | 8 | 3 | 3 | 10% |
+| Same measured profile across folders | 8 | 8 | 3 | 3 | 10% |
 
-These are separate target-intent gates; the existing CRF prior thresholds are
+Target-default scopes are nested: content class includes the current folder and
+item, while its folder-count gate requires cross-folder support. Folder and
+class evidence must have runtime between 80% and 125% of the reference runtime;
+this limits extrapolation of total bytes, including fixed non-video overhead.
+Invalid nonpositive sizes or nonfinite/nonpositive durations cannot vote, and
+the report counts excluded measurements and runtimes. These are separate target-intent gates; the existing CRF prior thresholds are
 unchanged. Folders are the parent directories of source-relative paths, not
 review prefixes, which may identify an exact file. Artifact counts use distinct
 review fingerprints. Dispersion is the
@@ -145,18 +150,25 @@ an exact item's rejected lower boundary. Rejection-only evidence cannot supply a
 target. There is no operator-wide target fallback or title/genre classification.
 
 The report selects the narrowest passing scope and exposes the rule, observation
-IDs, evidence snapshot, independent counts, dispersion, confidence, and failure
+IDs, a snapshot binding the rule version, thresholds, reference and scope
+partition, independent counts, dispersion, confidence, and failure
 reason for every scope. Moderate/high confidence labels mean that these rule
 thresholds passed; they are not statistical probabilities or visual guarantees.
 When no scope passes, it reports `no_supported_default_keep_reference_target`
 (or an explicit item conflict) and proposes no new target.
 
-Reports are retrospective and always `review_only`. Applying a proposal still
+Reports are retrospective and always `review_only`, with
+`production_authority=unverified`. Sample approvals do not establish the parent
+plan's approved, in-band, promoted production-outcome authority. Applying a proposal still
 requires checking the current source, intent, policy and stream budget, explicitly
 confirming the new target, and testing a representative sample. The command
 does not claim the reference's historical target is the current configured
-default. Automatic adoption, primary-UI integration, and empirical threshold
-calibration remain separate work; no production setting changes from a report.
+default. Studio shows this evidence for exact TV, Movie, and Other items only after
+matching the current calibration, source/content, intent, policy, technical
+compatibility and stream ledger. Stale or missing context exposes an unavailable
+reason. The disclosure preserves the current target and offers no apply or queue
+action. Automatic adoption and empirical threshold calibration remain separate
+work; no production setting changes from a report.
 
 ## Privacy and storage
 

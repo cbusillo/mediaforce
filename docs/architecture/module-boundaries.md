@@ -343,6 +343,9 @@ Guidance:
     normalized duration, independent-source thresholds, conflict/dispersion
     gates, and operator-visible evidence and fallback reporting
   - no CRF posterior input, settings writes, or production target authority
+- `target_default_context.py`
+  - fail-closed current source, calibration, intent, policy and stream-ledger
+    binding for exact-item Studio evidence, without adoption or queue authority
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
