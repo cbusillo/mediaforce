@@ -173,7 +173,8 @@
 					<div>
 						<span>Evidence</span>
 						<strong
-							>{selectedScopeReport.approved_source_count} files · {selectedScopeReport.approved_artifact_count}
+							>{selectedScopeReport.approved_source_count}
+							{selectedScopeReport.approved_source_count === 1 ? 'file' : 'files'} · {selectedScopeReport.approved_artifact_count}
 							reviews</strong
 						>
 						{#if selectedScopeReport.rejected_source_count > 0}
@@ -229,6 +230,13 @@
 		justify-content: space-between;
 		min-height: 34px;
 		padding: 0 10px;
+	}
+	summary strong::before {
+		content: '+';
+		margin-right: 7px;
+	}
+	details[open] summary strong::before {
+		content: '−';
 	}
 	summary strong,
 	.target-evidence__lead strong,

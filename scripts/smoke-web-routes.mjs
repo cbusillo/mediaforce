@@ -2950,6 +2950,138 @@ async function checkCompletedCleanupLanguage(baseUrl, timeoutMs) {
   }
 }
 
+async function checkTargetDefaultEvidence(baseUrl, timeoutMs) {
+  const browser = await launchSmokeBrowser();
+  const page = await browser.newPage();
+  const routes = [
+    ["tv", "/folders/tv/Review%20Ready/Season%201/Episode%2001.mkv"],
+    ["movies", "/folders/movies/Review%20Ready/Feature.mkv"],
+    ["other", "/folders/other/Loose%20Capture.mkv"],
+  ];
+  // UI-only evidence: backend tests separately prove observation/context binding.
+  const available = {
+    schema_version: 1,
+    status: "available",
+    reason: null,
+    report: {
+      schema_version: 1,
+      rule_version: 2,
+      source: "operator_visual_boundaries",
+      mode: "review_only",
+      production_authority: "unverified",
+      reference_runtime_seconds: 2700,
+      proposed_scope: "item",
+      proposed_bytes_per_45_minutes: 130000000,
+      scopes: [
+        {
+          scope: "item",
+          approved_source_count: 1,
+          approved_artifact_count: 2,
+          rejected_source_count: 0,
+          confidence: "moderate",
+        },
+      ],
+    },
+  };
+  let evidence = available;
+  let mutations = 0;
+  page.on("request", (request) => {
+    if (!["GET", "HEAD"].includes(request.method())) mutations += 1;
+  });
+  await page.route("**/api/folders/**", async (route) => {
+    const pathname = decodeURIComponent(
+      new URL(route.request().url()).pathname,
+    );
+    if (
+      !routes.some(
+        ([, routePath]) => pathname === decodeURIComponent(`/api${routePath}`),
+      )
+    ) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({
+      response,
+      json: { ...body, target_default_evidence: evidence },
+    });
+  });
+  try {
+    for (const width of [1024, NARROW_VIEWPORT.width]) {
+      await page.setViewportSize({ width, height: 844 });
+      for (const [kind, routePath] of routes) {
+        evidence = available;
+        await page.goto(`${baseUrl}${routePath}`, {
+          waitUntil: "domcontentloaded",
+          timeout: timeoutMs,
+        });
+        const panel = page.locator("[data-target-default-evidence]");
+        await expect(panel).toHaveCount(1);
+        const summary = panel.locator("summary");
+        await expect(summary).toContainText("Suggested sample target");
+        await summary.focus();
+        await page.keyboard.press("Enter");
+        await expect(panel.locator("details")).toHaveAttribute("open", "");
+        await expect(panel).toContainText("130 MB per 45 minutes");
+        await expect(panel).toContainText("1 file · 2 reviews");
+        await expect(panel).toContainText(
+          "production acceptance has not been verified",
+        );
+        await expect(panel).toContainText("Current target:");
+        await expect(panel.locator("button, a, input")).toHaveCount(0);
+        const overflow = await page.evaluate(
+          () => document.documentElement.scrollWidth > window.innerWidth + 2,
+        );
+        if (overflow)
+          throw new Error(`Target evidence overflowed ${kind} at ${width}px`);
+        if (process.env.MEDIAFORCE_WEB_REVIEW_ARTIFACTS) {
+          await panel.screenshot({
+            path: path.join(
+              process.env.MEDIAFORCE_WEB_REVIEW_ARTIFACTS,
+              `target-evidence-${kind}-${width}.png`,
+            ),
+          });
+        }
+        await page.keyboard.press("Enter");
+        await expect(panel.locator("details")).not.toHaveAttribute("open", "");
+        evidence = {
+          schema_version: 1,
+          status: "unavailable",
+          reason: "policy_hash_mismatch",
+          report: null,
+        };
+        await page.reload({
+          waitUntil: "domcontentloaded",
+          timeout: timeoutMs,
+        });
+        await panel.locator("summary").click();
+        await expect(panel).toContainText("saved review no longer matches");
+        await expect(panel).not.toContainText("130 MB");
+        evidence = {
+          ...available,
+          report: {
+            ...available.report,
+            proposed_scope: null,
+            proposed_bytes_per_45_minutes: null,
+            fallback_reason: "item_boundary_conflict",
+          },
+        };
+        await page.reload({
+          waitUntil: "domcontentloaded",
+          timeout: timeoutMs,
+        });
+        await panel.locator("summary").click();
+        await expect(panel).toContainText("reviewed size boundaries conflict");
+      }
+    }
+    if (mutations)
+      throw new Error("Target evidence interaction sent a mutation");
+  } finally {
+    await browser.close();
+  }
+}
+
 async function captureReviewFixtures(baseUrl, folderRoutes) {
   const outputDir = process.env.MEDIAFORCE_WEB_REVIEW_ARTIFACTS;
   if (!outputDir) return;
@@ -3011,6 +3143,7 @@ async function main() {
     await checkEndpoints(targetUrl, args.endpointTimeoutMs);
     await checkRoutes(targetUrl, browserRouteChecks, args.routeTimeoutMs);
     if (folderRoutes.length) {
+      await checkTargetDefaultEvidence(targetUrl, args.routeTimeoutMs);
       await checkLibraryModeLayout(targetUrl, args.routeTimeoutMs);
       await checkLibraryStateReachability(targetUrl, args.routeTimeoutMs);
       await checkSeriesSeasonIndex(targetUrl, args.routeTimeoutMs);

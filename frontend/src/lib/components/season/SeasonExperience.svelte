@@ -1895,13 +1895,6 @@
 						</div>
 					</div>
 				{/if}
-				{#if isExactItemScope}
-					<TargetDefaultEvidence
-						evidence={folder.target_default_evidence}
-						{currentTargetBytes}
-						durationSeconds={asNumber(sampleItem.duration_seconds)}
-					/>
-				{/if}
 				{#if isExactItemScope && folder.target_size_provenance?.blocker}
 					<div class="target-provenance-blocker" role="alert">
 						<strong>This saved target cannot start production.</strong>
@@ -3001,6 +2994,14 @@
 					{/if}
 				</div>
 			</section>
+		{/if}
+
+		{#if isExactItemScope}
+			<TargetDefaultEvidence
+				evidence={folder.target_default_evidence}
+				{currentTargetBytes}
+				durationSeconds={asNumber(sampleItem.duration_seconds)}
+			/>
 		{/if}
 
 		{#if safetyDialog}
