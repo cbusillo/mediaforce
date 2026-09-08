@@ -1,11 +1,13 @@
 """Validate the current context for review-only target-default evidence."""
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, open_readonly_db
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
 from mediaforce.core.type_defs import object_dict
@@ -31,6 +33,24 @@ def unavailable_target_default_evidence(reason: str) -> dict[str, Any]:
         "reason": reason,
         "report": None,
     }
+
+
+def load_target_default_evidence(
+        db_path: Path,
+        *,
+        budget_item: Mapping[str, Any],
+        calibration: Mapping[str, Any] | None,
+        advice_state: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Keep advisory database availability separate from the Studio page."""
+    try:
+        with open_readonly_db(db_path) as connection:
+            return build_target_default_evidence(
+                connection, budget_item=budget_item,
+                calibration=calibration, advice_state=advice_state,
+            )
+    except (SQLAlchemyError, OSError):
+        return unavailable_target_default_evidence("evidence_unavailable")
 
 
 def build_target_default_evidence(
@@ -112,6 +132,12 @@ def _validate_bindings(
         calibration: Mapping[str, Any],
         sample_item: Mapping[str, Any],
 ) -> str | None:
+    observed_duration = observation.get("duration_seconds")
+    if budget_item.get("duration_seconds") != observed_duration:
+        return "duration_mismatch"
+    if sample_item.get("duration_seconds") != observed_duration:
+        return "calibration_duration_mismatch"
+
     current_rel_path = str(budget_item.get("rel_path") or "").strip()
     if not current_rel_path or str(observation.get("source_rel_path") or "") != current_rel_path:
         return "source_rel_path_mismatch"

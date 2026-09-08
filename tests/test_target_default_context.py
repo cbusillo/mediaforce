@@ -1,6 +1,9 @@
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+from sqlalchemy.exc import OperationalError
 
 import pytest
 import test_content_intent_observations as boundary_fixtures
@@ -12,7 +15,7 @@ from mediaforce.tuning.content_intent_observations import (
     correct_content_intent_boundary_observation,
     withdraw_content_intent_boundary_observation,
 )
-from mediaforce.tuning.target_default_context import build_target_default_evidence
+from mediaforce.tuning.target_default_context import build_target_default_evidence, load_target_default_evidence
 from mediaforce.web.runtime.calibration_runtime import _stored_sample_item_payload
 
 
@@ -83,6 +86,7 @@ def test_context_read_does_not_mutate_database(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [
+        ("duration_seconds", 2800, "duration_mismatch"),
         ("rel_path", "tv/Futurama/Season 8/Other.mkv", "source_rel_path_mismatch"),
         ("library_item_id", 9, "source_id_mismatch"),
         ("source_fingerprint", "changed-source", "source_fingerprint_mismatch"),
@@ -198,3 +202,15 @@ def test_missing_corrected_and_withdrawn_evidence_is_unavailable(tmp_path: Path)
         )
         assert withdrawn_evidence["status"] == "unavailable"
         assert withdrawn_evidence["reason"] == "boundary_observation_withdrawn"
+
+
+@pytest.mark.parametrize("failure", [FileNotFoundError("missing"), OperationalError("query", {}, Exception("locked"))])
+def test_advisory_database_failure_is_unavailable(tmp_path: Path, failure: Exception) -> None:
+    item, calibration, row = _context()
+    with patch("mediaforce.tuning.target_default_context.open_readonly_db", side_effect=failure):
+        evidence = load_target_default_evidence(
+            tmp_path / "unavailable.sqlite3", budget_item=item, calibration=calibration,
+            advice_state={"content_intent_boundary_observation": {"observation_id": row["observation_id"]}},
+        )
+    assert evidence["status"] == "unavailable"
+    assert evidence["reason"] == "evidence_unavailable"

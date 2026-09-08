@@ -43,7 +43,7 @@ from mediaforce.tuning.quality_shadow import (
     select_latest_quality_shadow_observation,
 )
 from mediaforce.tuning.target_default_context import (
-    build_target_default_evidence,
+    load_target_default_evidence,
     unavailable_target_default_evidence,
 )
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
@@ -1465,13 +1465,12 @@ def create_app(
         )
         budget_item["stream_budget_ledger"] = stream_budget.to_payload()
         if media_scope.match == "exact_item":
-            with open_readonly_db(config.paths.db_path) as connection:
-                target_default_evidence = build_target_default_evidence(
-                    connection,
-                    budget_item=budget_item,
-                    calibration=calibration,
-                    advice_state=advice_state,
-                )
+            target_default_evidence = load_target_default_evidence(
+                config.paths.db_path,
+                budget_item=budget_item,
+                calibration=calibration,
+                advice_state=advice_state,
+            )
         else:
             target_default_evidence = unavailable_target_default_evidence("not_exact_item")
         size_goal_options = guided_size_goal_options(

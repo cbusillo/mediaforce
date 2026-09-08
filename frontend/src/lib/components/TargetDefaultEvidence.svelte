@@ -50,6 +50,8 @@
 		return Boolean(
 			value &&
 			value.schema_version === 1 &&
+			value.rule_version === 2 &&
+			value.production_authority === 'unverified' &&
 			value.source === 'operator_visual_boundaries' &&
 			value.mode === 'review_only' &&
 			value.reference_runtime_seconds === 2700 &&
@@ -100,6 +102,16 @@
 			.trim()
 			.toLowerCase();
 		if (!normalized) return 'No review-only target proposal is available for this item yet.';
+		if (normalized === 'evidence_unavailable') {
+			return 'Review evidence is temporarily unavailable. The current target stays in place.';
+		}
+		if (
+			['mismatch', 'not_current', 'withdrawn', 'ineligible', 'unconfirmed'].some((part) =>
+				normalized.includes(part)
+			)
+		) {
+			return 'The saved review no longer matches the current item and settings. Review a new sample before considering a suggestion.';
+		}
 		if (normalized.includes('missing') || normalized.includes('context')) {
 			return 'This item does not have enough matching review context for a suggestion.';
 		}
