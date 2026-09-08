@@ -99,7 +99,7 @@ jobs:
 
       - name: Run web route smoke
         env:
-          MEDIAFORCE_WEB_REVIEW_ARTIFACTS: scratch/web-review
+          MEDIAFORCE_WEB_REVIEW_ARTIFACTS: ${{ github.workspace }}/scratch/web-review
         run: npm --prefix frontend run smoke:web
 
       - name: Retain built frontend and synthetic review fixtures
