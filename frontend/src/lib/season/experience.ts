@@ -20,6 +20,7 @@ import type {
 } from '$lib/api/types';
 import { folderRoutePath } from '$lib/folder-display';
 import { formatFileSize as formatOperatorFileSize } from '$lib/format';
+import { reviewAvailability } from '$lib/review/availability';
 
 export type HumanSeasonStateKey =
 	| 'needs_test'
@@ -263,6 +264,18 @@ export interface SizeGoal {
 	requiresExplicitSelection: boolean;
 }
 
+export interface CompressionIntentContract {
+	sizeLabel: string;
+	sizeRule: string;
+	searchLabel: string;
+	searchRule: string;
+	qualityLabel: string;
+	qualityRule: string;
+	finalHeadline: string;
+	finalRule: string;
+	announcement: string;
+}
+
 export type ReviewSizeAdjustmentDirection = 'smaller' | 'higher_quality';
 
 export interface ReviewSizeAdjustment {
@@ -285,23 +298,10 @@ export interface ExpectedSizeChange {
 	bytes: number;
 }
 
-export interface ReviewClip {
-	path: string;
-	timestampSeconds: number;
-	durationSeconds: number;
-	sizeBytes: number;
-	audio: ReviewAudio | null;
-}
-
-export interface ReviewAudio {
-	trustworthy: boolean;
-	role: 'original' | 'new' | '';
-}
-
-export interface ReviewPair {
-	source: ReviewClip;
-	preview: ReviewClip;
-	comparePath: string;
+export interface ExactReviewSizeFacts {
+	currentSizeBytes: number;
+	estimatedOutputBytes: number | null;
+	estimatedSpaceSavedBytes: number | null;
 }
 
 export interface CompareRiskSummary {
@@ -316,6 +316,7 @@ export interface CompareRiskSummary {
 	topRiskDetail: string;
 	authority: string;
 	authorityDetail: string;
+	hasSavedDecision: boolean;
 	focusMoments: string[];
 	picture: CompareRiskFact;
 	sound: CompareRiskFact;
@@ -486,24 +487,31 @@ function riskTone(risk: QualityRiskPayload | null): HumanSeasonTone {
 	return 'quiet';
 }
 
-function riskAuthority(risk: QualityRiskPayload | null): { value: string; detail: string } {
+function riskAuthority(risk: QualityRiskPayload | null): {
+	value: string;
+	detail: string;
+	hasSavedDecision: boolean;
+} {
 	const decision = record(risk?.operator_decision);
 	const status = text(decision.status).toLowerCase();
 	if (status === 'rejected') {
 		return {
 			value: 'Not approved',
-			detail: 'This exact sample was most recently marked as not acceptable.'
+			detail: 'This exact sample was most recently marked as not acceptable.',
+			hasSavedDecision: true
 		};
 	}
 	if (status === 'approved') {
 		return {
 			value: 'Approved',
-			detail: 'A decision has been saved for this exact sample.'
+			detail: 'A decision has been saved for this exact sample.',
+			hasSavedDecision: true
 		};
 	}
 	return {
 		value: 'Not decided yet',
-		detail: 'No decision has been saved for this sample.'
+		detail: 'No decision has been saved for this sample.',
+		hasSavedDecision: false
 	};
 }
 
@@ -620,6 +628,7 @@ export function compareRiskSummary(folder: FolderPayload): CompareRiskSummary | 
 		topRiskDetail: topRiskCopy?.detail ?? 'Compare the selected moments before deciding.',
 		authority: authority.value,
 		authorityDetail: authority.detail,
+		hasSavedDecision: authority.hasSavedDecision,
 		focusMoments,
 		picture,
 		sound
@@ -725,6 +734,41 @@ export function episodeLabel(path: string | null | undefined): string {
 	return fileName?.trim() || 'A representative episode';
 }
 
+export interface SeasonEpisodeOption {
+	itemId: number;
+	label: string;
+	statusLabel: string;
+	relPath: string;
+	href: `/folders/${string}`;
+}
+
+export function seasonEpisodeNavigationUnavailable(status: FolderStatusPayload): boolean {
+	return Boolean(
+		status.staged_integrity?.load_error || status.staged_integrity?.database_truncated
+	);
+}
+
+export function seasonEpisodeOptions(status: FolderStatusPayload): SeasonEpisodeOption[] {
+	const options = new Map<string, SeasonEpisodeOption>();
+	for (const record of status.staged_integrity?.records ?? []) {
+		const itemId = record.item_id;
+		const relPath = record.rel_path?.trim();
+		if (itemId === null || !relPath) continue;
+		options.set(relPath, {
+			itemId,
+			label: episodeLabel(relPath),
+			statusLabel: stagedIntegrityDispositionCopy(record.disposition).label,
+			relPath,
+			href: folderRoutePath(relPath)
+		});
+	}
+	return [...options.values()].sort(
+		(left, right) =>
+			left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' }) ||
+			left.itemId - right.itemId
+	);
+}
+
 export function stagedEpisodeLinks(status: FolderStatusPayload): Array<{
 	label: string;
 	relPath: string;
@@ -772,6 +816,20 @@ export function expectedSizeChange(
 	if (deltaBytes > 0) return { direction: 'smaller', bytes: deltaBytes };
 	if (deltaBytes < 0) return { direction: 'larger', bytes: Math.abs(deltaBytes) };
 	return { direction: 'unchanged', bytes: 0 };
+}
+
+export function exactReviewSizeFacts(
+	currentBytes: number | null | undefined,
+	estimatedOutputBytes: number | null | undefined
+): ExactReviewSizeFacts {
+	const currentSizeBytes = numberValue(currentBytes);
+	const outputBytes = numberValue(estimatedOutputBytes);
+	const hasEstimate = outputBytes > 0;
+	return {
+		currentSizeBytes,
+		estimatedOutputBytes: hasEstimate ? outputBytes : null,
+		estimatedSpaceSavedBytes: hasEstimate ? Math.max(0, currentSizeBytes - outputBytes) : null
+	};
 }
 
 function formatQualityMemoryNumber(value: number | null | undefined): string {
@@ -1340,6 +1398,55 @@ export function sizeGoals(folder: FolderPayload): SizeGoal[] {
 	});
 }
 
+export function compressionIntentContract(
+	option: CompressionIntentOptionPayload
+): CompressionIntentContract {
+	const contract: Omit<CompressionIntentContract, 'announcement'> =
+		option.key === 'reference'
+			? {
+					sizeLabel: 'Size limit',
+					sizeRule: 'Highest measured fidelity wins as long as it fits.',
+					searchLabel: 'High fidelity first',
+					searchRule:
+						'Tests higher-fidelity candidates and only moves smaller as needed to fit the limit.',
+					qualityLabel: 'Highest measured fidelity',
+					qualityRule: 'Measured fidelity outranks extra savings.',
+					finalHeadline: 'Final result must meet the final band.',
+					finalRule:
+						'Outside-band results stop after the bounded correction path instead of silently passing.'
+				}
+			: option.key === 'transparent' || option.key === 'perceptual_floor'
+				? {
+						sizeLabel: 'Size ceiling',
+						sizeRule: 'Smaller is acceptable while measured quality remains good.',
+						searchLabel: 'Low end first',
+						searchRule:
+							'Searches toward the bottom of the sample band while the measured quality floor holds.',
+						qualityLabel: 'Measured acceptability floor',
+						qualityRule:
+							'Chooses the smallest candidate that still clears the measured quality floor.',
+						finalHeadline: 'A smaller final result may pass.',
+						finalRule:
+							'Under-target is accepted while the measured floor holds; larger or below-floor results stop.'
+					}
+				: {
+						sizeLabel: 'Size target',
+						sizeRule: 'The result closest to the selected size wins.',
+						searchLabel: 'Closest result in the band',
+						searchRule:
+							'Searches around the target and ranks the nearest candidate after quality clears.',
+						qualityLabel: 'Measured quality floor',
+						qualityRule: 'Picture and sound still have to clear the measured floor.',
+						finalHeadline: 'Final result must meet the final band.',
+						finalRule:
+							'Outside-band results stop after the bounded correction path instead of silently passing.'
+					};
+	return {
+		...contract,
+		announcement: `${option.title}. ${contract.sizeLabel}. ${contract.searchRule} ${contract.finalHeadline}`
+	};
+}
+
 export function resolvedTargetSummary(folder: FolderPayload): ResolvedTargetSummary | null {
 	const analysis = folderSizeTargetAnalysis(folder);
 	const resolved = folder.resolved_operator_intent?.size_goal;
@@ -1756,6 +1863,23 @@ export function librarySeasonState(
 			recoveryKind: 'season'
 		};
 	}
+	if (card.workflow_state?.primary_lane === 'blocked') {
+		return {
+			key: 'needs_help',
+			label: 'Cannot start',
+			detail: 'Open the season to see what must be fixed before work can continue.',
+			tone: 'attention',
+			recoveryKind: 'season'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'encode') {
+		return {
+			key: 'ready_to_make',
+			label: 'Ready to compress',
+			detail: 'The season has an approved setup and can be compressed.',
+			tone: 'ready'
+		};
+	}
 	if (card.workflow_state?.primary_lane === 'validate') {
 		return {
 			key: 'ready_to_check',
@@ -1778,6 +1902,14 @@ export function librarySeasonState(
 			label: 'Compressing the season',
 			detail: 'The smaller episodes are being compressed now.',
 			tone: 'active'
+		};
+	}
+	if (card.workflow_state?.primary_lane === 'mixed') {
+		return {
+			key: 'ready_to_make',
+			label: 'Ready to act on',
+			detail: 'This season has more than one step ready in Studio.',
+			tone: 'ready'
 		};
 	}
 
@@ -1951,8 +2083,8 @@ export function detailSeasonState(
 			recoveryKind: 'test'
 		};
 	}
-	const reviewReady =
-		booleanValue(calibration.browser_review_ready) || booleanValue(calibration.review_media_ready);
+	const review = reviewAvailability(folder);
+	const reviewReady = review.isBrowserReady;
 	const currentRisk = qualityRisk(folder);
 	const currentRiskStatus = text(record(currentRisk?.operator_decision).status).toLowerCase();
 	const currentRiskBlocksApproval =
@@ -1960,15 +2092,29 @@ export function detailSeasonState(
 		['rejected', 'needs_operator_review'].includes(currentRiskStatus);
 	const currentDraftIsApproved =
 		!currentRiskBlocksApproval &&
+		reviewGateStatus !== 'missing_review_media' &&
 		(booleanValue(reviewGate.can_confirm_full) || (draftHash && draftHash === acceptedHash));
+	if (currentDraftIsApproved) {
+		return {
+			key: 'ready_to_make',
+			label: 'Sample approved',
+			detail: exactEpisode
+				? 'This episode can be compressed.'
+				: 'The rest of the season can be compressed.',
+			tone: 'ready'
+		};
+	}
 	if (
+		review.recovery ||
 		reviewGateStatus === 'missing_review_media' ||
 		(priorTestJobId && !draftHash && !reviewReady)
 	) {
 		return {
 			key: 'needs_help',
 			label: 'Sample needs retry',
-			detail: 'The previous sample ended before its comparison clips were ready.',
+			detail:
+				review.recovery?.detail ??
+				'The previous sample ended before its comparison clips were ready.',
 			tone: 'attention',
 			recoveryKind: 'test'
 		};
@@ -1981,66 +2127,12 @@ export function detailSeasonState(
 			tone: 'ready'
 		};
 	}
-	if (currentDraftIsApproved) {
-		return {
-			key: 'ready_to_make',
-			label: 'Sample approved',
-			detail: exactEpisode
-				? 'This episode can be compressed.'
-				: 'The rest of the season can be compressed.',
-			tone: 'ready'
-		};
-	}
 	return {
 		key: 'needs_test',
 		label: 'Needs sample',
 		detail: 'Choose a size, then compare one sample first.',
 		tone: 'quiet'
 	};
-}
-
-export function normalizeReviewPairs(folder: FolderPayload): ReviewPair[] {
-	const calibration = record(folder.calibration);
-	return records(calibration.review_pairs)
-		.map((pair) => {
-			const source = record(pair.source_clip);
-			const preview = record(pair.preview_clip);
-			const compare = record(pair.compare_clip);
-			const sourceAudio = record(source.audio);
-			const previewAudio = record(preview.audio);
-			return {
-				source: {
-					path: text(source.path),
-					timestampSeconds: numberValue(source.timestamp_seconds),
-					durationSeconds: numberValue(source.duration_seconds),
-					sizeBytes: numberValue(source.size_bytes),
-					audio: Object.keys(sourceAudio).length
-						? {
-								trustworthy: booleanValue(sourceAudio.trustworthy),
-								role: reviewAudioRole(sourceAudio.role)
-							}
-						: null
-				},
-				preview: {
-					path: text(preview.path),
-					timestampSeconds: numberValue(preview.timestamp_seconds),
-					durationSeconds: numberValue(preview.duration_seconds),
-					sizeBytes: numberValue(preview.size_bytes),
-					audio: Object.keys(previewAudio).length
-						? {
-								trustworthy: booleanValue(previewAudio.trustworthy),
-								role: reviewAudioRole(previewAudio.role)
-							}
-						: null
-				},
-				comparePath: text(compare.path)
-			};
-		})
-		.filter((pair) => pair.source.path && pair.preview.path);
-}
-
-function reviewAudioRole(value: unknown): ReviewAudio['role'] {
-	return value === 'original' || value === 'new' ? value : '';
 }
 
 export function predictedEpisodeSize(folder: FolderPayload): number {
@@ -2066,26 +2158,6 @@ export function folderSizeTargetAnalysis(folder: FolderPayload): SizeTargetAnaly
 		lowerBoundBytes: numberValue(analysis.lower_bound_bytes),
 		upperBoundBytes: numberValue(analysis.upper_bound_bytes),
 		predictedToBudgetRatio: numberValue(analysis.predicted_to_budget_ratio)
-	};
-}
-
-export function reviewSampleSizes(folder: FolderPayload): {
-	original: number;
-	smaller: number;
-	durationSeconds: number;
-	ratioPercent: number;
-} {
-	const totals = normalizeReviewPairs(folder).reduce(
-		(total, pair) => ({
-			original: total.original + pair.source.sizeBytes,
-			smaller: total.smaller + pair.preview.sizeBytes,
-			durationSeconds: total.durationSeconds + pair.source.durationSeconds
-		}),
-		{ original: 0, smaller: 0, durationSeconds: 0 }
-	);
-	return {
-		...totals,
-		ratioPercent: totals.original > 0 ? Math.round((totals.smaller / totals.original) * 100) : 0
 	};
 }
 

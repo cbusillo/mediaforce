@@ -6,12 +6,27 @@ import type {
 } from '$lib/api/types';
 
 export type MovieLibrarySortMode = 'priority' | 'name' | 'size' | 'savings' | 'oldest';
+export type MovieLibraryStateKey =
+	'attention' | 'blocked' | 'processing' | 'ready' | 'explicit' | 'idle';
+
+export interface MovieLibraryStateGroup {
+	key: MovieLibraryStateKey;
+	label: string;
+	tone: 'active' | 'ready' | 'wait' | 'fail' | 'idle';
+}
 
 export interface MovieWorkflowDisplayState {
 	workflow_state?: FolderWorkflowState | null;
+	review_badge?: MovieTitle['review_badge'];
 	promotion_conflicts: unknown[];
 	details_loading: boolean;
 	availability: 'production' | 'browse_only';
+}
+
+export interface MoviePendingReviewBadge {
+	label: string;
+	tone: 'active' | 'attention' | 'ready';
+	detail?: string | null;
 }
 
 export function movieWorkflowIsComplete(workflow: FolderWorkflowState | null | undefined): boolean {
@@ -56,13 +71,61 @@ export function movieTitleRuntimeSeconds(title: MovieTitle): number | null {
 }
 
 export function movieExpectedOutputBytes(title: MovieTitle): number | null {
+	if (title.estimated_output_bytes != null) return title.estimated_output_bytes;
 	return title.projected_reclaim_bytes == null
 		? null
 		: Math.max(0, title.total_size_bytes - title.projected_reclaim_bytes);
 }
 
+export function movieEstimatedOutputTotalIsLowerBound(titles: MovieTitle[]): boolean {
+	return titles.some((title) => movieExpectedOutputBytes(title) == null);
+}
+
+export function movieEstimateEvidence(title: MovieTitle): string | null {
+	if (title.estimate_provenance === 'sampled_calibration') {
+		return 'Estimated from completed samples for every included movie file.';
+	}
+	const coverage = title.estimate_coverage;
+	return title.estimate_provenance === 'unavailable' &&
+		coverage &&
+		!coverage.complete &&
+		coverage.required_included_members > 1
+		? 'No title estimate until every included movie file has its own current sample.'
+		: null;
+}
+
 export function moviePrimaryStudioPrefix(title: MovieTitle): string {
-	return title.members.length === 1 && title.members[0] ? title.members[0].prefix : title.prefix;
+	return title.members.length === 1 && title.members[0] && !movieTitleOwnsActiveWork(title)
+		? title.members[0].prefix
+		: title.prefix;
+}
+
+export function movieTitleOwnsActiveWork(
+	title: Pick<MovieTitle, 'workflow_state' | 'review_badge'>
+): boolean {
+	if (title.review_badge?.label?.trim()) return true;
+	const workflow = title.workflow_state;
+	if (!workflow) return false;
+	return ['processing', 'validate', 'promote', 'mixed', 'attention', 'blocked'].includes(
+		workflow.primary_lane ?? ''
+	);
+}
+
+export function moviePendingReviewBadge(
+	title: Pick<MovieTitle, 'workflow_state' | 'review_badge'>
+): MoviePendingReviewBadge | null {
+	const badge = title.review_badge;
+	const label = badge?.label?.trim();
+	if (!label || badge?.tone === 'ok') return null;
+	if (
+		['processing', 'validate', 'promote', 'blocked', 'complete'].includes(
+			title.workflow_state?.primary_lane ?? ''
+		)
+	) {
+		return null;
+	}
+	const tone = badge?.tone === 'active' || badge?.tone === 'ready' ? badge.tone : 'attention';
+	return { label, tone, detail: badge?.detail };
 }
 
 export function movieCompositionDetail(title: MovieTitle): string | null {
@@ -78,16 +141,35 @@ export function movieCompositionDetail(title: MovieTitle): string | null {
 	return details.length ? details.join(' · ') : null;
 }
 
-export function movieTitleNeedsAction(title: MovieTitle): boolean {
+export function movieLibraryStateGroup(title: MovieTitle): MovieLibraryStateGroup {
 	if (title.availability === 'browse_only' || title.workflow_state?.state === 'browse_only') {
-		return false;
+		return { key: 'idle', label: 'View only', tone: 'idle' };
 	}
-	if (title.promotion_conflicts.length) return true;
-	if (title.workflow_state?.state === 'explicit_selection_required') return true;
-	if (movieWorkflowIsComplete(title.workflow_state)) return false;
-	return ['encode', 'validate', 'promote', 'processing', 'attention', 'mixed'].includes(
-		title.workflow_state?.primary_lane ?? ''
-	);
+	if (movieWorkflowIsComplete(title.workflow_state)) {
+		return { key: 'idle', label: 'Finished', tone: 'idle' };
+	}
+	if (title.promotion_conflicts.length || title.workflow_state?.primary_lane === 'blocked') {
+		return { key: 'blocked', label: 'Cannot start', tone: 'fail' };
+	}
+	if (title.workflow_state?.state === 'explicit_selection_required') {
+		return { key: 'explicit', label: 'Needs a file choice', tone: 'wait' };
+	}
+	if (moviePendingReviewBadge(title) || title.workflow_state?.primary_lane === 'attention') {
+		return { key: 'attention', label: 'Needs attention', tone: 'fail' };
+	}
+	if (title.workflow_state?.primary_lane === 'processing') {
+		return { key: 'processing', label: 'Compressing', tone: 'active' };
+	}
+	if (
+		['encode', 'validate', 'promote', 'mixed'].includes(title.workflow_state?.primary_lane ?? '')
+	) {
+		return { key: 'ready', label: 'Ready to act on', tone: 'ready' };
+	}
+	return { key: 'idle', label: 'No work needed', tone: 'idle' };
+}
+
+export function movieTitleNeedsAction(title: MovieTitle): boolean {
+	return movieLibraryStateGroup(title).key !== 'idle';
 }
 
 export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
@@ -97,6 +179,8 @@ export function movieWorkflowLabel(title: MovieWorkflowDisplayState): string {
 	}
 	if (title.workflow_state?.state === 'explicit_selection_required') return 'Choose a file';
 	if (movieWorkflowIsComplete(title.workflow_state)) return 'Finished';
+	const pendingReview = moviePendingReviewBadge(title);
+	if (pendingReview) return pendingReview.label;
 	switch (title.workflow_state?.primary_lane ?? 'none') {
 		case 'encode':
 			return 'Ready to compress';
@@ -169,6 +253,7 @@ function moviePriorityStage(title: MovieTitle): number {
 	if (title.promotion_conflicts.length) return 0;
 	if (movieWorkflowIsComplete(title.workflow_state)) return 10;
 	if (title.workflow_state?.state === 'explicit_selection_required') return 6;
+	if (moviePendingReviewBadge(title)) return 1;
 	return {
 		attention: 1,
 		promote: 2,
@@ -189,6 +274,7 @@ function movieTitleCanBeRecommended(title: MovieTitle): boolean {
 	if (title.promotion_conflicts.length || movieWorkflowIsComplete(title.workflow_state))
 		return false;
 	if (title.workflow_state?.state === 'explicit_selection_required') return true;
+	if (moviePendingReviewBadge(title)) return true;
 	return ['promote', 'validate', 'mixed', 'encode'].includes(
 		title.workflow_state?.primary_lane ?? ''
 	);

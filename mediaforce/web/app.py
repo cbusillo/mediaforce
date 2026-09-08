@@ -42,6 +42,10 @@ from mediaforce.tuning.quality_shadow import (
     quality_shadow_public_view,
     select_latest_quality_shadow_observation,
 )
+from mediaforce.tuning.target_default_context import (
+    load_target_default_evidence,
+    unavailable_target_default_evidence,
+)
 from mediaforce.core.config import DEFAULT_CONFIG_PATH, MediaforceConfig, load_config, migrate_config_state, \
     update_runtime_settings, update_runtime_folder_policy_values, upsert_runtime_folder_policy_override
 from mediaforce.core.binaries import ffmpeg_binary
@@ -1460,6 +1464,15 @@ def create_app(
             prefer_persisted=False,
         )
         budget_item["stream_budget_ledger"] = stream_budget.to_payload()
+        if media_scope.match == "exact_item":
+            target_default_evidence = load_target_default_evidence(
+                config.paths.db_path,
+                budget_item=budget_item,
+                calibration=calibration,
+                advice_state=advice_state,
+            )
+        else:
+            target_default_evidence = unavailable_target_default_evidence("not_exact_item")
         size_goal_options = guided_size_goal_options(
             video_policy,
             item_runtime_seconds=item_runtime_seconds,
@@ -1521,6 +1534,7 @@ def create_app(
                 "size_target_analysis": size_target_analysis or None,
                 "resolved_operator_intent": resolved_operator_intent,
                 "target_size_provenance": budget_item["target_size_provenance"],
+                "target_default_evidence": target_default_evidence,
                 "compression_intent_options": compression_intent_options(operator_intent.compression_intent),
                 "stream_budget_ledger": stream_budget.to_payload(),
                 "size_goal_options": size_goal_options,
@@ -3139,6 +3153,13 @@ def _folder_review_badge(
             )
             if badge is not None:
                 return badge
+
+    if _load_pending_proposal(config, prefix) is not None:
+        return {
+            "label": "Sample plan ready",
+            "tone": "attention",
+            "detail": "A sample plan is waiting for review.",
+        }
 
     calibration = _load_calibration_state(config, prefix)
     if calibration is None:

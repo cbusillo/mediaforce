@@ -36,7 +36,7 @@ TARGET_SIZE_TRANSFORM_PLAN_SCHEMA_VERSION = 1
 MAX_TARGET_SIZE_CANDIDATES = 6
 TARGET_SIZE_BOUND_EXPANSION_STEP = 8
 MAX_FINAL_OUTPUT_RETRIES = 1
-MAX_FINAL_RETRY_MEASUREMENTS = 2
+MAX_FINAL_RETRY_MEASUREMENTS = 3
 MIN_FINAL_RETRY_CALIBRATION_FACTOR = 0.5
 MAX_FINAL_RETRY_CALIBRATION_FACTOR = 2.0
 CRF_PER_BITRATE_HALVING = 6.0
@@ -843,7 +843,7 @@ def retry_quality_result_for_final_miss(
                 eligible_candidate_count=len(eligible),
                 video_projection_factor=round(calibration_factor, 9),
             )
-        probe_crf, probe_from_candidate = probe
+        probe_crf, probe_from_candidate, probe_placement_evidence = probe
         if measure_candidate is None:
             return skip_retry(
                 "final_retry_skipped_measurement_unavailable",
@@ -880,8 +880,11 @@ def retry_quality_result_for_final_miss(
                 lower_bound_bytes=lower_bound_bytes,
                 upper_bound_bytes=upper_bound_bytes,
                 rejection_reason=rejection_reason,
+                placement="directional_seed",
+                placement_evidence=probe_placement_evidence,
             )
         ]
+        first_probe_candidate = candidate
         first_probe_size_status = _calibrated_candidate_size_status(
             candidate,
             lower_bound_bytes=lower_bound_bytes,
@@ -897,15 +900,18 @@ def retry_quality_result_for_final_miss(
                 and MAX_FINAL_RETRY_MEASUREMENTS > 1
                 and _payload_curve_shape(probe_candidates) != "non_monotonic"
         ):
-            second_probe_crf = _adjacent_directional_probe_crf(
+            second_probe = _measured_secant_probe_crf(
                 verification_status=verification.status,
-                first_probe_crf=probe_crf,
-                probe_from_candidate=probe_from_candidate,
+                selected_crf=selected_crf,
+                selected_actual_video_bytes=actual_video_bytes,
+                first_probe_candidate=first_probe_candidate,
+                target_video_bytes=target_size_bytes - non_video_bytes,
                 crf_bounds=object_dict(trace.get("crf_bounds")),
                 measured_crfs=_measured_integer_crfs(probe_candidates),
                 cap_violating_crfs=cap_violating_crfs,
             )
-            if second_probe_crf is not None:
+            if second_probe is not None:
+                second_probe_crf, second_probe_evidence = second_probe
                 second_sample, second_candidate = _measure_calibrated_retry_candidate(
                     measure_candidate,
                     trace=_trace_with_retry_candidates(trace, measured_candidates),
@@ -932,11 +938,75 @@ def retry_quality_result_for_final_miss(
                         lower_bound_bytes=lower_bound_bytes,
                         upper_bound_bytes=upper_bound_bytes,
                         rejection_reason=second_rejection_reason,
+                        placement="measured_secant",
+                        placement_evidence=second_probe_evidence,
                     )
                 )
                 candidate = second_candidate
                 sample = second_sample
                 rejection_reason = second_rejection_reason
+                second_probe_size_status = _calibrated_candidate_size_status(
+                    second_candidate,
+                    lower_bound_bytes=lower_bound_bytes,
+                    upper_bound_bytes=upper_bound_bytes,
+                )
+                second_probe_candidates = [*probe_candidates, second_candidate]
+                if (
+                        second_rejection_reason == "final_retry_measurement_outside_final_band"
+                        and second_probe_size_status == _opposite_final_size_status(verification.status)
+                        and MAX_FINAL_RETRY_MEASUREMENTS > 2
+                        and _payload_curve_shape(second_probe_candidates) != "non_monotonic"
+                ):
+                    third_probe = _straddle_interpolation_probe_crf(
+                        verification_status=verification.status,
+                        first_probe_candidate=first_probe_candidate,
+                        second_probe_candidate=second_candidate,
+                        target_size_bytes=target_size_bytes,
+                        target_video_bytes=target_size_bytes - non_video_bytes,
+                        non_video_bytes=non_video_bytes,
+                        lower_bound_bytes=lower_bound_bytes,
+                        upper_bound_bytes=upper_bound_bytes,
+                        source_cap_video_bytes=source_cap_video_bytes,
+                        crf_bounds=object_dict(trace.get("crf_bounds")),
+                        measured_crfs=_measured_integer_crfs(second_probe_candidates),
+                        window_min_crf=second_probe_evidence["interpolation_window_min_crf"],
+                        window_max_crf=second_probe_evidence["interpolation_window_max_crf"],
+                    )
+                    if third_probe is not None:
+                        third_probe_crf, third_probe_evidence = third_probe
+                        third_sample, third_candidate = _measure_calibrated_retry_candidate(
+                            measure_candidate,
+                            trace=_trace_with_retry_candidates(trace, measured_candidates),
+                            crf=third_probe_crf,
+                            calibration_factor=calibration_factor,
+                            non_video_bytes=non_video_bytes,
+                            target_size_bytes=target_size_bytes,
+                            source_cap_video_bytes=source_cap_video_bytes,
+                            lower_bound_bytes=lower_bound_bytes,
+                            upper_bound_bytes=upper_bound_bytes,
+                        )
+                        third_rejection_reason = _final_retry_candidate_rejection_reason(
+                            third_sample,
+                            third_candidate,
+                            verification_status=verification.status,
+                            selected_metric=selected_metric,
+                            selected_metric_score=selected_metric_score,
+                            minimum_quality_score=minimum_quality_score,
+                        )
+                        measured_candidates.append(third_candidate)
+                        measurements.append(
+                            _final_retry_measurement_evidence(
+                                third_candidate,
+                                lower_bound_bytes=lower_bound_bytes,
+                                upper_bound_bytes=upper_bound_bytes,
+                                rejection_reason=third_rejection_reason,
+                                placement="bracket_interpolation",
+                                placement_evidence=third_probe_evidence,
+                            )
+                        )
+                        candidate = third_candidate
+                        sample = third_sample
+                        rejection_reason = third_rejection_reason
         if rejection_reason is not None:
             quality.target_size_trace = _final_retry_rejection_trace(
                 trace,
@@ -1015,6 +1085,25 @@ def retry_quality_result_for_final_miss(
         selected_metric_score=selected_metric_score,
         minimum_quality_score=minimum_quality_score,
     )
+    bracket_measurement = _final_retry_measurement_evidence(
+        candidate,
+        lower_bound_bytes=lower_bound_bytes,
+        upper_bound_bytes=upper_bound_bytes,
+        rejection_reason=rejection_reason,
+        placement="bracket_interpolation",
+        placement_evidence={
+            "method": "log_space_bracket_interpolation",
+            "selected_crf": selected_crf,
+            "selected_actual_video_bytes": actual_video_bytes,
+            "bracket_crf": float_value(bracket_candidate.get("crf")),
+            "bracket_calibrated_video_bytes": bracket_video_bytes,
+            "target_video_bytes": target_size_bytes - non_video_bytes,
+            "log_video_bytes_per_crf": (
+                math.log(bracket_video_bytes) - math.log(actual_video_bytes)
+            ) / (float_value(bracket_candidate.get("crf")) - selected_crf),
+            "strictly_between_measured_probes": True,
+        },
+    )
     if rejection_reason is not None:
         quality.target_size_trace = _final_retry_rejection_trace(
             trace,
@@ -1025,6 +1114,7 @@ def retry_quality_result_for_final_miss(
             non_video_bytes=non_video_bytes,
             bracket_candidate=bracket_candidate,
             rejection_reason=rejection_reason,
+            measurements=[bracket_measurement],
         )
         return None
     retry_trace_candidates = [dict(existing) for existing in candidates]
@@ -1042,6 +1132,7 @@ def retry_quality_result_for_final_miss(
         calibration_factor=calibration_factor,
         non_video_bytes=non_video_bytes,
         bracket_candidate=bracket_candidate,
+        measurements=[bracket_measurement],
         stdout=sample.stdout,
     )
 
@@ -1061,6 +1152,7 @@ def _final_retry_skip_trace(
     previous_selection_reason = str(trace.get("selection_reason") or "") or None
     retry_trace["status"] = "needs_review"
     retry_trace["selection_reason"] = reason
+    retry_trace["retry_policy"] = _retry_policy_payload(trace)
     if selected:
         retry_trace["final_retry_from_candidate"] = selected
     retry_trace["final_retry_skip"] = {
@@ -1095,6 +1187,7 @@ def _final_retry_quality_result(
     retry_trace["status"] = "selected"
     retry_trace["selection_reason"] = "calibrated_final_size_retry_candidate"
     retry_trace["final_retry_from_candidate"] = selected
+    retry_trace["retry_policy"] = _retry_policy_payload(trace)
     calibration_payload = {
         **_final_retry_calibration_payload(
             selected,
@@ -1170,6 +1263,7 @@ def _final_retry_rejection_trace(
     retry_trace["status"] = "needs_review"
     retry_trace["selection_reason"] = rejection_reason
     retry_trace["final_retry_from_candidate"] = selected
+    retry_trace["retry_policy"] = _retry_policy_payload(trace)
     calibration_payload = {
         **_final_retry_calibration_payload(
             selected,
@@ -1212,6 +1306,14 @@ def _increment_retry_candidate_count(
     )
     warm_payload["total_candidate_count"] = int_value(warm_payload.get("total_candidate_count")) + added_count
     retry_trace["warm_start"] = warm_payload
+
+
+def _retry_policy_payload(trace: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **object_dict(trace.get("retry_policy")),
+        "max_final_output_retries": MAX_FINAL_OUTPUT_RETRIES,
+        "max_final_retry_measurements": MAX_FINAL_RETRY_MEASUREMENTS,
+    }
 
 
 def _trace_with_retry_candidates(
@@ -1293,7 +1395,7 @@ def _bounded_directional_probe(
         cap_violating_crfs: list[float],
         crf_bounds: dict[str, Any],
         measured_crfs: set[int],
-) -> tuple[float, dict[str, Any]] | None:
+) -> tuple[float, dict[str, Any], dict[str, Any]] | None:
     if verification_status not in {"over_target", "under_target"}:
         return None
     if "min_crf" not in crf_bounds or "max_crf" not in crf_bounds:
@@ -1341,10 +1443,13 @@ def _bounded_directional_probe(
         estimated_crf = probe_from_crf + (
             math.log(target_video_bytes) - math.log(probe_from_video_bytes)
         ) / slope
+        placement_method = "measured_log_space_projection"
     else:
+        slope = -math.log(2.0) / CRF_PER_BITRATE_HALVING
         estimated_crf = selected_crf + CRF_PER_BITRATE_HALVING * math.log2(
             selected_actual_video_bytes / target_video_bytes
         )
+        placement_method = "bitrate_halving_prior"
     if not math.isfinite(estimated_crf):
         return None
     if verification_status == "over_target":
@@ -1370,7 +1475,21 @@ def _bounded_directional_probe(
     probe_crf = _nearest_unmeasured(seed, measured_crfs, directional_min, directional_max)
     if probe_crf is None:
         return None
-    return float(probe_crf), dict(probe_from)
+    return float(probe_crf), dict(probe_from), {
+        "method": placement_method,
+        "selected_crf": selected_crf,
+        "selected_actual_video_bytes": selected_actual_video_bytes,
+        "probe_from_crf": probe_from_crf,
+        "probe_from_calibrated_video_bytes": probe_from_video_bytes,
+        "target_video_bytes": target_video_bytes,
+        "log_video_bytes_per_crf": slope,
+        "estimated_crf": estimated_crf,
+        "probe_crf": float(probe_crf),
+        "window_min_crf": directional_min,
+        "window_max_crf": directional_max,
+        "crf_bounds": dict(crf_bounds),
+        "max_directional_probe_crf_step": MAX_DIRECTIONAL_PROBE_CRF_STEP,
+    }
 
 
 def _final_retry_candidate_rejection_reason(
@@ -1419,9 +1538,15 @@ def _final_retry_measurement_evidence(
         lower_bound_bytes: int,
         upper_bound_bytes: int,
         rejection_reason: str | None,
+        placement: Literal["directional_seed", "measured_secant", "bracket_interpolation"],
+        placement_evidence: dict[str, Any],
 ) -> dict[str, Any]:
+    slope = placement_evidence.get("log_video_bytes_per_crf")
     return {
         "crf": float_value(candidate.get("crf")),
+        "placement": placement,
+        "placement_evidence": placement_evidence,
+        "log_video_bytes_per_crf": slope,
         "metric": str(candidate.get("metric") or ""),
         "metric_score": float_value(candidate.get("metric_score")),
         "calibrated_predicted_video_bytes": int_value(candidate.get("calibrated_predicted_video_bytes")),
@@ -1438,51 +1563,208 @@ def _final_retry_measurement_evidence(
     }
 
 
-def _adjacent_directional_probe_crf(
+def _opposite_final_size_status(status: FinalSizeStatus) -> FinalSizeStatus:
+    if status == "over_target":
+        return "under_target"
+    if status == "under_target":
+        return "over_target"
+    return "missing_target"
+
+
+def _measured_secant_probe_crf(
         *,
         verification_status: FinalSizeStatus,
-        first_probe_crf: float,
-        probe_from_candidate: dict[str, Any],
+        selected_crf: float,
+        selected_actual_video_bytes: int,
+        first_probe_candidate: dict[str, Any],
+        target_video_bytes: int,
         crf_bounds: dict[str, Any],
         measured_crfs: set[int],
         cap_violating_crfs: list[float],
-) -> float | None:
+) -> tuple[float, dict[str, Any]] | None:
     if verification_status not in {"over_target", "under_target"}:
         return None
     if "min_crf" not in crf_bounds or "max_crf" not in crf_bounds:
         return None
     min_crf = int_value(crf_bounds.get("min_crf"))
     max_crf = int_value(crf_bounds.get("max_crf"))
-    probe_from_crf = float_value(probe_from_candidate.get("crf"))
-    if min_crf < 0 or max_crf < min_crf or not math.isfinite(probe_from_crf):
+    first_probe_crf = float_value(first_probe_candidate.get("crf"))
+    first_probe_video_bytes = int_value(first_probe_candidate.get("calibrated_predicted_video_bytes"))
+    if (
+            min_crf < 0
+            or max_crf < min_crf
+            or not math.isfinite(selected_crf)
+            or not math.isfinite(first_probe_crf)
+            or first_probe_crf == selected_crf
+            or selected_actual_video_bytes <= 0
+            or first_probe_video_bytes <= 0
+            or target_video_bytes <= 0
+    ):
+        return None
+    slope = (
+        math.log(first_probe_video_bytes) - math.log(selected_actual_video_bytes)
+    ) / (first_probe_crf - selected_crf)
+    if not math.isfinite(slope) or slope >= 0:
         return None
     if verification_status == "over_target":
-        directional_min = math.floor(probe_from_crf) + 1
-        directional_max = max_crf
-        candidate_crf = round(first_probe_crf) + 1
+        first_probe_same_side = (
+            first_probe_crf > selected_crf
+            and first_probe_video_bytes > target_video_bytes
+        )
     else:
+        first_probe_same_side = (
+            first_probe_crf < selected_crf
+            and first_probe_video_bytes < target_video_bytes
+        )
+    if not first_probe_same_side:
+        return None
+    estimated_crf = first_probe_crf + (
+        math.log(target_video_bytes) - math.log(first_probe_video_bytes)
+    ) / slope
+    if not math.isfinite(estimated_crf):
+        return None
+    if verification_status == "over_target":
+        if estimated_crf <= first_probe_crf:
+            return None
+        directional_min = math.floor(first_probe_crf) + 1
+        directional_max = min(max_crf, math.floor(first_probe_crf + MAX_DIRECTIONAL_PROBE_CRF_STEP))
+    else:
+        if estimated_crf >= first_probe_crf:
+            return None
         directional_min = max(
             min_crf,
             math.floor(max(cap_violating_crfs)) + 1 if cap_violating_crfs else min_crf,
         )
-        directional_max = math.ceil(probe_from_crf) - 1
-        candidate_crf = round(first_probe_crf) - 1
-    directional_min = max(
+        directional_min = max(directional_min, math.ceil(first_probe_crf - MAX_DIRECTIONAL_PROBE_CRF_STEP))
+        directional_max = min(max_crf, math.ceil(first_probe_crf) - 1)
+    if directional_min > directional_max:
+        return None
+    probe_crf = _nearest_unmeasured(
+        _clamp_int(round(estimated_crf), directional_min, directional_max),
+        measured_crfs,
         directional_min,
-        math.ceil(probe_from_crf - MAX_DIRECTIONAL_PROBE_CRF_STEP),
-    )
-    directional_max = min(
         directional_max,
-        math.floor(probe_from_crf + MAX_DIRECTIONAL_PROBE_CRF_STEP),
     )
+    if probe_crf is None:
+        return None
+    return float(probe_crf), {
+        "method": "log_space_secant",
+        "selected_crf": selected_crf,
+        "selected_actual_video_bytes": selected_actual_video_bytes,
+        "first_probe_crf": first_probe_crf,
+        "first_probe_calibrated_video_bytes": first_probe_video_bytes,
+        "target_video_bytes": target_video_bytes,
+        "log_video_bytes_per_crf": slope,
+        "estimated_crf": estimated_crf,
+        "window_min_crf": directional_min,
+        "window_max_crf": directional_max,
+        "interpolation_window_min_crf": min(first_probe_crf, directional_min),
+        "interpolation_window_max_crf": max(first_probe_crf, directional_max),
+        "same_direction_as_miss": True,
+    }
+
+
+def _straddle_interpolation_probe_crf(
+        *,
+        verification_status: FinalSizeStatus,
+        first_probe_candidate: dict[str, Any],
+        second_probe_candidate: dict[str, Any],
+        target_size_bytes: int,
+        target_video_bytes: int,
+        non_video_bytes: int,
+        lower_bound_bytes: int,
+        upper_bound_bytes: int,
+        source_cap_video_bytes: int | None,
+        crf_bounds: dict[str, Any],
+        measured_crfs: set[int],
+        window_min_crf: float,
+        window_max_crf: float,
+) -> tuple[float, dict[str, Any]] | None:
     if (
-            directional_min > directional_max
-            or candidate_crf < directional_min
-            or candidate_crf > directional_max
-            or candidate_crf in measured_crfs
+            verification_status not in {"over_target", "under_target"}
+            or target_video_bytes <= 0
+            or "min_crf" not in crf_bounds
+            or "max_crf" not in crf_bounds
     ):
         return None
-    return float(candidate_crf)
+    first_crf = float_value(first_probe_candidate.get("crf"))
+    second_crf = float_value(second_probe_candidate.get("crf"))
+    first_video_bytes = int_value(first_probe_candidate.get("calibrated_predicted_video_bytes"))
+    second_video_bytes = int_value(second_probe_candidate.get("calibrated_predicted_video_bytes"))
+    first_status = _calibrated_candidate_size_status(
+        first_probe_candidate,
+        lower_bound_bytes=lower_bound_bytes,
+        upper_bound_bytes=upper_bound_bytes,
+    )
+    second_status = _calibrated_candidate_size_status(
+        second_probe_candidate,
+        lower_bound_bytes=lower_bound_bytes,
+        upper_bound_bytes=upper_bound_bytes,
+    )
+    if (
+            first_status != verification_status
+            or second_status != _opposite_final_size_status(verification_status)
+            or not math.isfinite(first_crf)
+            or not math.isfinite(second_crf)
+            or first_crf == second_crf
+            or first_video_bytes <= 0
+            or second_video_bytes <= 0
+            or not int_value(crf_bounds.get("min_crf")) <= first_crf <= int_value(crf_bounds.get("max_crf"))
+            or not int_value(crf_bounds.get("min_crf")) <= second_crf <= int_value(crf_bounds.get("max_crf"))
+            or first_crf < window_min_crf
+            or first_crf > window_max_crf
+            or second_crf < window_min_crf
+            or second_crf > window_max_crf
+    ):
+        return None
+    if verification_status == "over_target" and not first_crf < second_crf:
+        return None
+    if verification_status == "under_target" and not second_crf < first_crf:
+        return None
+    slope = (math.log(second_video_bytes) - math.log(first_video_bytes)) / (second_crf - first_crf)
+    if not math.isfinite(slope) or slope >= 0:
+        return None
+    start = math.floor(min(first_crf, second_crf)) + 1
+    stop = math.ceil(max(first_crf, second_crf))
+    candidates: list[tuple[float, int, float]] = []
+    for integer_crf in range(start, stop):
+        if integer_crf in measured_crfs or not window_min_crf <= integer_crf <= window_max_crf:
+            continue
+        fraction = (integer_crf - first_crf) / (second_crf - first_crf)
+        if not 0 < fraction < 1:
+            continue
+        predicted_video_bytes = round(
+            math.exp(
+                math.log(first_video_bytes)
+                + (math.log(second_video_bytes) - math.log(first_video_bytes)) * fraction
+            )
+        )
+        predicted_total_bytes = predicted_video_bytes + non_video_bytes
+        if (
+                lower_bound_bytes <= predicted_total_bytes <= upper_bound_bytes
+                and (source_cap_video_bytes is None or predicted_video_bytes <= source_cap_video_bytes)
+        ):
+            candidates.append((float(integer_crf), predicted_total_bytes, fraction))
+    if not candidates:
+        return None
+    retry_crf, _predicted_total_bytes, fraction = min(
+        candidates,
+        key=lambda entry: (abs(entry[1] - target_size_bytes), entry[0]),
+    )
+    return retry_crf, {
+        "method": "log_space_bracket_interpolation",
+        "first_probe_crf": first_crf,
+        "first_probe_calibrated_video_bytes": first_video_bytes,
+        "second_probe_crf": second_crf,
+        "second_probe_calibrated_video_bytes": second_video_bytes,
+        "target_video_bytes": target_video_bytes,
+        "log_video_bytes_per_crf": slope,
+        "interpolation_fraction": fraction,
+        "window_min_crf": window_min_crf,
+        "window_max_crf": window_max_crf,
+        "strictly_between_measured_probes": True,
+        "monotonic_evidence": "strictly_decreasing_calibrated_video_bytes",
+    }
 
 
 def _interpolated_retry_crf(
@@ -1994,7 +2276,10 @@ def _trace_payload(
             "candidate_count": len(candidates),
             "max_candidates": MAX_TARGET_SIZE_CANDIDATES,
         },
-        "retry_policy": {"max_final_output_retries": MAX_FINAL_OUTPUT_RETRIES},
+        "retry_policy": {
+            "max_final_output_retries": MAX_FINAL_OUTPUT_RETRIES,
+            "max_final_retry_measurements": MAX_FINAL_RETRY_MEASUREMENTS,
+        },
         "candidates": [candidate.to_payload() for candidate in sorted(candidates, key=lambda item: item.attempt)],
         "selected_candidate": selected.to_payload() if selected is not None else None,
         "best_reachable_candidate": best.to_payload() if best is not None else None,

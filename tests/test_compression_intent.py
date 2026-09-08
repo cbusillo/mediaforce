@@ -61,14 +61,21 @@ class CompressionIntentTests(unittest.TestCase):
 
         options = compression_intent_options(intent)
 
-        self.assertEqual([option["key"] for option in options], [
-            "reference",
-            "transparent",
-            "balanced",
-            "perceptual_floor",
-        ])
-        self.assertEqual([option["key"] for option in options if option["selected"]], ["transparent"])
-        self.assertEqual(options[1]["compression_intent"]["level"], "transparent")
+        self.assertEqual(
+            [option["key"] for option in options],
+            ["reference", "balanced", "perceptual_floor"],
+        )
+        self.assertEqual([option["key"] for option in options if option["selected"]], ["perceptual_floor"])
+        self.assertEqual(options[2]["compression_intent"]["level"], "perceptual_floor")
+        self.assertEqual(
+            {option["key"]: option["accepts_under_target_result"] for option in options},
+            {
+                "reference": False,
+                "balanced": False,
+                "perceptual_floor": True,
+            },
+        )
+        self.assertIn("measured quality floor", options[2]["detail"])
 
     def test_legacy_options_do_not_preselect_a_named_intent(self) -> None:
         options = compression_intent_options(CompressionIntentV1("legacy_unconfirmed", "legacy", False))

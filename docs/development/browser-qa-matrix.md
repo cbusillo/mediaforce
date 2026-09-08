@@ -46,8 +46,12 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   featurette, an uncertain nested file, active processing, completed titles,
   validation-ready work, two replacement-ready titles with different measured
   savings and playable checked-output previews, and a preflight promotion
-  conflict. Unmeasured titles show
-  `No estimate` rather than inheriting TV codec-history savings.
+  conflict. A title with current completed sampled evidence for every included
+  movie file shows its sampled output and savings; incomplete, stale, or
+  incompatible evidence remains `No estimate` rather than inheriting TV
+  codec-history savings. Mixed known and unknown titles show explicit coverage,
+  a lower bound for known output, and a partial known savings total while every
+  title stays reachable.
 - Movie Studio: `/folders/movies/Loose%20Feature.mkv`,
   `/folders/movies/Editions%20Showcase`,
   `/folders/movies/Waiting%20Encode`, and
@@ -57,9 +61,22 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   shows `Cannot start`, explains the configured source-size cap, keeps current
   size, expected output, and expected savings visible, and disables
   sample/queue work.
+  For one-file titles with title-scoped sample, review, encode, validation, or
+  promotion work, the Movie Library opens the title route. Completed and idle
+  one-file titles keep their exact-file route. The title inspector still exposes
+  `Open exact file in Studio`; that exact route offers `Review title sample` for
+  pending review and `Open title workspace` for other applicable title work,
+  without exposing a duplicate sample action.
 - Folder Studio: `/folders/tv/Example%20Show/Season%201`, including enough item
   metadata to render policy comparison, sample facts, queue state, and side
   context.
+- Quality contract: `/folders/tv/Example%20Show/Season%201` exposes visible
+  detail on every quality option. Selecting reference, balanced, or
+  perceptual-floor intent immediately changes the size target/ceiling, sample
+  search direction, quality rule, final band/ceiling, under-target policy, and
+  live screen-reader announcement on desktop and narrow viewports. The legacy
+  transparent intent is consolidated into the perceptual-floor option because
+  both currently use the same search and acceptance behavior.
 - Sampling state: `/folders/tv/Sampling%20Show/Season%201`, with persisted stage,
   heartbeat, bounded review-step progress, and a historical ETA range.
 - Shared-scope sampling state:
@@ -74,7 +91,14 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   would repeat and routes the operator to a fresh settings review.
 - Review-ready state: `/folders/tv/Review%20Ready/Season%201`, with retained
   review media, explicit target/band/sample-byte facts, picture/sound risk, and
-  trustworthy sound metadata for the focused comparison workspace.
+  trustworthy sound metadata for the shared review comparison workspace. Verify
+  the same persistent Original/Sample stage and explicit `Full screen` control
+  on a review-ready Movie and Other fixture; the combined comparison remains a
+  separately labeled download.
+  An exact-item review-ready TV route also keeps `Current size`, `Estimated
+  output`, and `Estimated space saved` in its decision facts, separate from the
+  comparison clip byte labels. Risk guidance remains visible, but no empty
+  `Decision` placeholder is shown before a decision exists.
 - Absolute-target state: `/folders/tv/Absolute%20Goal/Season%201`, proving an
   explicit 225 MB episode goal remains 225 MB for an 88-minute episode.
 - Under- and over-target states: `/folders/tv/Undershoot%20Show/Season%201` and
@@ -106,6 +130,12 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   unchanged, and replace the guaranteed-to-fail validation action with the
   bounded `Reconnect storage and check` path. A failed reconnect must leave the
   staged output and original untouched and keep validation blocked.
+- A TV season workspace must expose a complete `Choose an episode` control
+  before sample or size actions. Verify that all catalog episodes are present in
+  numeric order with plain workflow state, changing the selection does not
+  navigate, `Open episode` opens Episode 2's exact workspace without starting
+  work, and the exact-item header links back to the parent season. Repeat at
+  1024px and 390px widths.
 - Lifecycle states: `tv/Current Season` includes an aged eligible Season 1 and a
   five-day-old active Season 2. Library must show eligible versus held episode
   counts, active-series metadata, the `Auto` policy, and current/acquisition hold
@@ -116,10 +146,15 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   queued encode work exists.
 - Completed cleanup: one promoted `movies/Archive Ready` item with an archived
   original under the smoke archive root, so `/completed` has cleanup-ready work.
+  Selection stays reversible, review resolution remains visually separate from
+  destructive cleanup, and every disabled cleanup command exposes its reason
+  beside the command through `aria-describedby`.
 - Completed history: the completed fixtures include earlier failed and
   operator-stopped encode events so History must distinguish the two outcomes.
   Item events use media-aware labels such as `Movie failed` or `Episode
-finished`; season wording is reserved for folder-level summaries.
+  finished`; season wording is reserved for folder-level summaries. The History
+  tab reports visible and total events and renders every returned event rather
+  than a capped summary.
 - Exact-item Activity: a running episode fixture must keep the readiness badge
   readable without horizontal overflow at 390px, including a long episode name.
 - Blocked cleanup: one promoted `movies/Blocked Cleanup` item with an archived
@@ -185,11 +220,14 @@ Every browser QA pass should cover these routes:
 - `/folders/tv/Promotion%20Ready/Season%201`: promotion-ready state.
 - `/folders/tv/Finished%20Show/Season%201`: completed state.
 - `/movies`: Movie Library priority, scope, and replacement-conflict language.
-- `/folders/movies/Editions%20Showcase`: Movie Studio sample setup and whole-title scope.
-- `/folders/movies/Loose%20Feature.mkv`: Movie Studio sample-waiting and one-file scope.
+- `/folders/movies/Editions%20Showcase`: Movie Studio sample setup and
+  whole-title scope.
+- `/folders/movies/Loose%20Feature.mkv`: Movie Studio sample-waiting and
+  one-file scope.
 - `/folders/movies/Review%20Ready`: Movie Studio comparison-clips-ready state.
 - `/folders/movies/Validation%20Ready`: Movie Studio check-ready state.
-- `/folders/movies/Replacement%20Ready%20Large`: Movie Studio replacement-ready state.
+- `/folders/movies/Replacement%20Ready%20Large`: Movie Studio
+  replacement-ready state.
 - `/other`: Other Library folder/file language and mapped workflow states.
 - `/folders/other/Field%20Notes`: Other Studio sample setup and inclusion state.
 - `/folders/other/Sampling%20Folder`: Other Studio sample-waiting state.
@@ -201,6 +239,23 @@ Every browser QA pass should cover these routes:
 - `/settings`: basic, advanced, and danger-zone settings sections.
 
 ## Layout Expectations
+
+On `/`, `/movies`, and `/other`, verify at 1440px, 1024px, and 390px that:
+
+- mode navigation, metrics, current-work summary, and toolbar retain one stable
+  order and visual language;
+- no mode adds a visible hero heading, subtitle, recommendation card, or
+  ranking explainer before the index;
+- current-work totals equal the active rows exposed by the state controls, and
+  every emitted non-idle state remains reachable through ordinary filtering;
+- the index remains reachable in the first mobile scroll, controls use the same
+  compact two-column collapse, row selection does not expand detail by itself,
+  and Inspect opens the selected detail directly beneath its row;
+- desktop selection opens one inline detail directly beneath the selected row,
+  Collapse removes it without losing selection, and neither the register nor
+  detail creates an independently scrolling region;
+- switching modes does not introduce page-level horizontal overflow or shift
+  the mode-navigation anchor.
 
 The automated narrow smoke uses a 390px viewport and fails when:
 
@@ -243,15 +298,27 @@ When a measured sample lands outside that target band, the comparison viewport
 must say that the size goal was not met before presenting review media. It must
 distinguish review-clip byte savings from the full-episode estimate, make another
 same-target measured test the primary action, and require an explicit warning
-that accepting the tradeoff saves the profile and queues the full folder encode.
+that accepting the tradeoff records the profile decision while production
+remains separate until the operator chooses the exact compression action.
 
-When review media is ready, `Compare in full screen` must open paused in `Side by
-side` and `Fit`. `One at a time` must switch between `Original` and `Sample` without
-changing the selected moment, playback position, or picture position. Sound
-controls appear only when both clips carry trustworthy sound metadata; legacy or
-silent clips must say they show picture only and offer a plain-language path to
-create another sample when the source has sound. The normal UI must not expose codec,
-quality-score, synchronization, or other implementation vocabulary.
+When valid browser-ready review pairs are available, the Original/Sample stage
+must remain visible with playback paused in `Side by side` and `Fit`. `Full
+screen` must enter a viewing-only mode with no approval, queue, stop, retry,
+checking, replacement, or Details action. `One at a time` must switch between
+`Original` and `Sample` without changing the selected moment, playback position,
+or picture position. Sound controls appear only when both clips carry trustworthy
+sound metadata; legacy or silent clips must say they show picture only and offer
+a plain-language path to create another sample when the source has sound. Purged,
+missing, and legacy-download-only review media must explain that inline comparison
+is unavailable instead of treating `review_media_ready` as browser authority. The
+normal UI must not expose codec, quality-score, synchronization, or other
+implementation vocabulary.
+
+At 390px, Original and Sample stack by default, the One/Both control remains
+available, and `Review decision` moves to the decision region without changing
+state. The fact ledger becomes a readable 2×2 grid. Escape exits fullscreen and
+returns focus and scroll position without resetting the selected moment,
+playback position, picture arrangement, or scale.
 
 Playback uses the new clip as the comparison clock. Dragging the timeline may
 preview the requested position, but each committed seek must update both clips
@@ -285,10 +352,20 @@ show progress only for a bounded measurable stage, and label historical ETA as
 an estimate. Operators must not need to scroll past old evidence to learn
 whether work is still running.
 
-On Activity, unresolved processing failures must appear newest first. A missing
-controller media mount must remain queued instead of dispatching futile SSH
-retries, identify storage as the blocker, and show `Selecting computer` or
-`Unassigned` rather than a placeholder host name. When one sample transitions
+On Activity, `Working now` must own or begin the first viewport at desktop and
+390px widths; do not place a visible hero or separate dashboard summary ahead of
+the current queue. At wide desktop widths, the collapsed System details rail
+must not compress the current-work register below 70% of the workstation canvas;
+stack the rail beneath the register at ordinary desktop widths. Keep unresolved
+processing failures newest first and inside the queue surface with their actions.
+A wide Activity register keeps each row divider aligned across every column even
+when work-window copy is taller than progress or next-step content. A missing
+controller media mount must
+remain queued instead of dispatching futile SSH retries, identify storage as the
+blocker, and show `Selecting computer` or `Unassigned` rather than a placeholder
+host name. Keep queue controls adjacent to the affected current work, show one
+refresh control, and retain work-window detail with the row it governs; computer
+and schedule detail stays collapsed until requested. When one sample transitions
 out of processing, the exact item's stale encode row must disappear, but another
 active item under the same folder must remain visible. A review-ready item moves
 to the attention list; a completed sample without available review media remains
@@ -297,10 +374,11 @@ and 390px widths without horizontal page overflow.
 
 On Library, each show and season must expose projected space savings at the
 selection point. Verify that every sort option visibly reorders shows, that the
-desktop show and season panes keep one stable height with independent scrolling,
-and that narrow layouts replace the long show rail with a show picker. Opening a
-multi-season show must clearly state that one representative test and one size
-choice apply to all seasons before any full encode can be queued.
+show register uses normal document scrolling, and that one selected show expands
+inline without moving its identity away from the detail. At 390px, selecting a
+row must keep detail closed until Inspect is used. Opening a multi-season show
+must clearly state that one representative test and one size choice apply to all
+seasons before any full encode can be queued.
 
 On Other Library, verify that root-level files are exact work units and nested
 media is grouped by the configured bounded folder or file policy. Every row must
@@ -329,9 +407,10 @@ library usable and explain that only savings and status details are unavailable.
 
 On Movies, the default `What to work on next` view must show a visible
 `Recommended next` route to the highest-priority actionable title without
-requiring search. The full title list must remain reachable in a bounded,
-independently scrolling region with a sticky header, and the selected movie
-details must stay adjacent rather than appearing after the complete library.
+requiring search. The full title list must remain reachable through document
+scrolling, and the selected movie detail must open directly beneath its row
+rather than in a side pane or after the complete library. Selection and Collapse
+must preserve row position; narrow layouts require an explicit Inspect action.
 Verify this path at 1024px and 390px: Library → Movies → recommended title →
 Studio. Before full work starts, Movie Studio must show runtime, current size,
 expected output, planned savings, and the target range. Once full work is queued
@@ -362,6 +441,18 @@ On Finished, the finished-season list must fit without horizontal scrolling at
 must persist across route changes and reloads, and both themes must preserve
 status contrast, media-stage darkness, focus visibility, and readable controls
 on Library, Activity, Finished, Settings, and folder review routes.
+
+## Target-default evidence
+
+Exact TV review, Movie title-review handoff, and Other file routes expose one
+review-only target evidence disclosure. The route smoke injects synthetic
+available, stale-policy, and conflicting-boundary responses at 1024px and
+390px. It verifies keyboard expansion/collapse, decimal size and current-target
+copy, scope/count/confidence, unverified production acceptance, absence of
+adoption controls or mutation requests, and no horizontal overflow. Hosted CI
+retains panel screenshots alongside its built frontend and synthetic responses.
+Backend tests independently validate current observation and calibration binding;
+these display fixtures do not establish real production evidence or media quality.
 
 ## State Gaps
 

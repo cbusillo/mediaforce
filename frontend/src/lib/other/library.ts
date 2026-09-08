@@ -12,6 +12,15 @@ export interface OtherSampleSetupResult {
 	attentionTitle?: string;
 }
 
+export type OtherLibraryStateKey =
+	'attention' | 'blocked' | 'processing' | 'ready' | 'browse_only' | 'idle';
+
+export interface OtherLibraryStateGroup {
+	key: OtherLibraryStateKey;
+	label: string;
+	tone: 'active' | 'ready' | 'wait' | 'fail' | 'idle';
+}
+
 export function otherSampleSetupResult(canQueue: boolean): OtherSampleSetupResult {
 	return canQueue
 		? {
@@ -114,6 +123,26 @@ export function otherWorkflowLabel(
 		default:
 			return detailsLoading ? 'Loading details' : 'Ready';
 	}
+}
+
+export function otherLibraryStateGroup(unit: OtherWorkUnit): OtherLibraryStateGroup {
+	if (unit.profile_readiness.state === 'blocked') {
+		return { key: 'blocked', label: 'Cannot start', tone: 'fail' };
+	}
+	if (unit.profile_readiness.state === 'browse_only') {
+		return { key: 'browse_only', label: 'Browse only', tone: 'idle' };
+	}
+	const lane = unit.workflow_state?.primary_lane;
+	if (lane === 'attention' || lane === 'blocked') {
+		return { key: 'attention', label: 'Needs attention', tone: 'fail' };
+	}
+	if (lane === 'processing') {
+		return { key: 'processing', label: 'Compressing', tone: 'active' };
+	}
+	if (['encode', 'validate', 'promote', 'mixed'].includes(lane ?? '')) {
+		return { key: 'ready', label: 'Ready to act on', tone: 'ready' };
+	}
+	return { key: 'idle', label: 'No active work', tone: 'idle' };
 }
 
 export function otherWorkflowDetail(

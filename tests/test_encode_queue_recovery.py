@@ -170,6 +170,63 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         }
 
     @staticmethod
+    def _accepted_calibration_contract(
+            *,
+            sample_job_id: str,
+            compression_intent: str = "balanced",
+            default_grain: int = 8,
+    ) -> folder_actions_runtime.ActionPayload:
+        request = {
+            "schema_version": 2,
+            "size_goal": {
+                "mode": "normalized",
+                "value_mb": 300.0,
+                "sample_projection_tolerance_percent": 10.0,
+                "final_output_tolerance_percent": 5.0,
+                "reference_runtime_minutes": 45.0,
+            },
+            "resolution": {"mode": "source", "max_height": None},
+            "compression_intent": {
+                "schema_version": 1,
+                "level": compression_intent,
+                "confirmed": True,
+            },
+            "quality": {
+                "metric": "vmaf",
+                "target_vmaf": 85.0,
+                "min_target_vmaf": 80.0,
+                "target_xpsnr": 41.0,
+                "min_target_xpsnr": 35.0,
+            },
+        }
+        policy = {
+            "video": {
+                "compression_intent_schema_version": 1,
+                "compression_intent": compression_intent,
+                "compression_intent_source": "operator",
+                "compression_intent_confirmed": True,
+                "default_grain": default_grain,
+            }
+        }
+        return {
+            "job_id": sample_job_id,
+            "accepted_sample_job_id": sample_job_id,
+            "accepted_policy_hash": f"policy-{sample_job_id}-{default_grain}",
+            "accepted_at": web_app._now_iso(),
+            "policy": policy,
+            "sample_item": {
+                "compression_intent": {
+                    "schema_version": 1,
+                    "level": compression_intent,
+                    "source": "operator",
+                    "confirmed": True,
+                },
+                "resolved_operator_intent": {"request": request},
+                "resolved_policy": policy,
+            },
+        }
+
+    @staticmethod
     def _accepted_review_gate(
             _calibration: folder_actions_runtime.ActionPayload | None,
     ) -> folder_actions_runtime.ActionPayload:
@@ -2058,18 +2115,147 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "Choose a fresh size or compression goal and make another representative test before retrying.",
         )
 
-    def test_broad_retry_excludes_final_size_miss_that_needs_changed_inputs(self) -> None:
-        progress_json = json.dumps(
-            {
-                "failure_analysis": {
-                    "kind": "final_size_target_miss",
-                    "retry_strategy": "fresh_goal_required",
-                }
-            }
+    def test_broad_retry_delegates_final_size_miss_to_central_queue_guard(self) -> None:
+        prefix = "tv/show/episode-final-size-miss.mkv"
+        with open_db(self.config.paths.db_path) as connection:
+            now = web_app._now_iso()
+            save_encode_job(
+                connection,
+                {
+                    "job_id": "job-final-size-central-guard",
+                    "prefix": prefix,
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_path": str(self.root / "runs" / "final-size-central-guard.json"),
+                    "item_count": 1,
+                    "saved_profile_path": None,
+                    "host": {},
+                    "last_host": {},
+                    "notes": "",
+                    "bypass_schedule": False,
+                    "attempt_count": 1,
+                    "process_pid": None,
+                    "error": None,
+                    "leased_at": None,
+                    "lease_expires_at": None,
+                    "heartbeat_at": None,
+                    "worker_id": None,
+                    "retry_not_before": None,
+                    "waiting_reason": None,
+                    "terminal_reason": "deterministic",
+                    "last_failure_kind": "deterministic",
+                    "last_failure_at": now,
+                    "host_cooldown_until": None,
+                    "progress": {
+                        "failure_analysis": {
+                            "kind": "final_size_target_miss",
+                            "retry_strategy": "fresh_goal_required",
+                        }
+                    },
+                    "created_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+
+        self.assertIn(
+            prefix,
+            queue_actions_runtime._retryable_terminal_encode_prefixes(
+                connection_factory=lambda: open_db(self.config.paths.db_path)
+            ),
         )
 
-        self.assertTrue(queue_actions_runtime._terminal_encode_requires_changed_inputs(progress_json))
-        self.assertFalse(queue_actions_runtime._terminal_encode_requires_changed_inputs(None))
+    def test_production_approval_contract_ignores_unrelated_policy_hash_change(self) -> None:
+        original = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(sample_job_id="sample-1", default_grain=8)
+        )
+        unrelated_change = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(sample_job_id="sample-2", default_grain=12)
+        )
+
+        self.assertIsNotNone(original)
+        self.assertIsNotNone(unrelated_change)
+        assert original is not None and unrelated_change is not None
+        self.assertNotEqual(original["policy_hash"], unrelated_change["policy_hash"])
+        self.assertEqual(original["operator_intent_hash"], unrelated_change["operator_intent_hash"])
+
+    def test_final_size_requeue_requires_new_sample_and_changed_operator_contract(self) -> None:
+        original = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(sample_job_id="sample-1")
+        )
+        new_sample_same_intent = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(sample_job_id="sample-2")
+        )
+        same_sample_changed_intent = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(
+                sample_job_id="sample-1",
+                compression_intent="perceptual_floor",
+            )
+        )
+        new_sample_changed_intent = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(
+                sample_job_id="sample-2",
+                compression_intent="perceptual_floor",
+            )
+        )
+        manifest_path = self._write_manifest("manifest-final-size-contract-unit.json", [])
+        manifest_path.write_text(json.dumps({
+            "selection": {"production_approval_contract": original},
+            "items": [],
+        }))
+        job = {
+            "manifest_path": str(manifest_path),
+            "progress": {"failure_analysis": {"kind": "final_size_target_miss"}},
+        }
+
+        self.assertIsNotNone(
+            folder_actions_runtime._final_size_requeue_contract_blocker(job, new_sample_same_intent)
+        )
+        self.assertIsNotNone(
+            folder_actions_runtime._final_size_requeue_contract_blocker(job, same_sample_changed_intent)
+        )
+        self.assertIsNone(
+            folder_actions_runtime._final_size_requeue_contract_blocker(job, new_sample_changed_intent)
+        )
+
+    def test_final_size_requeue_fails_closed_without_valid_previous_contract(self) -> None:
+        current = folder_actions_runtime._production_approval_contract(
+            self._accepted_calibration_contract(
+                sample_job_id="sample-2",
+                compression_intent="perceptual_floor",
+            )
+        )
+        missing_contract_manifest = self._write_manifest("manifest-missing-recovery-contract.json", [])
+        tampered_contract_manifest = self._write_manifest("manifest-tampered-recovery-contract.json", [])
+        tampered = object_dict(current)
+        tampered["operator_intent_hash"] = "sha256:tampered"
+        tampered_contract_manifest.write_text(json.dumps({
+            "selection": {"production_approval_contract": tampered},
+            "items": [],
+        }))
+        jobs = [
+            {
+                "manifest_path": None,
+                "progress": {"failure_analysis": {"kind": "final_size_target_miss"}},
+            },
+            {
+                "manifest_path": str(missing_contract_manifest),
+                "progress": {"failure_analysis": {"kind": "final_size_target_miss"}},
+            },
+            {
+                "manifest_path": str(tampered_contract_manifest),
+                "progress": {"failure_analysis": {"kind": "final_size_target_miss"}},
+            },
+        ]
+
+        for job in jobs:
+            with self.subTest(manifest_path=job["manifest_path"]):
+                blocker = folder_actions_runtime._final_size_requeue_contract_blocker(job, current)
+                self.assertIsNotNone(blocker)
+                assert blocker is not None
+                self.assertEqual(blocker["code"], "final_size_recovery_contract_unchanged")
 
     def test_quality_policy_legacy_near_miss_does_not_raise_size_cap(self) -> None:
         source_path = self._create_source_file("episode-legacy-near-miss.mkv")
@@ -2663,6 +2849,29 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         failure_kind = encode_runtime._classify_encode_failure(exc, job)
         self.assertEqual(failure_kind, "host_configuration")
         self.assertFalse(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+
+    def test_containment_failure_is_not_retried_from_embedded_ssh_markers(self) -> None:
+        host = {"key": "remote-a", "label": "Remote A", "mode": "ssh"}
+        exc = ProcessDeadlineEnforcementError(
+            "containment failed after ssh connection reset by remote host"
+        )
+        failure_kind = encode_runtime._classify_encode_failure(exc, {"host": host})
+
+        self.assertEqual(failure_kind, "containment_unproven")
+        self.assertFalse(
+            encode_runtime._encode_failure_is_retryable(
+                failure_kind,
+                str(exc),
+                host,
+            )
+        )
+        self.assertFalse(
+            encode_runtime._encode_failure_retries_after_attempt_cap(
+                failure_kind,
+                str(exc),
+                host,
+            )
+        )
 
     def test_controller_storage_failure_retries_other_hosts_within_attempt_cap(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
@@ -3886,6 +4095,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             available=False,
             message="Missing required paths",
             missing_paths=["/Volumes/media/tv"],
+            probe_available=True,
             missing_mounts=["/Volumes/media"],
             platform="macos",
             setup_supported=True,
@@ -3899,6 +4109,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             rows = web_app._host_runtime_rows(connection, self.config)
 
         self.assertTrue(rows[0]["storage_recovery_available"])
+        self.assertTrue(rows[0]["probe_available"])
         self.assertEqual(rows[0]["message"], "Storage will reconnect when work starts")
         self.assertEqual(rows[0]["active_reason"], "shared storage will reconnect when work starts")
 
@@ -3929,7 +4140,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "host": "remote@mac",
             "label": "Remote Mac",
             "available": False,
-            "probe_available": False,
+            "probe_available": True,
             "priority": 50,
             "capabilities": ["encode_queue"],
             "active_encode_count": 0,
@@ -8519,16 +8730,28 @@ raise SystemExit(0)
                 },
             )
 
+        queue_calls: list[str] = []
+
+        def queue_action(queued_prefix: str, _notes: str, _bypass_schedule: bool) -> dict[str, object]:
+            queue_calls.append(queued_prefix)
+            return {
+                "ok": False,
+                "code": "final_size_recovery_contract_unchanged",
+                "message": "Choose a fresh size or compression goal before retrying.",
+            }
+
         result = queue_actions_runtime.retry_failed_encode_prefix_action(
             connection_factory=lambda: open_db(self.config.paths.db_path),
             config=self.config,
             prefix=prefix,
-            load_calibration_state=lambda _config, _prefix: None,
+            load_calibration_state=self._accepted_calibration_state,
             review_gate=self._accepted_review_gate,
-            queue_folder_encode_action=lambda _prefix, _notes, _bypass_schedule: {"ok": True},
+            queue_folder_encode_action=queue_action,
         )
 
         self.assertEqual(result["queued_count"], 0)
+        self.assertEqual(queue_calls, [prefix])
+        self.assertEqual(result["blocked"][0]["code"], "final_size_recovery_contract_unchanged")
         self.assertIn("Choose a fresh size or compression goal", result["message"])
 
     def test_save_profile_action_requires_high_impact_confirmation(self) -> None:
@@ -9291,6 +9514,22 @@ raise SystemExit(0)
         self.assertEqual(
             web_app._folder_review_badge(self.config, "tv/show-refresh"),
             {"label": "Refresh review", "tone": "warning"},
+        )
+
+    def test_folder_review_badge_marks_pending_sample_plan_with_scope_neutral_copy(self) -> None:
+        web_app._save_pending_proposal(
+            self.config,
+            "tv/show-plan",
+            {"status": "pending_confirmation", "can_queue": True},
+        )
+
+        self.assertEqual(
+            web_app._folder_review_badge(self.config, "tv/show-plan"),
+            {
+                "label": "Sample plan ready",
+                "tone": "attention",
+                "detail": "A sample plan is waiting for review.",
+            },
         )
 
     def test_folder_review_badge_prioritizes_active_sample_job(self) -> None:
@@ -10527,6 +10766,7 @@ raise SystemExit(0)
             status = remote._remote_host_status(self.config, host)
 
         self.assertFalse(status.available)
+        self.assertTrue(status.probe_available)
         self.assertEqual(status.message, "Shared storage disconnected")
         self.assertEqual(status.missing_paths, ["/Volumes/My Share/tv"])
         self.assertEqual(status.missing_mounts, ["/Volumes/My Share"])
@@ -10536,6 +10776,57 @@ raise SystemExit(0)
             run_remote_ssh_mock.call_args.kwargs["input_text"],
         )
         self.assertIn(' on $mount_path (', run_remote_ssh_mock.call_args.kwargs["input_text"])
+
+    def test_remote_host_status_marks_failed_probe_unavailable(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"], returncode=255, stdout="", stderr="Connection refused"
+                ),
+        ), patch("mediaforce.hosts.status_runtime.time.sleep"):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertFalse(status.probe_available)
+
+    def test_remote_host_status_marks_unreadable_probe_unavailable(self) -> None:
+        host: dict[str, object] = {
+            "host": "cbusillo@encode-host",
+            "label": "Encode Host",
+            "capabilities": ["encode_queue"],
+        }
+        with patch(
+                "mediaforce.remote._run_remote_ssh",
+                return_value=subprocess.CompletedProcess(
+                    args=["ssh"], returncode=0, stdout="unexpected output", stderr=""
+                ),
+        ):
+            status = remote._remote_host_status(self.config, host)
+
+        self.assertFalse(status.available)
+        self.assertFalse(status.probe_available)
+        self.assertEqual(status.message, "Remote check returned unreadable output")
+
+    def test_host_status_positional_optional_fields_remain_compatible(self) -> None:
+        status = HostStatus(
+            "remote-a",
+            "Remote A",
+            "ssh",
+            20,
+            ["encode_queue"],
+            True,
+            "Mounted and ready",
+            [],
+            "/srv/mediaforce",
+        )
+
+        self.assertEqual(status.repo_path, "/srv/mediaforce")
+        self.assertIsNone(status.probe_available)
 
     def test_remote_host_status_rejects_unwritable_staging_root(self) -> None:
         host: dict[str, object] = {
@@ -10687,13 +10978,14 @@ raise SystemExit(0)
             "host": "cbusillo@encode-host",
             "label": "Encode Host",
             "capabilities": ["encode_queue"],
-            "source_roots": {"tv": "/srv/media/tv"},
-            "staging_root": "/srv/media/transcode",
+            "source_roots": {"tv": "/Volumes/media/tv"},
+            "staging_root": "/Volumes/media/transcode",
         }
         full_stdout = "\n".join(
             [
-                "path|/srv/media/tv|1",
-                "path|/srv/media/transcode|1",
+                "mount|/Volumes/media|1",
+                "path|/Volumes/media/tv|1",
+                "path|/Volumes/media/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -10711,8 +11003,9 @@ raise SystemExit(0)
         )
         changed_cheap_stdout = "\n".join(
             [
-                "path|/srv/media/tv|1",
-                "path|/srv/media/transcode|1",
+                "mount|/Volumes/media|1",
+                "path|/Volumes/media/tv|1",
+                "path|/Volumes/media/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -10726,8 +11019,9 @@ raise SystemExit(0)
         )
         refreshed_full_stdout = "\n".join(
             [
-                "path|/srv/media/tv|1",
-                "path|/srv/media/transcode|1",
+                "mount|/Volumes/media|1",
+                "path|/Volumes/media/tv|1",
+                "path|/Volumes/media/transcode|1",
                 "tool|xcode_clt|1",
                 "tool|brew|1",
                 "tool|ffmpeg|1",
@@ -10764,6 +11058,7 @@ raise SystemExit(0)
         self.assertIn("-filters", scripts[0])
         self.assertNotIn("-filters", scripts[1])
         self.assertIn("-filters", scripts[2])
+        self.assertIn("mount_path=/Volumes/media", scripts[2])
 
     def test_remote_host_status_requires_metric_for_mounted_encode_hosts(self) -> None:
         host: dict[str, object] = {
@@ -18161,6 +18456,8 @@ raise SystemExit(0)
             job = load_encode_job(connection, "job-containment-failure")
         assert job is not None
         self.assertEqual(job["status"], "needs_attention")
+        self.assertEqual(job["last_failure_kind"], "containment_unproven")
+        self.assertIsNone(job["retry_not_before"])
         self.assertIn("first containment cleanup is unproven", str(job["error"]))
         self.assertTrue(controller.cleanup_unproven)
 
@@ -21846,6 +22143,167 @@ raise SystemExit(0)
         self.assertIsNotNone(new_job)
         self.assertEqual({str(row["job_kind"]) for row in prefix_rows}, {"folder", "shard"})
         self.assertEqual({str(row["status"]) for row in prefix_rows}, {"queued"})
+
+    def test_queue_folder_encode_blocks_unchanged_final_size_recovery_contract(self) -> None:
+        calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
+        contract = folder_actions_runtime._production_approval_contract(calibration)
+        self.assertIsNotNone(contract)
+        manifest_path = self._write_manifest("manifest-final-size-unchanged.json", [{"library_item_id": 1}])
+        manifest_path.write_text(json.dumps({
+            "selection": {"production_approval_contract": contract},
+            "items": [{"library_item_id": 1}],
+        }))
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="terminal-final-size-unchanged",
+                manifest_name=manifest_path.name,
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "terminal-final-size-unchanged")
+                .values(progress_json=json.dumps({
+                    "failure_analysis": {
+                        "kind": "final_size_target_miss",
+                        "retry_strategy": "fresh_goal_required",
+                    }
+                }))
+            )
+
+        prepared: list[str] = []
+        overrides: list[str] = []
+        with patch("mediaforce.web.runtime.folder_actions.create_folder_manifest", return_value=(
+                {"selection": {}, "items": [{"library_item_id": 1}]},
+                manifest_path,
+        )), patch(
+                "mediaforce.web.runtime.folder_actions.cadence_evidence_blocker",
+                return_value=None,
+        ):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show",
+                "",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda _config, _prefix: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=lambda *_args: overrides.append("override"),
+                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: prepared.append("prepared"),
+                save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "final_size_recovery_contract_unchanged")
+        self.assertEqual(result["retry_strategy"], "fresh_goal_required")
+        self.assertEqual(prepared, [])
+        self.assertEqual(overrides, [])
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNotNone(load_encode_job(connection, "terminal-final-size-unchanged"))
+
+    def test_queue_folder_encode_allows_fresh_changed_final_size_recovery_contract(self) -> None:
+        failed_calibration = self._accepted_calibration_contract(sample_job_id="sample-original")
+        failed_contract = folder_actions_runtime._production_approval_contract(failed_calibration)
+        self.assertIsNotNone(failed_contract)
+        current_calibration = self._accepted_calibration_contract(
+            sample_job_id="sample-recovery",
+            compression_intent="perceptual_floor",
+        )
+        terminal_manifest = self._write_manifest(
+            "manifest-final-size-changed.json",
+            [{"library_item_id": 1}],
+        )
+        terminal_manifest.write_text(json.dumps({
+            "selection": {"production_approval_contract": failed_contract},
+            "items": [{"library_item_id": 1}],
+        }))
+        queued_manifest = self.root / "runs" / "manifest-final-size-recovery.json"
+        with open_db(self.config.paths.db_path) as connection:
+            self._save_job(
+                connection,
+                job_id="terminal-final-size-changed",
+                manifest_name=terminal_manifest.name,
+                host={"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "terminal-final-size-changed")
+                .values(progress_json=json.dumps({
+                    "failure_analysis": {
+                        "kind": "final_size_target_miss",
+                        "retry_strategy": "fresh_goal_required",
+                    }
+                }))
+            )
+
+        captured_manifest: dict[str, object] = {}
+
+        def write_manifest_stub(
+                _connection: DBClient,
+                _config: MediaforceConfig,
+                manifest: dict[str, object],
+        ) -> Path:
+            captured_manifest.update(manifest)
+            queued_manifest.write_text(json.dumps(manifest))
+            return queued_manifest
+
+        def attach_lineage_stub(_connection: DBClient, **kwargs: Any) -> None:
+            self.assertEqual(kwargs["calibration"], current_calibration)
+            self.assertEqual(kwargs["advice_state"], {})
+            self.assertEqual(kwargs["approval_contract"]["sample_job_id"], "sample-recovery")
+            kwargs["manifest"]["items"][0]["target_lineage"] = {"persistence_marker": True}
+
+        with patch("mediaforce.web.runtime.folder_actions.attach_target_lineage", side_effect=attach_lineage_stub), patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
+                "mediaforce.web.runtime.folder_actions.create_folder_manifest",
+                return_value=({
+                    "run_id": "recovery-run",
+                    "created_at": web_app._now_iso(),
+                    "selection": {},
+                    "items": [{"library_item_id": 1}],
+                }, None),
+        ), patch(
+                "mediaforce.web.runtime.folder_actions.write_manifest",
+                side_effect=write_manifest_stub,
+        ), patch(
+                "mediaforce.web.runtime.folder_actions.cadence_evidence_blocker",
+                return_value=None,
+        ):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                self.config,
+                "tv/show",
+                "fresh reviewed recovery",
+                False,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda _config, _prefix: current_calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+                clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+                prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+                save_encode_job=save_encode_job,
+                reserve_preflight=lambda *_args, **_kwargs: SimpleNamespace(allowed=True, waiting_reason=None),
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(json.loads(queued_manifest.read_text())["items"][0]["target_lineage"], {"persistence_marker": True})
+        selection = object_dict(captured_manifest["selection"])
+        recovery_contract = object_dict(selection["production_approval_contract"])
+        self.assertEqual(recovery_contract["sample_job_id"], "sample-recovery")
+        self.assertNotEqual(
+            recovery_contract["operator_intent_hash"],
+            object_dict(failed_contract)["operator_intent_hash"],
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertIsNone(load_encode_job(connection, "terminal-final-size-changed"))
 
     def test_load_latest_terminal_encode_job_for_prefix_prefers_latest_display_row(self) -> None:
         shared_created_at = "2026-04-09T12:00:00+00:00"

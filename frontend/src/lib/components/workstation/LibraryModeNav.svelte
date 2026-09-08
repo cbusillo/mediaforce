@@ -28,7 +28,6 @@
 		border-bottom: 1px solid var(--mf-line);
 		display: flex;
 		gap: 22px;
-		margin-bottom: 24px;
 	}
 
 	a {

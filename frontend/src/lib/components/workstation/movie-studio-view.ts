@@ -2,6 +2,7 @@ import type {
 	CalibrationJobPayload,
 	EncodeQueueJob,
 	EncodeQueueSummary,
+	MovieTitle,
 	QualityRiskPayload,
 	RepresentativeSampleItemPayload,
 	ResolvedOperatorIntentPayload,
@@ -9,6 +10,7 @@ import type {
 	StreamBudgetLedgerPayload
 } from '$lib/api/types';
 import { formatFileSize } from '$lib/format';
+import { movieTitleOwnsActiveWork, movieWorkflowLabel } from '$lib/movies/library';
 
 export interface MovieCurrentWorkView {
 	label: string;
@@ -34,7 +36,9 @@ export interface MovieGoalFactsView {
 	expectedOutput: string;
 	expectedSavings: string;
 	targetRange: string;
+	outputDetail: string;
 	estimateQuality: string;
+	estimateBasis: 'sampled' | 'target' | 'unavailable';
 }
 
 export interface MovieGoalContractRow {
@@ -130,6 +134,62 @@ export function parentSampleAppliesToExactItem(
 	}
 	const sampleItem = overlappingJob.sample_item;
 	return sampleItem?.rel_path === exactPrefix;
+}
+
+export interface ParentTitleWorkView {
+	actionLabel: string;
+	statusLabel: string;
+	detail: string;
+	reviewSample: boolean;
+}
+
+export function parentTitleWorkView(
+	exactPrefix: string,
+	parentTitle: MovieTitle | null | undefined,
+	inheritedParentSample: boolean
+): ParentTitleWorkView | null {
+	if (
+		!parentTitle ||
+		parentTitle.prefix === exactPrefix ||
+		!movieTitleOwnsActiveWork(parentTitle) ||
+		(parentTitle.members.length > 1 && !inheritedParentSample)
+	) {
+		return null;
+	}
+	const badgeLabel = parentTitle.review_badge?.label?.trim() ?? '';
+	const reviewSample =
+		inheritedParentSample ||
+		['ready to review', 'review pending'].includes(badgeLabel.toLowerCase());
+	if (reviewSample) {
+		return {
+			actionLabel: 'Review title sample',
+			statusLabel: 'Review at title level',
+			detail:
+				'This file belongs to a title-level sample that is ready for review. Continue in the title workspace.',
+			reviewSample: true
+		};
+	}
+	const workflowLabel = movieWorkflowLabel({
+		workflow_state: parentTitle.workflow_state,
+		promotion_conflicts: parentTitle.promotion_conflicts,
+		details_loading: parentTitle.details_loading,
+		availability: parentTitle.availability
+	});
+	const workflowOwnsStatus = [
+		'processing',
+		'validate',
+		'promote',
+		'mixed',
+		'attention',
+		'blocked'
+	].includes(parentTitle.workflow_state?.primary_lane ?? '');
+	return {
+		actionLabel: 'Open title workspace',
+		statusLabel: workflowOwnsStatus ? workflowLabel : badgeLabel || workflowLabel,
+		detail:
+			'This file belongs to active title-level work. Continue in the title workspace to take the next step.',
+		reviewSample: false
+	};
 }
 
 export function movieReviewStatusLabel(status: unknown, inheritedParentSample = false): string {
@@ -346,7 +406,11 @@ function matchCase(source: string, replacement: string): string {
 export function movieGoalFactsView(
 	durationSeconds: number | null | undefined,
 	sourceSizeBytes: number | null | undefined,
-	sizeGoal: ResolvedSizeGoalPayload | null | undefined
+	sizeGoal: ResolvedSizeGoalPayload | null | undefined,
+	estimate?: Pick<
+		MovieTitle,
+		'estimated_output_bytes' | 'estimate_provenance' | 'estimate_coverage'
+	> | null
 ): MovieGoalFactsView {
 	const targetSizeBytes = finitePositive(sizeGoal?.target_size_bytes);
 	const sourceSize = finitePositive(sourceSizeBytes);
@@ -356,34 +420,59 @@ export function movieGoalFactsView(
 	const upperBound = finitePositive(
 		sizeGoal?.final_upper_bound_bytes ?? sizeGoal?.sample_upper_bound_bytes
 	);
-	const savingsBytes =
-		sourceSize && targetSizeBytes ? Math.max(0, sourceSize - targetSizeBytes) : null;
+	const sampledOutputBytes =
+		estimate?.estimate_provenance === 'sampled_calibration' && estimate.estimate_coverage?.complete
+			? finitePositive(estimate.estimated_output_bytes)
+			: null;
+	const expectedOutputBytes = sampledOutputBytes ?? targetSizeBytes;
+	const savingsBytes = sourceSize && expectedOutputBytes ? sourceSize - expectedOutputBytes : null;
 	const savingsPercent =
-		sourceSize && targetSizeBytes && targetSizeBytes < sourceSize
-			? Math.round((savingsBytes! / sourceSize) * 100)
+		sourceSize && savingsBytes != null && savingsBytes > 0
+			? Math.round((savingsBytes / sourceSize) * 100)
 			: null;
 	const expectedSavings =
-		sourceSize && targetSizeBytes
-			? targetSizeBytes < sourceSize && savingsBytes != null && savingsPercent != null
+		sourceSize && expectedOutputBytes && savingsBytes != null
+			? savingsBytes > 0 && savingsPercent != null
 				? `${formatMovieBytes(savingsBytes)} · ${savingsPercent}%`
-				: 'No size reduction planned'
+				: savingsBytes < 0
+					? `Grows by ${formatMovieBytes(Math.abs(savingsBytes))}`
+					: sampledOutputBytes
+						? 'No size reduction estimated'
+						: 'No size reduction planned'
 			: 'Not available';
+	const targetRange =
+		lowerBound && upperBound
+			? `${formatMovieBytes(lowerBound)}–${formatMovieBytes(upperBound)}`
+			: 'Not available';
+	const outputDetail = sampledOutputBytes
+		? lowerBound && upperBound
+			? sampledOutputBytes > upperBound
+				? `Current sample estimate · ${formatMovieBytes(sampledOutputBytes - upperBound)} above target range`
+				: sampledOutputBytes < lowerBound
+					? `Current sample estimate · ${formatMovieBytes(lowerBound - sampledOutputBytes)} below target range`
+					: 'Current sample estimate · inside target range'
+			: 'Current completed-sample estimate'
+		: expectedOutputBytes
+			? targetRange === 'Not available'
+				? 'Configured target, not a measured result'
+				: `Target range ${targetRange}`
+			: 'No current output estimate';
 
 	return {
 		duration: formatDuration(durationSeconds),
 		sourceSize: formatMovieBytes(sourceSize),
-		expectedOutput: formatMovieBytes(targetSizeBytes),
+		expectedOutput: formatMovieBytes(expectedOutputBytes),
 		expectedSavings,
-		targetRange:
-			lowerBound && upperBound
-				? `${formatMovieBytes(lowerBound)}–${formatMovieBytes(upperBound)}`
-				: 'Not available',
-		estimateQuality:
-			targetSizeBytes && lowerBound && upperBound
+		targetRange,
+		outputDetail,
+		estimateQuality: sampledOutputBytes
+			? 'Current completed-sample estimate, not a guarantee'
+			: targetSizeBytes && lowerBound && upperBound
 				? 'Planning range, not a guarantee'
 				: targetSizeBytes
 					? 'Target estimate, not a guarantee'
-					: 'Target not resolved'
+					: 'Target not resolved',
+		estimateBasis: sampledOutputBytes ? 'sampled' : targetSizeBytes ? 'target' : 'unavailable'
 	};
 }
 

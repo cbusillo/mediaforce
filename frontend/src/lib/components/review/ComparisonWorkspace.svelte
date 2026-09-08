@@ -22,8 +22,8 @@
 		type ComparisonLayout,
 		type ComparisonScale,
 		type ComparisonSide
-	} from '$lib/season/comparison';
-	import type { ReviewPair } from '$lib/season/experience';
+	} from '$lib/review/comparison';
+	import type { ReviewPair } from '$lib/review/pairs';
 
 	const DECODER_WARMUP_MS = 350;
 	const MEDIA_PLAYING_TIMEOUT_MS = 1200;
@@ -33,12 +33,15 @@
 		pairs,
 		selectedMoment,
 		audioChoice,
-		episodeLabel,
+		reviewScopeLabel,
 		originalClipLabel,
 		sampleClipLabel,
-		episodeEstimateLabel,
+		estimatedOutputLabel,
+		facts = [],
+		decisionTargetId = '',
 		canCreateSoundSample,
 		soundSampleDisabled,
+		soundSampleActionLabel = 'Create a sample with sound',
 		onMomentChange,
 		onAudioChange,
 		onRequestSoundSample
@@ -46,12 +49,15 @@
 		pairs: ReviewPair[];
 		selectedMoment: number;
 		audioChoice: ComparisonSide;
-		episodeLabel: string;
+		reviewScopeLabel: string;
 		originalClipLabel: string;
 		sampleClipLabel: string;
-		episodeEstimateLabel: string;
+		estimatedOutputLabel: string;
+		facts?: { label: string; value: string; detail?: string }[];
+		decisionTargetId?: string;
 		canCreateSoundSample: boolean;
 		soundSampleDisabled: boolean;
+		soundSampleActionLabel?: string;
 		onMomentChange: (index: number) => void;
 		onAudioChange: (side: ComparisonSide) => void;
 		onRequestSoundSample: () => void;
@@ -88,6 +94,7 @@
 	let sourceError = $state(false);
 	let previewError = $state(false);
 	let previousBodyOverflow = '';
+	let returnScrollY = 0;
 	let scrollSyncPending = false;
 	let mediaGeneration = 0;
 	let playbackSequence = 0;
@@ -115,6 +122,13 @@
 		`--media-width:${previewFrameWidth}px;--media-height:${previewFrameHeight}px`
 	);
 	const pairKey = $derived(`${currentPair?.source.path ?? ''}|${currentPair?.preview.path ?? ''}`);
+	const reviewFacts = $derived(
+		facts.length
+			? facts
+			: estimatedOutputLabel
+				? [{ label: 'Estimated output', value: estimatedOutputLabel }]
+				: []
+	);
 
 	$effect(() => {
 		if (!pairKey) return;
@@ -182,13 +196,9 @@
 
 	function openWorkspace(event: MouseEvent) {
 		returnFocus = event.currentTarget as HTMLElement;
-		layout = 'side_by_side';
-		visibleSide = 'new';
-		scale = 'fit';
-		picturePositionX = 0.5;
-		picturePositionY = 0.5;
+		returnScrollY = window.scrollY;
+		workspaceElement?.scrollIntoView({ block: 'start', inline: 'nearest' });
 		playbackError = '';
-		pauseBoth();
 		isOpen = true;
 		previousBodyOverflow = document.body.style.overflow;
 		document.body.style.overflow = 'hidden';
@@ -205,6 +215,20 @@
 		});
 	}
 
+	function jumpToDecision() {
+		if (!decisionTargetId) return;
+		const target = document.getElementById(decisionTargetId);
+		if (!target) return;
+		target.scrollIntoView({
+			behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+			block: 'start'
+		});
+		const focusTarget = target.querySelector<HTMLElement>(
+			'button:not([disabled]), a[href], [tabindex]'
+		);
+		focusTarget?.focus({ preventScroll: true });
+	}
+
 	async function closeWorkspace() {
 		if (document.fullscreenElement === workspaceElement) {
 			await document.exitFullscreen().catch(() => undefined);
@@ -218,7 +242,10 @@
 		isOpen = false;
 		nativeFullscreen = false;
 		document.body.style.overflow = previousBodyOverflow;
-		void tick().then(() => returnFocus?.focus());
+		void tick().then(() => {
+			returnFocus?.focus({ preventScroll: true });
+			window.scrollTo({ top: returnScrollY });
+		});
 	}
 
 	async function togglePlayback() {
@@ -647,12 +674,12 @@
 			aria-label={isOpen ? workspaceTitle : 'Original and sample comparison'}
 			onkeydown={handleWorkspaceKeydown}
 		>
-			{#if isOpen}
-				<header class="workspace-header">
-					<div>
-						<span class="workspace-kicker">{episodeLabel}</span>
-						<h2>{workspaceTitle}</h2>
-					</div>
+			<header class="workspace-header">
+				<div class="workspace-context">
+					<span class="workspace-kicker">{reviewScopeLabel}</span>
+					<strong>{workspaceTitle}</strong>
+				</div>
+				{#if pairs.length > 1}
 					<div class="workspace-moments" role="group" aria-label="Comparison clips">
 						{#each pairs as pair, index (`${pair.source.path}-${index}`)}
 							<button
@@ -665,65 +692,76 @@
 							</button>
 						{/each}
 					</div>
-					<button
-						bind:this={closeButton}
-						class="close-comparison"
-						type="button"
-						onclick={closeWorkspace}
-					>
-						Close comparison
-					</button>
-				</header>
-			{/if}
-
-			{#if isOpen}
-				<div class="workspace-tools">
-					<div class="tool-group" role="group" aria-label="Picture arrangement">
-						<button
-							type="button"
-							class:active={layout === 'side_by_side'}
-							onclick={() => chooseLayout('side_by_side')}
-							aria-pressed={layout === 'side_by_side'}>Side by side</button
+				{/if}
+				<div class="workspace-header__actions">
+					{#if decisionTargetId && !isOpen}
+						<button class="review-decision-jump" type="button" onclick={jumpToDecision}
+							>Review decision</button
 						>
-						<button
-							type="button"
-							class:active={layout === 'one_at_a_time'}
-							onclick={() => chooseLayout('one_at_a_time')}
-							aria-pressed={layout === 'one_at_a_time'}>One at a time</button
-						>
-					</div>
-					{#if layout === 'one_at_a_time'}
-						<div class="tool-group" role="group" aria-label="Picture shown">
-							<button
-								type="button"
-								class:active={visibleSide === 'original'}
-								onclick={() => (visibleSide = 'original')}
-								aria-pressed={visibleSide === 'original'}>Original</button
-							>
-							<button
-								type="button"
-								class:active={visibleSide === 'new'}
-								onclick={() => (visibleSide = 'new')}
-								aria-pressed={visibleSide === 'new'}>Sample</button
-							>
-						</div>
 					{/if}
-					<div class="tool-group" role="group" aria-label="Picture size">
+					{#if isOpen}
+						<button
+							bind:this={closeButton}
+							class="close-comparison"
+							type="button"
+							onclick={closeWorkspace}
+						>
+							Exit full screen
+						</button>
+					{:else}
+						<button class="fullscreen-control" type="button" onclick={openWorkspace}>
+							<span aria-hidden="true">⛶</span> Full screen
+						</button>
+					{/if}
+				</div>
+			</header>
+
+			<div class="workspace-tools">
+				<div class="tool-group" role="group" aria-label="Picture arrangement">
+					<button
+						type="button"
+						class:active={layout === 'side_by_side'}
+						onclick={() => chooseLayout('side_by_side')}
+						aria-pressed={layout === 'side_by_side'}>Side by side</button
+					>
+					<button
+						type="button"
+						class:active={layout === 'one_at_a_time'}
+						onclick={() => chooseLayout('one_at_a_time')}
+						aria-pressed={layout === 'one_at_a_time'}>One at a time</button
+					>
+				</div>
+				{#if layout === 'one_at_a_time'}
+					<div class="tool-group" role="group" aria-label="Picture shown">
 						<button
 							type="button"
-							class:active={scale === 'fit'}
-							onclick={() => chooseScale('fit')}
-							aria-pressed={scale === 'fit'}>Fit</button
+							class:active={visibleSide === 'original'}
+							onclick={() => (visibleSide = 'original')}
+							aria-pressed={visibleSide === 'original'}>Original</button
 						>
 						<button
 							type="button"
-							class:active={scale === 'actual'}
-							onclick={() => chooseScale('actual')}
-							aria-pressed={scale === 'actual'}>Actual size</button
+							class:active={visibleSide === 'new'}
+							onclick={() => (visibleSide = 'new')}
+							aria-pressed={visibleSide === 'new'}>Sample</button
 						>
 					</div>
+				{/if}
+				<div class="tool-group" role="group" aria-label="Picture size">
+					<button
+						type="button"
+						class:active={scale === 'fit'}
+						onclick={() => chooseScale('fit')}
+						aria-pressed={scale === 'fit'}>Fit</button
+					>
+					<button
+						type="button"
+						class:active={scale === 'actual'}
+						onclick={() => chooseScale('actual')}
+						aria-pressed={scale === 'actual'}>Actual size</button
+					>
 				</div>
-			{/if}
+			</div>
 
 			<div class="comparison-media">
 				<div
@@ -820,11 +858,6 @@
 					</div>
 				</div>
 			</div>
-			<p class="clip-size-caption">
-				Clip sizes only.{#if episodeEstimateLabel}
-					Estimated episode output: {episodeEstimateLabel}.{/if}
-			</p>
-
 			<footer class="workspace-controls" aria-label="Comparison playback controls">
 				<div class="playback-primary">
 					<button
@@ -884,37 +917,27 @@
 				{#if playbackError}<p class="playback-error" role="alert">{playbackError}</p>{/if}
 			</footer>
 		</div>
-
-		<div class="comparison-entry">
-			{#if pairs.length > 1}
-				<div class="inline-moments" role="group" aria-label="Comparison clips">
-					{#each pairs as pair, index (`${pair.source.path}-${index}`)}
-						<button
-							type="button"
-							class:active={selectedMoment === index}
-							onclick={() => chooseMoment(index)}
-							aria-pressed={selectedMoment === index}
-						>
-							Moment {index + 1}
-						</button>
-					{/each}
-				</div>
-			{/if}
-			<div class="entry-action">
-				<button type="button" onclick={openWorkspace}>Compare in full screen</button>
-				<small>Opens side by side, paused. Nothing is changed.</small>
-			</div>
-		</div>
+		{#if reviewFacts.length}
+			<dl class="review-ledger" aria-label="Review facts">
+				{#each reviewFacts as fact (fact.label)}
+					<div>
+						<dt>{fact.label}</dt>
+						<dd>{fact.value}</dd>
+						{#if fact.detail}<small>{fact.detail}</small>{/if}
+					</div>
+				{/each}
+			</dl>
+		{/if}
 		{#if !hasSound}
 			<div class="sound-unavailable">
 				<p>
 					{canCreateSoundSample
 						? 'These clips show picture only. Another sample is needed to compare sound.'
-						: 'This episode does not have sound to compare.'}
+						: 'These clips do not include sound you can compare.'}
 				</p>
 				{#if canCreateSoundSample}
 					<button type="button" onclick={onRequestSoundSample} disabled={soundSampleDisabled}>
-						Create a sample with sound
+						{soundSampleActionLabel}
 					</button>
 				{/if}
 			</div>
@@ -930,11 +953,13 @@
 
 	.comparison-workspace {
 		background: #090b0d;
-		border-radius: 12px;
+		border: 1px solid rgb(255 255 255 / 12%);
+		border-radius: 8px;
 		box-shadow: 0 8px 28px rgb(20 22 25 / 16%);
 		color: #f4f5f2;
 		display: grid;
 		gap: 10px;
+		grid-template-rows: auto auto minmax(0, 1fr) auto;
 		overflow: hidden;
 		padding: 10px;
 	}
@@ -957,8 +982,8 @@
 		align-items: center;
 		border-bottom: 1px solid rgb(255 255 255 / 11%);
 		display: grid;
-		gap: 16px;
-		grid-template-columns: minmax(220px, 1fr) auto minmax(220px, 1fr);
+		gap: 12px;
+		grid-template-columns: minmax(160px, 1fr) auto minmax(160px, 1fr);
 		padding: 2px 2px 13px;
 	}
 
@@ -966,14 +991,14 @@
 		padding-left: 64px;
 	}
 
-	.workspace-header > div:first-child {
+	.workspace-context {
 		display: grid;
 		gap: 3px;
 	}
 
-	.workspace-header h2 {
-		font-size: 20px;
-		margin: 0;
+	.workspace-context strong {
+		font-size: 13px;
+		font-weight: 700;
 	}
 
 	.workspace-kicker {
@@ -985,7 +1010,6 @@
 	}
 
 	.workspace-moments,
-	.inline-moments,
 	.tool-group,
 	.sound-control {
 		align-items: center;
@@ -998,7 +1022,6 @@
 	}
 
 	.workspace-moments button,
-	.inline-moments button,
 	.tool-group button,
 	.sound-control button {
 		background: transparent;
@@ -1015,14 +1038,22 @@
 	}
 
 	.workspace-moments button.active,
-	.inline-moments button.active,
 	.tool-group button.active,
 	.sound-control button.active {
 		background: #e8eeeb;
 		color: #17201c;
 	}
 
-	.close-comparison {
+	.workspace-header__actions {
+		align-items: center;
+		display: flex;
+		gap: 8px;
+		justify-self: end;
+	}
+
+	.close-comparison,
+	.fullscreen-control,
+	.review-decision-jump {
 		background: transparent;
 		border: 1px solid rgb(255 255 255 / 18%);
 		border-radius: 7px;
@@ -1031,9 +1062,17 @@
 		font: inherit;
 		font-size: 12px;
 		font-weight: 700;
-		justify-self: end;
 		min-height: 38px;
 		padding: 0 14px;
+	}
+
+	.fullscreen-control span {
+		font-size: 15px;
+		margin-right: 4px;
+	}
+
+	.review-decision-jump {
+		display: none;
 	}
 
 	.workspace-tools {
@@ -1048,13 +1087,6 @@
 		gap: 10px;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		min-height: 0;
-	}
-
-	.clip-size-caption {
-		color: #a9b2b9;
-		font-size: 0.78rem;
-		margin: 0;
-		text-align: center;
 	}
 
 	.is-open .comparison-media {
@@ -1144,11 +1176,8 @@
 		z-index: 1;
 	}
 
-	.is-open {
-		grid-template-rows: auto auto minmax(0, 1fr) auto;
-	}
-
 	.is-open .comparison-media {
+		min-height: 0;
 		overflow: hidden;
 	}
 
@@ -1205,8 +1234,7 @@
 		gap: 8px;
 	}
 
-	.play-control,
-	.entry-action button {
+	.play-control {
 		background: #dfece6;
 		border: 1px solid #c2d8ce;
 		border-radius: 7px;
@@ -1268,49 +1296,51 @@
 		grid-column: 1 / -1;
 	}
 
-	.comparison-entry {
-		align-items: center;
-		display: flex;
-		gap: 12px;
-		justify-content: space-between;
-	}
-
-	.inline-moments {
-		background: var(--mf-bg-raised);
-		border-color: var(--mf-line);
-	}
-
-	.inline-moments button {
-		color: var(--mf-fg-secondary);
-	}
-
-	.inline-moments button.active {
-		background: var(--mf-bg-panel);
-		box-shadow: 0 1px 2px rgb(30 34 39 / 10%);
-		color: var(--mf-active-fg);
-	}
-
-	.entry-action {
-		align-items: flex-end;
-		display: flex;
-		flex-direction: column;
-		gap: 10px;
-	}
-
-	.entry-action button {
-		min-width: 190px;
-		white-space: nowrap;
-	}
-
-	.entry-action small {
-		max-width: 230px;
-		text-align: right;
-	}
-
-	.entry-action small,
 	.sound-unavailable {
 		color: var(--mf-fg-tertiary);
 		font-size: 11px;
+	}
+
+	.review-ledger {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line);
+		border-radius: 7px;
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		margin: 0;
+		overflow: hidden;
+	}
+
+	.review-ledger > div {
+		display: grid;
+		gap: 3px;
+		min-width: 0;
+		padding: 10px 12px;
+	}
+
+	.review-ledger > div + div {
+		border-left: 1px solid var(--mf-line);
+	}
+
+	.review-ledger dt {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
+		font-weight: 700;
+		letter-spacing: 0.05em;
+		text-transform: uppercase;
+	}
+
+	.review-ledger dd {
+		color: var(--mf-fg-primary);
+		font-size: 15px;
+		font-variant-numeric: tabular-nums;
+		font-weight: 750;
+		margin: 0;
+	}
+
+	.review-ledger small {
+		color: var(--mf-fg-tertiary);
+		font-size: 10px;
 	}
 
 	.sound-unavailable {
@@ -1372,7 +1402,7 @@
 			grid-template-columns: 1fr auto;
 		}
 
-		.workspace-header > div:first-child {
+		.workspace-context {
 			grid-column: 1;
 		}
 
@@ -1387,29 +1417,13 @@
 			grid-row: 1;
 		}
 
-		.workspace-tools,
-		.comparison-entry {
+		.workspace-tools {
 			align-items: stretch;
 			flex-wrap: wrap;
 		}
 
-		.comparison-entry {
-			flex-direction: column;
-		}
-
 		.sound-unavailable {
 			align-items: stretch;
-			flex-direction: column;
-		}
-
-		.inline-moments,
-		.entry-action {
-			justify-content: center;
-			width: 100%;
-		}
-
-		.entry-action {
-			align-items: center;
 			flex-direction: column;
 		}
 
@@ -1425,8 +1439,21 @@
 	}
 
 	@media (max-width: 520px) {
+		.workspace-header {
+			grid-template-columns: minmax(0, 1fr) auto;
+		}
+
+		.workspace-header__actions {
+			align-self: start;
+		}
+
+		.review-decision-jump {
+			display: inline-flex;
+		}
+
 		.comparison-media {
 			grid-template-columns: 1fr;
+			min-height: 0;
 		}
 
 		.is-open .comparison-media {
@@ -1456,6 +1483,18 @@
 
 		.time-display {
 			justify-self: end;
+		}
+
+		.review-ledger {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.review-ledger > div:nth-child(odd) {
+			border-left: 0;
+		}
+
+		.review-ledger > div:nth-child(n + 3) {
+			border-top: 1px solid var(--mf-line);
 		}
 	}
 </style>

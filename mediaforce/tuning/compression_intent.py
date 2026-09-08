@@ -33,6 +33,11 @@ COMPRESSION_INTENT_LEVELS = (
     "balanced",
     "perceptual_floor",
 )
+_SELECTABLE_COMPRESSION_INTENT_LEVELS = (
+    "reference",
+    "balanced",
+    "perceptual_floor",
+)
 COMPRESSION_EVIDENCE_KINDS = (
     "approved_visual_result",
     "rejected_visual_result",
@@ -59,10 +64,10 @@ _INTENT_TITLES = {
     "legacy_unconfirmed": "Choose a compression goal",
 }
 _INTENT_DETAILS = {
-    "reference": "Favor the highest measured fidelity within the size limit you set.",
-    "transparent": "Choose the smallest result that remains indistinguishable from the source.",
-    "balanced": "Stay near the requested size while preserving measured quality.",
-    "perceptual_floor": "Choose the smallest acceptable result and never add unmeasured headroom.",
+    "reference": "Prefer the highest measured fidelity that fits within the size limit.",
+    "transparent": "Legacy name for the same smallest measured-acceptable result behavior.",
+    "balanced": "Prefer the result closest to the requested size after measured quality clears.",
+    "perceptual_floor": "Prefer the smallest result that clears the measured quality floor.",
     "legacy_unconfirmed": "This older policy needs a compression goal before Mediaforce can change its size direction.",
 }
 
@@ -286,7 +291,10 @@ def compression_intent_options(current: CompressionIntentV1) -> list[dict[str, A
             "key": level,
             "title": _INTENT_TITLES[level],
             "detail": _INTENT_DETAILS[level],
-            "selected": current.confirmed and current.level == level,
+            "selected": current.confirmed and (
+                current.level == level
+                or current.level == "transparent" and level == "perceptual_floor"
+            ),
             "accepts_under_target_result": CompressionIntentV1(
                 level=level,  # type: ignore[arg-type]
                 source="operator",
@@ -298,7 +306,7 @@ def compression_intent_options(current: CompressionIntentV1) -> list[dict[str, A
                 confirmed=True,
             ).request_payload(),
         }
-        for level in COMPRESSION_INTENT_LEVELS
+        for level in _SELECTABLE_COMPRESSION_INTENT_LEVELS
     ]
 
 

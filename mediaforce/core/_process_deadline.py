@@ -8,18 +8,20 @@ import signal
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from enum import Enum
 
 
 _STATUS_EXPIRED = b"E"
 _STATUS_UNAVAILABLE = b"U"
 _STATUS_COMPLETE = b"C"
+_STATUS_REASON_LIMIT = 240
 _TARGET_READY = b"R"
 _TREE_POLL_SECONDS = 0.02
 _TREE_SETTLE_SECONDS = 0.08
 _TERM_GRACE_SECONDS = 0.45
 _KILL_GRACE_SECONDS = 0.75
-_DARWIN_IDENTITY_PIN_RETRY_SECONDS = 0.05
+_DARWIN_IDENTITY_PIN_RETRY_SECONDS = 0.5
 _DARWIN_IDENTITY_PIN_RETRY_INTERVAL_SECONDS = 0.001
 _PR_SET_CHILD_SUBREAPER = 36
 _TASK_AUDIT_TOKEN = 15
@@ -35,6 +37,12 @@ class _ContainmentMode(Enum):
     TRUSTED_PROCESS_GROUP = "trusted-process-group"
 
 
+@dataclass(frozen=True)
+class _TerminationResult:
+    succeeded: bool
+    reason: str | None = None
+
+
 class _ParentLivenessMonitor:
     def __init__(self, descriptor: int) -> None:
         self._poller = select.poll()
@@ -47,9 +55,19 @@ class _ParentLivenessMonitor:
         return bool(self._poller.poll(0))
 
 
-def _notify(status_descriptor: int, status: bytes) -> None:
+def _notify(
+        status_descriptor: int,
+        status: bytes,
+        reason: str | None = None,
+) -> None:
+    payload = status
+    if status == _STATUS_UNAVAILABLE and reason:
+        normalized_reason = " ".join(reason.split())
+        encoded_reason = normalized_reason.encode(errors="replace")[:_STATUS_REASON_LIMIT]
+        if encoded_reason:
+            payload += b":" + encoded_reason
     try:
-        os.write(status_descriptor, status)
+        os.write(status_descriptor, payload)
     except OSError:
         pass
 
@@ -175,6 +193,7 @@ class _LinuxProcessTree:
             ) from OSError(error_number, os.strerror(error_number))
         _linux_child_pids(os.getpid())
         self._processes: dict[int, _LinuxProcessIdentity] = {}
+        self._signal_failure_reason: str | None = None
 
     @property
     def compromised(self) -> bool:
@@ -183,6 +202,10 @@ class _LinuxProcessTree:
     @property
     def requires_immediate_shutdown(self) -> bool:
         return False
+
+    @property
+    def signal_failure_reason(self) -> str | None:
+        return self._signal_failure_reason
 
     def add_root(self, pid: int) -> None:
         if not self._register(pid, os.getpid()):
@@ -235,6 +258,11 @@ class _LinuxProcessTree:
             except OSError as exc:
                 if exc.errno != errno.ESRCH:
                     succeeded = False
+                    if self._signal_failure_reason is None:
+                        self._signal_failure_reason = (
+                            f"cannot signal managed process {identity.pid}: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
         return succeeded
 
     def close(self) -> None:
@@ -361,6 +389,7 @@ class _DarwinProcessTree:
         self._serial_by_unique_id: dict[int, int] = {}
         self._compromised = False
         self._scope_violation = False
+        self._signal_failure_reason: str | None = None
         if self._unique_process_info(os.getpid()) is None:
             raise _ContainmentUnavailableError(
                 "unique Darwin process identity is unavailable"
@@ -374,6 +403,10 @@ class _DarwinProcessTree:
     def requires_immediate_shutdown(self) -> bool:
         return self._scope_violation
 
+    @property
+    def signal_failure_reason(self) -> str | None:
+        return self._signal_failure_reason
+
     def add_root(self, pid: int) -> None:
         if self._register(pid, None, required=True) is None:
             raise _ContainmentUnavailableError(
@@ -381,18 +414,19 @@ class _DarwinProcessTree:
             )
 
     def refresh(self, timeout: float = 0.0) -> None:
-        self._discover_until_stable()
-        self._discover_trusted_process_group_members()
+        identity_retry_deadline = time.monotonic() + _DARWIN_IDENTITY_PIN_RETRY_SECONDS
+        self._discover_until_stable(identity_retry_deadline)
+        self._discover_trusted_process_group_members(identity_retry_deadline)
         events = self._read_events(timeout)
-        self._discover_until_stable()
-        self._discover_trusted_process_group_members()
+        self._discover_until_stable(identity_retry_deadline)
+        self._discover_trusted_process_group_members(identity_retry_deadline)
         for event in events:
             if not event.fflags & select.KQ_NOTE_FORK:
                 continue
             if not self._trusted_process_group:
                 self._compromised = True
-            self._discover_reparented_descendants()
-            self._discover_trusted_process_group_members()
+            self._discover_reparented_descendants(identity_retry_deadline)
+            self._discover_trusted_process_group_members(identity_retry_deadline)
         for event in events:
             if event.fflags & select.KQ_NOTE_EXIT:
                 identity = self._processes.get(int(event.udata))
@@ -402,13 +436,15 @@ class _DarwinProcessTree:
         self._validate_trusted_process_group()
 
     def live(self) -> bool:
-        self._discover_trusted_process_group_members()
+        identity_retry_deadline = time.monotonic() + _DARWIN_IDENTITY_PIN_RETRY_SECONDS
+        self._discover_trusted_process_group_members(identity_retry_deadline)
         self._refresh_liveness()
         self._validate_trusted_process_group()
         return any(not identity.exited for identity in self._processes.values())
 
     def signal_all(self, signal_number: int) -> bool:
         self.refresh()
+        identity_retry_deadline = time.monotonic() + _DARWIN_IDENTITY_PIN_RETRY_SECONDS
         succeeded = True
         identities = sorted(
             (
@@ -420,7 +456,10 @@ class _DarwinProcessTree:
             reverse=True,
         )
         for identity in identities:
-            token_state = self._refresh_signal_token(identity)
+            token_state = self._refresh_signal_token(
+                identity,
+                retry_deadline=identity_retry_deadline,
+            )
             if token_state is _DarwinSignalState.EXITED:
                 self._mark_exited(identity)
                 continue
@@ -432,7 +471,10 @@ class _DarwinProcessTree:
                 signal_number,
             )
             if result == errno.ESRCH:
-                token_state = self._refresh_signal_token(identity)
+                token_state = self._refresh_signal_token(
+                    identity,
+                    retry_deadline=identity_retry_deadline,
+                )
                 if token_state is _DarwinSignalState.EXITED:
                     self._mark_exited(identity)
                     continue
@@ -446,10 +488,17 @@ class _DarwinProcessTree:
             if result == errno.ESRCH:
                 if self._same_identity_alive(identity):
                     succeeded = False
+                    self._record_signal_failure(
+                        f"managed process {identity.pid} remained live after audit-token signaling"
+                    )
                 else:
                     self._mark_exited(identity)
             elif result != 0:
                 succeeded = False
+                self._record_signal_failure(
+                    f"cannot signal managed process {identity.pid}: "
+                    f"{os.strerror(result)}"
+                )
         return succeeded
 
     def close(self) -> None:
@@ -636,6 +685,7 @@ class _DarwinProcessTree:
             *,
             required: bool = False,
             observed_unique_info: _UniqueProcessInfo | None = None,
+            identity_retry_deadline: float | None = None,
     ) -> int | None:
         current_serial = self._current_by_pid.get(pid)
         if current_serial is not None:
@@ -657,7 +707,11 @@ class _DarwinProcessTree:
             parent = self._processes[parent_serial]
             if int(unique_info.parent_unique_id) != parent.unique_id:
                 return None
-        task_identity = self._pin_task_identity(pid, int(unique_info.unique_id))
+        task_identity = self._pin_task_identity(
+            pid,
+            int(unique_info.unique_id),
+            retry_deadline=identity_retry_deadline,
+        )
         if task_identity is None:
             if required:
                 raise _ContainmentUnavailableError(
@@ -714,8 +768,12 @@ class _DarwinProcessTree:
             self,
             pid: int,
             expected_unique_id: int,
+            *,
+            retry_deadline: float | None = None,
     ) -> tuple[int, _AuditToken] | None:
-        retry_deadline = time.monotonic() + _DARWIN_IDENTITY_PIN_RETRY_SECONDS
+        process_retry_deadline = time.monotonic() + _DARWIN_IDENTITY_PIN_RETRY_SECONDS
+        if retry_deadline is not None:
+            process_retry_deadline = min(process_retry_deadline, retry_deadline)
         while True:
             task_identity = self._task_identity(pid)
             if task_identity is not None:
@@ -723,13 +781,13 @@ class _DarwinProcessTree:
             current_info = self._unique_process_info(pid)
             if current_info is None or int(current_info.unique_id) != expected_unique_id:
                 return None
-            if time.monotonic() >= retry_deadline:
+            if time.monotonic() >= process_retry_deadline:
                 raise _ContainmentUnavailableError(
                     f"cannot pin live process identity for {pid}"
                 )
             time.sleep(_DARWIN_IDENTITY_PIN_RETRY_INTERVAL_SECONDS)
 
-    def _discover_until_stable(self) -> None:
+    def _discover_until_stable(self, identity_retry_deadline: float) -> None:
         changed = True
         while changed:
             changed = False
@@ -738,17 +796,28 @@ class _DarwinProcessTree:
                     continue
                 for child_pid in self._child_pids(identity.pid):
                     before = self._current_by_pid.get(child_pid)
-                    after = self._register(child_pid, identity.serial)
+                    after = self._register(
+                        child_pid,
+                        identity.serial,
+                        identity_retry_deadline=identity_retry_deadline,
+                    )
                     if after is not None and after != before:
                         changed = True
 
-    def _discover_trusted_process_group_members(self) -> None:
+    def _discover_trusted_process_group_members(
+            self,
+            identity_retry_deadline: float,
+    ) -> None:
         if not self._trusted_process_group:
             return
         for pid in self._process_group_pids():
             if pid == os.getpid():
                 continue
-            self._register(pid, None)
+            self._register(
+                pid,
+                None,
+                identity_retry_deadline=identity_retry_deadline,
+            )
 
     def _validate_trusted_process_group(self) -> None:
         if not self._trusted_process_group:
@@ -787,7 +856,10 @@ class _DarwinProcessTree:
             return None
         return process_group_id, session_id
 
-    def _discover_reparented_descendants(self) -> None:
+    def _discover_reparented_descendants(
+            self,
+            identity_retry_deadline: float,
+    ) -> None:
         candidates: list[tuple[int, _UniqueProcessInfo]] = []
         for pid in self._all_pids():
             try:
@@ -811,6 +883,7 @@ class _DarwinProcessTree:
                     pid,
                     parent_serial,
                     observed_unique_info=info,
+                    identity_retry_deadline=identity_retry_deadline,
                 ) is not None:
                     changed = True
 
@@ -834,6 +907,8 @@ class _DarwinProcessTree:
     def _refresh_signal_token(
             self,
             identity: _DarwinProcessIdentity,
+            *,
+            retry_deadline: float | None = None,
     ) -> _DarwinSignalState:
         info = self._unique_process_info(identity.pid)
         if info is None or int(info.unique_id) != identity.unique_id:
@@ -842,8 +917,13 @@ class _DarwinProcessTree:
             task_identity = self._pin_task_identity(
                 identity.pid,
                 identity.unique_id,
+                retry_deadline=retry_deadline,
             )
-        except _ContainmentUnavailableError:
+        except _ContainmentUnavailableError as exc:
+            detail = str(exc).strip() or "live process identity could not be pinned"
+            self._record_signal_failure(
+                f"managed process {identity.pid} is unsignalable: {detail}"
+            )
             return _DarwinSignalState.UNSIGNALABLE
         if task_identity is None:
             return _DarwinSignalState.EXITED
@@ -860,6 +940,10 @@ class _DarwinProcessTree:
         identity.token = token
         identity.pid_version = int(token.values[7])
         return _DarwinSignalState.SIGNALABLE
+
+    def _record_signal_failure(self, reason: str) -> None:
+        if self._signal_failure_reason is None:
+            self._signal_failure_reason = reason
 
     def _refresh_liveness(self) -> None:
         for identity in self._processes.values():
@@ -915,7 +999,7 @@ def _reap_children(
 def _terminate_tree(
         tree: _LinuxProcessTree | _DarwinProcessTree,
         reap: Callable[[], None],
-) -> bool:
+) -> _TerminationResult:
     succeeded = tree.signal_all(signal.SIGTERM)
     term_deadline = time.monotonic() + _TERM_GRACE_SECONDS
     while time.monotonic() < term_deadline:
@@ -923,7 +1007,15 @@ def _terminate_tree(
         tree.refresh(_TREE_POLL_SECONDS)
         if not tree.live():
             reap()
-            return succeeded and not tree.compromised
+            if succeeded and not tree.compromised:
+                return _TerminationResult(True)
+            reason = tree.signal_failure_reason
+            if tree.compromised:
+                reason = reason or "managed process ownership was compromised"
+            return _TerminationResult(
+                False,
+                reason or "managed process termination could not be proven",
+            )
         succeeded = tree.signal_all(signal.SIGTERM) and succeeded
     succeeded = tree.signal_all(signal.SIGKILL) and succeeded
     kill_deadline = time.monotonic() + _KILL_GRACE_SECONDS
@@ -932,9 +1024,29 @@ def _terminate_tree(
         tree.refresh(_TREE_POLL_SECONDS)
         if not tree.live():
             reap()
-            return succeeded and not tree.compromised
+            if succeeded and not tree.compromised:
+                return _TerminationResult(True)
+            reason = tree.signal_failure_reason
+            if tree.compromised:
+                reason = reason or "managed process ownership was compromised"
+            return _TerminationResult(
+                False,
+                reason or "managed process termination could not be proven",
+            )
         succeeded = tree.signal_all(signal.SIGKILL) and succeeded
-    return False
+    reason = "managed process tree remained live after SIGKILL grace"
+    if tree.signal_failure_reason:
+        reason += f": {tree.signal_failure_reason}"
+    return _TerminationResult(False, reason)
+
+
+def _cleanup_failure_reason(
+        context: str,
+        result: _TerminationResult,
+) -> str:
+    if result.reason:
+        return f"{context}: {result.reason}"
+    return context
 
 
 def _terminate_tree_after_parent_loss(
@@ -996,7 +1108,11 @@ def _run(
         containment_mode: _ContainmentMode = _ContainmentMode.STRICT,
 ) -> int:
     if not command:
-        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        _notify(
+            status_descriptor,
+            _STATUS_UNAVAILABLE,
+            "managed process command is empty",
+        )
         return 125
     if deadline_ns >= 0 and time.time_ns() >= deadline_ns:
         _notify(status_descriptor, _STATUS_EXPIRED)
@@ -1014,21 +1130,37 @@ def _run(
 
     try:
         parent_liveness = _ParentLivenessMonitor(parent_liveness_descriptor)
-    except BaseException:
-        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+    except BaseException as exc:
+        _notify(
+            status_descriptor,
+            _STATUS_UNAVAILABLE,
+            f"parent liveness monitor initialization failed: {type(exc).__name__}: {exc}",
+        )
         return 125
     if parent_liveness.lost():
-        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        _notify(
+            status_descriptor,
+            _STATUS_UNAVAILABLE,
+            "managed process parent liveness was lost before containment initialization",
+        )
         return 125
 
     try:
         tree = _process_tree(containment_mode)
-    except BaseException:
-        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+    except BaseException as exc:
+        _notify(
+            status_descriptor,
+            _STATUS_UNAVAILABLE,
+            f"process containment initialization failed: {type(exc).__name__}: {exc}",
+        )
         return 125
     if parent_liveness.lost():
         tree.close()
-        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        _notify(
+            status_descriptor,
+            _STATUS_UNAVAILABLE,
+            "managed process parent liveness was lost during containment initialization",
+        )
         return 125
 
     gate_read_descriptor, gate_write_descriptor = os.pipe()
@@ -1053,30 +1185,52 @@ def _run(
     try:
         try:
             tree.add_root(target_pid)
-        except BaseException:
+        except BaseException as exc:
             os.close(gate_write_descriptor)
-            _terminate_tree(tree, reap)
-            _notify(status_descriptor, _STATUS_UNAVAILABLE)
+            cleanup_result = _terminate_tree(tree, reap)
+            cleanup_reason = (
+                "cleanup succeeded"
+                if cleanup_result.succeeded
+                else _cleanup_failure_reason("cleanup failed", cleanup_result)
+            )
+            _notify(
+                status_descriptor,
+                _STATUS_UNAVAILABLE,
+                f"process containment root registration failed: "
+                f"{type(exc).__name__}: {exc}; {cleanup_reason}",
+            )
             return 125
         if parent_liveness.lost():
             os.close(gate_write_descriptor)
             _terminate_tree_after_parent_loss(tree, reap)
-            _notify(status_descriptor, _STATUS_UNAVAILABLE)
+            _notify(
+                status_descriptor,
+                _STATUS_UNAVAILABLE,
+                "managed process parent liveness was lost before target launch",
+            )
             return 125
         if termination_signal != 0:
             os.close(gate_write_descriptor)
-            cleanup_succeeded = _terminate_tree(tree, reap)
+            cleanup_result = _terminate_tree(tree, reap)
             _notify(
                 status_descriptor,
-                _STATUS_COMPLETE if cleanup_succeeded else _STATUS_UNAVAILABLE,
+                _STATUS_COMPLETE if cleanup_result.succeeded else _STATUS_UNAVAILABLE,
+                _cleanup_failure_reason(
+                    "managed process cleanup failed after a termination request before target launch",
+                    cleanup_result,
+                ),
             )
             return 128 + termination_signal
         if deadline_ns >= 0 and time.time_ns() >= deadline_ns:
             os.close(gate_write_descriptor)
-            cleanup_succeeded = _terminate_tree(tree, reap)
+            cleanup_result = _terminate_tree(tree, reap)
             _notify(
                 status_descriptor,
-                _STATUS_EXPIRED if cleanup_succeeded else _STATUS_UNAVAILABLE,
+                _STATUS_EXPIRED if cleanup_result.succeeded else _STATUS_UNAVAILABLE,
+                _cleanup_failure_reason(
+                    "managed process cleanup failed after deadline expiry before target launch",
+                    cleanup_result,
+                ),
             )
             return 124
         os.write(gate_write_descriptor, _TARGET_READY)
@@ -1089,46 +1243,76 @@ def _run(
             reap()
             if parent_liveness.lost():
                 _terminate_tree_after_parent_loss(tree, reap)
-                _notify(status_descriptor, _STATUS_UNAVAILABLE)
-                return 125
-            if termination_signal != 0:
-                cleanup_succeeded = _terminate_tree(tree, reap)
                 _notify(
                     status_descriptor,
-                    _STATUS_COMPLETE if cleanup_succeeded else _STATUS_UNAVAILABLE,
+                    _STATUS_UNAVAILABLE,
+                    "managed process parent liveness was lost during target execution",
+                )
+                return 125
+            if termination_signal != 0:
+                cleanup_result = _terminate_tree(tree, reap)
+                _notify(
+                    status_descriptor,
+                    _STATUS_COMPLETE if cleanup_result.succeeded else _STATUS_UNAVAILABLE,
+                    _cleanup_failure_reason(
+                        "managed process cleanup failed after a termination request",
+                        cleanup_result,
+                    ),
                 )
                 return 128 + termination_signal
             if deadline_ns >= 0 and time.time_ns() >= deadline_ns:
-                cleanup_succeeded = _terminate_tree(tree, reap)
+                cleanup_result = _terminate_tree(tree, reap)
                 _notify(
                     status_descriptor,
-                    _STATUS_EXPIRED if cleanup_succeeded else _STATUS_UNAVAILABLE,
+                    _STATUS_EXPIRED if cleanup_result.succeeded else _STATUS_UNAVAILABLE,
+                    _cleanup_failure_reason(
+                        "managed process cleanup failed after deadline expiry",
+                        cleanup_result,
+                    ),
                 )
                 return 124
             if tree.requires_immediate_shutdown:
-                _terminate_tree(tree, reap)
-                _notify(status_descriptor, _STATUS_UNAVAILABLE)
+                cleanup_result = _terminate_tree(tree, reap)
+                _notify(
+                    status_descriptor,
+                    _STATUS_UNAVAILABLE,
+                    _cleanup_failure_reason(
+                        "managed process escaped trusted process-group containment",
+                        cleanup_result,
+                    ),
+                )
                 return 125
             if target_status is not None and not tree.live():
                 if empty_since is None:
                     empty_since = time.monotonic()
                 elif time.monotonic() - empty_since >= _TREE_SETTLE_SECONDS:
                     if tree.compromised:
-                        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+                        _notify(
+                            status_descriptor,
+                            _STATUS_UNAVAILABLE,
+                            "managed process ownership could not be proven",
+                        )
                         return 125
                     _notify(status_descriptor, _STATUS_COMPLETE)
                     return _exit_like_target(target_status)
             else:
                 empty_since = None
-    except BaseException:
+    except BaseException as exc:
+        reason = f"{type(exc).__name__}: {exc}"
         if parent_liveness.lost():
             _terminate_tree_after_parent_loss(tree, reap)
         else:
             try:
-                _terminate_tree(tree, reap)
+                cleanup_result = _terminate_tree(tree, reap)
+                if not cleanup_result.succeeded:
+                    reason = _cleanup_failure_reason(reason, cleanup_result)
             except BaseException:
                 pass
-        _notify(status_descriptor, _STATUS_UNAVAILABLE)
+        _notify(
+            status_descriptor,
+            _STATUS_UNAVAILABLE,
+            reason,
+        )
         return 125
     finally:
         tree.close()

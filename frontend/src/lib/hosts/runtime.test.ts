@@ -36,10 +36,20 @@ describe('host runtime status', () => {
 
 	it('stops treating hosts as pending once a real result arrives', () => {
 		const ready = runtime({ available: true, message: 'Mounted and ready' });
-		const offline = runtime({ message: 'Turn on SSH first' });
+		const reachable = runtime({
+			probe_available: true,
+			storage_recovery_available: true,
+			message: 'Storage will reconnect when work starts'
+		});
+		const needsSetup = runtime({ probe_available: true, issues: ['Install ffmpeg first'] });
+		const offline = runtime({ probe_available: false, message: 'Turn on SSH first' });
 
 		expect(hostRuntimeBadgeState(ready)).toEqual({ tone: 'ready', label: 'Ready' });
+		expect(hostRuntimeBadgeState(reachable)).toEqual({ tone: 'wait', label: 'Reachable' });
+		expect(hostRuntimeBadgeState(needsSetup)).toEqual({ tone: 'wait', label: 'Needs setup' });
 		expect(hostRuntimeBadgeState(offline)).toEqual({ tone: 'fail', label: 'Unavailable' });
-		expect(hostsStatusPending({ compact: true, hosts: [ready, offline] })).toBe(false);
+		expect(
+			hostsStatusPending({ compact: true, hosts: [ready, reachable, needsSetup, offline] })
+		).toBe(false);
 	});
 });

@@ -1,4 +1,5 @@
 import json
+from collections.abc import Sequence
 from typing import Any
 from typing import TypeVar
 
@@ -42,6 +43,33 @@ def load_latest_overlapping_job(connection: DBClient, prefix: str) -> dict[str, 
         .limit(1)
     ).mappings().fetchone()
     return _hydrate_job(row) if row is not None else None
+
+
+def load_completed_sample_jobs_for_prefixes(
+        connection: DBClient,
+        prefixes: Sequence[str],
+) -> list[dict[str, Any]]:
+    normalized_prefixes = tuple(dict.fromkeys(prefix.strip("/") for prefix in prefixes if prefix.strip("/")))
+    if not normalized_prefixes:
+        return []
+    rows = []
+    for offset in range(0, len(normalized_prefixes), 500):
+        prefix_batch = normalized_prefixes[offset:offset + 500]
+        rows.extend(connection.execute(
+            _calibration_job_select()
+            .where(calibration_jobs.c.prefix.in_(prefix_batch))
+            .where(calibration_jobs.c.status == "completed")
+            .where(calibration_jobs.c.lane == "sample")
+            .where(calibration_jobs.c.error.is_(None))
+            .where(calibration_jobs.c.started_at.is_not(None))
+            .where(calibration_jobs.c.finished_at.is_not(None))
+            .order_by(
+                calibration_jobs.c.finished_at.desc(),
+                calibration_jobs.c.created_at.desc(),
+                _rowid_column().desc(),
+            )
+        ).mappings().fetchall())
+    return [_hydrate_job(row) for row in rows]
 
 
 def load_latest_failed_sample_job(connection: DBClient, prefix: str) -> dict[str, Any] | None:

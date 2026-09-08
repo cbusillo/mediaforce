@@ -4,6 +4,7 @@ import type { FolderWorkflowState, OtherLibraryPayload, OtherWorkUnit } from '$l
 import {
 	mergeOtherLibraryPayloads,
 	otherActionFileCount,
+	otherLibraryStateGroup,
 	otherReadinessBlockerCopy,
 	otherSampleSetupResult,
 	otherScopeSummary,
@@ -124,6 +125,28 @@ describe('mergeOtherLibraryPayloads', () => {
 });
 
 describe('Other workflow presentation', () => {
+	it('groups each current-work state under a stable reachable key', () => {
+		expect(
+			otherLibraryStateGroup({
+				...workUnit,
+				profile_readiness: { ...workUnit.profile_readiness, state: 'blocked' }
+			})
+		).toEqual({ key: 'blocked', label: 'Cannot start', tone: 'fail' });
+		expect(otherLibraryStateGroup({ ...workUnit, workflow_state: workflow('attention') })).toEqual({
+			key: 'attention',
+			label: 'Needs attention',
+			tone: 'fail'
+		});
+		expect(otherLibraryStateGroup({ ...workUnit, workflow_state: workflow('processing') })).toEqual(
+			{ key: 'processing', label: 'Compressing', tone: 'active' }
+		);
+		expect(otherLibraryStateGroup({ ...workUnit, workflow_state: workflow('encode') })).toEqual({
+			key: 'ready',
+			label: 'Ready to act on',
+			tone: 'ready'
+		});
+	});
+
 	it.each([
 		['encode', 'Ready to compress'],
 		['validate', 'Ready to check'],

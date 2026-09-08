@@ -12,9 +12,11 @@ import {
 	movieSizeCapBlockView,
 	parseServerTimestamp,
 	parentSampleAppliesToExactItem,
+	parentTitleWorkView,
 	sampleStopResponseCopy
 } from './movie-studio-view';
 import type {
+	MovieTitle,
 	PlannedStreamPayload,
 	ResolvedOperatorIntentPayload,
 	StreamBudgetLedgerPayload
@@ -321,6 +323,197 @@ describe('parentSampleAppliesToExactItem', () => {
 		).toBe(false));
 });
 
+describe('parentTitleWorkView', () => {
+	function parentTitle(overrides: Partial<MovieTitle> = {}, memberCount = 1): MovieTitle {
+		const member = {
+			item_id: 1,
+			prefix: 'movies/Example/Example.mkv',
+			rel_path: 'movies/Example/Example.mkv',
+			root: 'movies',
+			title_prefix: 'movies/Example',
+			title: 'Example',
+			scope_mode: 'title_folder' as const,
+			role: 'feature' as const,
+			label: 'Example',
+			status: 'discovered',
+			size_bytes: 10,
+			included_by_default: true,
+			exact_action_available: true,
+			promotion_conflicts: [],
+			details_loading: false
+		};
+		return {
+			prefix: 'movies/Example',
+			root: 'movies',
+			library_label: 'Movies',
+			availability: 'production',
+			policy: {},
+			title: 'Example',
+			scope_mode: 'title_folder',
+			item_count: memberCount,
+			feature_count: memberCount,
+			edition_count: memberCount,
+			extra_count: 0,
+			uncertain_count: 0,
+			included_item_count: memberCount,
+			total_size_bytes: memberCount * 10,
+			included_size_bytes: memberCount * 10,
+			savings_confidence: 'unavailable',
+			promotion_conflicts: [],
+			members: Array.from({ length: memberCount }, (_, index) => ({
+				...member,
+				item_id: index + 1,
+				prefix: index ? `movies/Example/Edition ${index + 1}.mkv` : member.prefix,
+				rel_path: index ? `movies/Example/Edition ${index + 1}.mkv` : member.rel_path
+			})),
+			details_loading: false,
+			...overrides
+		};
+	}
+
+	it.each([
+		[
+			'proposal',
+			{ review_badge: { label: 'Sample plan ready' } },
+			{ actionLabel: 'Open title workspace', statusLabel: 'Sample plan ready', reviewSample: false }
+		],
+		[
+			'pending review',
+			{ review_badge: { label: 'Review pending' } },
+			{
+				actionLabel: 'Review title sample',
+				statusLabel: 'Review at title level',
+				reviewSample: true
+			}
+		],
+		[
+			'accepted encode',
+			{ review_badge: { label: 'Approved draft' } },
+			{ actionLabel: 'Open title workspace', statusLabel: 'Approved draft', reviewSample: false }
+		],
+		[
+			'processing',
+			{
+				workflow_state: {
+					prefix: 'movies/Example',
+					state: 'processing',
+					primary_lane: 'processing',
+					label: '',
+					tone: 'active',
+					detail: '',
+					counts: {},
+					lane_counts: {},
+					state_counts: {},
+					next_action: {
+						kind: 'monitor_encode',
+						label: '',
+						enabled: true,
+						target_prefix: 'movies/Example'
+					},
+					blockers: []
+				}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Compressing', reviewSample: false }
+		],
+		[
+			'validate',
+			{
+				workflow_state: {
+					prefix: 'movies/Example',
+					state: 'ready_to_validate',
+					primary_lane: 'validate',
+					label: '',
+					tone: 'ready',
+					detail: '',
+					counts: {},
+					lane_counts: {},
+					state_counts: {},
+					next_action: {
+						kind: 'validate_outputs',
+						label: '',
+						enabled: true,
+						target_prefix: 'movies/Example'
+					},
+					blockers: []
+				}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Ready to check', reviewSample: false }
+		],
+		[
+			'promote',
+			{
+				workflow_state: {
+					prefix: 'movies/Example',
+					state: 'ready_to_promote',
+					primary_lane: 'promote',
+					label: '',
+					tone: 'ready',
+					detail: '',
+					counts: {},
+					lane_counts: {},
+					state_counts: {},
+					next_action: {
+						kind: 'promote_outputs',
+						label: '',
+						enabled: true,
+						target_prefix: 'movies/Example'
+					},
+					blockers: []
+				}
+			},
+			{ actionLabel: 'Open title workspace', statusLabel: 'Ready to replace', reviewSample: false }
+		]
+	] as const)(
+		'routes applicable parent %s work to truthful title-level copy',
+		(_state, overrides, expected) => {
+			expect(
+				parentTitleWorkView(
+					'movies/Example/Example.mkv',
+					parentTitle(overrides as Partial<MovieTitle>),
+					false
+				)
+			).toMatchObject(expected);
+		}
+	);
+
+	it('keeps idle, completed, and unrelated multi-file title work on the exact-file route', () => {
+		expect(parentTitleWorkView('movies/Example/Example.mkv', parentTitle(), false)).toBeNull();
+		expect(
+			parentTitleWorkView(
+				'movies/Example/Example.mkv',
+				parentTitle({
+					workflow_state: {
+						prefix: 'movies/Example',
+						state: 'complete',
+						primary_lane: 'complete',
+						label: 'Finished',
+						tone: 'success',
+						detail: '',
+						counts: {},
+						lane_counts: {},
+						state_counts: {},
+						next_action: {
+							kind: 'none',
+							label: '',
+							enabled: false,
+							target_prefix: 'movies/Example'
+						},
+						blockers: []
+					}
+				}),
+				false
+			)
+		).toBeNull();
+		expect(
+			parentTitleWorkView(
+				'movies/Example/Example.mkv',
+				parentTitle({ review_badge: { label: 'Review pending' } }, 2),
+				false
+			)
+		).toBeNull();
+	});
+});
+
 describe('movieReviewStatusLabel', () => {
 	it('uses operator-facing copy for approval-ready and missing samples', () => {
 		expect(movieReviewStatusLabel('needs_approval')).toBe('Ready to review');
@@ -592,8 +785,76 @@ describe('movieGoalFactsView', () => {
 			expectedOutput: '717 MB',
 			expectedSavings: '2.11 GB · 75%',
 			targetRange: '681 MB–753 MB',
-			estimateQuality: 'Planning range, not a guarantee'
+			outputDetail: 'Target range 681 MB–753 MB',
+			estimateQuality: 'Planning range, not a guarantee',
+			estimateBasis: 'target'
 		}));
+
+	it('prefers the current complete sampled estimate over the configured target', () => {
+		const view = movieGoalFactsView(
+			7652.542,
+			8_667_928_469,
+			{
+				schema_version: 1,
+				mode: 'normalized',
+				source: 'config_default',
+				status: 'resolved',
+				requires_confirmation: false,
+				target_size_bytes: 850_282_444,
+				sample_projection_tolerance_percent: 10,
+				final_output_tolerance_percent: 5,
+				final_lower_bound_bytes: 807_768_322,
+				final_upper_bound_bytes: 892_796_566,
+				rationale: 'Runtime-adjusted movie target.'
+			},
+			{
+				estimated_output_bytes: 904_049_452,
+				estimate_provenance: 'sampled_calibration',
+				estimate_coverage: {
+					covered_included_members: 1,
+					required_included_members: 1,
+					complete: true
+				}
+			}
+		);
+
+		expect(view).toMatchObject({
+			expectedOutput: '904 MB',
+			expectedSavings: '7.76 GB · 90%',
+			targetRange: '808 MB–893 MB',
+			estimateQuality: 'Current completed-sample estimate, not a guarantee',
+			estimateBasis: 'sampled'
+		});
+		expect(view.outputDetail).toContain('above target range');
+	});
+
+	it('ignores incomplete sampled evidence', () =>
+		expect(
+			movieGoalFactsView(
+				3600,
+				1_000_000_000,
+				{
+					schema_version: 1,
+					mode: 'absolute',
+					source: 'profile',
+					status: 'resolved',
+					requires_confirmation: false,
+					target_size_bytes: 400_000_000,
+					sample_projection_tolerance_percent: 10,
+					final_output_tolerance_percent: 5,
+					rationale: 'Movie target.'
+				},
+				{
+					estimated_output_bytes: 500_000_000,
+					estimate_provenance: 'sampled_calibration',
+					estimate_coverage: {
+						covered_included_members: 1,
+						required_included_members: 2,
+						complete: false
+					}
+				}
+			).estimateBasis
+		).toBe('target'));
 
 	it('does not claim savings when the target is not smaller', () =>
 		expect(

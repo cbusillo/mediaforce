@@ -17,7 +17,12 @@ from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import item_events, library_items, quality_search_observations, staged_artifacts
 from mediaforce.core.evidence import stable_json_hash
 from mediaforce.core.models import ProbeSummary
-from mediaforce.core.process_control import ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.process_control import (
+    ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
+    ScheduleWindowClosedError,
+)
+from mediaforce.encoding import manifest as manifest_module
 from mediaforce.encoding.quality import (
     QualitySearchError,
     QualitySearchResult,
@@ -27,7 +32,7 @@ from mediaforce.encoding.quality import (
 from mediaforce.tuning.quality_memory import quality_search_context_from_command, rounded_target_video_bitrate
 from mediaforce.tuning.quality_shadow import QualityShadowMetrics, QualityShadowRecommendation
 from mediaforce.tuning.quality_warm_start import QualityWarmStartBlockReason, QualityWarmStartPlan
-from mediaforce.tuning.target_size_search import FinalSizeMissError, TargetSizeSearchError
+from mediaforce.tuning.target_size_search import FinalSizeMissError, FinalSizeVerification, TargetSizeSearchError
 
 
 class TargetSizeProductionTests(unittest.TestCase):
@@ -38,6 +43,46 @@ class TargetSizeProductionTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
+
+    def test_unlinked_reencode_clears_previous_target_lineage_and_acceptance(self) -> None:
+        source_path = self._source_file("reencode-lineage.mkv")
+        staging_path = self._staging_path("reencode-lineage.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=item_id, staging_path=str(staging_path), target_lineage_json='{"old":true}',
+                validated_at="2026-07-01", promoted_at="2026-07-02", promoted_path="old-path",
+                archived_source_path="old-archive", updated_at="2026-07-02",
+            ))
+            quality = QualitySearchResult(crf=30, metric="VMAF", target=85, score=86, stdout="test")
+            with patch("mediaforce.tuning.production_lineage.quality_toolchain_identity") as probe:
+                self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+                probe.assert_not_called()
+            row = connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id,
+            )).mappings().one()
+            for key in ("target_lineage_json", "validated_at", "promoted_at", "promoted_path", "archived_source_path"):
+                self.assertIsNone(row[key], key)
+
+    def test_containment_failure_precedes_final_size_miss_classification(self) -> None:
+        verification = FinalSizeVerification(
+            status="over_target",
+            target_size_bytes=5_000_000,
+            lower_bound_bytes=4_750_000,
+            upper_bound_bytes=5_250_000,
+            actual_output_bytes=5_400_000,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason="A bounded measured retry is allowed for this final-size miss.",
+        )
+
+        failure_kind = manifest_module._failure_kind_for_exception(
+            ProcessDeadlineEnforcementError("containment cleanup is unproven"),
+            verification,
+        )
+
+        self.assertEqual(failure_kind, "containment_unproven")
 
     def test_encode_persists_final_size_verification_inside_approved_band(self) -> None:
         source_path = self._source_file("episode-target-ok.mkv")
@@ -670,7 +715,7 @@ class TargetSizeProductionTests(unittest.TestCase):
                 "final_retry_measurement",
             )
 
-    def test_encode_measures_bounded_directional_probe_before_second_full_encode(self) -> None:
+    def test_encode_performs_at_most_one_replacement_full_encode(self) -> None:
         source_path = self._source_file("episode-target-directional-probe.mkv")
         staging_path = self._staging_path("episode-target-directional-probe.mkv")
         with open_db(self.config.paths.db_path) as connection:
@@ -687,30 +732,71 @@ class TargetSizeProductionTests(unittest.TestCase):
                 stdout="target-size-search",
                 target_size_trace=trace,
             )
-            retry_samples = [
-                SampleEncodeResult(
-                    metric="VMAF",
-                    score=84.5,
-                    predicted_encode_percent=20.0,
-                    predicted_encode_seconds=30.0,
-                    predicted_encode_size_bytes=900_000,
-                    stdout="first bounded directional probe",
-                ),
-                SampleEncodeResult(
-                    metric="VMAF",
-                    score=84.0,
-                    predicted_encode_percent=20.0,
-                    predicted_encode_seconds=30.0,
-                    predicted_encode_size_bytes=800_000,
-                    stdout="second bounded directional probe",
-                ),
-            ]
+            retry_sample = SampleEncodeResult(
+                metric="VMAF",
+                score=84.5,
+                predicted_encode_percent=20.0,
+                predicted_encode_seconds=30.0,
+                predicted_encode_size_bytes=800_000,
+                stdout="bounded directional probe",
+            )
 
             build_calls, measure_calls = self._encode_with_output_sizes(
                 connection,
                 item,
                 quality,
                 [5_400_000, 5_100_000],
+                retry_sample=retry_sample,
+            )
+
+            artifact = self._staged_artifact(
+                connection,
+                item_id,
+                staged_artifacts.c.chosen_crf,
+                staged_artifacts.c.validation_json,
+            )
+            assert artifact is not None
+            validation = json.loads(cast(str, artifact["validation_json"]))
+            retry_trace = validation["target_size_trace"]
+            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 37.0])
+            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [37.0])
+            self.assertEqual(artifact["chosen_crf"], 37.0)
+            self.assertEqual(retry_trace["final_retry_calibration"]["strategy"], "bounded_directional_probe")
+            self.assertEqual(retry_trace["final_retry_calibration"]["probe_from_crf"], 34.0)
+            self.assertEqual(retry_trace["final_retry_calibration"]["measurement_count"], 1)
+            self.assertEqual(
+                retry_trace["final_retry_calibration"]["measurements"][0]["placement"],
+                "directional_seed",
+            )
+
+    def test_encode_persists_three_measurement_straddle_retry(self) -> None:
+        source_path = self._source_file("episode-target-straddle-retry.mkv")
+        staging_path = self._staging_path("episode-target-straddle-retry.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            self._attach_stream_budget(item)
+            trace = self._trace(item, selected_crf=34.0)
+            trace["crf_bounds"] = {"min_crf": 18, "max_crf": 38}
+            quality = QualitySearchResult(
+                crf=34.0,
+                metric="VMAF",
+                target=85.0,
+                score=86.0,
+                stdout="target-size-search",
+                target_size_trace=trace,
+            )
+            retry_samples = [
+                SampleEncodeResult("VMAF", 85.5, 20.0, 30.0, 990_000, "directional seed"),
+                SampleEncodeResult("VMAF", 84.5, 20.0, 30.0, 500_000, "measured secant"),
+                SampleEncodeResult("VMAF", 85.0, 20.0, 30.0, 700_000, "bracket interpolation"),
+            ]
+
+            build_calls, measure_calls = self._encode_with_output_sizes(
+                connection,
+                item,
+                quality,
+                [5_300_000, 5_100_000],
                 retry_samples=retry_samples,
             )
 
@@ -723,12 +809,19 @@ class TargetSizeProductionTests(unittest.TestCase):
             assert artifact is not None
             validation = json.loads(cast(str, artifact["validation_json"]))
             retry_trace = validation["target_size_trace"]
-            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 38.0])
-            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [37.0, 38.0])
-            self.assertEqual(artifact["chosen_crf"], 38.0)
-            self.assertEqual(retry_trace["final_retry_calibration"]["strategy"], "bounded_directional_probe")
-            self.assertEqual(retry_trace["final_retry_calibration"]["probe_from_crf"], 34.0)
-            self.assertEqual(retry_trace["final_retry_calibration"]["measurement_count"], 2)
+            measurements = retry_trace["final_retry_calibration"]["measurements"]
+            self.assertEqual([call.kwargs["quality"].crf for call in build_calls], [34.0, 37.0])
+            self.assertEqual([call.kwargs["crf"] for call in measure_calls], [36.0, 38.0, 37.0])
+            self.assertEqual(artifact["chosen_crf"], 37.0)
+            self.assertEqual(retry_trace["final_retry_calibration"]["measurement_count"], 3)
+            self.assertEqual(
+                [measurement["placement"] for measurement in measurements],
+                ["directional_seed", "measured_secant", "bracket_interpolation"],
+            )
+            self.assertEqual(
+                [attempt["status"] for attempt in retry_trace["final_output_attempts"]],
+                ["over_target", "inside_target_band"],
+            )
 
     def test_encode_surfaces_needs_review_when_final_miss_has_no_measured_retry(self) -> None:
         source_path = self._source_file("episode-target-review.mkv")

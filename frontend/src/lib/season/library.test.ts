@@ -5,12 +5,14 @@ import type { FolderCard, LifecycleState, SeasonLifecycleState } from '$lib/api/
 import {
 	applySeriesLifecycle,
 	buildShowCards,
+	compareSeasonCards,
 	filterShowCards,
 	mergeFolderPayloads,
 	olderSeasonLibraryAction,
 	savingsPercent,
 	seasonsByShow,
-	sortShowCards
+	sortShowCards,
+	tvLibraryStateGroup
 } from './library';
 
 function card(prefix: string, size: number, savings: number): FolderCard {
@@ -70,6 +72,53 @@ function lifecycle(mode: 'auto' | 'on' | 'off', held: number): LifecycleState {
 }
 
 describe('season library grouping', () => {
+	it('groups show workflow by the highest-priority reachable state', () => {
+		expect(tvLibraryStateGroup([{ tone: 'ready' }, { tone: 'active' }])).toEqual({
+			key: 'processing',
+			label: 'In progress',
+			tone: 'active'
+		});
+		expect(tvLibraryStateGroup([{ tone: 'ready' }, { tone: 'wait' }])).toEqual({
+			key: 'attention',
+			label: 'Needs attention',
+			tone: 'fail'
+		});
+		expect(tvLibraryStateGroup([{ tone: 'idle' }])).toEqual({
+			key: 'idle',
+			label: 'No active work',
+			tone: 'idle'
+		});
+		expect(tvLibraryStateGroup([{ key: 'needs_test', tone: 'quiet' }])).toEqual({
+			key: 'ready',
+			label: 'Ready to act on',
+			tone: 'ready'
+		});
+		expect(tvLibraryStateGroup([{ key: 'sample_waiting', tone: 'quiet' }])).toEqual({
+			key: 'processing',
+			label: 'In progress',
+			tone: 'active'
+		});
+		expect(tvLibraryStateGroup([{ key: 'finished', tone: 'success' }])).toEqual({
+			key: 'idle',
+			label: 'No active work',
+			tone: 'idle'
+		});
+	});
+
+	it('sorts season cards by season number', () => {
+		const seasons = [
+			card('tv/Example Show/Season 12', 1, 0),
+			card('tv/Example Show/Season 2', 1, 0),
+			card('tv/Example Show/Specials', 1, 0)
+		].sort(compareSeasonCards);
+
+		expect(seasons.map((season) => season.prefix)).toEqual([
+			'tv/Example Show/Season 2',
+			'tv/Example Show/Season 12',
+			'tv/Example Show/Specials'
+		]);
+	});
+
 	it('aggregates fallback show cards without losing savings', () => {
 		const seasons = [
 			card('tv/Big Brother (US)/Season 1', 1000, 700),

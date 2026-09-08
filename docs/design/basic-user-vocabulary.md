@@ -41,9 +41,10 @@ a computer`, `Needs sample`, `Safe to delete`.
   checking, finishing, and completed states. Do not reuse season-wide copy for
   a route that targets one episode.
 - Exact TV approval: use `Sample approved` for the settled review state and
-  `Compress the full episode` for the next action. Name the episode and file,
-  show the expected size change, and state that compression creates a separate
-  file; checking and the explicit replace decision happen later.
+  `Compress the full episode` for the separate production action. Approval
+  records the operator's judgment and does not queue work. Name the episode and
+  file, show the expected size change, and state that compression creates a
+  separate file; checking and the explicit replace decision happen later.
 - Movie scope: use `Action covers` with `Only this file` or `The whole title`.
   Keep `scope`, `exact selection`, and `title-wide` in technical details only.
 - Movie validation: use `Check compressed file` and `checked file` instead of
@@ -85,14 +86,14 @@ Use this sequence across TV, Movie, Other, Activity, Finished, and Settings.
 Scope nouns may change (`episode`, `movie`, `file`, or `files`), but the phase
 verb does not.
 
-| Phase                    | Primary action              | Waiting or running                   | Ready state              |
-| ------------------------ | --------------------------- | ------------------------------------ | ------------------------ |
-| Safe representative work | `Create sample`             | `Sample waiting` / `Creating sample` | `Ready to review`        |
-| Human review media       | `Compare clips`             | —                                    | `Comparison clips ready` |
-| Production compression   | `Compress …`                | `Compressing …`                      | `Ready to check`         |
-| Machine validation       | `Check compressed file(s)`  | `Checking …`                         | `Ready to replace`       |
-| Installation             | `Replace original(s)`       | `Replacing …`                        | `Replaced`               |
-| Cleanup                  | `Delete original backup(s)` | `Deleting …`                         | `Deleted`                |
+| Phase                    | Primary action              | Waiting or running                   | Ready state        |
+| ------------------------ | --------------------------- | ------------------------------------ | ------------------ |
+| Safe representative work | `Create sample`             | `Sample waiting` / `Creating sample` | `Ready to review`  |
+| Human review media       | `Full screen`               | —                                    | `Ready to review`  |
+| Production compression   | `Compress …`                | `Compressing …`                      | `Ready to check`   |
+| Machine validation       | `Check compressed file(s)`  | `Checking …`                         | `Ready to replace` |
+| Installation             | `Replace original(s)`       | `Replacing …`                        | `Replaced`         |
+| Cleanup                  | `Delete original backup(s)` | `Deleting …`                         | `Deleted`          |
 
 Use `Set up sample` only when the product genuinely saves a plan without
 opening media or queueing work. Do not use `preview` for this workflow; preview
@@ -265,8 +266,9 @@ remain unchanged` while memory is observation-only.
 - Other Library should say `folders and files`, `One file`, `Whole folder`,
   `Files included`, and `Files left untouched`. Keep `work unit`, `semantics`,
   `inference`, and raw workflow labels out of primary copy. Other Studio should
-  distinguish `Set up sample` from `Create sample`, use `Compare clips` and
-  `Approve sample`, and follow the shared compress/check/replace phase verbs.
+  distinguish `Set up sample` from `Create sample`, use the shared review
+  choices (`Keep this version`, `Use less space`, and `Improve picture or
+  sound`), and follow the shared compress/check/replace phase verbs.
 - Activity may expose more technical detail, but first-level headings should
   still use `computers`, `sample queue`, `compression queue`, and `retry available`.
 - Completed should use destructive language directly: `Delete original

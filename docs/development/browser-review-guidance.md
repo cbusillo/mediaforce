@@ -28,3 +28,21 @@ visual and interaction judgment on top of that automated matrix, not replace it.
 - For reviews of home, queue, review, or folder-workspace screens, require the
   critique to call out any SaaS-dashboard drift against
   `docs/style/workstation-ui.md`.
+
+## Reviewing a hosted build on a lightly loaded workstation
+
+Pull-request CI retains a `web-review-<head-sha>` artifact for three days. It
+contains `frontend/build/` and synthetic API responses from the smoke test's
+managed fixture server. Response capture runs only in GitHub Actions with a
+newly seeded fixture server; it excludes Settings and never includes review
+media. The upload uses the supported
+[Actions artifact contract](https://github.com/actions/upload-artifact).
+
+When local builds are prohibited, download the artifact from the run for the
+reviewed PR head. Serve its static build with the captured synthetic responses
+on a separate loopback port. Keep all mutations disabled in that fixture
+server. This supports real-browser visual and disclosure checks without
+starting the production controller, building locally, or processing media.
+Record the PR head, run, artifact, browser, viewports, and any fixture response
+overrides used. Synthetic UI evidence does not prove production evidence
+availability, runtime reconciliation, or media quality.

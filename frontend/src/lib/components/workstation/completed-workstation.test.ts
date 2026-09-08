@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import type { CompletedFolderRow, CompletedPayload } from '$lib/api/types';
 import {
 	buildCompletedHistoryRows,
-	buildCompletedReadinessSummary,
 	buildCompletedStatusTiles,
 	buildDeleteConfirmCopy,
 	buildMarkHandledConfirmCopy,
@@ -79,35 +78,6 @@ describe('Completed workstation mapping', () => {
 			{ label: 'Review needed', value: '1 / 1', tone: 'fail' },
 			{ label: 'Cleanup folder', tone: 'ready' }
 		]);
-	});
-
-	it('summarizes completed cleanup state for the page headline', () => {
-		expect(buildCompletedReadinessSummary(null, null)).toMatchObject({
-			tone: 'idle',
-			title: 'Finished media is loading',
-			detail: 'Opening finished media and its original-backup status.'
-		});
-
-		expect(
-			buildCompletedReadinessSummary(
-				payload([folder({ archived_backup_count: 1, archived_backup_size_bytes: 1024 })]),
-				null
-			)
-		).toMatchObject({
-			tone: 'ready',
-			title: 'Original backups are ready to delete',
-			detail: '1 finished item has original backups waiting in the Cleanup folder.',
-			metricLabel: 'Ready to delete',
-			metricValue: '1'
-		});
-
-		expect(buildCompletedReadinessSummary(payload([folder({})]), null)).toMatchObject({
-			tone: 'idle',
-			title: 'Nothing to delete',
-			detail: '1 finished item is settled. Recent changes remain available in History.',
-			metricLabel: 'Finished',
-			metricValue: '1'
-		});
 	});
 
 	it('orders cleanup state filter options by operator risk sequence', () => {

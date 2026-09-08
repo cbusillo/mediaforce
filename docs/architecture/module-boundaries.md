@@ -52,7 +52,10 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     exit race only when the pinned pidfd independently proves exit
   - macOS uses Darwin unique parent identities plus audit-token signaling; a
     uniquely live process that cannot provide a signal token remains live and
-    makes cleanup unprovable rather than being classified as exited
+    makes cleanup unprovable rather than being classified as exited. Signal-token
+    pinning tolerates bounded short-lived task-port churn before failing closed;
+    each discovery or signaling pass shares one retry deadline across all
+    observed identities so process fan-out cannot multiply the wait per PID
   - each supervisor receives the read side of a parent-liveness pipe whose write
     side exists only in the Mediaforce parent; parent exit therefore produces
     EOF even when the target forks or detaches, and a surviving supervisor must
@@ -98,7 +101,10 @@ after the package consolidation pass. Avoid growing them with new helper logic.
     runtime temp area instead of mounted staging
   - containment fails closed before command success when required host
     primitives or descendant ownership proof are unavailable; it never falls
-    back to same-user process scans or signals
+    back to same-user process scans or signals. Unavailable containment statuses
+    carry bounded diagnostic reasons while retaining compatibility with legacy
+    bare unavailable statuses, and cleanup failures preserve the first concrete
+    signaling or identity-pin failure when one is available
 
 Guidance:
 
@@ -174,8 +180,10 @@ Guidance:
 
 - `transport.py`
   - SSH command execution, SCP/rsync helpers, shell/path helpers
-- `readiness.py`
-  - host probe scripts, capability checks, status parsing
+- `status_helpers.py` and `status_runtime.py`
+  - host probe scripts, capability checks, and status parsing
+  - successful status probes remain distinct from full encode readiness, so a
+    reachable host with recoverable storage is not reported as unreachable
 - `lifecycle.py`
   - wake/start/stop commands, cooldown behavior
 - `mount_runtime.py`
@@ -330,6 +338,20 @@ Guidance:
   - request/runtime compatibility, compatible local content-intent replay,
     bounded passive CRF prediction, narrow-to-broad scope eligibility,
     confidence, provenance, and no-recommendation behavior
+- `target_defaults.py`
+  - read-only total-byte target proposals from current visual boundaries,
+    normalized duration, independent-source thresholds, conflict/dispersion
+    gates, and operator-visible evidence and fallback reporting
+  - no CRF posterior input, settings writes, or production target authority
+- `target_default_context.py`
+  - fail-closed current source, calibration, intent, policy and stream-ledger
+    binding for exact-item Studio evidence, without adoption or queue authority
+- `production_lineage.py`
+  - exact-item approved-boundary capsules, actual source/toolchain capture,
+    and post-repair validation identity for advisory production evidence
+- `production_outcomes.py`
+  - transaction-owned append-only promotion receipts and read-only eligibility
+    rechecks, without target adoption or historical promotion backfill
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
@@ -473,6 +495,15 @@ Guidance:
     - folder modal components under `frontend/src/lib/components/folders/`
 - `frontend/src/lib/components/settings/SettingsEditor.svelte`
   - split further only if settings UI grows again
+
+### Shared review workspace
+
+- `frontend/src/lib/review/`
+  - scope-neutral review-pair normalization, availability/recovery derivation,
+    sample-size summaries, and synchronized comparison helpers
+- `frontend/src/lib/components/review/ComparisonWorkspace.svelte`
+  - shared browser comparison surface for TV, Movies, and Other
+  - receives scope-neutral labels and callbacks; owns synchronized media playback
 
 ## Extraction heuristics
 

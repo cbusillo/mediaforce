@@ -19,7 +19,7 @@ import {
 	scrollOffsetForPosition,
 	waitForMediaPlaying
 } from './comparison';
-import type { ReviewPair } from './experience';
+import type { ReviewPair } from './pairs';
 
 function pair(sound: boolean): ReviewPair {
 	return {

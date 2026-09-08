@@ -223,6 +223,7 @@ def _status_from_paths(
             issues=issue_list,
         ),
         missing_paths=missing_paths,
+        probe_available=True,
         repo_path=repo_path,
         ffmpeg_path=ffmpeg_path,
         platform=platform,

@@ -16,8 +16,15 @@ Frontend changes should feel intentional and production-ready.
   route, continue at the action response's surviving `target_prefix` instead of
   rehydrating the stale file URL.
 - For workbench, review, worker, completed, and settings redesigns, follow
-  `docs/style/workstation-ui.md`, `handoff.md`, and
-  `docs/design/workstation-reset-plan.md`
+  `docs/style/workstation-ui.md` and `docs/design/workstation-reset-plan.md`
+- Build the TV, Movies, and Other landing modes through the shared
+  `LibraryLayout.svelte` composition and `library-layout.ts` summary helpers.
+  Do not duplicate metric-strip, notice, current-work, toolbar, or responsive
+  workspace CSS in the media-specific views.
+- Library mode indexes use the shared inline-ledger contract: one document
+  scrollbar, one open detail directly after its selected row, explicit
+  Collapse, and explicit Inspect on narrow screens. Do not reintroduce fixed
+  list heights, nested scrolling, or a side inspector.
 
 ## Validation
 

@@ -117,6 +117,7 @@ def _fallback_host_statuses(config: MediaforceConfig) -> list[HostStatus]:
                 available=False,
                 message="Checking host status...",
                 missing_paths=[],
+                probe_available=False,
                 repo_path=str(host.get("repo_path") or "").strip() or None,
                 issues=[],
             )
@@ -139,6 +140,7 @@ def _host_status_error(detail: str | None) -> list[HostStatus]:
             available=False,
             message="Host checks could not load with the current runtime settings.",
             missing_paths=[],
+            probe_available=False,
             issues=["Review the runtime settings values and save the page again."],
             detail=detail,
         )

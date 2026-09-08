@@ -30,7 +30,12 @@ from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stable_source_id
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS, ensure_queue_state, list_child_encode_jobs, \
     load_encode_job, load_queue_state, persisted_encode_host_payload, save_encode_job, save_queue_state
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, ScheduleWindowClosedError
+from mediaforce.core.process_control import (
+    ManagedProcessController,
+    ProcessCancelledError,
+    ProcessDeadlineEnforcementError,
+    ScheduleWindowClosedError,
+)
 from mediaforce.core.schedule_deadline import SCHEDULE_CLOSE_DEADLINE_KEY, parse_schedule_close_deadline
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
@@ -1553,7 +1558,6 @@ def select_encode_host(
         host
         for host in host_rows
         if not bool(host.get("available"))
-        and not _probe_available(host)
         and not object_list(host.get("issues"))
         and (
             bool(deps.host_lifecycle_start_command(host))
@@ -2917,6 +2921,8 @@ def _finalize_encode_job_progress(
 
 
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
+    if failure_kind == "containment_unproven":
+        return False
     if failure_kind in {"controller_storage_unavailable", "host_unavailable", "ssh_transport"}:
         return True
     return _encode_failure_is_ssh_transport(error_message, host_payload)
@@ -3188,6 +3194,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
     host_payload = object_dict(job.get("host"))
     if isinstance(exc, HostReadinessError):
         return exc.failure_kind
+    if isinstance(exc, ProcessDeadlineEnforcementError):
+        return "containment_unproven"
     if isinstance(exc, PermissionError):
         return "controller_media_access"
     if isinstance(exc, QualityTempSetupError) and _quality_temp_setup_is_host_related(message):

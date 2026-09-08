@@ -35,10 +35,15 @@ We do not stop at "it works." We stop when we fully like the result.
   `scripts/prepare-jetbrains-inspection.sh`. Generated state stays ignored and
   must not be committed. Frontend dependencies are reinstalled only when the
   committed npm manifests change, preventing preparation from invalidating an
-  IDE snapshot on every inspection run. Preparation creates one pyproject-owned
-  exact-root Python module with the worktree SDK and removes stale suffixed
-  modules; PyCharm's bounded SDK-registration retry handles first open. The
-  named profile is copied into both project roots, and WebStorm opens
+  IDE snapshot on every inspection run. A missing npm lock marker forces repair;
+  required Svelte generation runs without the package lifecycle's error fallback
+  and must succeed before the dependency stamp is written. Preparation creates one pyproject-owned
+  exact-root Python module with a provisional worktree SDK name. Duplicate
+  suffixed modules are preserved and stop preparation for review. Preparation
+  does not register the SDK: the inspection step verifies registration and may
+  perform its bounded first-open readiness retry. The named profile is copied
+  into both project roots and explicitly requested by the inspection helper;
+  WebStorm opens
   `frontend/` through its lane `projectPath`.
 - `npm --prefix frontend run check` is the semantic authority for Svelte files,
   with `npm --prefix frontend run lint` covering ESLint and formatting policy.

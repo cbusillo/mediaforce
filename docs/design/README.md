@@ -6,8 +6,6 @@ briefs as evidence only.
 
 ## Active Reset Sources
 
-- `handoff.md`: current reset stance, durable product facts, and first-slice
-  direction.
 - `docs/design/workstation-reset-plan.md`: implementation plan for replacing
   the frontend from a workstation contract.
 - `docs/design/basic-user-vocabulary.md`: user-facing term and workflow-state

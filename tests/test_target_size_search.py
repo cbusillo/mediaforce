@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from statistics import median
 from typing import Any
+from unittest.mock import patch
 
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeError, SampleEncodeResult
 from mediaforce.tuning.compression_intent import (
@@ -15,6 +16,7 @@ from mediaforce.tuning.target_size_search import (
     FINAL_RETRY_SKIP_REASONS,
     FinalSizeVerification,
     TargetSizeSearchError,
+    _straddle_interpolation_probe_crf,
     build_target_size_transform_plan,
     retry_quality_result_for_final_miss,
     search_target_size,
@@ -1260,7 +1262,7 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertEqual(measured_crfs, [25.0])
         self.assertEqual(retry.crf, 25.0)
 
-    def test_under_target_retry_allows_second_adjacent_probe(self) -> None:
+    def test_under_target_retry_uses_measured_secant_probe(self) -> None:
         selected = {
             "crf": 28.0,
             "metric": "VMAF",
@@ -1318,8 +1320,8 @@ class TargetSizeSearchTests(unittest.TestCase):
         def measure_candidate(crf: float) -> SampleEncodeResult:
             measured_crfs.append(crf)
             if crf == 25.0:
-                return SampleEncodeResult("VMAF", 87.0, 40.0, 30.0, 700_000, "still under")
-            self.assertEqual(crf, 24.0)
+                return SampleEncodeResult("VMAF", 87.0, 40.0, 30.0, 740_000, "still under")
+            self.assertEqual(crf, 21.0)
             return SampleEncodeResult("VMAF", 88.0, 40.0, 30.0, 1_000_000, "inside band")
 
         retry = retry_quality_result_for_final_miss(
@@ -1330,9 +1332,13 @@ class TargetSizeSearchTests(unittest.TestCase):
         )
 
         assert retry is not None
-        self.assertEqual(measured_crfs, [25.0, 24.0])
-        self.assertEqual(retry.crf, 24.0)
+        self.assertEqual(measured_crfs, [25.0, 21.0])
+        self.assertEqual(retry.crf, 21.0)
         self.assertEqual(retry.target_size_trace["final_retry_calibration"]["measurement_count"], 2)
+        self.assertEqual(
+            [measurement["placement"] for measurement in retry.target_size_trace["final_retry_calibration"]["measurements"]],
+            ["directional_seed", "measured_secant"],
+        )
 
     def test_directional_probe_does_not_escape_exhausted_step_window(self) -> None:
         selected = {
@@ -2280,6 +2286,353 @@ class TargetSizeSearchTests(unittest.TestCase):
 
         self.assertEqual(context.exception.status, "needs_review")
         self.assertEqual(context.exception.trace["selection_reason"], "transform_plan_identity_invalid")
+
+    def test_seed_six_measured_secant_places_second_probe_at_crf_38(self) -> None:
+        quality, verification = self._seed_six_retry_fixture()
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            if crf == 36.0:
+                return SampleEncodeResult("VMAF", 96.923538, 20.0, 30.0, 33_381_617, "crf 36")
+            self.assertEqual(crf, 38.0)
+            return SampleEncodeResult("VMAF", 96.5, 20.0, 30.0, 28_000_000, "crf 38")
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        self.assertIsNotNone(retry)
+        assert retry is not None
+        retry_calibration = retry.target_size_trace["final_retry_calibration"]
+        self.assertEqual(measured_crfs, [36.0, 38.0])
+        self.assertEqual(retry.crf, 38.0)
+        self.assertEqual(retry_calibration["measurement_count"], 2)
+        self.assertEqual(
+            [measurement["placement"] for measurement in retry_calibration["measurements"]],
+            ["directional_seed", "measured_secant"],
+        )
+        self.assertLess(retry_calibration["measurements"][1]["log_video_bytes_per_crf"], 0.0)
+        self.assertAlmostEqual(
+            retry_calibration["measurements"][1]["placement_evidence"]["estimated_crf"],
+            38.365851598146946,
+        )
+        self.assertEqual(retry.target_size_trace["retry_policy"]["max_final_retry_measurements"], 3)
+
+    def test_seed_six_persisted_crf36_and_crf37_anchors_remain_over_target(self) -> None:
+        target_size_bytes = 48_673_111
+        non_video_bytes = 10_996_292
+        calibration_factor = (60_204_063 - non_video_bytes) / 37_724_934
+        crf36_total = round(33_381_617 * calibration_factor) + non_video_bytes
+        crf37_total = round((42_582_703 - non_video_bytes) * calibration_factor) + non_video_bytes
+
+        self.assertEqual(33_381_617 + non_video_bytes, 44_377_909)
+        self.assertEqual(crf36_total, 54_538_713)
+        self.assertEqual(crf37_total, 52_197_077)
+        self.assertGreater(crf36_total, target_size_bytes)
+        self.assertGreater(crf37_total, target_size_bytes)
+
+    def test_seed_six_straddle_uses_only_strict_interior_third_probe(self) -> None:
+        quality, verification = self._seed_six_retry_fixture()
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            samples = {
+                36.0: (96.923538, 33_381_617),
+                38.0: (96.0, 23_000_000),
+                37.0: (96.5, 27_700_000),
+            }
+            score, predicted_video_bytes = samples[crf]
+            return SampleEncodeResult("VMAF", score, 20.0, 30.0, predicted_video_bytes, f"crf {int(crf)}")
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        self.assertIsNotNone(retry)
+        assert retry is not None
+        measurements = retry.target_size_trace["final_retry_calibration"]["measurements"]
+        self.assertEqual(measured_crfs, [36.0, 38.0, 37.0])
+        self.assertEqual(retry.crf, 37.0)
+        self.assertEqual([measurement["placement"] for measurement in measurements], [
+            "directional_seed",
+            "measured_secant",
+            "bracket_interpolation",
+        ])
+        self.assertTrue(measurements[2]["placement_evidence"]["strictly_between_measured_probes"])
+        self.assertEqual(retry.target_size_trace["retry_policy"]["max_final_retry_measurements"], 3)
+
+    def test_same_side_measured_secant_fails_closed_without_third_probe(self) -> None:
+        quality, verification = self._seed_six_retry_fixture()
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            if crf == 36.0:
+                return SampleEncodeResult("VMAF", 96.923538, 20.0, 30.0, 33_381_617, "crf 36")
+            self.assertEqual(crf, 38.0)
+            return SampleEncodeResult("VMAF", 96.0, 20.0, 30.0, 31_000_000, "still over")
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+        )
+
+        self.assertIsNone(retry)
+        self.assertEqual(measured_crfs, [36.0, 38.0])
+        self.assertEqual(
+            quality.target_size_trace["final_retry_calibration"]["measurement_count"],
+            2,
+        )
+        self.assertEqual(
+            quality.target_size_trace["final_retry_calibration"]["measurements"][-1]["size_status"],
+            "over_target",
+        )
+
+    def test_second_probe_rejection_does_not_attempt_third_probe(self) -> None:
+        for rejection_kind in ("quality", "metric"):
+            with self.subTest(rejection_kind=rejection_kind):
+                quality, verification = self._seed_six_retry_fixture()
+                measured_crfs: list[float] = []
+
+                def measure_candidate(crf: float) -> SampleEncodeResult:
+                    measured_crfs.append(crf)
+                    if crf == 36.0:
+                        return SampleEncodeResult("VMAF", 96.923538, 20.0, 30.0, 33_381_617, "crf 36")
+                    metric = "XPSNR" if rejection_kind == "metric" else "VMAF"
+                    score = 79.0 if rejection_kind == "quality" else 96.0
+                    return SampleEncodeResult(metric, score, 20.0, 30.0, 23_000_000, "rejected crf 38")
+
+                retry = retry_quality_result_for_final_miss(
+                    quality,
+                    verification,
+                    measure_candidate=measure_candidate,
+                )
+
+                self.assertIsNone(retry)
+                self.assertEqual(measured_crfs, [36.0, 38.0])
+                expected_reason = (
+                    "final_retry_measurement_below_quality_floor"
+                    if rejection_kind == "quality"
+                    else "final_retry_measurement_metric_mismatch"
+                )
+                self.assertEqual(quality.target_size_trace["selection_reason"], expected_reason)
+
+    def test_straddle_rejects_non_monotonic_evidence_without_third_probe(self) -> None:
+        quality, verification = self._seed_six_retry_fixture()
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            if crf == 36.0:
+                return SampleEncodeResult("VMAF", 96.923538, 20.0, 30.0, 33_381_617, "crf 36")
+            return SampleEncodeResult("VMAF", 96.0, 20.0, 30.0, 23_000_000, "crf 38")
+
+        def curve_shape(candidates: list[dict[str, Any]]) -> str:
+            measurement_count = sum(
+                candidate.get("role") == "final_retry_measurement"
+                for candidate in candidates
+            )
+            return "non_monotonic" if measurement_count >= 2 else "monotonic"
+
+        with patch("mediaforce.tuning.target_size_search._payload_curve_shape", side_effect=curve_shape):
+            retry = retry_quality_result_for_final_miss(
+                quality,
+                verification,
+                measure_candidate=measure_candidate,
+            )
+
+        self.assertIsNone(retry)
+        self.assertEqual(measured_crfs, [36.0, 38.0])
+
+    def test_straddle_requires_an_interior_integer(self) -> None:
+        first_probe = {
+            "crf": 36.0,
+            "calibrated_predicted_video_bytes": 43_542_421,
+            "calibrated_predicted_whole_episode_bytes": 54_538_713,
+        }
+        second_probe = {
+            "crf": 37.0,
+            "calibrated_predicted_video_bytes": 30_000_000,
+            "calibrated_predicted_whole_episode_bytes": 40_996_292,
+        }
+
+        retry_crf = _straddle_interpolation_probe_crf(
+            verification_status="over_target",
+            first_probe_candidate=first_probe,
+            second_probe_candidate=second_probe,
+            target_size_bytes=48_673_111,
+            target_video_bytes=37_676_819,
+            non_video_bytes=10_996_292,
+            lower_bound_bytes=46_239_455,
+            upper_bound_bytes=51_106_767,
+            source_cap_video_bytes=195_898_925,
+            crf_bounds={"min_crf": 18, "max_crf": 38},
+            measured_crfs={34, 36, 37},
+            window_min_crf=36,
+            window_max_crf=38,
+        )
+
+        self.assertIsNone(retry_crf)
+
+    def test_under_target_measured_secant_mirrors_direction(self) -> None:
+        quality, verification = self._under_target_retry_fixture()
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            if crf == 30.0:
+                return SampleEncodeResult("VMAF", 87.0, 20.0, 30.0, 800_000, "crf 30")
+            self.assertEqual(crf, 24.0)
+            return SampleEncodeResult("VMAF", 88.0, 20.0, 30.0, 1_200_000, "crf 24")
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+            compression_intent=CompressionIntentV1("balanced", "operator", True),
+        )
+
+        self.assertIsNotNone(retry)
+        assert retry is not None
+        self.assertEqual(measured_crfs, [30.0, 24.0])
+        self.assertEqual(retry.crf, 24.0)
+        self.assertEqual(
+            [measurement["placement"] for measurement in retry.target_size_trace["final_retry_calibration"]["measurements"]],
+            ["directional_seed", "measured_secant"],
+        )
+
+    def test_under_target_second_probe_cap_rejection_stops_measurements(self) -> None:
+        quality, verification = self._under_target_retry_fixture(source_cap_video_bytes=900_000)
+        measured_crfs: list[float] = []
+
+        def measure_candidate(crf: float) -> SampleEncodeResult:
+            measured_crfs.append(crf)
+            if crf == 30.0:
+                return SampleEncodeResult("VMAF", 87.0, 20.0, 30.0, 800_000, "crf 30")
+            self.assertEqual(crf, 24.0)
+            return SampleEncodeResult("VMAF", 88.0, 20.0, 30.0, 1_200_000, "cap rejected")
+
+        retry = retry_quality_result_for_final_miss(
+            quality,
+            verification,
+            measure_candidate=measure_candidate,
+            compression_intent=CompressionIntentV1("balanced", "operator", True),
+        )
+
+        self.assertIsNone(retry)
+        self.assertEqual(measured_crfs, [30.0, 24.0])
+        self.assertEqual(
+            quality.target_size_trace["selection_reason"],
+            "final_retry_measurement_exceeds_source_cap",
+        )
+
+    def _seed_six_retry_fixture(
+            self,
+            *,
+            source_cap_video_bytes: int = 195_898_925,
+    ) -> tuple[QualitySearchResult, FinalSizeVerification]:
+        selected = {
+            "attempt": 1,
+            "role": "target_seed",
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 97.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 37_724_934,
+            "predicted_whole_episode_bytes": 48_721_226,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=34.0,
+            metric="VMAF",
+            target=85.0,
+            score=97.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "schema_version": 1,
+                "status": "selected",
+                "selection_reason": "candidate_inside_sample_projection_band",
+                "target": {
+                    "total_target_bytes": 48_673_111,
+                    "non_video_bytes": 10_996_292,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": source_cap_video_bytes},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "crf_bounds": {"min_crf": 18, "max_crf": 38},
+                "curve": {"shape": "monotonic", "candidate_count": 1, "max_candidates": 6},
+                "candidate_count": 1,
+                "candidates": [selected],
+                "selected_candidate": selected,
+            },
+        )
+        verification = FinalSizeVerification(
+            status="over_target",
+            target_size_bytes=48_673_111,
+            lower_bound_bytes=46_239_455,
+            upper_bound_bytes=51_106_767,
+            actual_output_bytes=60_204_063,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason="A bounded measured retry is allowed for this final-size miss.",
+        )
+        return quality, verification
+
+    def _under_target_retry_fixture(
+            self,
+            *,
+            source_cap_video_bytes: int = 2_000_000,
+    ) -> tuple[QualitySearchResult, FinalSizeVerification]:
+        selected = {
+            "crf": 34.0,
+            "metric": "VMAF",
+            "metric_target": 85.0,
+            "metric_score": 86.0,
+            "quality_floor_met": True,
+            "predicted_video_bytes": 700_000,
+            "predicted_whole_episode_bytes": 4_700_000,
+            "violates_source_cap": False,
+        }
+        quality = QualitySearchResult(
+            crf=34.0,
+            metric="VMAF",
+            target=85.0,
+            score=86.0,
+            stdout="target-size-search",
+            target_size_trace={
+                "status": "selected",
+                "target": {
+                    "total_target_bytes": 5_000_000,
+                    "non_video_bytes": 4_000_000,
+                    "sample_projection_tolerance_percent": 10.0,
+                },
+                "source_cap": {"video_cap_bytes": source_cap_video_bytes},
+                "quality_floor": {"metric": "VMAF", "target": 85.0, "minimum": 80.0},
+                "crf_bounds": {"min_crf": 18, "max_crf": 38},
+                "curve": {"shape": "monotonic"},
+                "candidates": [selected],
+                "selected_candidate": selected,
+            },
+        )
+        verification = FinalSizeVerification(
+            status="under_target",
+            target_size_bytes=5_000_000,
+            lower_bound_bytes=4_750_000,
+            upper_bound_bytes=5_250_000,
+            actual_output_bytes=4_600_000,
+            tolerance_percent=5.0,
+            retry_allowed=True,
+            retry_reason="A bounded measured retry is allowed for this final-size miss.",
+        )
+        return quality, verification
 
     def _ledger(
             self,

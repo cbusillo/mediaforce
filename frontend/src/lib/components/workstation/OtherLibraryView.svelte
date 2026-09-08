@@ -1,11 +1,24 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { onMount } from 'svelte';
 
 	import type { OtherLibraryPayload, OtherWorkUnit } from '$lib/api/types';
 	import { folderRoutePath } from '$lib/folder-display';
 	import { formatFileSize } from '$lib/format';
-	import { otherWorkflowLabel } from '$lib/other/library';
-	import LibraryModeNav from './LibraryModeNav.svelte';
+	import {
+		otherLibraryStateGroup,
+		otherWorkflowLabel,
+		type OtherLibraryStateKey
+	} from '$lib/other/library';
+	import LibraryLayout from './LibraryLayout.svelte';
+	import StateBadge from './StateBadge.svelte';
+	import { summarizeWorkStates } from './library-layout';
+	import type {
+		LibraryMetric,
+		LibraryNotice,
+		LibraryTone,
+		LibraryWorkSegment
+	} from './library-layout';
 
 	let {
 		payload,
@@ -23,9 +36,14 @@
 
 	let query = $state('');
 	let rootFilter = $state('all');
-	let stateFilter = $state<'all' | 'ready' | 'blocked' | 'browse_only' | 'active'>('all');
+	let stateFilter = $state<'all' | OtherLibraryStateKey>('all');
 	let sortMode = $state<'name' | 'size' | 'files' | 'reclaim'>('name');
 	let selectedPrefix = $state('');
+	let detailExpanded = $state(true);
+
+	onMount(() => {
+		if (window.matchMedia('(max-width: 680px)').matches) detailExpanded = false;
+	});
 
 	const workUnits = $derived.by(() => {
 		const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -35,21 +53,16 @@
 				const haystack = `${unit.title} ${unit.prefix} ${unit.library_label}`.toLocaleLowerCase();
 				if (!haystack.includes(normalizedQuery)) return false;
 			}
-			if (stateFilter === 'ready') return unit.profile_readiness.state === 'ready';
-			if (stateFilter === 'blocked') return unit.profile_readiness.state === 'blocked';
-			if (stateFilter === 'browse_only') return unit.profile_readiness.state === 'browse_only';
-			if (stateFilter === 'active') {
-				return ['processing', 'validate', 'promote', 'attention'].includes(
-					unit.workflow_state?.primary_lane ?? ''
-				);
-			}
-			return true;
+			return stateFilter === 'all' || otherLibraryStateGroup(unit).key === stateFilter;
 		});
 		return [...filtered].sort((left, right) => compareUnits(left, right, sortMode));
 	});
 
 	const selectedUnit = $derived(
 		workUnits.find((unit) => unit.prefix === selectedPrefix) ?? workUnits[0] ?? null
+	);
+	const selectedUnitIndex = $derived(
+		selectedUnit ? workUnits.findIndex((unit) => unit.prefix === selectedUnit.prefix) : -1
 	);
 	const totalFiles = $derived(
 		payload.work_units.reduce((total, unit) => total + unit.item_count, 0)
@@ -68,25 +81,111 @@
 			(unit) => unit.projected_reclaim_bytes == null || (unit.estimate_unavailable_count ?? 0) > 0
 		)
 	);
-	const totalOutputLabel = $derived(
+	const totalOutputValue = $derived(
 		detailsPending
 			? '…'
 			: reclaimCoverage === 0
-				? 'No estimate'
-				: `${reclaimHasUnknowns ? 'At most ' : ''}${formatBytes(Math.max(0, totalSize - projectedReclaim))}`
+				? '—'
+				: formatBytes(Math.max(0, totalSize - projectedReclaim))
 	);
-	const totalReclaimLabel = $derived(
+	const totalOutputDetail = $derived(
 		detailsPending
-			? '…'
+			? undefined
 			: reclaimCoverage === 0
 				? 'No estimate'
-				: `${reclaimHasUnknowns ? 'At least ' : ''}${formatBytes(projectedReclaim)}`
+				: reclaimHasUnknowns
+					? `At most · ${reclaimCoverage} of ${payload.work_units.length}`
+					: undefined
 	);
+	const totalReclaimValue = $derived(
+		detailsPending ? '…' : reclaimCoverage === 0 ? '—' : formatBytes(projectedReclaim)
+	);
+	const totalReclaimDetail = $derived(
+		detailsPending
+			? undefined
+			: reclaimCoverage === 0
+				? 'No estimate'
+				: reclaimHasUnknowns
+					? `At least · ${reclaimCoverage} of ${payload.work_units.length}`
+					: undefined
+	);
+	const libraryMetrics = $derived<LibraryMetric[]>([
+		{
+			value: `${payload.work_units.length}`,
+			label: payload.work_units.length === 1 ? 'Scope' : 'Scopes',
+			detail: `${totalFiles} ${totalFiles === 1 ? 'file' : 'files'}`
+		},
+		{ value: formatBytes(totalSize), label: 'Current size' },
+		{
+			value: totalOutputValue,
+			label: 'Estimated output',
+			detail: totalOutputDetail,
+			pending: detailsPending
+		},
+		{
+			value: totalReclaimValue,
+			label: 'Estimated space saved',
+			detail: totalReclaimDetail,
+			pending: detailsPending
+		}
+	]);
+	const libraryWorkSegments = $derived<LibraryWorkSegment[]>(
+		summarizeWorkStates(payload.work_units, otherLibraryStateGroup)
+	);
+	const libraryNotices = $derived.by<LibraryNotice[]>(() => {
+		const notices: LibraryNotice[] = [];
+		if (loadError)
+			notices.push({ title: 'Other Library could not open', detail: loadError, tone: 'fail' });
+		if (detailsError) {
+			notices.push({
+				title: 'Workflow details are unavailable',
+				detail: `The library index remains usable. ${detailsError}`
+			});
+		}
+		if (payload.catalog_truncated) {
+			notices.push({
+				title: 'Safe catalog window reached',
+				detail: `Showing at most ${payload.catalog_work_unit_limit} folders and files from the first ${payload.catalog_item_limit.toLocaleString()} indexed items. Narrow the configured roots to expose more bounded work; hidden items cannot be queued from this view.`,
+				tone: 'wait'
+			});
+		}
+		return notices;
+	});
 
 	$effect(() => {
 		if (selectedUnit && selectedPrefix !== selectedUnit.prefix)
 			selectedPrefix = selectedUnit.prefix;
 	});
+
+	function selectUnit(prefix: string) {
+		selectedPrefix = prefix;
+		detailExpanded = !window.matchMedia('(max-width: 680px)').matches;
+	}
+
+	function toggleUnitDetail(prefix: string) {
+		if (selectedUnit?.prefix === prefix) detailExpanded = !detailExpanded;
+		else {
+			selectedPrefix = prefix;
+			detailExpanded = true;
+		}
+		requestAnimationFrame(() => {
+			document
+				.querySelector<HTMLElement>(`[data-other-unit-row="${CSS.escape(prefix)}"]`)
+				?.scrollIntoView({ block: 'nearest' });
+		});
+	}
+
+	function clearFilters() {
+		query = '';
+		rootFilter = 'all';
+		stateFilter = 'all';
+	}
+
+	function selectWorkSegment(key: string) {
+		query = '';
+		rootFilter = 'all';
+		stateFilter = stateFilter === key ? 'all' : (key as OtherLibraryStateKey);
+	}
 
 	function compareUnits(left: OtherWorkUnit, right: OtherWorkUnit, mode: typeof sortMode): number {
 		if (mode === 'size') return right.total_size_bytes - left.total_size_bytes;
@@ -100,7 +199,7 @@
 		return formatFileSize(value, 'Pending');
 	}
 
-	function workflowTone(unit: OtherWorkUnit): string {
+	function workflowTone(unit: OtherWorkUnit): LibraryTone {
 		if (unit.profile_readiness.state === 'blocked') return 'fail';
 		if (unit.profile_readiness.state === 'browse_only') return 'wait';
 		const lane = unit.workflow_state?.primary_lane;
@@ -130,141 +229,160 @@
 	<title>Other Library · Mediaforce</title>
 </svelte:head>
 
-<main class="other-library">
-	<LibraryModeNav active="other" />
+<LibraryLayout
+	active="other"
+	title="Other Library"
+	metrics={libraryMetrics}
+	workSegments={libraryWorkSegments}
+	activeWorkSegment={stateFilter === 'all' ? '' : stateFilter}
+	onWorkSegmentSelect={selectWorkSegment}
+	notices={libraryNotices}
+	toolbarSummary={`${workUnits.length} of ${payload.work_units.length} scopes`}
+	loading={structurePending || detailsPending}
+>
+	{#snippet toolbar()}
+		<label class="search-field">
+			<span class="sr-only">Search folders and files</span>
+			<input bind:value={query} type="search" placeholder="Search folders and files" />
+		</label>
+		<label>
+			<span>Library</span>
+			<select bind:value={rootFilter}>
+				<option value="all">All roots</option>
+				{#each payload.libraries as library (library.key)}
+					<option value={library.key}>{library.label}</option>
+				{/each}
+			</select>
+		</label>
+		<label>
+			<span>State</span>
+			<select bind:value={stateFilter}>
+				<option value="all">All states</option>
+				<option value="attention">Needs attention</option>
+				<option value="blocked">Cannot start</option>
+				<option value="processing">Compressing</option>
+				<option value="ready">Ready to act on</option>
+				<option value="browse_only">Browse only</option>
+				<option value="idle">No active work</option>
+			</select>
+		</label>
+		<label>
+			<span>Sort</span>
+			<select bind:value={sortMode}>
+				<option value="name">Name</option>
+				<option value="size">Current size</option>
+				<option value="files">File count</option>
+				<option value="reclaim">Estimated space saved</option>
+			</select>
+		</label>
+	{/snippet}
 
-	<header class="page-heading">
-		<div class="page-heading__copy">
-			<h1>Other Library</h1>
-			<p>Files and folders you choose directly. Mediaforce never guesses what they are.</p>
+	{#if structurePending && payload.work_units.length === 0}
+		<div class="empty-state" role="status">
+			<strong>Loading Other Library…</strong>
+			<span>Folders and files appear first; workflow details follow.</span>
 		</div>
-		<div class="library-totals" aria-label="Other library totals">
-			<div><strong>{payload.work_units.length} scopes</strong><span>{totalFiles} files</span></div>
-			<div><strong>{formatBytes(totalSize)}</strong><span>Current size</span></div>
-			<div><strong>{totalOutputLabel}</strong><span>Estimated output</span></div>
-			<div><strong>{totalReclaimLabel}</strong><span>Estimated space saved</span></div>
-		</div>
-	</header>
-
-	{#if loadError}
-		<div class="notice notice--danger" role="alert">
-			<strong>Other Library could not open</strong><span>{loadError}</span>
-		</div>
-	{/if}
-	{#if detailsError}
-		<div class="notice" role="status">
-			<strong>Workflow details are unavailable</strong>
-			<span>The library index remains usable. {detailsError}</span>
-		</div>
-	{/if}
-	{#if payload.catalog_truncated}
-		<div class="notice" role="status">
-			<strong>Safe catalog window reached</strong>
+	{:else if payload.catalog_empty || payload.work_units.length === 0}
+		<div class="empty-state">
+			<strong>No Other media found.</strong>
 			<span
-				>Showing at most {payload.catalog_work_unit_limit} folders and files from the first {payload.catalog_item_limit.toLocaleString()}
-				indexed items. Narrow the configured roots to expose more bounded work; hidden items cannot be
-				queued from this view.</span
+				>Add or scan an Other root in Settings. Root-level files and nested folders will appear
+				here.</span
+			>
+			<a href={resolve('/settings')}>Open Settings</a>
+		</div>
+	{:else if workUnits.length === 0}
+		<div class="empty-state">
+			<strong>No Other folders or files match these filters.</strong>
+			<button class="empty-state__action" type="button" onclick={clearFilters}>Clear filters</button
 			>
 		</div>
-	{/if}
-
-	<section class="library-workstation" aria-label="Other library folders and files">
-		<div class="toolbar">
-			<label class="search-field">
-				<span class="sr-only">Search folders and files</span>
-				<input bind:value={query} type="search" placeholder="Search folders and files" />
-			</label>
-			<label>
-				<span>Library</span>
-				<select bind:value={rootFilter}>
-					<option value="all">All roots</option>
-					{#each payload.libraries as library (library.key)}
-						<option value={library.key}>{library.label}</option>
-					{/each}
-				</select>
-			</label>
-			<label>
-				<span>State</span>
-				<select bind:value={stateFilter}>
-					<option value="all">All states</option>
-					<option value="ready">Profile ready</option>
-					<option value="blocked">Blocked</option>
-					<option value="browse_only">Browse only</option>
-					<option value="active">Active work</option>
-				</select>
-			</label>
-			<label>
-				<span>Sort</span>
-				<select bind:value={sortMode}>
-					<option value="name">Name</option>
-					<option value="size">Current size</option>
-					<option value="files">File count</option>
-					<option value="reclaim">Estimated space saved</option>
-				</select>
-			</label>
-		</div>
-
-		{#if structurePending && payload.work_units.length === 0}
-			<div class="empty-state" role="status">
-				<strong>Loading Other Library…</strong>
-				<span>Folders and files appear first; workflow details follow.</span>
+	{:else}
+		<div class="library-register">
+			<div class="unit-list__head library-register__header" aria-hidden="true">
+				<span>Scope</span><span>Files</span><span>Current size</span><span>Workflow</span>
 			</div>
-		{:else if payload.catalog_empty || payload.work_units.length === 0}
-			<div class="empty-state">
-				<strong>No Other media found.</strong>
-				<span
-					>Add or scan an Other root in Settings. Root-level files and nested folders will appear
-					here.</span
-				>
-				<a href={resolve('/settings')}>Open Settings</a>
-			</div>
-		{:else if workUnits.length === 0}
-			<div class="empty-state">
-				<strong>No Other folders or files match these filters.</strong>
-				<span>Clear search or choose a broader state and library filter.</span>
-			</div>
-		{:else}
-			<div class="workbench">
-				<div class="unit-list" aria-label="Other folders and files">
-					<div class="unit-list__head" aria-hidden="true">
-						<span>Scope</span><span>Files</span><span>Current size</span><span>Workflow</span>
-					</div>
-					{#each workUnits as unit (unit.prefix)}
-						<button
-							type="button"
-							class="unit-row"
-							class:is-selected={selectedUnit?.prefix === unit.prefix}
-							aria-pressed={selectedUnit?.prefix === unit.prefix}
-							onclick={() => (selectedPrefix = unit.prefix)}
-						>
-							<span class="unit-identity">
-								<strong>{unit.title}</strong>
-								<small
-									>{unit.scope_mode === 'exact_file' ? 'One file' : 'Whole folder'} · {unit.library_label}</small
-								>
-							</span>
-							<span data-label="Files"><span class="sr-only">Files: </span>{unit.item_count}</span>
-							<span data-label="Current size"
-								><span class="sr-only">Current size: </span>{formatBytes(
-									unit.total_size_bytes
-								)}</span
+			<div class="library-workbench">
+				<div class="unit-list library-index">
+					{#each workUnits as unit, unitIndex (unit.prefix)}
+						<div class="ledger-row">
+							<button
+								type="button"
+								class="unit-row"
+								class:is-selected={selectedUnit?.prefix === unit.prefix}
+								data-other-unit-row={unit.prefix}
+								data-library-state={otherLibraryStateGroup(unit).key}
+								aria-pressed={selectedUnit?.prefix === unit.prefix}
+								onclick={() => selectUnit(unit.prefix)}
 							>
-							<span class="state-badge" data-tone={workflowTone(unit)}>{statusLabel(unit)}</span>
-						</button>
+								<span class="unit-identity">
+									<strong>{unit.title}</strong>
+									<small>
+										{unit.scope_mode === 'exact_file'
+											? 'One file'
+											: 'Whole folder'}{#if payload.libraries.length > 1}
+											· {unit.library_label}{/if}
+									</small>
+								</span>
+								<span data-label="Files"><span class="sr-only">Files: </span>{unit.item_count}</span
+								>
+								<span data-label="Current size"
+									><span class="sr-only">Current size: </span>{formatBytes(
+										unit.total_size_bytes
+									)}</span
+								>
+								<StateBadge
+									tone={workflowTone(unit)}
+									label={statusLabel(unit)}
+									compact
+									quiet={selectedUnit?.prefix !== unit.prefix &&
+										(unit.profile_readiness.state === 'browse_only' ||
+											workflowTone(unit) === 'ready')}
+								/>
+							</button>
+							<button
+								class="row-inspect"
+								type="button"
+								aria-controls={`other-unit-detail-${unitIndex}`}
+								aria-expanded={selectedUnit?.prefix === unit.prefix && detailExpanded}
+								aria-label={`${selectedUnit?.prefix === unit.prefix && detailExpanded ? 'Close' : 'Inspect'} ${unit.title}`}
+								onclick={() => toggleUnitDetail(unit.prefix)}
+							>
+								<span aria-hidden="true"
+									>{selectedUnit?.prefix === unit.prefix && detailExpanded
+										? 'Close'
+										: 'Inspect'}</span
+								>
+							</button>
+						</div>
 					{/each}
 				</div>
 
-				{#if selectedUnit}
-					<aside class="inspector" aria-label={`${selectedUnit.title} details`}>
+				{#if selectedUnit && detailExpanded}
+					<aside
+						id={`other-unit-detail-${selectedUnitIndex}`}
+						class="inspector library-inspector"
+						style:grid-row={selectedUnitIndex + 2}
+						aria-label={`${selectedUnit.title} details`}
+					>
 						<header class="inspector-heading">
 							<div>
 								<span class="eyebrow">{selectedUnit.scope_label}</span>
 								<h2>{selectedUnit.title}</h2>
 								<p>{selectedUnit.prefix}</p>
 							</div>
-							<span class="state-badge" data-tone={workflowTone(selectedUnit)}
-								>{statusLabel(selectedUnit)}</span
+							<StateBadge
+								tone={workflowTone(selectedUnit)}
+								label={statusLabel(selectedUnit)}
+								compact
+							/>
+							<button
+								class="inspector-collapse"
+								type="button"
+								onclick={() => (detailExpanded = false)}
 							>
+								Collapse ↑
+							</button>
 						</header>
 
 						<div class="inspector-facts">
@@ -324,66 +442,31 @@
 
 						<footer class="inspector-actions">
 							<a class="primary-link" href={resolve(folderRoutePath(selectedUnit.prefix))}>
-								Open {selectedUnit.title}
+								Open in Studio
 							</a>
 							<span>Studio lists every included and untouched file before work starts.</span>
 						</footer>
 					</aside>
 				{/if}
 			</div>
-		{/if}
-
-		<footer class="workstation-footer">
-			<span>{workUnits.length} of {payload.work_units.length} shown</span>
-			<span
-				>{detailsPending || reclaimCoverage === 0
-					? 'Refreshing workflow details…'
-					: `${formatBytes(projectedReclaim)} estimated space saved${reclaimHasUnknowns ? ' · lower bound' : ''}`}</span
-			>
-		</footer>
-	</section>
-</main>
+		</div>
+	{/if}
+</LibraryLayout>
 
 <style>
-	.other-library {
-		margin: 0 auto;
-		max-width: 1400px;
-		padding: 24px 28px 54px;
-	}
-
-	h1,
 	h2,
 	p {
 		margin: 0;
 	}
 
-	.page-heading {
-		align-items: center;
-		display: flex;
-		gap: 28px;
-		justify-content: space-between;
-		margin-bottom: 14px;
-	}
-
-	.page-heading__copy {
-		max-width: 610px;
-	}
-
 	.eyebrow {
 		color: var(--mf-fg-muted);
-		font-size: 11px;
-		font-weight: 800;
-		letter-spacing: 0.12em;
+		font-size: var(--mf-text-2xs);
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
 	}
 
-	h1 {
-		font-size: clamp(24px, 3vw, 30px);
-		letter-spacing: -0.03em;
-		margin-top: 2px;
-	}
-
-	.page-heading p,
 	.inspector-heading p,
 	.inspector-actions span,
 	.readiness p,
@@ -393,34 +476,6 @@
 		line-height: 1.55;
 	}
 
-	.library-totals {
-		border-bottom: 1px solid var(--mf-line);
-		border-top: 1px solid var(--mf-line);
-		display: grid;
-		grid-template-columns: repeat(4, minmax(88px, 1fr));
-		min-width: min(100%, 430px);
-	}
-
-	.library-totals div {
-		border-left: 1px solid var(--mf-line);
-		padding: 9px 12px;
-	}
-
-	.library-totals div:first-child {
-		border-left: 0;
-	}
-
-	.library-totals strong,
-	.library-totals span {
-		display: block;
-	}
-
-	.library-totals strong {
-		font-size: 15px;
-	}
-
-	.library-totals span,
-	.toolbar label > span,
 	.inspector-facts span,
 	.readiness > span {
 		color: var(--mf-fg-muted);
@@ -431,104 +486,52 @@
 		text-transform: uppercase;
 	}
 
-	.notice {
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line);
-		border-left: 3px solid var(--mf-wait-fg);
-		display: grid;
-		gap: 3px;
-		margin-bottom: 14px;
-		padding: 12px 14px;
-	}
-
-	.notice--danger {
-		border-left-color: var(--mf-fail-fg);
-	}
-
-	.notice span {
-		color: var(--mf-fg-secondary);
-		font-size: 12px;
-	}
-
-	.library-workstation {
-		background: var(--mf-bg-panel);
-		border: 1px solid var(--mf-line);
-	}
-
-	.toolbar {
-		align-items: end;
-		border-bottom: 1px solid var(--mf-line);
-		display: grid;
-		gap: 12px;
-		grid-template-columns: minmax(220px, 1.6fr) repeat(3, minmax(130px, 0.7fr));
-		padding: 14px;
-	}
-
-	.toolbar label {
-		display: grid;
-		gap: 5px;
-	}
-
-	.toolbar input,
-	.toolbar select {
-		background: var(--mf-bg-input);
-		border: 1px solid var(--mf-line-strong);
-		border-radius: 0;
-		color: var(--mf-fg-primary);
-		font: inherit;
-		font-size: 13px;
-		height: 36px;
-		padding: 0 10px;
-	}
-
-	.workbench {
-		display: grid;
-		grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
-		min-height: 480px;
-	}
-
 	.unit-list {
-		border-right: 1px solid var(--mf-line);
-		min-width: 0;
+		display: contents;
 	}
 
 	.unit-list__head,
 	.unit-row {
 		display: grid;
 		gap: 12px;
-		grid-template-columns: minmax(180px, 1fr) 64px 92px minmax(112px, 0.65fr);
+		grid-template-columns: minmax(320px, 1fr) 80px 128px 180px;
 	}
 
 	.unit-list__head {
-		background: var(--mf-bg-subtle);
-		border-bottom: 1px solid var(--mf-line);
+		background: var(--mf-bg-panel);
+		border-bottom: 1px solid var(--mf-line-strong);
 		color: var(--mf-fg-muted);
 		font-size: 10px;
-		font-weight: 800;
-		letter-spacing: 0.06em;
-		padding: 10px 14px;
+		font-weight: var(--mf-weight-semibold);
+		letter-spacing: 0.1em;
+		padding: var(--mf-space-4) var(--mf-space-6);
 		text-transform: uppercase;
+	}
+
+	.ledger-row {
+		position: relative;
 	}
 
 	.unit-row {
 		align-items: center;
 		background: transparent;
 		border: 0;
-		border-bottom: 1px solid var(--mf-line);
+		border-bottom: 1px solid var(--mf-line-muted);
 		color: var(--mf-fg-primary);
 		cursor: pointer;
 		font: inherit;
-		padding: 13px 14px;
+		min-height: 56px;
+		padding: var(--mf-space-4) var(--mf-space-6);
 		text-align: left;
 		width: 100%;
 	}
 
-	.unit-row:hover,
-	.unit-row.is-selected {
-		background: var(--mf-bg-subtle);
+	.unit-row:hover {
+		background: var(--mf-bg-panel-2);
 	}
 
 	.unit-row.is-selected {
+		background: var(--mf-bg-panel-2);
 		box-shadow: inset 3px 0 0 var(--mf-lib-other);
 	}
 
@@ -547,56 +550,50 @@
 		white-space: nowrap;
 	}
 
+	.unit-identity strong {
+		font-size: 14px;
+		font-weight: var(--mf-weight-semibold);
+	}
+
 	.unit-identity small {
 		color: var(--mf-fg-secondary);
-		font-size: 11px;
+		font-size: 12px;
 		margin-top: 3px;
 	}
 
-	.state-badge {
-		border: 1px solid var(--mf-line-strong);
-		color: var(--mf-fg-secondary);
-		font-size: 10px;
-		font-weight: 800;
-		justify-self: start;
-		letter-spacing: 0.04em;
-		padding: 4px 6px;
-		text-transform: uppercase;
+	.unit-row :global(.state-badge) {
+		max-width: 100%;
+		white-space: nowrap;
 	}
 
-	.state-badge[data-tone='ready'] {
-		border-color: var(--mf-ready-fg);
-		color: var(--mf-ready-fg);
-	}
-
-	.state-badge[data-tone='active'] {
-		background: var(--mf-active-bg-strong);
-		border-color: var(--mf-active-fg);
-		color: var(--mf-active-fg-bright);
-	}
-
-	.state-badge[data-tone='wait'] {
-		border-color: var(--mf-wait-fg);
-		color: var(--mf-wait-fg);
-	}
-
-	.state-badge[data-tone='fail'] {
-		border-color: var(--mf-fail-fg);
-		color: var(--mf-fail-fg);
+	.row-inspect {
+		display: none;
 	}
 
 	.inspector {
-		display: flex;
-		flex-direction: column;
+		display: grid;
+		gap: var(--mf-space-7);
+		grid-column: 1;
+		grid-template-columns: minmax(230px, 0.75fr) minmax(390px, 1.45fr) minmax(260px, 0.8fr);
 		min-width: 0;
-		padding: 20px;
+		padding: var(--mf-space-7) var(--mf-space-6) var(--mf-space-8);
+		box-shadow:
+			inset 3px 0 0 var(--mf-lib-other),
+			0 10px 24px color-mix(in srgb, var(--mf-fg-primary) 8%, transparent);
 	}
 
 	.inspector-heading {
 		align-items: start;
-		display: flex;
-		gap: 16px;
-		justify-content: space-between;
+		display: grid;
+		grid-column: 1;
+		grid-row: 1;
+		gap: var(--mf-space-6);
+		padding-right: var(--mf-space-8);
+		position: relative;
+	}
+
+	.inspector-heading :global(.state-badge) {
+		justify-self: start;
 	}
 
 	.inspector-heading > div {
@@ -604,29 +601,29 @@
 	}
 
 	.inspector-heading h2 {
+		font-family: inherit;
 		font-size: 22px;
+		font-weight: var(--mf-weight-semibold);
+		line-height: var(--mf-leading-snug);
 		letter-spacing: -0.025em;
 		margin-top: 4px;
+		overflow-wrap: anywhere;
 	}
 
 	.inspector-facts {
-		border: 1px solid var(--mf-line);
 		display: grid;
+		gap: var(--mf-space-6) var(--mf-space-8);
+		grid-column: 2;
+		grid-row: 1;
 		grid-template-columns: 1fr 1fr;
-		margin-top: 18px;
 	}
 
 	.inspector-facts div {
-		border-bottom: 1px solid var(--mf-line);
-		padding: 12px;
+		padding: 0;
 	}
 
-	.inspector-facts div:nth-child(odd) {
-		border-right: 1px solid var(--mf-line);
-	}
-
-	.inspector-facts div:nth-last-child(-n + 2) {
-		border-bottom: 0;
+	.inspector-facts div:last-child {
+		grid-column: 1 / -1;
 	}
 
 	.inspector-facts strong,
@@ -635,14 +632,17 @@
 	}
 
 	.inspector-facts strong {
-		font-size: 13px;
-		margin-top: 4px;
+		font-size: 15px;
+		font-variant-numeric: tabular-nums;
+		font-weight: var(--mf-weight-semibold);
+		margin-top: var(--mf-space-2);
 	}
 
 	.readiness {
 		border-left: 3px solid var(--mf-ready-fg);
-		margin-top: 16px;
-		padding: 4px 0 4px 12px;
+		grid-column: 2;
+		margin-top: var(--mf-space-6);
+		padding: var(--mf-space-2) 0 var(--mf-space-2) var(--mf-space-5);
 	}
 
 	.readiness[data-state='blocked'] {
@@ -670,8 +670,8 @@
 	.policy-strip {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 6px;
-		margin-top: 16px;
+		gap: var(--mf-space-3);
+		margin-top: var(--mf-space-6);
 	}
 
 	.policy-strip span {
@@ -679,29 +679,43 @@
 		border: 1px solid var(--mf-line);
 		color: var(--mf-fg-secondary);
 		font-size: 10px;
-		font-weight: 700;
-		padding: 5px 7px;
+		font-weight: var(--mf-weight-semibold);
+		padding: var(--mf-space-2) var(--mf-space-3);
 		text-transform: uppercase;
 	}
 
 	.inspector-actions {
 		align-items: start;
-		border-top: 1px solid var(--mf-line);
+		border-left: 1px solid var(--mf-line-strong);
 		display: grid;
-		gap: 8px;
-		margin-top: auto;
-		padding-top: 18px;
+		gap: var(--mf-space-4);
+		grid-column: 3;
+		grid-row: 1 / span 6;
+		padding-left: var(--mf-space-7);
 	}
 
 	.primary-link,
 	.empty-state a {
-		background: var(--mf-active-fg);
+		background: var(--mf-active-solid);
 		color: var(--mf-active-contrast);
 		font-size: 13px;
-		font-weight: 800;
+		border-radius: var(--mf-radius-2);
+		font-weight: var(--mf-weight-semibold);
 		justify-self: start;
 		padding: 9px 12px;
 		text-decoration: none;
+	}
+
+	.inspector-collapse {
+		background: transparent;
+		border: 0;
+		border-radius: var(--mf-radius-2);
+		color: var(--mf-fg-secondary);
+		font-size: var(--mf-text-xs);
+		padding: var(--mf-space-2) var(--mf-space-3);
+		position: absolute;
+		right: 0;
+		top: 0;
 	}
 
 	.empty-state {
@@ -709,24 +723,26 @@
 		display: grid;
 		gap: 8px;
 		justify-items: center;
-		min-height: 360px;
-		padding: 36px;
+		min-height: 180px;
+		padding: 28px;
 		text-align: center;
+	}
+
+	.empty-state__action {
+		background: var(--mf-bg-panel);
+		border: 1px solid var(--mf-line-strong);
+		border-radius: var(--mf-radius-1);
+		color: var(--mf-fg-primary);
+		cursor: pointer;
+		font: inherit;
+		font-weight: var(--mf-weight-semibold);
+		padding: 8px 12px;
 	}
 
 	.empty-state span {
 		color: var(--mf-fg-secondary);
 		font-size: 13px;
 		max-width: 520px;
-	}
-
-	.workstation-footer {
-		border-top: 1px solid var(--mf-line);
-		color: var(--mf-fg-muted);
-		display: flex;
-		font-size: 11px;
-		justify-content: space-between;
-		padding: 10px 14px;
 	}
 
 	.sr-only {
@@ -738,67 +754,47 @@
 	}
 
 	@media (max-width: 980px) {
-		.page-heading {
-			align-items: stretch;
-			flex-direction: column;
+		.unit-list__head,
+		.unit-row {
+			grid-template-columns: minmax(260px, 1fr) 140px 190px;
 		}
 
-		.toolbar {
-			grid-template-columns: 1fr 1fr;
-		}
-
-		.search-field {
-			grid-column: 1 / -1;
-		}
-
-		.workbench {
-			grid-template-columns: 1fr;
-		}
-
-		.unit-list {
-			border-right: 0;
+		.unit-list__head > :nth-child(2),
+		.unit-row > :nth-child(2) {
+			display: none;
 		}
 
 		.inspector {
-			border-top: 1px solid var(--mf-line);
-			min-height: 420px;
+			grid-template-columns: minmax(210px, 0.75fr) minmax(320px, 1.25fr);
+		}
+
+		.inspector-actions {
+			border-left: 0;
+			border-top: 1px solid var(--mf-line-strong);
+			grid-column: 1 / -1;
+			grid-row: auto;
+			padding: var(--mf-space-6) 0 0;
 		}
 	}
 
 	@media (max-width: 680px) {
-		.other-library {
-			padding: 22px 14px 40px;
-		}
-
-		.library-totals {
-			grid-template-columns: 1fr 1fr;
-			min-width: 0;
-		}
-
-		.library-totals div:nth-child(3) {
-			border-left: 0;
-			border-top: 1px solid var(--mf-line);
-		}
-
-		.library-totals div:nth-child(4) {
-			border-top: 1px solid var(--mf-line);
-		}
-
-		.toolbar {
-			grid-template-columns: 1fr;
-		}
-
-		.search-field {
-			grid-column: auto;
-		}
-
 		.unit-list__head {
-			display: none;
+			border: 0;
+			height: 0;
+			overflow: hidden;
+			padding: 0;
+			visibility: hidden;
 		}
 
 		.unit-row {
 			gap: 7px 12px;
 			grid-template-columns: 1fr auto;
+			min-height: 68px;
+			padding-right: 86px;
+		}
+
+		.unit-row > span[data-label='Files'] {
+			display: none;
 		}
 
 		.unit-identity {
@@ -813,12 +809,9 @@
 			text-transform: uppercase;
 		}
 
-		.state-badge {
-			grid-column: 1 / -1;
-		}
-
 		.inspector {
-			padding: 16px;
+			grid-template-columns: minmax(0, 1fr);
+			padding: var(--mf-space-6) var(--mf-space-5) var(--mf-space-7);
 		}
 
 		.inspector-heading {
@@ -826,10 +819,31 @@
 			flex-direction: column;
 		}
 
-		.workstation-footer {
-			align-items: flex-start;
-			flex-direction: column;
-			gap: 4px;
+		.inspector-heading,
+		.inspector-facts,
+		.readiness,
+		.policy-strip,
+		.inspector-actions {
+			grid-column: 1;
+			grid-row: auto;
+		}
+
+		.inspector-actions {
+			padding-top: var(--mf-space-6);
+		}
+
+		.row-inspect {
+			background: var(--mf-bg-panel);
+			border: 1px solid var(--mf-line-strong);
+			border-radius: var(--mf-radius-2);
+			bottom: var(--mf-space-3);
+			color: var(--mf-fg-secondary);
+			display: inline-flex;
+			font-size: 11px;
+			min-height: 26px;
+			padding: 0 var(--mf-space-2);
+			position: absolute;
+			right: var(--mf-space-3);
 		}
 	}
 </style>

@@ -1149,12 +1149,13 @@ class ProcessControlTests(TestCase):
             os.close(status_write)
             os.close(parent_liveness_read)
             _, wait_status = os.waitpid(helper_pid, 0)
-            status = os.read(status_read, 16)
+            status = b"".join(iter(lambda: os.read(status_read, 16), b""))
             os.close(status_read)
             os.close(parent_liveness_write)
 
             self.assertEqual(os.waitstatus_to_exitcode(wait_status), 125)
-            self.assertEqual(status, b"U")
+            self.assertTrue(status.startswith(b"U:"))
+            self.assertIn(b"process containment initialization failed", status)
             self.assertFalse(marker_path.exists())
 
     def test_parent_loss_cleanup_retries_until_observed_tree_is_empty(self) -> None:
@@ -1337,7 +1338,8 @@ class ProcessControlTests(TestCase):
                 patch.object(tree, "_validate_trusted_process_group"),
             ):
                 tree.refresh()
-            reconcile.assert_called_once_with()
+            reconcile.assert_called_once()
+            self.assertIsInstance(reconcile.call_args.args[0], float)
             self.assertFalse(tree.compromised)
             self.assertFalse(tree.requires_immediate_shutdown)
         finally:
@@ -1385,6 +1387,145 @@ class ProcessControlTests(TestCase):
             tree.close()
 
     @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_identity_pin_tolerates_bounded_task_port_delay(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        unique_info = process_deadline_module._UniqueProcessInfo()
+        unique_info.unique_id = 67890
+        token = process_deadline_module._AuditToken()
+        try:
+            with (
+                patch.object(
+                    tree,
+                    "_task_identity",
+                    side_effect=[None, (123, token)],
+                ),
+                patch.object(
+                    tree,
+                    "_unique_process_info",
+                    return_value=unique_info,
+                ),
+                patch.object(
+                    process_deadline_module.time,
+                    "monotonic",
+                    side_effect=[0.0, 0.1],
+                ),
+                patch.object(process_deadline_module.time, "sleep") as sleep_mock,
+            ):
+                identity = tree._pin_task_identity(12345, 67890)
+            self.assertEqual(identity, (123, token))
+            sleep_mock.assert_called_once_with(
+                process_deadline_module._DARWIN_IDENTITY_PIN_RETRY_INTERVAL_SECONDS
+            )
+        finally:
+            tree.close()
+
+    def test_deadline_status_surfaces_bounded_unavailable_reason(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            os.write(
+                write_descriptor,
+                b"U:_ContainmentUnavailableError: cannot pin live process identity for 12345",
+            )
+        finally:
+            os.close(write_descriptor)
+
+        try:
+            with self.assertRaisesRegex(
+                ProcessDeadlineEnforcementError,
+                "cannot pin live process identity",
+            ):
+                process_control_module._read_deadline_status(read_descriptor)
+        finally:
+            os.close(read_descriptor)
+
+    def test_deadline_status_preserves_legacy_bare_unavailable_status(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            os.write(write_descriptor, b"U")
+        finally:
+            os.close(write_descriptor)
+
+        try:
+            self.assertEqual(
+                process_control_module._read_deadline_status(read_descriptor),
+                b"U",
+            )
+        finally:
+            os.close(read_descriptor)
+
+    def test_deadline_status_rejects_empty_unavailable_reason(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            os.write(write_descriptor, b"U:")
+        finally:
+            os.close(write_descriptor)
+
+        try:
+            with self.assertRaisesRegex(
+                ProcessDeadlineEnforcementError,
+                "failed closed",
+            ):
+                process_control_module._read_deadline_status(read_descriptor)
+        finally:
+            os.close(read_descriptor)
+
+    def test_unavailable_status_reason_is_normalized_and_bounded(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        reason = "  cleanup\n" + ("failed " * 80)
+        try:
+            process_deadline_module._notify(
+                write_descriptor,
+                process_deadline_module._STATUS_UNAVAILABLE,
+                reason,
+            )
+        finally:
+            os.close(write_descriptor)
+
+        try:
+            payload = os.read(read_descriptor, 1024)
+        finally:
+            os.close(read_descriptor)
+
+        self.assertTrue(payload.startswith(b"U:cleanup failed"))
+        self.assertLessEqual(
+            len(payload),
+            process_deadline_module._STATUS_REASON_LIMIT + 2,
+        )
+        self.assertNotIn(b"\n", payload)
+
+    def test_non_unavailable_status_ignores_reason(self) -> None:
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            process_deadline_module._notify(
+                write_descriptor,
+                process_deadline_module._STATUS_EXPIRED,
+                "must not alter the terminal status",
+            )
+        finally:
+            os.close(write_descriptor)
+
+        try:
+            self.assertEqual(os.read(read_descriptor, 16), b"E")
+        finally:
+            os.close(read_descriptor)
+
+    def test_terminate_tree_preserves_signal_failure_reason(self) -> None:
+        tree = Mock(
+            signal_failure_reason=(
+                "managed process 12345 is unsignalable: "
+                "cannot pin live process identity for 12345"
+            ),
+            compromised=False,
+        )
+        tree.signal_all.return_value = False
+        tree.live.return_value = False
+
+        result = process_deadline_module._terminate_tree(tree, Mock())
+
+        self.assertFalse(result.succeeded)
+        self.assertIn("managed process 12345 is unsignalable", str(result.reason))
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
     def test_darwin_identity_pin_fails_closed_for_live_unsignalable_process(self) -> None:
         tree = process_deadline_module._DarwinProcessTree()
         unique_info = process_deadline_module._UniqueProcessInfo()
@@ -1408,6 +1549,35 @@ class ProcessControlTests(TestCase):
                 ),
             ):
                 tree._pin_task_identity(12345, 67890)
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_identity_pin_honors_expired_shared_retry_deadline(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        unique_info = process_deadline_module._UniqueProcessInfo()
+        unique_info.unique_id = 67890
+        try:
+            with (
+                patch.object(tree, "_task_identity", return_value=None),
+                patch.object(
+                    tree,
+                    "_unique_process_info",
+                    return_value=unique_info,
+                ),
+                patch.object(process_deadline_module.time, "monotonic", return_value=1.0),
+                patch.object(process_deadline_module.time, "sleep") as sleep_mock,
+                self.assertRaisesRegex(
+                    process_deadline_module._ContainmentUnavailableError,
+                    "cannot pin live process identity",
+                ),
+            ):
+                tree._pin_task_identity(
+                    12345,
+                    67890,
+                    retry_deadline=0.5,
+                )
+            sleep_mock.assert_not_called()
         finally:
             tree.close()
 
@@ -1447,13 +1617,48 @@ class ProcessControlTests(TestCase):
                 patch.object(
                     tree,
                     "_pin_task_identity",
-                    side_effect=process_deadline_module._ContainmentUnavailableError,
+                    side_effect=process_deadline_module._ContainmentUnavailableError(
+                        "cannot pin live process identity for 12345"
+                    ),
                 ),
             ):
                 state = tree._refresh_signal_token(identity)
             self.assertIs(
                 state,
                 process_deadline_module._DarwinSignalState.UNSIGNALABLE,
+            )
+            self.assertIn("managed process 12345 is unsignalable", str(tree.signal_failure_reason))
+            self.assertIn("cannot pin live process identity", str(tree.signal_failure_reason))
+        finally:
+            tree.close()
+
+    @skipUnless(sys.platform == "darwin", "requires Darwin process identities")
+    def test_darwin_signal_retry_budget_is_shared_across_processes(self) -> None:
+        tree = process_deadline_module._DarwinProcessTree()
+        first_identity = Mock(pid=12345, exited=False, parent_serial=None)
+        second_identity = Mock(pid=12346, exited=False, parent_serial=None)
+        tree._processes = {1: first_identity, 2: second_identity}
+        try:
+            with (
+                patch.object(tree, "refresh"),
+                patch.object(tree, "_depth", return_value=0),
+                patch.object(
+                    tree,
+                    "_refresh_signal_token",
+                    return_value=process_deadline_module._DarwinSignalState.UNSIGNALABLE,
+                ) as refresh_signal_token,
+                patch.object(process_deadline_module.time, "monotonic", return_value=10.0),
+            ):
+                succeeded = tree.signal_all(signal.SIGTERM)
+
+            self.assertFalse(succeeded)
+            expected_deadline = 10.0 + process_deadline_module._DARWIN_IDENTITY_PIN_RETRY_SECONDS
+            self.assertEqual(
+                refresh_signal_token.call_args_list,
+                [
+                    call(first_identity, retry_deadline=expected_deadline),
+                    call(second_identity, retry_deadline=expected_deadline),
+                ],
             )
         finally:
             tree.close()

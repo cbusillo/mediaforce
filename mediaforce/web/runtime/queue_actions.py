@@ -1,4 +1,3 @@
-import json
 from typing import Any
 
 from fastapi import HTTPException
@@ -7,7 +6,6 @@ from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db_tables import calibration_jobs, encode_jobs
-from mediaforce.core.type_defs import object_dict
 from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, load_queue_state, save_queue_state
 
 
@@ -95,17 +93,9 @@ def retry_failed_encode_prefix_action(
 
     retryable_prefixes = set(_retryable_terminal_encode_prefixes(connection_factory=connection_factory))
     if normalized_prefix not in retryable_prefixes:
-        changed_inputs_required = _terminal_encode_prefix_requires_changed_inputs(
-            connection_factory=connection_factory,
-            prefix=normalized_prefix,
-        )
         return {
             "ok": True,
-            "message": (
-                f"Choose a fresh size or compression goal for {normalized_prefix} before retrying."
-                if changed_inputs_required
-                else f"No failed folder encode was ready to retry for {normalized_prefix}."
-            ),
+            "message": f"No failed folder encode was ready to retry for {normalized_prefix}.",
             "queued_count": 0,
             "queued_prefixes": [],
             "review_blocked_count": 0,
@@ -126,52 +116,23 @@ def retry_failed_encode_prefix_action(
 def _retryable_terminal_encode_prefixes(*, connection_factory: Any) -> list[str]:
     with connection_factory() as connection:
         rows = connection.execute(
-            select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.progress_json)
+            select(encode_jobs.c.prefix, encode_jobs.c.status)
             .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
             .order_by(encode_jobs.c.updated_at.desc(), literal_column("rowid").desc())
         ).mappings().fetchall()
 
-    latest_job_by_prefix: dict[str, tuple[str, str | None]] = {}
+    latest_job_by_prefix: dict[str, str] = {}
     for row in rows:
         prefix = str(row["prefix"] or "").strip()
         if not prefix or prefix in latest_job_by_prefix:
             continue
-        latest_job_by_prefix[prefix] = (
-            str(row["status"] or "").strip(),
-            str(row["progress_json"] or "").strip() or None,
-        )
+        latest_job_by_prefix[prefix] = str(row["status"] or "").strip()
 
     return [
         prefix
-        for prefix, (status, progress_json) in latest_job_by_prefix.items()
+        for prefix, status in latest_job_by_prefix.items()
         if status in RETRYABLE_TERMINAL_ENCODE_JOB_STATUSES
-        and not _terminal_encode_requires_changed_inputs(progress_json)
     ]
-
-
-def _terminal_encode_requires_changed_inputs(progress_json: str | None) -> bool:
-    if not progress_json:
-        return False
-    try:
-        progress = json.loads(progress_json)
-    except (TypeError, json.JSONDecodeError):
-        return False
-    analysis = object_dict(object_dict(progress).get("failure_analysis"))
-    return str(analysis.get("kind") or "") == "final_size_target_miss"
-
-
-def _terminal_encode_prefix_requires_changed_inputs(*, connection_factory: Any, prefix: str) -> bool:
-    with connection_factory() as connection:
-        row = connection.execute(
-            select(encode_jobs.c.status, encode_jobs.c.progress_json)
-            .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
-            .where(encode_jobs.c.prefix == prefix)
-            .order_by(encode_jobs.c.updated_at.desc(), literal_column("rowid").desc())
-            .limit(1)
-        ).mappings().fetchone()
-    if row is None or str(row["status"] or "").strip() not in RETRYABLE_TERMINAL_ENCODE_JOB_STATUSES:
-        return False
-    return _terminal_encode_requires_changed_inputs(str(row["progress_json"] or "").strip() or None)
 
 
 def _retry_failed_encode_prefixes(
@@ -200,7 +161,11 @@ def _retry_failed_encode_prefixes(
         if bool(result.get("ok")):
             queued_prefixes.append(prefix)
             continue
-        blocked.append({"prefix": prefix, "message": str(result.get("message") or "Retry blocked.")})
+        blocker = {"prefix": prefix, "message": str(result.get("message") or "Retry blocked.")}
+        code = str(result.get("code") or "").strip()
+        if code:
+            blocker["code"] = code
+        blocked.append(blocker)
 
     message_parts: list[str] = []
     if queued_prefixes:
@@ -214,6 +179,8 @@ def _retry_failed_encode_prefixes(
         )
     if blocked:
         message_parts.append(f"{len(blocked)} could not be retried due to queue conflicts or other blockers.")
+        if len(blocked) == 1:
+            message_parts.append(blocked[0]["message"])
 
     return {
         "ok": True,

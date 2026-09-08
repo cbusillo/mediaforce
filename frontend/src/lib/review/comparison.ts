@@ -1,4 +1,4 @@
-import type { ReviewPair } from './experience';
+import type { ReviewPair } from './pairs';
 
 export type ComparisonLayout = 'side_by_side' | 'one_at_a_time';
 export type ComparisonSide = 'original' | 'new';

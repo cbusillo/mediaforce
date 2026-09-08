@@ -40,6 +40,16 @@ second encode path.
 - Structure renders before details; background detail refreshes never overlap.
 - A failed or non-queueable sample proposal stays visible as a blocked plan and
   never exposes a start action.
+- Review keeps Original and Sample visible in an evidence-dominant stage with
+  an explicit viewing-only `Full screen` control.
+- The ordinary review outcomes are `Keep this version`, `Use less space`, and
+  `Improve picture or sound`. Keeping a version records judgment only; it does
+  not queue production.
+- The production action is separate and scope-derived. For one exact movie it
+  uses `Compress this movie` and states that it adds one file to the compression
+  queue while the original remains unchanged until checked replacement.
+- Checked replacement uses `Replace original now`, runs immediately, and keeps
+  an original backup first.
 
 ## Safety
 

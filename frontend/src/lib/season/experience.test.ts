@@ -29,10 +29,12 @@ import {
 	calibrationWorkProgress,
 	catalogWarningNotice,
 	compareRiskSummary,
+	compressionIntentContract,
 	currentOperatorIntent,
 	detailSeasonState,
 	episodeLabel,
 	exactItemFilename,
+	exactReviewSizeFacts,
 	expectedSizeChange,
 	folderSizeTargetAnalysis,
 	formatDecimalFileSize,
@@ -42,7 +44,6 @@ import {
 	isSizeGoalSelectionConfirmed,
 	measuredFollowupRequest,
 	librarySeasonState,
-	normalizeReviewPairs,
 	normalizedSizePaceBytes,
 	overlappingCalibrationActivity,
 	plainFailureMessage,
@@ -52,10 +53,11 @@ import {
 	reviewFeedbackRequest,
 	reviewAdjustmentIntent,
 	reviewSizeAdjustment,
-	reviewSampleSizes,
 	scopedEncodeProgress,
 	seasonIdentity,
+	seasonEpisodeNavigationUnavailable,
 	seasonPromotionIntegrity,
+	seasonEpisodeOptions,
 	sampleSearchTechnicalDetail,
 	stagedEpisodeLinks,
 	shouldPrioritizeScopeActivity,
@@ -66,6 +68,7 @@ import {
 	technicalVideoPolicy,
 	withCompressionIntent
 } from './experience';
+import { normalizeReviewPairs, reviewSampleSizes } from '$lib/review/pairs';
 
 const card: FolderCard = {
 	prefix: 'tv/Big Brother (US)/Season 19',
@@ -342,6 +345,15 @@ function folder(overrides: Partial<FolderPayload> = {}): FolderPayload {
 		},
 		...overrides
 	};
+}
+
+function browserReadyReviewPairs(): Array<Record<string, unknown>> {
+	return [
+		{
+			source_clip: { path: '/review/source.mp4', duration_seconds: 8, size_bytes: 100 },
+			preview_clip: { path: '/review/preview.mp4', duration_seconds: 8, size_bytes: 25 }
+		}
+	];
 }
 
 function qualityMemoryPayload(): FolderQualityMemoryPayload {
@@ -650,12 +662,12 @@ function sizeOption(
 }
 
 function compressionIntentOptions(): CompressionIntentOptionPayload[] {
-	return (['reference', 'transparent', 'balanced', 'perceptual_floor'] as const).map((level) => ({
+	return (['reference', 'balanced', 'perceptual_floor'] as const).map((level) => ({
 		key: level,
 		title: level,
 		detail: level,
 		selected: level === 'balanced',
-		accepts_under_target_result: level === 'transparent' || level === 'perceptual_floor',
+		accepts_under_target_result: level === 'perceptual_floor',
 		compression_intent: {
 			schema_version: 1,
 			level,
@@ -686,6 +698,45 @@ function workflowState(primaryLane: WorkflowLane, state = primaryLane): FolderWo
 }
 
 describe('season experience translation', () => {
+	it('describes the size, search, quality, and final contract for every quality preference', () => {
+		const contracts = Object.fromEntries(
+			compressionIntentOptions().map((option) => [option.key, compressionIntentContract(option)])
+		);
+
+		expect(contracts.reference).toMatchObject({
+			sizeLabel: 'Size limit',
+			searchLabel: 'High fidelity first',
+			qualityLabel: 'Highest measured fidelity',
+			finalHeadline: 'Final result must meet the final band.'
+		});
+		expect(contracts.balanced).toMatchObject({
+			sizeLabel: 'Size target',
+			searchLabel: 'Closest result in the band',
+			qualityLabel: 'Measured quality floor',
+			finalHeadline: 'Final result must meet the final band.'
+		});
+		expect(contracts.perceptual_floor).toMatchObject({
+			sizeLabel: 'Size ceiling',
+			searchLabel: 'Low end first',
+			qualityLabel: 'Measured acceptability floor',
+			finalHeadline: 'A smaller final result may pass.'
+		});
+		const legacyTransparent = compressionIntentContract({
+			key: 'transparent',
+			title: 'No visible difference',
+			detail: 'Legacy option',
+			selected: false,
+			accepts_under_target_result: true,
+			compression_intent: { schema_version: 1, level: 'transparent', confirmed: true }
+		});
+		expect(legacyTransparent).toMatchObject({
+			sizeLabel: contracts.perceptual_floor.sizeLabel,
+			searchLabel: contracts.perceptual_floor.searchLabel,
+			qualityLabel: contracts.perceptual_floor.qualityLabel,
+			finalHeadline: contracts.perceptual_floor.finalHeadline
+		});
+	});
+
 	it('parses a human show and season identity', () => {
 		expect(seasonIdentity(card.prefix)).toEqual({
 			library: 'tv',
@@ -814,6 +865,7 @@ describe('season experience translation', () => {
 				'Check natural texture for waxiness, crawling noise, or an overly smooth look.',
 			authority: 'Not decided yet',
 			authorityDetail: 'No decision has been saved for this sample.',
+			hasSavedDecision: false,
 			focusMoments: ['Moment 2 needs the closest look.'],
 			picture: {
 				label: 'Texture and grain',
@@ -825,6 +877,20 @@ describe('season experience translation', () => {
 				level: 'No specific warning',
 				detail: 'Listen for clear dialogue, balanced sound, and anything distracting.'
 			}
+		});
+	});
+
+	it('keeps exact-item review facts separate from comparison clip measurements', () => {
+		expect(exactReviewSizeFacts(1_200_000_000, 480_000_000)).toEqual({
+			currentSizeBytes: 1_200_000_000,
+			estimatedOutputBytes: 480_000_000,
+			estimatedSpaceSavedBytes: 720_000_000
+		});
+		expect(exactReviewSizeFacts(480_000_000, 600_000_000).estimatedSpaceSavedBytes).toBe(0);
+		expect(exactReviewSizeFacts(480_000_000, null)).toEqual({
+			currentSizeBytes: 480_000_000,
+			estimatedOutputBytes: null,
+			estimatedSpaceSavedBytes: null
 		});
 	});
 
@@ -1208,9 +1274,12 @@ describe('season experience translation', () => {
 
 	it.each([
 		['attention', 'needs_help'],
+		['blocked', 'needs_help'],
+		['encode', 'ready_to_make'],
 		['validate', 'ready_to_check'],
 		['promote', 'ready_to_finish'],
 		['processing', 'making_season'],
+		['mixed', 'ready_to_make'],
 		['complete', 'finished']
 	] as const)('shows the %s workflow before an older approved-test badge', (lane, expectedKey) => {
 		expect(
@@ -1232,7 +1301,8 @@ describe('season experience translation', () => {
 					calibration: {
 						draft_hash: 'draft-1',
 						accepted_draft_hash: null,
-						browser_review_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					workflow_state: {
 						prefix: card.prefix,
@@ -1265,7 +1335,8 @@ describe('season experience translation', () => {
 					calibration: {
 						draft_hash: 'draft-1',
 						accepted_draft_hash: 'draft-1',
-						browser_review_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					encode_job: {
 						job_id: 'job-1',
@@ -1318,7 +1389,8 @@ describe('season experience translation', () => {
 						job_id: 'sample-new',
 						draft_hash: 'draft-new',
 						accepted_draft_hash: null,
-						browser_review_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					calibration_job: {
 						job_id: 'sample-new',
@@ -1379,7 +1451,8 @@ describe('season experience translation', () => {
 						job_id: 'sample-1',
 						draft_hash: 'draft-1',
 						accepted_draft_hash: 'draft-1',
-						review_media_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					review_gate: { status: 'accepted', can_confirm_full: true },
 					quality_risk: {
@@ -1399,7 +1472,8 @@ describe('season experience translation', () => {
 						job_id: 'sample-1',
 						draft_hash: 'draft-with-refreshed-metadata',
 						accepted_draft_hash: 'original-draft',
-						review_media_ready: true
+						browser_review_ready: true,
+						review_pairs: browserReadyReviewPairs()
 					},
 					review_gate: { status: 'accepted', can_confirm_full: true },
 					quality_risk: {
@@ -1410,6 +1484,41 @@ describe('season experience translation', () => {
 				status
 			)
 		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
+	});
+
+	it('keeps an approved sample ready when only legacy review media remains', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: true,
+						compare_clips: [{ path: '/review/compare.mov' }]
+					},
+					review_gate: { status: 'accepted', can_confirm_full: true }
+				}),
+				status
+			)
+		).toMatchObject({ key: 'ready_to_make', label: 'Sample approved' });
+	});
+
+	it('requires a fresh sample when legacy approval no longer matches review media', () => {
+		expect(
+			detailSeasonState(
+				folder({
+					calibration: {
+						job_id: 'sample-1',
+						draft_hash: 'draft-1',
+						accepted_draft_hash: 'draft-1',
+						review_media_ready: false
+					},
+					review_gate: { status: 'missing_review_media', can_confirm_full: false }
+				}),
+				status
+			)
+		).toMatchObject({ key: 'needs_help', label: 'Sample needs retry' });
 	});
 
 	it.each([
@@ -2136,6 +2245,99 @@ describe('season experience translation', () => {
 				href: '/folders/tv/Bluey%20(2018)/Season%203/Bluey.2018.S03E49.1080p.BluRay.mkv'
 			}
 		]);
+	});
+
+	it('lists every catalog episode for exact-item navigation in numeric order', () => {
+		const episodeStatus: FolderStatusPayload = {
+			...status,
+			staged_integrity: {
+				scope: status.media_scope,
+				counts: { not_started: 2, tracked: 1, orphaned: 1 },
+				blocker_count: 3,
+				blockers: [],
+				database_truncated: false,
+				discovery: { requested: true, truncated: true, entries_scanned: 4 },
+				records: [
+					{
+						disposition: 'not_started',
+						item_id: 10,
+						rel_path: 'tv/Show/Season 1/Show.S01E10.mkv',
+						staging_path: null,
+						code: 'staged_integrity_not_started',
+						next_action: 'queue_encode',
+						detail: 'Not encoded.'
+					},
+					{
+						disposition: 'tracked',
+						item_id: 2,
+						rel_path: 'tv/Show/Season 1/Show.S01E02.mkv',
+						staging_path: null,
+						code: 'staged_integrity_tracked',
+						next_action: '',
+						detail: 'Already placed.'
+					},
+					{
+						disposition: 'not_started',
+						item_id: 1,
+						rel_path: 'tv/Show/Season 1/Show.S01E01.mkv',
+						staging_path: null,
+						code: 'staged_integrity_not_started',
+						next_action: 'queue_encode',
+						detail: 'Not encoded.'
+					},
+					{
+						disposition: 'orphaned',
+						item_id: null,
+						rel_path: null,
+						staging_path: '/Volumes/transcode/unknown.mkv',
+						code: 'staged_integrity_orphaned',
+						next_action: 'inspect',
+						detail: 'Untracked.'
+					}
+				]
+			}
+		};
+		const options = seasonEpisodeOptions(episodeStatus);
+
+		expect(options).toEqual([
+			{
+				itemId: 1,
+				label: 'Episode 1',
+				statusLabel: 'Not compressed yet',
+				relPath: 'tv/Show/Season 1/Show.S01E01.mkv',
+				href: '/folders/tv/Show/Season%201/Show.S01E01.mkv'
+			},
+			{
+				itemId: 2,
+				label: 'Episode 2',
+				statusLabel: 'Already in the library',
+				relPath: 'tv/Show/Season 1/Show.S01E02.mkv',
+				href: '/folders/tv/Show/Season%201/Show.S01E02.mkv'
+			},
+			{
+				itemId: 10,
+				label: 'Episode 10',
+				statusLabel: 'Not compressed yet',
+				relPath: 'tv/Show/Season 1/Show.S01E10.mkv',
+				href: '/folders/tv/Show/Season%201/Show.S01E10.mkv'
+			}
+		]);
+		expect(seasonEpisodeNavigationUnavailable(episodeStatus)).toBe(false);
+		expect(
+			seasonEpisodeNavigationUnavailable({
+				...episodeStatus,
+				staged_integrity: { ...episodeStatus.staged_integrity!, database_truncated: true }
+			})
+		).toBe(true);
+		expect(
+			seasonEpisodeNavigationUnavailable({
+				...episodeStatus,
+				staged_integrity: {
+					...episodeStatus.staged_integrity!,
+					load_error: 'Could not load episode inventory.'
+				}
+			})
+		).toBe(true);
 	});
 
 	it('formats operator-facing target totals with decimal units', () => {

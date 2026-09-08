@@ -123,8 +123,8 @@
 		display: flex;
 		height: 58px;
 		margin: 0 auto;
-		max-width: 1120px;
-		padding: 0 24px;
+		max-width: var(--mf-shell-max);
+		padding: 0 var(--mf-shell-pad);
 	}
 
 	.brand {
@@ -221,8 +221,8 @@
 		font-size: 13px;
 		gap: 8px;
 		margin: 0 auto;
-		max-width: 1120px;
-		padding: 9px 24px;
+		max-width: var(--mf-shell-max);
+		padding: 9px var(--mf-shell-pad);
 	}
 
 	.catalog-warning__inner strong {

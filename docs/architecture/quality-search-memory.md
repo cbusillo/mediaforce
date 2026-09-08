@@ -97,16 +97,20 @@ without replaying the planner while keeping the observation payload bounded.
 Final-size retry planning uses the completed output as a measured calibration
 anchor. It first prefers an already-measured directional candidate or an
 interpolated candidate inside an existing calibrated bracket. When neither is
-available, it may measure up to two additional directional samples chosen
-deterministically from the calibrated size ratio and the explicit CRF bounds.
-The second sample is adjacent to the first and is allowed only when the first
-failed solely because it remained outside the final band on the same side as
-the completed output. A measured sample authorizes the single full-output retry
+available, it measures a bounded directional seed. That seed uses calibrated
+same-side evidence when available and the conservative bitrate-halving prior
+otherwise. It may then place a second sample with a content-derived log-space
+secant using the completed-output anchor and the first measured/calibrated
+point. A third sample is permitted only when the two real measured/calibrated
+probes are monotonic and straddle the final band; it uses strict log
+interpolation between those points and never a same-side extrapolation. The
+retry planner permits at most three sample measurements and one replacement
+full-output encode. A measured sample authorizes that retry
 only when its real quality score still meets the floor and its calibrated
 projection remains inside the unchanged final-size band and source cap. Missing
 bounds, invalid or non-monotonic evidence, exhausted bounds, quality failure,
-crossing to the opposite side, or a second projected miss all remain
-fail-closed needs-review outcomes.
+crossing to the opposite side without a valid interior integer, or a projected
+miss all remain fail-closed needs-review outcomes.
 
 The log stores typed identity, signature, selected-result, timing, and output
 fields alongside bounded JSON for context, bounds, candidates, outcome, and

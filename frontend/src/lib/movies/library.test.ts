@@ -4,10 +4,15 @@ import type { MovieLibraryPayload, MovieTitle } from '$lib/api/types';
 import {
 	mergeMovieLibraryPayloads,
 	movieCompositionDetail,
+	movieEstimateEvidence,
+	movieEstimatedOutputTotalIsLowerBound,
 	movieExpectedOutputBytes,
+	movieLibraryStateGroup,
+	moviePendingReviewBadge,
 	moviePrimaryStudioPrefix,
 	movieReclaimLowerBound,
 	movieReclaimTotalIsLowerBound,
+	movieTitleOwnsActiveWork,
 	movieTitleNeedsAction,
 	movieTitleRuntimeSeconds,
 	movieWorkflowIsComplete,
@@ -218,7 +223,63 @@ describe('movie decision facts', () => {
 		).toBeNull();
 	});
 
-	it('uses the exact member route as the one action for one-file titles', () => {
+	it('uses the stored sampled output instead of recalculating it from title size', () => {
+		expect(
+			movieExpectedOutputBytes({
+				...title,
+				total_size_bytes: 100,
+				projected_reclaim_bytes: 35,
+				estimated_output_bytes: 70,
+				estimate_provenance: 'sampled_calibration'
+			})
+		).toBe(70);
+	});
+
+	it('keeps zero and growth projections as known reclaim values', () => {
+		expect(movieReclaimLowerBound({ ...title, projected_reclaim_bytes: 0 })).toBe(0);
+		expect(movieReclaimLowerBound({ ...title, projected_reclaim_bytes: -20 })).toBe(-20);
+	});
+
+	it('only asks for complete samples when the title estimate is unavailable', () => {
+		const incompleteCoverage = {
+			covered_included_members: 0,
+			required_included_members: 2,
+			complete: false
+		};
+		expect(
+			movieEstimateEvidence({
+				...title,
+				estimate_provenance: 'unavailable',
+				estimate_coverage: incompleteCoverage
+			})
+		).toBe('No title estimate until every included movie file has its own current sample.');
+		for (const estimate_provenance of ['projected', 'measured'] as const) {
+			expect(
+				movieEstimateEvidence({
+					...title,
+					estimate_provenance,
+					estimate_coverage: incompleteCoverage
+				})
+			).toBeNull();
+		}
+	});
+
+	it('marks aggregate output as a lower bound when any title is unavailable', () => {
+		expect(
+			movieEstimatedOutputTotalIsLowerBound([
+				{ ...title, estimated_output_bytes: 6, details_loading: false },
+				{ ...title, prefix: 'films/Unknown', estimated_output_bytes: null, details_loading: false }
+			])
+		).toBe(true);
+		expect(
+			movieEstimatedOutputTotalIsLowerBound([
+				{ ...title, estimated_output_bytes: 6, details_loading: false },
+				{ ...title, prefix: 'films/Also known', estimated_output_bytes: 4, details_loading: false }
+			])
+		).toBe(false);
+	});
+
+	it('uses the exact member route for idle one-file titles', () => {
 		expect(moviePrimaryStudioPrefix(title)).toBe('films/Example/Example.mkv');
 		expect(
 			moviePrimaryStudioPrefix({
@@ -230,6 +291,63 @@ describe('movie decision facts', () => {
 				]
 			})
 		).toBe(title.prefix);
+	});
+
+	it.each([
+		['proposal', { label: 'Sample plan ready' }, null],
+		['pending review', { label: 'Review pending' }, null],
+		['accepted encode', { label: 'Approved draft' }, 'encode'],
+		['processing', null, 'processing'],
+		['validate', null, 'validate'],
+		['promote', null, 'promote']
+	] as const)(
+		'opens the title route when one-file title work is active: %s',
+		(_state, reviewBadge, primaryLane) => {
+			const activeTitle: MovieTitle = {
+				...title,
+				review_badge: reviewBadge,
+				workflow_state: primaryLane
+					? {
+							prefix: title.prefix,
+							state: `${primaryLane}_candidates`,
+							primary_lane: primaryLane,
+							label: primaryLane,
+							tone: primaryLane === 'processing' ? 'active' : 'ready',
+							detail: '',
+							counts: {},
+							lane_counts: {},
+							state_counts: {},
+							next_action: { kind: 'none', label: '', enabled: false, target_prefix: title.prefix },
+							blockers: []
+						}
+					: null
+			};
+
+			expect(movieTitleOwnsActiveWork(activeTitle)).toBe(true);
+			expect(moviePrimaryStudioPrefix(activeTitle)).toBe(title.prefix);
+		}
+	);
+
+	it('uses the exact member route after one-file title work is complete', () => {
+		const completeTitle: MovieTitle = {
+			...title,
+			workflow_state: {
+				prefix: title.prefix,
+				state: 'complete',
+				primary_lane: 'complete',
+				label: 'Finished',
+				tone: 'success',
+				detail: '',
+				counts: {},
+				lane_counts: {},
+				state_counts: {},
+				next_action: { kind: 'none', label: '', enabled: false, target_prefix: title.prefix },
+				blockers: []
+			}
+		};
+
+		expect(movieTitleOwnsActiveWork(completeTitle)).toBe(false);
+		expect(moviePrimaryStudioPrefix(completeTitle)).toBe(title.members[0].prefix);
 	});
 
 	it('only calls out exceptional file composition', () => {
@@ -292,6 +410,89 @@ describe('movie action discoverability', () => {
 				}
 			})
 		).toBe('Compressing');
+	});
+
+	it('keeps blocked titles reachable through the cannot-start group', () => {
+		const blockedTitle: MovieTitle = {
+			...readyTitle,
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'blocked',
+				primary_lane: 'blocked',
+				label: 'Blocked'
+			}
+		};
+
+		expect(movieLibraryStateGroup(blockedTitle)).toEqual({
+			key: 'blocked',
+			label: 'Cannot start',
+			tone: 'fail'
+		});
+		expect(movieTitleNeedsAction(blockedTitle)).toBe(true);
+		expect(movieWorkflowLabel(blockedTitle)).toBe('Cannot start');
+	});
+
+	it('puts pending sample review ahead of encode readiness', () => {
+		const reviewTitle: MovieTitle = {
+			...readyTitle,
+			review_badge: {
+				label: 'Ready to review',
+				tone: 'attention',
+				detail: 'Review the current sample before production compression can begin.'
+			},
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'encode_candidates',
+				primary_lane: 'encode',
+				label: 'Ready to encode'
+			}
+		};
+		const plainEncodeTitle: MovieTitle = {
+			...reviewTitle,
+			prefix: 'films/Plain encode',
+			title: 'Plain encode',
+			review_badge: null
+		};
+
+		expect(movieWorkflowLabel(reviewTitle)).toBe('Ready to review');
+		expect(movieTitleNeedsAction(reviewTitle)).toBe(true);
+		expect(
+			moviePendingReviewBadge({
+				...reviewTitle,
+				review_badge: { ...reviewTitle.review_badge, tone: 'warning' }
+			})?.tone
+		).toBe('attention');
+		expect(
+			selectMovieLeadTitle(
+				sortMovieTitles([plainEncodeTitle, reviewTitle], 'priority'),
+				'priority',
+				''
+			)
+		).toBe(reviewTitle);
+	});
+
+	it('keeps accepted and later-stage movie work authoritative', () => {
+		const acceptedTitle: MovieTitle = {
+			...readyTitle,
+			review_badge: { label: 'Approved draft', tone: 'ok' },
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'encode_candidates',
+				primary_lane: 'encode'
+			}
+		};
+		const validatingTitle: MovieTitle = {
+			...acceptedTitle,
+			review_badge: { label: 'Ready to review', tone: 'attention' },
+			workflow_state: {
+				...readyTitle.workflow_state!,
+				state: 'ready_to_validate',
+				primary_lane: 'validate'
+			}
+		};
+
+		expect(movieWorkflowLabel(acceptedTitle)).toBe('Ready to compress');
+		expect(movieWorkflowLabel(validatingTitle)).toBe('Ready to check');
 	});
 
 	it('treats a required file choice as actionable without exposing the backend label', () => {

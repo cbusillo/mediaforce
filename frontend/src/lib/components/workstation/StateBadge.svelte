@@ -4,15 +4,21 @@
 	let {
 		tone = 'idle',
 		label,
-		compact = false
+		compact = false,
+		quiet = false
 	}: {
 		tone?: Tone;
 		label: string;
 		compact?: boolean;
+		quiet?: boolean;
 	} = $props();
 </script>
 
-<span class="state-badge state-badge--{tone}" class:state-badge--compact={compact}>
+<span
+	class="state-badge state-badge--{tone}"
+	class:state-badge--compact={compact}
+	class:state-badge--quiet={quiet}
+>
 	<span class="state-badge__dot"></span>
 	{label}
 </span>
@@ -32,16 +38,27 @@
 		font-size: var(--mf-text-xs);
 		font-weight: var(--mf-weight-semibold);
 		gap: var(--mf-space-3);
+		justify-self: start;
 		line-height: 1;
 		min-height: 24px;
 		padding: 0 9px;
 		white-space: nowrap;
+		width: fit-content;
 	}
 
 	.state-badge--compact {
 		background: var(--badge-bg);
 		min-height: 0;
 		padding: 5px 8px;
+	}
+
+	.state-badge--quiet {
+		background: transparent;
+		color: var(--mf-fg-secondary);
+	}
+
+	.state-badge--quiet .state-badge__dot {
+		background: currentColor;
 	}
 
 	.state-badge__dot {

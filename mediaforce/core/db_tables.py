@@ -8,6 +8,7 @@ from sqlalchemy import REAL
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import Text
+from sqlalchemy import UniqueConstraint
 
 metadata = MetaData()
 
@@ -660,6 +661,7 @@ staged_artifacts = Table(
     Column("subtitle_summary_json", Text),
     Column("attachment_summary_json", Text),
     Column("validation_json", Text),
+    Column("target_lineage_json", Text),
     Column("staged_at", Text),
     Column("validated_at", Text),
     Column("promoted_at", Text),
@@ -667,6 +669,27 @@ staged_artifacts = Table(
     Column("archived_source_path", Text),
     Column("updated_at", Text, nullable=False),
 )
+
+# Runtime databases use Alembic, which installs the append-only receipt triggers.
+target_production_outcomes = Table(
+    "target_production_outcomes",
+    metadata,
+    Column("receipt_id", Text, primary_key=True),
+    Column("library_item_id", Integer, nullable=False),
+    Column("observation_id", Text, nullable=False),
+    Column("manifest_run_id", Text, nullable=False),
+    Column("item_index", Integer, nullable=False),
+    Column("encode_job_id", Text, nullable=False),
+    Column("promoted_content_fingerprint", Text, nullable=False),
+    Column("payload_json", Text, nullable=False),
+    Column("payload_sha256", Text, nullable=False),
+    Column("recorded_at", Text, nullable=False),
+    UniqueConstraint(
+        "library_item_id", "manifest_run_id", "item_index", "encode_job_id",
+        "promoted_content_fingerprint", name="uq_target_production_outcome",
+    ),
+)
+Index("idx_target_production_boundary", target_production_outcomes.c.observation_id)
 
 item_events = Table(
     "item_events",

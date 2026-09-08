@@ -5,9 +5,16 @@ import type {
 	SeasonLifecycleState
 } from '$lib/api/types';
 
-import { seasonIdentity } from './experience';
+import { seasonIdentity, seasonNumberLabel } from './experience';
 
 export type LibrarySort = 'savings' | 'size' | 'seasons' | 'name';
+export type TvLibraryStateKey = 'attention' | 'processing' | 'ready' | 'idle';
+
+export interface TvLibraryStateGroup {
+	key: TvLibraryStateKey;
+	label: string;
+	tone: 'active' | 'ready' | 'wait' | 'fail' | 'idle';
+}
 
 export interface OlderSeasonLibraryAction {
 	latestSeasonLabel: string;
@@ -18,6 +25,31 @@ export interface OlderSeasonLibraryAction {
 }
 
 const OVERRIDEABLE_HOLD_CODES = new Set(['current_season', 'recent_acquisition']);
+
+export function tvLibraryStateGroup(
+	states: Array<{ key?: string; tone: string }>
+): TvLibraryStateGroup {
+	const keys = new Set(states.map((state) => state.key));
+	const tones = new Set(states.map((state) => normalizeLibraryTone(state.tone)));
+	if (tones.has('fail') || tones.has('wait')) {
+		return { key: 'attention', tone: 'fail', label: 'Needs attention' };
+	}
+	if (tones.has('active') || keys.has('sample_waiting')) {
+		return { key: 'processing', tone: 'active', label: 'In progress' };
+	}
+	if (tones.has('ready') || keys.has('needs_test')) {
+		return { key: 'ready', tone: 'ready', label: 'Ready to act on' };
+	}
+	return { key: 'idle', tone: 'idle', label: 'No active work' };
+}
+
+function normalizeLibraryTone(tone: string): TvLibraryStateGroup['tone'] {
+	if (tone === 'attention' || tone === 'fail') return 'fail';
+	if (tone === 'ready') return 'ready';
+	if (tone === 'active') return 'active';
+	if (tone === 'wait') return 'wait';
+	return 'idle';
+}
 
 export function mergeFolderPayloads(
 	structure: DashboardFoldersPayload,
@@ -220,6 +252,15 @@ export function seasonsByShow(seasons: FolderCard[]): Map<string, FolderCard[]> 
 		grouped.set(showPrefix, showSeasons);
 	}
 	return grouped;
+}
+
+export function compareSeasonCards(left: FolderCard, right: FolderCard): number {
+	const leftNumber = Number(seasonNumberLabel(seasonIdentity(left.prefix).season));
+	const rightNumber = Number(seasonNumberLabel(seasonIdentity(right.prefix).season));
+	if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+	if (Number.isFinite(leftNumber)) return -1;
+	if (Number.isFinite(rightNumber)) return 1;
+	return left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' });
 }
 
 export function buildShowCards(seriesCards: FolderCard[], seasons: FolderCard[]): FolderCard[] {
