@@ -22255,7 +22255,13 @@ raise SystemExit(0)
             queued_manifest.write_text(json.dumps(manifest))
             return queued_manifest
 
-        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
+        def attach_lineage_stub(_connection: DBClient, **kwargs: Any) -> None:
+            self.assertEqual(kwargs["calibration"], current_calibration)
+            self.assertEqual(kwargs["advice_state"], {})
+            self.assertEqual(kwargs["approval_contract"]["sample_job_id"], "sample-recovery")
+            kwargs["manifest"]["items"][0]["target_lineage"] = {"persistence_marker": True}
+
+        with patch("mediaforce.web.runtime.folder_actions.attach_target_lineage", side_effect=attach_lineage_stub), patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
                 "mediaforce.web.runtime.folder_actions.create_folder_manifest",
                 return_value=({
                     "run_id": "recovery-run",
@@ -22288,6 +22294,7 @@ raise SystemExit(0)
             )
 
         self.assertTrue(result["ok"])
+        self.assertEqual(json.loads(queued_manifest.read_text())["items"][0]["target_lineage"], {"persistence_marker": True})
         selection = object_dict(captured_manifest["selection"])
         recovery_contract = object_dict(selection["production_approval_contract"])
         self.assertEqual(recovery_contract["sample_job_id"], "sample-recovery")

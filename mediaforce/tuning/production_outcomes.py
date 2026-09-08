@@ -145,16 +145,20 @@ def load_target_production_report(
 ) -> dict[str, Any]:
     """Eligibility is re-proved now. This report never adopts or changes a target."""
     boundary, boundary_reason = current_approved_boundary(connection, observation_id)
-    receipts = connection.execute(
-        select(target_production_outcomes)
-        .where(
-            target_production_outcomes.c.observation_id == observation_id,
+    receipts = (
+        connection.execute(
+            select(target_production_outcomes)
+            .where(
+                target_production_outcomes.c.observation_id == observation_id,
+            )
+            .order_by(
+                target_production_outcomes.c.recorded_at,
+                target_production_outcomes.c.receipt_id,
+            )
         )
-        .order_by(
-            target_production_outcomes.c.recorded_at,
-            target_production_outcomes.c.receipt_id,
-        )
-    ).mappings()
+        .mappings()
+        .all()
+    )
     outcomes = []
     for receipt in receipts:
         payload = lineage_object(receipt["payload_json"])

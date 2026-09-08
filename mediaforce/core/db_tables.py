@@ -670,6 +670,7 @@ staged_artifacts = Table(
     Column("updated_at", Text, nullable=False),
 )
 
+# Runtime databases use Alembic, which installs the append-only receipt triggers.
 target_production_outcomes = Table(
     "target_production_outcomes",
     metadata,

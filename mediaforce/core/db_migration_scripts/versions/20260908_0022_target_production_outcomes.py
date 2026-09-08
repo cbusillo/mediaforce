@@ -41,7 +41,8 @@ def upgrade() -> None:
             ),
         )
     if "idx_target_production_boundary" not in {
-        index["name"] for index in inspector.get_indexes("target_production_outcomes")
+        index["name"]
+        for index in sa.inspect(op.get_bind()).get_indexes("target_production_outcomes")
     }:
         op.create_index(
             "idx_target_production_boundary",
@@ -57,6 +58,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if (
+        op.get_bind()
+        .exec_driver_sql("SELECT 1 FROM target_production_outcomes LIMIT 1")
+        .first()
+        is not None
+    ):
+        raise RuntimeError("Cannot remove immutable target production outcomes")
     for operation in ("update", "delete"):
         op.execute(f"DROP TRIGGER target_production_outcomes_no_{operation}")
     op.drop_table("target_production_outcomes")

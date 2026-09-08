@@ -644,3 +644,250 @@ def test_cli_uses_readonly_database_without_runtime_mutations(tmp_path: Path) ->
     assert report["eligible_outcome_count"] == 1
     assert report["adoption_enabled"] is False
     assert db_path.read_bytes() == before
+
+
+def test_persisted_manifest_encode_validate_promote_retains_eligible_lineage(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    from mediaforce import execution
+    from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
+    from mediaforce.core.models import ProbeSummary
+    from mediaforce.encoding.quality import QualitySearchResult
+    from mediaforce.library.run_manifests import write_manifest
+    from mediaforce.tuning.content_intent_observations import (
+        content_intent_stream_plan_id,
+    )
+    from mediaforce.tuning.size_goals import SizeGoalIntent
+    from mediaforce.web.runtime.folder_actions import _calibration_policy_hash
+    from test_content_intent_observations import ContentIntentObservationTests
+    from test_target_size_production import TargetSizeProductionTests
+
+    harness = TargetSizeProductionTests()
+    harness.root = tmp_path
+    config = harness._config()
+    config.raw["media"]["output_container"] = "mkv"
+    config.raw["validation"] = {}
+    source = harness._source_file("lineage.mkv")
+    with source.open("r+b") as handle:
+        handle.truncate(20_000_000)
+    output = harness._staging_path("lineage.mkv")
+    fixtures = ContentIntentObservationTests()
+    sample, calibration = fixtures._review_payload()
+    with open_db(config.paths.db_path) as connection:
+        item_id = harness._insert_item(connection, source)
+        item = harness._manifest_item(item_id, source, output)
+        item["media_root"] = "tv"
+        item.update(
+            {
+                key: sample[key]
+                for key in (
+                    "compression_intent",
+                    "cadence_summary",
+                    "media_fingerprint_decision",
+                )
+            }
+        )
+        item["resolved_policy"]["video"].update(
+            target_vmaf=95.0,
+            min_target_vmaf=92.0,
+            default_grain=8,
+            compression_intent="perceptual_floor",
+            compression_intent_source="operator",
+            compression_intent_confirmed=True,
+            compression_intent_schema_version=1,
+        )
+        item["source_fingerprint"] = file_fingerprint(
+            source, source.stat(), item["duration_seconds"]
+        )
+        item["content_version_fingerprint"] = content_version_fingerprint(
+            source, source.stat()
+        )
+        goal = SizeGoalIntent(
+            mode="absolute",
+            value_bytes=5_000_000,
+            reference_runtime_seconds=None,
+            sample_projection_tolerance_percent=10,
+            final_output_tolerance_percent=5,
+            source="test",
+        ).resolve(60)
+        item["resolved_operator_intent"] = {
+            "size_goal": goal.to_payload(),
+            "request": {"size_goal": {"mode": "absolute", "value_bytes": 5_000_000}},
+        }
+        item["stream_budget_ledger"] = execution.resolve_stream_budget_ledger(
+            item,
+            resolved_size_goal=goal,
+            prefer_persisted=False,
+        ).to_payload()
+        compat = fixtures._compatibility(
+            stream_plan_id=content_intent_stream_plan_id(item["stream_budget_ledger"])
+        ).to_payload()
+        calibration.update(policy=item["resolved_policy"], sample_item=deepcopy(item))
+        calibration["sample_result"].update(
+            content_intent_compatibility=compat,
+            predicted_video_size_bytes=4_800_000,
+            predicted_total_size_bytes=5_000_000,
+        )
+        row = fixtures._observation(item, calibration).values()
+        append_content_intent_boundary_observation(connection, _rehash_observation(row))
+        calibration.update(
+            accepted_at=row["recorded_at"],
+            accepted_draft_hash="approved-draft",
+            accepted_sample_job_id=calibration["job_id"],
+            accepted_policy_hash=_calibration_policy_hash(calibration),
+        )
+        manifest = {
+            "run_id": "integration-run",
+            "created_at": row["recorded_at"],
+            "items": [item],
+        }
+        attach_target_lineage(
+            connection,
+            manifest=manifest,
+            calibration=calibration,
+            advice_state={
+                "content_intent_boundary_observation": {
+                    "observation_id": row["observation_id"]
+                }
+            },
+            approval_contract=_production_approval_contract(calibration),
+        )
+        assert "target_lineage" in item
+        path = write_manifest(connection, config, manifest)
+        manifest = json.loads(path.read_text())
+        assert manifest["items"][0]["target_lineage"] == item["target_lineage"]
+        toolchain = {
+            key: compat[key]
+            for key in (
+                "encoder",
+                "encoder_version",
+                "encoder_runtime_version",
+                "encoder_runtime_signature_id",
+                "quality_tool",
+                "quality_tool_version",
+                "metric_runtime_signature_id",
+            )
+        }
+        toolchain["status"] = "available"
+        quality = QualitySearchResult(
+            crf=31, metric="VMAF", target=95, score=95.4, stdout="fixture"
+        )
+        probe = ProbeSummary(
+            duration_seconds=60,
+            video_codec="av1",
+            video_bitrate=600_000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json='[{"language":"eng"}]',
+            subtitle_summary_json="[]",
+        )
+        encode_command = [
+            "ffmpeg",
+            "-i",
+            str(source),
+            "-c:v",
+            "libsvtav1",
+            "-pix_fmt",
+            "yuv420p10le",
+            "-preset",
+            "4",
+            "-svtav1-params",
+            "tune=0:film-grain=8:film-grain-denoise=0",
+            "-crf",
+            "31",
+            str(output),
+        ]
+
+        def fake_encode(
+            *, temp_output: Path, **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            temp_output.parent.mkdir(parents=True, exist_ok=True)
+            with temp_output.open("wb") as handle:
+                handle.truncate(5_000_000)
+            return subprocess.CompletedProcess(encode_command, 0, "", "")
+
+        with (
+            patch(
+                "mediaforce.tuning.production_lineage.quality_toolchain_identity",
+                return_value=toolchain,
+            ) as identity_probe,
+            patch("mediaforce.execution._search_quality", return_value=quality),
+            patch(
+                "mediaforce.execution._select_streams",
+                return_value={"audio_tracks": [], "subtitle_tracks": []},
+            ),
+            patch(
+                "mediaforce.execution._build_ffmpeg_command",
+                return_value=encode_command,
+            ),
+            patch("mediaforce.execution._run_encode_command", side_effect=fake_encode),
+            patch("mediaforce.execution.probe_media", return_value=probe),
+        ):
+            execution.encode_manifest_items(
+                connection,
+                config,
+                path,
+                manifest,
+                [0],
+                False,
+                encode_context={"encode_job_id": "integration-encode"},
+            )
+            assert len(identity_probe.call_args_list) == 2
+            assert {
+                call.kwargs["quality_metric"].casefold()
+                for call in identity_probe.call_args_list
+            } == {"vmaf"}
+            validation = execution.validate_manifest_items(
+                connection, config, manifest, [0]
+            )
+            assert validation[0]["passed"] is True
+            execution.promote_manifest_items(connection, config, manifest, [0], False)
+        report = load_target_production_report(
+            connection, observation_id=row["observation_id"]
+        )
+        assert report["eligible_outcome_count"] == 1, report
+        assert report["outcomes"][0]["encode_identity"]["item_index"] == 0
+        assert report["outcomes"][0]["production_crf"] == 31
+
+
+def test_migration_cannot_drop_recorded_production_history(tmp_path: Path) -> None:
+    db_path = tmp_path / "evidence.db"
+    with open_db(db_path) as connection:
+        item, _, stage, promoted = _seed(connection)
+        _record(connection, item, stage, promoted)
+    reset_engine_cache()
+    with (
+        _alembic_script_location() as location,
+        pytest.raises(RuntimeError, match="Cannot remove immutable"),
+    ):
+        command.downgrade(_alembic_config(db_path, location), "20260822_0021")
+    with open_readonly_db(db_path) as connection:
+        assert len(connection.execute(select(target_production_outcomes)).all()) == 1
+
+
+def test_actual_toolchain_probe_normalizes_plan_and_result_metric_names() -> None:
+    import subprocess
+    from mediaforce.encoding.quality import quality_toolchain_identity
+
+    replies = [
+        subprocess.CompletedProcess([], 0, "ab-av1 0.11.3", ""),
+        subprocess.CompletedProcess([], 0, "ffmpeg version fixture", ""),
+        subprocess.CompletedProcess([], 0, "", "SVT-AV1 Encoder Lib v4.2.0"),
+        subprocess.CompletedProcess([], 0, "filter help fixture", ""),
+    ]
+    with patch(
+        "mediaforce.encoding.quality._run_quality_command", side_effect=replies * 2
+    ):
+        plan_identity = quality_toolchain_identity(quality_metric="vmaf")
+        result_identity = quality_toolchain_identity(quality_metric="VMAF")
+    assert plan_identity["status"] == "available"
+    assert plan_identity == result_identity
