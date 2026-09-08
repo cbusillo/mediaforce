@@ -6,6 +6,7 @@
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
+	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
 	import type {
 		CompressionIntentLevel,
@@ -2993,6 +2994,14 @@
 					{/if}
 				</div>
 			</section>
+		{/if}
+
+		{#if isExactItemScope}
+			<TargetDefaultEvidence
+				evidence={folder.target_default_evidence}
+				{currentTargetBytes}
+				durationSeconds={asNumber(sampleItem.duration_seconds)}
+			/>
 		{/if}
 
 		{#if safetyDialog}

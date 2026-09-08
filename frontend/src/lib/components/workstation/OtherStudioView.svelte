@@ -17,6 +17,7 @@
 	import { reviewAvailability } from '$lib/review/availability';
 	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
+	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import {
 		otherActionFileCount,
 		otherReadinessBlockerCopy,
@@ -95,6 +96,14 @@
 	const reviewReady = $derived(review.isBrowserReady);
 	const reviewSample = $derived(reviewSampleSizes(folder));
 	const reviewSourceHasSound = $derived(reviewSourceHasAudio(folder));
+	const currentTargetBytes = $derived(
+		folder.resolved_operator_intent?.size_goal?.target_size_bytes ?? null
+	);
+	const sampleDurationSeconds = $derived(
+		typeof folder.sample_item?.duration_seconds === 'number'
+			? folder.sample_item.duration_seconds
+			: null
+	);
 	const reviewLabel = $derived(reviewSourceLabel(folder, folder.media_scope.title));
 	const approved = $derived(Boolean(calibration.accepted_at));
 	const scopeNoun = $derived(folder.media_scope.match === 'exact_item' ? 'file' : 'folder');
@@ -648,6 +657,14 @@
 				>
 			{/if}
 		</section>
+	{/if}
+
+	{#if folder.media_scope.match === 'exact_item'}
+		<TargetDefaultEvidence
+			evidence={folder.target_default_evidence}
+			{currentTargetBytes}
+			durationSeconds={sampleDurationSeconds}
+		/>
 	{/if}
 
 	<div class:studio-grid--review={reviewReady} class="studio-grid">

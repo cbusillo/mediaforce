@@ -183,6 +183,21 @@ uv run mediaforce quality-memory
 uv run mediaforce quality-memory --prefix "tv/Show/Season 1" --json
 ```
 
+Inspect a target-size default proposal using a current visual boundary observation
+ID from the configured database:
+
+```bash
+uv run mediaforce target-defaults cibo1_example
+```
+
+This read-only JSON report explains item, folder, and measured-content scope,
+evidence counts, confidence, and fallback. It does not apply a target or start
+media work. Exact-item Studio pages also expose this evidence when the saved
+review still matches the current source, calibration, intent and budget.
+Suggestions remain review-only; sample approvals do not establish promoted
+production evidence. See [target-default rules](docs/architecture/content-intent-boundary-evidence.md#target-default-proposals)
+for the evidence thresholds and required operator confirmation.
+
 Run a sample scan:
 
 ```bash

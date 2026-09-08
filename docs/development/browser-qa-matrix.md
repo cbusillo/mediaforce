@@ -442,6 +442,18 @@ must persist across route changes and reloads, and both themes must preserve
 status contrast, media-stage darkness, focus visibility, and readable controls
 on Library, Activity, Finished, Settings, and folder review routes.
 
+## Target-default evidence
+
+Exact TV review, Movie title-review handoff, and Other file routes expose one
+review-only target evidence disclosure. The route smoke injects synthetic
+available, stale-policy, and conflicting-boundary responses at 1024px and
+390px. It verifies keyboard expansion/collapse, decimal size and current-target
+copy, scope/count/confidence, unverified production acceptance, absence of
+adoption controls or mutation requests, and no horizontal overflow. Hosted CI
+retains panel screenshots alongside its built frontend and synthetic responses.
+Backend tests independently validate current observation and calibration binding;
+these display fixtures do not establish real production evidence or media quality.
+
 ## State Gaps
 
 The current fixture covers non-empty queue, empty queue, waiting Folder Studio,

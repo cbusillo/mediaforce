@@ -1531,6 +1531,63 @@ export interface TargetSizeProvenance {
 	blocker?: TargetSizeProvenanceBlocker | null;
 }
 
+export type TargetDefaultEvidenceStatus = 'available' | 'unavailable';
+export type TargetDefaultEvidenceScope = 'item' | 'folder' | 'content_class';
+export type TargetDefaultEvidenceConfidence = 'none' | 'limited' | 'moderate' | 'high';
+
+export interface TargetDefaultRulePayload {
+	minimum_approved_sources: number;
+	minimum_approved_artifacts: number;
+	minimum_rejected_sources: number;
+	minimum_approved_folders: number;
+	maximum_relative_spread: number;
+}
+
+export interface TargetDefaultScopeReportPayload {
+	scope: TargetDefaultEvidenceScope;
+	observation_ids: string[];
+	approved_source_count: number;
+	approved_artifact_count: number;
+	rejected_source_count: number;
+	approved_folder_count: number;
+	relative_spread: number | null;
+	proposed_bytes_per_45_minutes: number | null;
+	confidence: TargetDefaultEvidenceConfidence;
+	reason: string;
+	rule: TargetDefaultRulePayload;
+	excluded_measurement_count: number;
+	excluded_runtime_count: number;
+}
+
+export interface TargetDefaultReportPayload {
+	schema_version: number;
+	rule_version: number;
+	source: 'operator_visual_boundaries';
+	mode: 'review_only';
+	reference_runtime_seconds: number;
+	reference_observation_id: string;
+	reference_target_bytes: number;
+	reference_duration_seconds: number;
+	folder_prefix: string;
+	content_profile_id: string;
+	intent_semantic_id: string;
+	compatibility_key: string;
+	evidence_snapshot_id: string;
+	production_authority: 'unverified';
+	application_requires: string[];
+	scopes: TargetDefaultScopeReportPayload[];
+	proposed_scope: TargetDefaultEvidenceScope | null;
+	proposed_bytes_per_45_minutes: number | null;
+	fallback_reason: string | null;
+}
+
+export interface TargetDefaultEvidence {
+	schema_version: 1;
+	status: TargetDefaultEvidenceStatus;
+	reason: string | null;
+	report: TargetDefaultReportPayload | null;
+}
+
 export interface FolderPayload {
 	prefix: string;
 	media_scope: MediaScopePayload;
@@ -1545,6 +1602,7 @@ export interface FolderPayload {
 	size_target_analysis?: Record<string, unknown> | null;
 	resolved_operator_intent?: ResolvedOperatorIntentPayload;
 	target_size_provenance?: TargetSizeProvenance | null;
+	target_default_evidence?: TargetDefaultEvidence | null;
 	compression_intent_options?: CompressionIntentOptionPayload[];
 	stream_budget_ledger?: StreamBudgetLedgerPayload;
 	size_goal_options?: SizeGoalOptionPayload[];
