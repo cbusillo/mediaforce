@@ -2,7 +2,7 @@
 
 from dataclasses import asdict, dataclass
 from fractions import Fraction
-from math import ceil
+from math import ceil, isfinite
 from pathlib import PurePosixPath
 from statistics import median
 from typing import Any, Literal, Mapping, Sequence
@@ -21,7 +21,10 @@ from mediaforce.tuning.content_intent_observations import (
 
 
 REFERENCE_RUNTIME_SECONDS = 2700
-TARGET_DEFAULT_RULE_VERSION = 1
+TARGET_DEFAULT_RULE_VERSION = 2
+TARGET_DEFAULT_SCOPES: tuple[BoundaryCohortScope, ...] = ("item", "folder", "content_class")
+MINIMUM_RUNTIME_RATIO = Fraction(4, 5)
+MAXIMUM_RUNTIME_RATIO = Fraction(5, 4)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +51,8 @@ class TargetDefaultScopeReport:
     approved_artifact_count: int
     rejected_source_count: int
     approved_folder_count: int
+    excluded_measurement_count: int
+    excluded_runtime_count: int
     relative_spread: float | None
     proposed_bytes_per_45_minutes: int | None
     confidence: Literal["none", "limited", "moderate", "high"]
@@ -76,6 +81,7 @@ class TargetDefaultReport:
             "rule_version": TARGET_DEFAULT_RULE_VERSION,
             "source": "operator_visual_boundaries",
             "mode": "review_only",
+            "production_authority": "unverified",
             "reference_runtime_seconds": REFERENCE_RUNTIME_SECONDS,
             "application_requires": ["current_source_and_policy_check", "operator_target_confirmation", "representative_sample"],
             **asdict(self),
@@ -113,6 +119,8 @@ def target_default_report(
     if reference_values is None:
         raise ValueError("Choose a current eligible visual boundary observation ID")
     reference = content_intent_boundary_observation_from_values(reference_values)
+    if not _valid_measurement(reference_values):
+        raise ValueError("The reference boundary has an invalid size or duration")
     replay_scopes: tuple[BoundaryCohortScope, ...] = ("item", "operator")
     compatible_rows = {
         scope: content_intent_replay_scope_rows(
@@ -131,15 +139,20 @@ def target_default_report(
     scoped_rows: dict[BoundaryCohortScope, tuple[Mapping[str, Any], ...]] = {
         "item": compatible_rows["item"],
         "folder": tuple(row for row in compatible_rows["operator"] if _source_folder(row) == folder_prefix),
-        "content_class": tuple(row for row in compatible_rows["operator"] if _source_folder(row) != folder_prefix),
+        "content_class": compatible_rows["operator"],
     }
     if not any(row["observation_id"] == observation_id for row in scoped_rows["item"]):
         raise ValueError("Choose a current eligible visual boundary observation ID")
 
-    scopes = tuple(_scope_report(scope, rows) for scope, rows in scoped_rows.items())
-    item_conflicts = scopes[0].reason == "conflicting_boundaries"
+    scope_reports = {
+        scope: _scope_report(scope, scoped_rows[scope], reference_duration=reference.duration_seconds)
+        for scope in TARGET_DEFAULT_SCOPES
+    }
+    scopes = tuple(scope_reports[scope] for scope in TARGET_DEFAULT_SCOPES)
+    item_conflicts = scope_reports["item"].reason == "conflicting_boundaries"
     item_rejections = [
-        _normalized_bytes(row) for row in scoped_rows["item"] if row["verdict"] == "unacceptable"
+        _normalized_bytes(row) for row in scoped_rows["item"]
+        if row["verdict"] == "unacceptable" and _valid_measurement(row)
     ]
     selected = next((
         report for report in scopes
@@ -147,7 +160,18 @@ def target_default_report(
         and report.proposed_bytes_per_45_minutes is not None
         and all(report.proposed_bytes_per_45_minutes > rejected for rejected in item_rejections)
     ), None)
-    evidence_hashes = sorted({str(row["payload_sha256"]) for rows in scoped_rows.values() for row in rows})
+    snapshot = {
+        "rule_version": TARGET_DEFAULT_RULE_VERSION,
+        "rules": {scope: asdict(TARGET_DEFAULT_RULES[scope]) for scope in TARGET_DEFAULT_SCOPES},
+        "reference_runtime_seconds": REFERENCE_RUNTIME_SECONDS,
+        "runtime_ratio_bounds": [str(MINIMUM_RUNTIME_RATIO), str(MAXIMUM_RUNTIME_RATIO)],
+        "production_authority": "unverified",
+        "reference_observation_id": observation_id,
+        "scopes": {
+            scope: sorted(str(row["payload_sha256"]) for row in scoped_rows[scope])
+            for scope in TARGET_DEFAULT_SCOPES
+        },
+    }
     return TargetDefaultReport(
         reference_observation_id=observation_id,
         reference_target_bytes=reference.authoritative_anchor_bytes,
@@ -156,7 +180,7 @@ def target_default_report(
         content_profile_id=reference.content_profile_id,
         intent_semantic_id=reference.intent_semantic_id,
         compatibility_key=reference.compatibility_key,
-        evidence_snapshot_id=f"tds1_{stable_json_hash(evidence_hashes)[:32]}",
+        evidence_snapshot_id=f"tds1_{stable_json_hash(snapshot)[:32]}",
         scopes=scopes,
         proposed_scope=selected.scope if selected else None,
         proposed_bytes_per_45_minutes=selected.proposed_bytes_per_45_minutes if selected else None,
@@ -170,6 +194,16 @@ def _normalized_bytes(row: Mapping[str, Any]) -> Fraction:
     return Fraction(int(row["boundary_size_bytes"]) * REFERENCE_RUNTIME_SECONDS) / Fraction(str(row["duration_seconds"]))
 
 
+def _valid_measurement(row: Mapping[str, Any]) -> bool:
+    size = row.get("boundary_size_bytes")
+    duration = row.get("duration_seconds")
+    return (
+        isinstance(size, int) and not isinstance(size, bool) and size > 0
+        and isinstance(duration, (int, float)) and not isinstance(duration, bool)
+        and isfinite(duration) and duration > 0
+    )
+
+
 def _source_folder(row: Mapping[str, Any]) -> str:
     return str(PurePosixPath(str(row["source_rel_path"])).parent)
 
@@ -177,8 +211,20 @@ def _source_folder(row: Mapping[str, Any]) -> str:
 def _scope_report(
         scope: BoundaryCohortScope,
         rows: Sequence[Mapping[str, Any]],
+        *,
+        reference_duration: float,
 ) -> TargetDefaultScopeReport:
     rule = TARGET_DEFAULT_RULES[scope]
+    measured = [row for row in rows if _valid_measurement(row)]
+    runtime_compatible = [
+        row for row in measured
+        if scope == "item" or MINIMUM_RUNTIME_RATIO <= (
+            Fraction(str(row["duration_seconds"])) / Fraction(str(reference_duration))
+        ) <= MAXIMUM_RUNTIME_RATIO
+    ]
+    excluded_measurement_count = len(rows) - len(measured)
+    excluded_runtime_count = len(measured) - len(runtime_compatible)
+    rows = runtime_compatible
     approved = [row for row in rows if row["verdict"] == "acceptable" and row["quality_floor_met"]]
     rejected = [row for row in rows if row["verdict"] == "unacceptable"]
     source_bounds: dict[str, Fraction] = {}
@@ -199,7 +245,11 @@ def _scope_report(
     # posterior is deliberately not an input to a target-intent proposal.
     conflicting = bool(bounds and rejected and max(map(_normalized_bytes, rejected)) >= min(bounds))
     if not rows:
-        reason = "no_compatible_boundaries"
+        reason = (
+            "invalid_boundary_measurements" if excluded_measurement_count
+            else "no_runtime_compatible_boundaries" if excluded_runtime_count
+            else "no_compatible_boundaries"
+        )
     elif conflicting:
         reason = "conflicting_boundaries"
     elif not bounds:
@@ -224,6 +274,8 @@ def _scope_report(
         approved_artifact_count=len(approved_artifacts),
         rejected_source_count=len(rejected_sources),
         approved_folder_count=len(approved_folders),
+        excluded_measurement_count=excluded_measurement_count,
+        excluded_runtime_count=excluded_runtime_count,
         relative_spread=spread,
         proposed_bytes_per_45_minutes=ceil(max(bounds)) if supported else None,
         confidence=("high" if scope == "content_class" else "moderate") if supported else ("limited" if rows else "none"),

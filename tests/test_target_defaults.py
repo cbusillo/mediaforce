@@ -93,12 +93,12 @@ def test_repeated_same_artifact_does_not_unlock_an_item_default() -> None:
 
 def test_folder_default_normalizes_duration_and_weights_sources_equally() -> None:
     rows = [
-        boundary(1, size=65_000_000, duration=1350),
+        boundary(1, size=104_000_000, duration=2160),
         boundary(2, size=132_000_000),
-        boundary(3, size=268_000_000, duration=5400),
+        boundary(3, size=167_500_000, duration=3375),
     ]
     # Many reviews of one source cannot pull the conservative proposal down.
-    rows.extend(boundary(1, sample=index, size=65_000_000, duration=1350) for index in range(2, 10))
+    rows.extend(boundary(1, sample=index, size=104_000_000, duration=2160) for index in range(2, 10))
     report = target_default_report(rows, observation_id=rows[1]["observation_id"])
     assert report.proposed_scope == "folder"
     assert report.proposed_bytes_per_45_minutes == 134_000_000
@@ -160,7 +160,7 @@ def test_content_class_requires_cross_folder_approvals_and_rejections() -> None:
     report = target_default_report(rows, observation_id=reference["observation_id"])
     assert report.proposed_scope == "content_class"
     assert report.scopes[2].confidence == "high"
-    assert report.scopes[2].approved_source_count == 8
+    assert report.scopes[2].approved_source_count == 9
     assert report.scopes[2].rejected_source_count == 3
 
 
@@ -170,7 +170,7 @@ def test_exact_item_review_prefixes_do_not_count_as_independent_folders() -> Non
     rows.extend(boundary(source, sample=2, size=100_000_000, folder="tv/Other/Season 1", verdict="rejected", exact_scope=True) for source in range(2, 5))
     report = target_default_report(rows, observation_id=reference["observation_id"])
     assert report.folder_prefix == "tv/Futurama/Season 8"
-    assert report.scopes[2].approved_folder_count == 1
+    assert report.scopes[2].approved_folder_count == 2
     assert report.scopes[2].reason == "insufficient_cross_folder_evidence"
     assert report.proposed_scope is None
 
@@ -210,6 +210,36 @@ def test_tampered_evidence_cannot_unlock_default() -> None:
     report = target_default_report(rows, observation_id=rows[0]["observation_id"])
     assert report.scopes[1].approved_source_count == 2
     assert report.proposed_scope is None
+
+
+@pytest.mark.parametrize("field,value", [("duration_seconds", 0), ("duration_seconds", -1), ("boundary_size_bytes", 0)])
+def test_invalid_measurements_are_excluded_after_revision_replay(field: str, value: int) -> None:
+    rows = [boundary(source) for source in (1, 2, 3)]
+    rows[1][field] = value
+    rows[1] = _rehash_observation(rows[1]).values()
+    report = target_default_report(rows, observation_id=rows[0]["observation_id"])
+    assert report.scopes[1].excluded_measurement_count == 1
+    assert report.proposed_scope is None
+    with pytest.raises(ValueError, match="invalid size or duration"):
+        target_default_report(rows, observation_id=rows[1]["observation_id"])
+
+
+def test_disparate_runtimes_cannot_supply_cross_item_support() -> None:
+    rows = [boundary(), boundary(2, size=65_000_000, duration=1350), boundary(3, size=260_000_000, duration=5400)]
+    report = target_default_report(rows, observation_id=rows[0]["observation_id"])
+    assert report.scopes[1].excluded_runtime_count == 2
+    assert report.proposed_scope is None
+
+
+def test_snapshot_binds_reference_and_rule_version() -> None:
+    rows = [boundary(source) for source in (1, 2, 3)]
+    first = target_default_report(rows, observation_id=rows[0]["observation_id"])
+    second = target_default_report(rows, observation_id=rows[1]["observation_id"])
+    assert first.evidence_snapshot_id != second.evidence_snapshot_id
+    with patch("mediaforce.tuning.target_defaults.TARGET_DEFAULT_RULE_VERSION", 3):
+        changed = target_default_report(rows, observation_id=rows[0]["observation_id"])
+    assert changed.evidence_snapshot_id != first.evidence_snapshot_id
+    assert first.to_payload()["production_authority"] == "unverified"
 
 
 def test_correction_and_withdrawal_replace_original_votes() -> None:
