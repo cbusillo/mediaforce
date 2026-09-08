@@ -18,6 +18,7 @@
 	import { reviewAvailability } from '$lib/review/availability';
 	import { reviewSampleSizes, reviewSourceHasAudio, reviewSourceLabel } from '$lib/review/pairs';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
+	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import {
 		folderActionResponseCopy,
 		noteAfterPrepareAgain,
@@ -133,6 +134,12 @@
 				)
 	);
 	const sampleItem = $derived(asRecord(folder.sample_item));
+	const currentTargetBytes = $derived(
+		folder.resolved_operator_intent?.size_goal?.target_size_bytes ?? null
+	);
+	const sampleDurationSeconds = $derived(
+		typeof sampleItem.duration_seconds === 'number' ? sampleItem.duration_seconds : null
+	);
 	const hostOptions = $derived(
 		(folder.sample_host_options ?? [])
 			.map((host) => asRecord(host))
@@ -1343,6 +1350,14 @@
 						{/if}
 					</div>
 				</WorkstationPanel>
+			{/if}
+
+			{#if exactScope}
+				<TargetDefaultEvidence
+					evidence={folder.target_default_evidence}
+					{currentTargetBytes}
+					durationSeconds={sampleDurationSeconds}
+				/>
 			{/if}
 
 			<WorkstationPanel
