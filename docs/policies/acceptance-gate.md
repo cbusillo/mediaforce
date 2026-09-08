@@ -38,7 +38,8 @@ We do not stop at "it works." We stop when we fully like the result.
   IDE snapshot on every inspection run. A missing npm lock marker forces repair;
   required Svelte generation runs without the package lifecycle's error fallback
   and must succeed before the dependency stamp is written. Preparation creates one pyproject-owned
-  exact-root Python module with a provisional worktree SDK name. Duplicate
+  exact-root Python module with a provisional worktree SDK name. The locked
+  development group supplies pytest so test imports resolve in that SDK. Duplicate
   suffixed modules are preserved and stop preparation for review. Preparation
   does not register the SDK: the inspection step verifies registration and may
   perform its bounded first-open readiness retry. The named profile is copied
