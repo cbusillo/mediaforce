@@ -2958,10 +2958,9 @@ async function captureReviewFixtures(baseUrl, folderRoutes) {
       .map(([, route]) => route)
       .filter((route) => !route.startsWith("/api/settings")),
     "/api/hosts",
-    ...folderRoutes.flatMap(({ route }) => [
-      `/api${route}`,
-      `/api${route}/status`,
-    ]),
+    ...folderRoutes
+      .filter(({ route }) => route.startsWith("/folders/"))
+      .flatMap(({ route }) => [`/api${route}`, `/api${route}/status`]),
   ]);
   const responses = {};
   for (const route of routes) {
