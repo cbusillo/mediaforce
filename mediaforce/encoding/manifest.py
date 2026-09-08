@@ -26,6 +26,7 @@ from mediaforce.encoding.quality_search import QualitySearchPlan
 from mediaforce.encoding.staging import partial_output_path, safe_unlink
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import planned_output_dimensions
+from mediaforce.tuning.production_lineage import capture_production_identity, completed_target_lineage
 from mediaforce.tuning.compression_intent import (
     CompressionAuthorizationDecision,
     CompressionEvidenceRef,
@@ -428,6 +429,10 @@ def encode_one_item(
                 "out_time_seconds": 0.0,
             }
         )
+    lineage_identity_before = capture_production_identity(
+        item, source_path, quality_metric=quality_search_plan.metric_name,
+        host=host, process_controller=process_controller,
+    )
     stream_budget = _persisted_stream_budget(item)
     quality_search_run_id = f"qsr1_{uuid.uuid4().hex}"
     quality_search_started_at = timestamp()
@@ -1099,6 +1104,16 @@ def encode_one_item(
     bytes_saved = source_size_bytes - staged_stat.st_size
     size_ratio = (staged_stat.st_size / source_size_bytes) if source_size_bytes else None
 
+    lineage_identity_after = capture_production_identity(
+        item, source_path, quality_metric=quality_result.metric,
+        host=host, process_controller=process_controller,
+    )
+    target_lineage_json = completed_target_lineage(
+        item=item, manifest_run_id=manifest["run_id"], index=index,
+        before=lineage_identity_before, after=lineage_identity_after,
+        context=quality_observation_context.to_payload() if quality_observation_context is not None else {},
+        chosen_crf=quality_result.crf,
+    )
     staged_values = {
         "library_item_id": item["library_item_id"],
         "manifest_run_id": manifest["run_id"],
@@ -1130,6 +1145,11 @@ def encode_one_item(
         "quality_metric": quality_result.metric,
         "quality_target": quality_result.target,
         "quality_score": quality_result.score,
+        "target_lineage_json": target_lineage_json,
+        "validated_at": None,
+        "promoted_at": None,
+        "promoted_path": None,
+        "archived_source_path": None,
         "validation_json": json.dumps(_target_validation_payload(final_verification, final_trace), separators=(",", ":")),
         "encode_command_json": json.dumps(ffmpeg_cmd, separators=(",", ":")),
         "audio_summary_json": staged_probe.audio_summary_json,

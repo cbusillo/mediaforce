@@ -198,6 +198,18 @@ Suggestions remain review-only; sample approvals do not establish promoted
 production evidence. See [target-default rules](docs/architecture/content-intent-boundary-evidence.md#target-default-proposals)
 for the evidence thresholds and required operator confirmation.
 
+Inspect the separately captured production lineage for an approved boundary:
+
+```bash
+uv run mediaforce target-production-evidence cibo1_example
+```
+
+This read-only report links the exact reviewed item to its validated, promoted
+output and explains current evidence eligibility. It never adopts a default or
+backfills historical promotions. Output identity uses sampled content bytes,
+size, and metadata, not a full-file digest. See the
+[production lineage contract](docs/architecture/content-intent-boundary-evidence.md#production-outcome-lineage).
+
 Run a sample scan:
 
 ```bash

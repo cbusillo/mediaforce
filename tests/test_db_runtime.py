@@ -56,7 +56,7 @@ from mediaforce.web.runtime_lock import (
 )
 from mediaforce.web import runtime_lock as runtime_lock_module
 
-CURRENT_DB_REVISION = "20260822_0021"
+CURRENT_DB_REVISION = "20260908_0022"
 
 
 class DatabaseRuntimeTests(unittest.TestCase):

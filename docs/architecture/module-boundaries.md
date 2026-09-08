@@ -346,6 +346,12 @@ Guidance:
 - `target_default_context.py`
   - fail-closed current source, calibration, intent, policy and stream-ledger
     binding for exact-item Studio evidence, without adoption or queue authority
+- `production_lineage.py`
+  - exact-item approved-boundary capsules, actual source/toolchain capture,
+    and post-repair validation identity for advisory production evidence
+- `production_outcomes.py`
+  - transaction-owned append-only promotion receipts and read-only eligibility
+    rechecks, without target adoption or historical promotion backfill
 - `quality_memory.py`
   - read-only accepted-outcome cohorts, command-derived search signatures,
     confidence, dispersion, and explainable central CRF hints
