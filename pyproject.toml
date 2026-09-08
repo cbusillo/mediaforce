@@ -62,3 +62,8 @@ target-version = "py313"
 
 [tool.ruff.lint]
 select = ["ANN001", "ANN002", "ANN003", "ANN202"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
