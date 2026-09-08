@@ -44,6 +44,27 @@ class TargetSizeProductionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def test_unlinked_reencode_clears_previous_target_lineage_and_acceptance(self) -> None:
+        source_path = self._source_file("reencode-lineage.mkv")
+        staging_path = self._staging_path("reencode-lineage.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            connection.execute(staged_artifacts.insert().values(
+                library_item_id=item_id, staging_path=str(staging_path), target_lineage_json='{"old":true}',
+                validated_at="2026-07-01", promoted_at="2026-07-02", promoted_path="old-path",
+                archived_source_path="old-archive", updated_at="2026-07-02",
+            ))
+            quality = QualitySearchResult(crf=30, metric="VMAF", target=85, score=86, stdout="test")
+            with patch("mediaforce.tuning.production_lineage.quality_toolchain_identity") as probe:
+                self._encode_with_output_sizes(connection, item, quality, [5_100_000])
+                probe.assert_not_called()
+            row = connection.execute(select(staged_artifacts).where(
+                staged_artifacts.c.library_item_id == item_id,
+            )).mappings().one()
+            for key in ("target_lineage_json", "validated_at", "promoted_at", "promoted_path", "archived_source_path"):
+                self.assertIsNone(row[key], key)
+
     def test_containment_failure_precedes_final_size_miss_classification(self) -> None:
         verification = FinalSizeVerification(
             status="over_target",

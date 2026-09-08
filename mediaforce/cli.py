@@ -39,6 +39,7 @@ from mediaforce.review import generate_compare_clips
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.quality_acceptance import format_quality_acceptance_report, load_quality_acceptance_report
 from mediaforce.tuning.target_defaults import load_target_default_report
+from mediaforce.tuning.production_outcomes import load_target_production_report
 from mediaforce.web.runtime_lock import (
     MediaforceRuntimeBusyError,
     exclusive_mediaforce_runtime_lock,
@@ -153,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report review-only target-size proposals from stored visual boundaries as JSON",
     )
     target_defaults_parser.add_argument("observation_id", help="Current visual boundary observation ID to use as context")
+    production_evidence_parser = subparsers.add_parser(
+        "target-production-evidence", help="Report linked production outcome eligibility without changing defaults",
+    )
+    production_evidence_parser.add_argument("observation_id", help="Visual boundary observation ID")
 
     plan_parser = subparsers.add_parser("plan", help="Generate a run manifest from current state")
     plan_parser.add_argument("--limit", type=int, help="Maximum items in the run manifest")
@@ -264,6 +269,11 @@ def _main(
         args: argparse.Namespace,
         config: MediaforceConfig,
 ) -> int:
+    if args.command == "target-production-evidence":
+        with open_readonly_db(config.paths.db_path) as connection:
+            payload = load_target_production_report(connection, observation_id=args.observation_id)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
     if args.command == "target-defaults":
         try:
             with open_readonly_db(config.paths.db_path) as connection:

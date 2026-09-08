@@ -61,54 +61,12 @@ def build_target_default_evidence(
         advice_state: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Return a report only when its exact current source context is intact."""
-    if not calibration:
-        return unavailable_target_default_evidence("calibration_missing")
-
-    observation_id = str(
-        object_dict(object_dict(advice_state).get("content_intent_boundary_observation"))
-        .get("observation_id")
-        or ""
-    ).strip()
-    if not observation_id:
-        return unavailable_target_default_evidence("boundary_observation_missing")
-
-    reference = connection.execute(
-        select(content_intent_boundary_observations).where(
-            content_intent_boundary_observations.c.observation_id == observation_id,
-        ),
-    ).mappings().one_or_none()
+    reference, reason = current_target_boundary(
+        connection, budget_item=budget_item, calibration=calibration, advice_state=advice_state,
+    )
     if reference is None:
-        return unavailable_target_default_evidence("boundary_observation_missing")
-
-    current = load_current_content_intent_boundary_observations(
-        connection,
-        intent_semantic_id=str(reference["intent_semantic_id"]),
-        compatibility_key=str(reference["compatibility_key"]),
-        include_withdrawn=True,
-    )
-    current_reference = next(
-        (row for row in current if str(row.get("observation_id") or "") == observation_id),
-        None,
-    )
-    if current_reference is None:
-        return unavailable_target_default_evidence("boundary_observation_not_current")
-    if str(current_reference.get("disposition") or "") != "active":
-        return unavailable_target_default_evidence("boundary_observation_withdrawn")
-    if not bool(current_reference.get("personalization_eligible")):
-        return unavailable_target_default_evidence("boundary_observation_ineligible")
-
-    sample_item = object_dict(calibration.get("sample_item"))
-    if not sample_item:
-        return unavailable_target_default_evidence("calibration_sample_missing")
-
-    reason = _validate_bindings(
-        current_reference,
-        budget_item=budget_item,
-        calibration=calibration,
-        sample_item=sample_item,
-    )
-    if reason is not None:
-        return unavailable_target_default_evidence(reason)
+        return unavailable_target_default_evidence(reason or "boundary_observation_missing")
+    observation_id = str(reference["observation_id"])
 
     try:
         report = load_target_default_report(
@@ -123,6 +81,66 @@ def build_target_default_evidence(
         "reason": None,
         "report": report.to_payload(),
     }
+
+
+def current_target_boundary(
+        connection: DBClient,
+        *,
+        budget_item: Mapping[str, Any],
+        calibration: Mapping[str, Any] | None,
+        advice_state: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve one current boundary against its exact source and reviewed context."""
+    if not calibration:
+        return None, "calibration_missing"
+
+    observation_id = str(
+        object_dict(object_dict(advice_state).get("content_intent_boundary_observation"))
+        .get("observation_id")
+        or ""
+    ).strip()
+    if not observation_id:
+        return None, "boundary_observation_missing"
+
+    reference = connection.execute(
+        select(content_intent_boundary_observations).where(
+            content_intent_boundary_observations.c.observation_id == observation_id,
+        ),
+    ).mappings().one_or_none()
+    if reference is None:
+        return None, "boundary_observation_missing"
+
+    current = load_current_content_intent_boundary_observations(
+        connection,
+        intent_semantic_id=str(reference["intent_semantic_id"]),
+        compatibility_key=str(reference["compatibility_key"]),
+        include_withdrawn=True,
+    )
+    current_reference = next(
+        (row for row in current if str(row.get("observation_id") or "") == observation_id),
+        None,
+    )
+    if current_reference is None:
+        return None, "boundary_observation_not_current"
+    if str(current_reference.get("disposition") or "") != "active":
+        return None, "boundary_observation_withdrawn"
+    if not bool(current_reference.get("personalization_eligible")):
+        return None, "boundary_observation_ineligible"
+
+    sample_item = object_dict(calibration.get("sample_item"))
+    if not sample_item:
+        return None, "calibration_sample_missing"
+
+    reason = _validate_bindings(
+        current_reference,
+        budget_item=budget_item,
+        calibration=calibration,
+        sample_item=sample_item,
+    )
+    if reason is not None:
+        return None, reason
+
+    return dict(current_reference), None
 
 
 def _validate_bindings(

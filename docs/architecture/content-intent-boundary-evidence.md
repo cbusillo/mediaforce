@@ -170,6 +170,59 @@ reason. The disclosure preserves the current target and offers no apply or queue
 action. Automatic adoption and empirical threshold calibration remain separate
 work; no production setting changes from a report.
 
+## Production outcome lineage
+
+`mediaforce target-production-evidence <observation_id>` reports a separate,
+read-only production evidence contract. It does not change target proposals,
+confidence thresholds, settings, queue admission or automatic adoption. The
+empirical calibration and operator acceptance work remains outstanding.
+
+After existing queue admission gates pass, only the manifest item matching the
+current approved sample may receive a versioned, hashed lineage capsule. A
+folder approval cannot give its siblings this evidence. Duplicate matches,
+stale source/intent/policy/stream budgets, unavailable review context and
+unapproved samples produce no capsule. The capsule binds the boundary hash,
+sample job and review artifact, approved CRF, technical compatibility, operator
+size contract, approval time, manifest run and item index.
+
+Linked encodes capture source identity and the actual execution host's encoder
+and quality toolchain before and after production. The completed lineage also
+retains the command-derived compatibility and actual selected CRF. Missing or
+changed identities make the result ineligible. Advisory capture failure does
+not discard an encode; the normal encoding process controls still apply.
+Every re-encode replaces the staged lineage, including clearing it for unlinked
+work, and clears previous validation and promotion fields.
+
+Validation binds the staged bytes after any successful container repair.
+Promotion prepares the evidence payload before moving files, then appends a
+receipt within the same database transaction as the promoted item and staging
+state. A receipt failure rolls back that transaction and invokes the existing
+filesystem restoration. Identical receipt retries are idempotent; conflicting
+payloads fail. SQLite triggers reject receipt updates and deletes. Receipt
+history has no cascading library-item foreign key; removing current catalog
+state revokes eligibility without erasing the historical record. Migration
+adds nullable staging lineage and an empty receipt table, with no backfill.
+
+Eligibility is re-proved at report time against the current global boundary
+revision and current catalog/staging state. It requires matching source and
+technical context, the same CRF as the approved sample, quality-floor success,
+ordered approval/encode/validation/promotion timestamps, successful validation,
+and actual bytes strictly within the approved final size band. An under-target
+output accepted by production's size contract is still excluded from positive
+target-learning evidence. Withdrawals, corrections, re-encodes, changed output
+metadata or replaced staged evidence revoke eligibility without rewriting the
+receipt.
+
+Output continuity uses `content_version_sampled_sha1_v1`: size plus sampled
+head, middle and tail bytes, together with modification time. This is a bounded,
+path-independent identity compatible with promotion moves, not a full-file
+cryptographic digest or proof against unsampled same-size edits. Read-only
+reports consult the current catalog identity; they do not rescan media files.
+Receipt and capsule hashes detect accidental mutation, not malicious rewriting
+by an actor able to rewrite the database. These limits remain visible in the
+JSON report. Eligible receipts are evidence candidates, not a claim that
+production-derived defaults have been empirically calibrated.
+
 ## Privacy and storage
 
 All observations stay in the configured runtime database outside the

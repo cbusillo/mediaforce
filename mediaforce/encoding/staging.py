@@ -26,6 +26,8 @@ from mediaforce.core.utils import content_version_fingerprint
 from mediaforce.encoding.free_space import ReservePreflight, promotion_reserve_preflight
 from mediaforce.library.media_scopes import logical_library_rel_path
 from mediaforce.tuning.compression_intent import compression_intent_from_item
+from mediaforce.tuning.production_lineage import validated_target_identity
+from mediaforce.tuning.production_outcomes import append_target_production_outcome, prepare_target_production_outcome
 
 LOGGER = logging.getLogger(__name__)
 
@@ -268,6 +270,8 @@ def validate_one_item(
                 repair_payload["skipped_reason"] = "normal validation failed after remux candidate"
             safe_unlink(repair_candidate_path)
 
+    if validation["passed"] and row.get("target_lineage_json"):
+        validation["target_lineage_identity"] = validated_target_identity(row, item, staging_path)
     now = timestamp()
     connection.execute(
         update(staged_artifacts)
@@ -506,6 +510,7 @@ def promote_one_item(
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     destination_path.parent.mkdir(parents=True, exist_ok=True)
 
+    target_outcome = prepare_target_production_outcome(stage_row, item)
     archive_backup_path: Path | None = None
     source_archived = False
     staged_promoted = False
@@ -575,6 +580,11 @@ def promote_one_item(
                 archived_source_path=str(archive_path),
                 updated_at=now,
             )
+        )
+        append_target_production_outcome(
+            connection, prepared=target_outcome, promoted_at=now,
+            promoted_path=str(destination_path), promoted_content_fingerprint=promoted_content_fingerprint,
+            promoted_size_bytes=promoted_stat.st_size, promoted_mtime_ns=promoted_stat.st_mtime_ns,
         )
         connection.commit()
     except BaseException as promotion_error:

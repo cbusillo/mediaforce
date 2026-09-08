@@ -32,6 +32,7 @@ from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection,
     older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
     restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, scope_target_size_blocker, \
     workflow_eligibility
+from mediaforce.tuning.production_lineage import attach_target_lineage
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
 from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authorize_compression_change, \
@@ -474,6 +475,7 @@ def queue_folder_encode_action(
         )
         if failed_target_reason is not None:
             raise HTTPException(status_code=409, detail=failed_target_reason)
+        advice_state: ActionPayload = {}
         if load_advice_state is not None:
             advice_state = object_dict(load_advice_state(config, normalized_prefix))
             quality_risk_contract = build_quality_risk_contract(
@@ -804,6 +806,10 @@ def queue_folder_encode_action(
         if terminal_job_needs_requeue and latest_encode_job is not None:
             prepare_terminal_encode_job_for_requeue_fn(connection, latest_encode_job)
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
+        attach_target_lineage(
+            connection, manifest=manifest, calibration=calibration_payload,
+            advice_state=advice_state, approval_contract=production_approval_contract,
+        )
         saved_profile_path = config.paths.runtime_settings_path
         upsert_override(saved_profile_path, normalized_prefix, calibration_policy)
         refreshed_config = load_config(config.paths.config_path)
