@@ -177,6 +177,35 @@ class QualityRiskContractTests(unittest.TestCase):
 
         self.assertEqual(contract["verdict"], "needs_operator_review")
 
+    def test_under_target_recovery_exposes_only_safe_historical_measurements(self) -> None:
+        from mediaforce.tuning.quality_risk import target_size_search_public_view
+
+        trace = {
+            "status": "bound_exhausted",
+            "selection_reason": "largest_quality_safe_candidate_under_target_band",
+            "target": {"sample_lower_bound_bytes": 264_000_000},
+            "source_cap": {"video_cap_bytes": 223_000_000},
+            "quality_floor": {"minimum": 80.0},
+            "best_reachable_candidate": {
+                "crf": 42.0, "metric": "VMAF", "metric_score": 90.8,
+                "quality_floor_met": True, "violates_source_cap": False,
+                "predicted_video_bytes": 151_000_000,
+                "predicted_whole_episode_bytes": 219_000_000,
+            },
+        }
+        public = target_size_search_public_view(trace)
+        self.assertEqual(public["under_target_review_candidate"]["metric_score"], 90.8)
+        self.assertTrue(public["under_target_review_candidate"]["requires_fresh_sample"])
+        self.assertIsNone(public["selected_crf"])
+        for field, value in (
+                ("metric_score", 79.0),
+                ("predicted_video_bytes", 224_000_000), ("violates_source_cap", True),
+                ("predicted_whole_episode_bytes", 300_000_000),
+        ):
+            with self.subTest(field=field, value=value):
+                invalid = {**trace, "best_reachable_candidate": {**trace["best_reachable_candidate"], field: value}}
+                self.assertIsNone(target_size_search_public_view(invalid)["under_target_review_candidate"])
+
     def test_target_size_quality_conflict_is_typed_without_exposing_raw_candidates(self) -> None:
         trace = self._target_size_trace(status="quality_conflict")
         contract = self._contract(

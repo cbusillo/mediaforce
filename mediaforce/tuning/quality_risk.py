@@ -586,6 +586,38 @@ def build_quality_risk_contract(
     }
 
 
+def _under_target_review_candidate(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Historical measurements are review guidance, never approval authority."""
+    if payload.get("selection_reason") != "largest_quality_safe_candidate_under_target_band":
+        return None
+    candidate = object_dict(payload.get("best_reachable_candidate"))
+    target = object_dict(payload.get("target"))
+    source_cap = object_dict(payload.get("source_cap"))
+    quality = object_dict(payload.get("quality_floor"))
+    projected = int_value(candidate.get("predicted_whole_episode_bytes"))
+    video = int_value(candidate.get("predicted_video_bytes"))
+    cap = int_value(source_cap.get("video_cap_bytes"))
+    score = float_value(candidate.get("metric_score"))
+    minimum = float_value(quality.get("minimum"))
+    if (
+            candidate.get("quality_floor_met") is not True
+            or candidate.get("violates_source_cap") is not False
+            or not 0 < projected < int_value(target.get("sample_lower_bound_bytes"))
+            or not 0 < video <= cap
+            or not math.isfinite(score) or not math.isfinite(minimum)
+            or minimum <= 0 or score < minimum
+    ):
+        return None
+    return {
+        "crf": float_value(candidate.get("crf")),
+        "metric": str(candidate.get("metric") or ""),
+        "metric_score": score,
+        "minimum_metric_score": minimum,
+        "predicted_whole_episode_bytes": projected,
+        "requires_fresh_sample": True,
+    }
+
+
 def target_size_search_public_view(trace: Mapping[str, Any] | None) -> dict[str, Any] | None:
     payload = object_dict(trace)
     if not payload:
@@ -620,6 +652,7 @@ def target_size_search_public_view(trace: Mapping[str, Any] | None) -> dict[str,
         "range_expanded": bool(crf_bounds.get("range_expanded")),
         "measured_beyond_configured": bool(crf_bounds.get("measured_beyond_configured")),
         "selected_beyond_configured": bool(crf_bounds.get("selected_beyond_configured")),
+        "under_target_review_candidate": _under_target_review_candidate(payload),
     }
 
 

@@ -1313,6 +1313,22 @@
 		await focusCurrentHeading();
 	}
 
+	async function recoverTargetConstraint() {
+		const intent = currentOperatorIntent(folder);
+		if (!targetConstraint?.canReviewSmaller || !intent) {
+			await chooseDifferentSize();
+			return;
+		}
+		await startTest(
+			'Allow a smaller result while keeping the current size ceiling, resolution, quality floors, and streams. Create a fresh sample for review; this does not approve production.',
+			withCompressionIntent(intent, {
+				schema_version: 1,
+				level: 'perceptual_floor',
+				confirmed: true
+			})
+		);
+	}
+
 	async function openRevisionPane() {
 		revisionPaneOpen = true;
 		await tick();
@@ -2428,7 +2444,7 @@
 							<button
 								class="primary-button primary-button--light"
 								type="button"
-								onclick={chooseDifferentSize}
+								onclick={recoverTargetConstraint}
 							>
 								{targetConstraint.recoveryLabel}
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h11M11 5l5 5-5 5" /></svg>
@@ -2928,7 +2944,11 @@
 				<div class="help-safety">
 					{#if targetConstraint}
 						<strong>No quality rule was silently relaxed.</strong>
-						<span>Choose a viable goal, then Mediaforce can create a fresh sample.</span>
+						<span
+							>{targetConstraint.canReviewSmaller
+								? 'The saved measurements are not visual approval. A fresh sample rechecks the source and settings before review.'
+								: 'Choose a viable goal, then Mediaforce can create a fresh sample.'}</span
+						>
 					{:else if humanState.recoveryKind === 'test'}
 						<strong>Your library is safe.</strong>
 						<span>Nothing was replaced. Trying again rebuilds the comparison.</span>
@@ -2974,7 +2994,7 @@
 					<button
 						class="primary-button"
 						type="button"
-						onclick={() => (targetConstraint ? chooseDifferentSize() : recoverSeason())}
+						onclick={() => (targetConstraint ? recoverTargetConstraint() : recoverSeason())}
 					>
 						{targetConstraint?.recoveryLabel ||
 							(recoveryNeedsFreshGoal

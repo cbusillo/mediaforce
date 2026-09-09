@@ -25,6 +25,44 @@ from mediaforce.tuning.target_size_search import (
 
 
 class TargetSizeSearchTests(unittest.TestCase):
+    def test_under_band_sample_requires_confirmed_smaller_intent_and_quality(self) -> None:
+        for level, confirmed, score, accepted in (
+                ("perceptual_floor", True, 90.0, True),
+                ("transparent", True, 90.0, True),
+                ("balanced", True, 90.0, False),
+                ("reference", True, 90.0, False),
+                ("perceptual_floor", False, 90.0, False),
+                ("perceptual_floor", True, 79.0, False),
+        ):
+            with self.subTest(level=level, confirmed=confirmed, score=score):
+                def run_sample(_path: Path, **_kwargs: Any) -> SampleEncodeResult:
+                    return SampleEncodeResult("VMAF", score, 10.0, 30.0, 100_000_000, "measured")
+
+                kwargs = dict(
+                    source_codec="h264", metric_name="vmaf", metric_target=85.0,
+                    min_metric_score=80.0, preset=4, pixel_format="yuv420p10le",
+                    sample_every="8m", sample_duration="20s", min_crf=18, max_crf=38,
+                    svt_params=[], video_filter=None,
+                    stream_budget_ledger=self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000),
+                    transform_plan=self._transform_plan(), process_controller=None,
+                    host=None, quality_temp_dir=None, run_sample_encode=run_sample,
+                )
+                policy = {
+                    "compression_intent_schema_version": 1, "compression_intent": level,
+                    "compression_intent_source": "operator", "compression_intent_confirmed": confirmed,
+                }
+                if not accepted:
+                    with self.assertRaises(TargetSizeSearchError):
+                        search_target_size(Path("/tmp/source.mkv"), policy, **kwargs)
+                    continue
+                result = search_target_size(Path("/tmp/source.mkv"), policy, **kwargs)
+                trace = result.target_size_trace
+                self.assertEqual(trace["selection_reason"], "quality_safe_under_target_accepted_by_intent")
+                self.assertFalse(trace["selected_candidate"]["within_sample_band"])
+                self.assertTrue(trace["selected_candidate"]["quality_floor_met"])
+                self.assertFalse(trace["selected_candidate"]["violates_source_cap"])
+                self.assertLessEqual(len(trace["candidates"]), 6)
+
     def test_perceptual_floor_selects_130_mb_over_150_mb(self) -> None:
         ledger = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
         measured: list[int] = []
