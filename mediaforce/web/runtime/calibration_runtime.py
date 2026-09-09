@@ -22,6 +22,7 @@ from mediaforce.encoding.quality import default_local_quality_temp_root, quality
     resolve_local_quality_temp_root
 from mediaforce.encoding.video_filters import build_video_filter, planned_output_dimensions
 from mediaforce.hosts.config import host_media_access_for_host, host_targets_current_machine
+from mediaforce.remote import execution_mode_for_host
 from mediaforce.reviewing.artifact_identity import reviewed_artifact_fingerprint
 from mediaforce.state_cleanup import purge_transient_artifacts
 from mediaforce.tuning.content_intent_observations import (
@@ -658,6 +659,7 @@ def run_sampled_calibration(
 ) -> tuple[dict[str, Any], Path | None]:
     _ = prefix
     quality_host = _quality_host_data(config, host_data)
+    remote_review = execution_mode_for_host(quality_host) == "ssh"
     if source_path_override is None:
         controller_source_path = Path(sample_item["source_path"])
         quality_source_path = resolve_item_source_path(
@@ -850,12 +852,12 @@ def run_sampled_calibration(
             8.0,
             media_fingerprint=object_dict(sample_item.get("media_fingerprint")),
             media_fingerprint_decision=object_dict(sample_item.get("media_fingerprint_decision")),
-            analyze_source=controller_source_path.exists(),
+            analyze_source=not remote_review and controller_source_path.exists(),
             process_controller=process_controller,
         )
     timestamps = [moment.timestamp_seconds for moment in review_moments]
     if not timestamps:
-        if controller_source_path.exists():
+        if not remote_review and controller_source_path.exists():
             timestamps = deps.recommend_review_timestamps(
                 controller_source_path,
                 float_value(sample_item.get("duration_seconds")),
@@ -903,7 +905,9 @@ def run_sampled_calibration(
     )
     if progress_callback is not None:
         progress_callback("building_review", completed=2, total=3)
-    compare_clips = deps.generate_compare_clips_from_review_pairs(
+    # The browser compares the retained source/preview pair directly. Avoid a
+    # redundant controller-side ffmpeg composite for remote sample jobs.
+    compare_clips = [] if remote_review else deps.generate_compare_clips_from_review_pairs(
         source_clips=source_clips,
         previews=preview_clips,
         output_dir=output_dir,

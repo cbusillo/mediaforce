@@ -1910,6 +1910,50 @@ describe('season experience translation', () => {
 		});
 	});
 
+	it('offers a fresh smaller review without treating the failed measurements as approval', () => {
+		const request = sizeOption('recommended', 'normalized', 300, 294, 45).operator_intent;
+		const failed = folder({
+			resolved_operator_intent: { ...folder().resolved_operator_intent!, request },
+			failed_target_size_search: {
+				status: 'bound_exhausted',
+				selection_reason: 'largest_quality_safe_candidate_under_target_band',
+				under_target_review_candidate: {
+					crf: 42,
+					metric: 'VMAF',
+					metric_score: 90.8,
+					minimum_metric_score: 80,
+					predicted_whole_episode_bytes: 219_000_000,
+					requires_fresh_sample: true
+				}
+			}
+		});
+		expect(targetConstraintSummary(failed)).toMatchObject({
+			canReviewSmaller: true,
+			recoveryLabel: 'Allow smaller and create review sample',
+			detail: expect.stringContaining('219 MB with VMAF 90.8')
+		});
+		expect(targetConstraintSummary(failed)?.detail).toContain('selected candidate may change');
+		expect(
+			detailSeasonState(failed, {
+				...status,
+				calibration_job: null,
+				calibration_status: 'idle',
+				workflow_state: undefined
+			})
+		).toMatchObject({ key: 'needs_help', recoveryKind: 'test' });
+		const intent = withCompressionIntent(currentOperatorIntent(failed)!, {
+			schema_version: 1,
+			level: 'perceptual_floor',
+			confirmed: true
+		});
+		expect(intent.size_goal).toEqual(request.size_goal);
+		expect(intent.resolution).toEqual(request.resolution);
+		expect(intent.evidence_authority).not.toBe('approved_visual_result');
+		expect(
+			targetConstraintSummary({ ...failed, resolved_operator_intent: undefined })?.canReviewSmaller
+		).toBeUndefined();
+	});
+
 	it('recognizes legacy CRF-bound failures before the generic missing-review message', () => {
 		const failedFolder = folder({
 			calibration: { job_id: 'legacy-bound-failure' },

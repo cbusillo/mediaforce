@@ -348,6 +348,7 @@ export interface TargetConstraintSummary {
 	title: string;
 	detail: string;
 	recoveryLabel: string;
+	canReviewSmaller?: boolean;
 }
 
 export interface CalibrationEtaSummary {
@@ -1420,8 +1421,7 @@ export function compressionIntentContract(
 						sizeLabel: 'Size ceiling',
 						sizeRule: 'Smaller is acceptable while measured quality remains good.',
 						searchLabel: 'Low end first',
-						searchRule:
-							'Searches toward the bottom of the sample band while the measured quality floor holds.',
+						searchRule: 'Searches below the size ceiling while the measured quality floor holds.',
 						qualityLabel: 'Measured acceptability floor',
 						qualityRule:
 							'Chooses the smallest candidate that still clears the measured quality floor.',
@@ -1532,6 +1532,16 @@ export function targetConstraintSummary(
 		legacyBoundExhaustion ||
 		sourceCap?.status === 'arithmetically_infeasible'
 	) {
+		const candidate = search?.under_target_review_candidate;
+		if (candidate && currentOperatorIntent(folder)) {
+			return {
+				kind: 'bound_exhausted',
+				title: 'A smaller result passed the measured quality checks.',
+				detail: `The previous sample projected ${Math.round(candidate.predicted_whole_episode_bytes / 1_000_000)} MB with ${candidate.metric.toUpperCase()} ${candidate.metric_score.toFixed(1)} (minimum ${candidate.minimum_metric_score}). It passed the source-size cap but fell below the target band. Allowing smaller results creates fresh comparison clips with current settings; the selected candidate may change. Review is still required before encoding.`,
+				recoveryLabel: 'Allow smaller and create review sample',
+				canReviewSmaller: true
+			};
+		}
 		return {
 			kind: 'bound_exhausted',
 			title: 'The sample reached a configured limit.',
@@ -2074,7 +2084,7 @@ export function detailSeasonState(
 			tone: 'active'
 		};
 	}
-	if (retryableSample || isFailedJob(sampleJob)) {
+	if (retryableSample || isFailedJob(sampleJob) || folder.failed_target_size_search) {
 		return {
 			key: 'needs_help',
 			label: 'Sample needs retry',

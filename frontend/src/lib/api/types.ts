@@ -1326,6 +1326,14 @@ export interface QualityRiskOperatorRecord {
 }
 
 export interface QualityRiskTargetSizeSearch {
+	under_target_review_candidate?: {
+		crf: number;
+		metric: string;
+		metric_score: number;
+		minimum_metric_score: number;
+		predicted_whole_episode_bytes: number;
+		requires_fresh_sample: boolean;
+	} | null;
 	trace_id?: string;
 	schema_version?: number;
 	status?: 'selected' | 'infeasible' | 'bound_exhausted' | 'quality_conflict' | 'needs_review';

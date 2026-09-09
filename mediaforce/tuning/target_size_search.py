@@ -275,8 +275,9 @@ def search_target_size(
             candidate_progress_callback(len(candidates), MAX_TARGET_SIZE_CANDIDATES)
 
     measure(seed_crf, "target_seed")
+    _, upper_bound_bytes = _sample_bounds(stream_budget_ledger)
     while len(candidates) < MAX_TARGET_SIZE_CANDIDATES:
-        selected = _select_candidate(candidates, compression_intent)
+        selected = _select_candidate(candidates, compression_intent, upper_bound_bytes=upper_bound_bytes)
         if selected is not None:
             next_floor_crf = _next_intent_probe_crf(
                 candidates,
@@ -285,6 +286,7 @@ def search_target_size(
                 min_crf=normalized_min_crf,
                 max_crf=normalized_max_crf,
                 compression_intent=compression_intent,
+                upper_bound_bytes=upper_bound_bytes,
             )
             if next_floor_crf is None:
                 break
@@ -298,11 +300,15 @@ def search_target_size(
             break
         measure(next_crf, "expanded_bound" if next_crf > configured_max_crf else "refine")
 
-    selected = _select_candidate(candidates, compression_intent)
+    selected = _select_candidate(candidates, compression_intent, upper_bound_bytes=upper_bound_bytes)
     if selected is not None:
         trace = _trace_payload(
             status="selected",
-            reason="candidate_inside_sample_projection_band",
+            reason=(
+                "candidate_inside_sample_projection_band"
+                if selected.within_sample_band
+                else "quality_safe_under_target_accepted_by_intent"
+            ),
             ledger=stream_budget_ledger,
             candidates=candidates,
             selected=selected,
@@ -425,7 +431,7 @@ def _try_target_size_warm_start(
         min_metric_score=min_metric_score,
         ledger=ledger,
     )
-    selected = _select_candidate([candidate], compression_intent)
+    selected = _select_candidate([candidate], compression_intent, upper_bound_bytes=_sample_bounds(ledger)[1])
     warm_trace = _target_warm_start_trace(
         warm_start,
         status="accepted" if selected is not None else "rejected_fallback",
@@ -2044,10 +2050,13 @@ def _candidate_from_sample(
 def _select_candidate(
         candidates: list[TargetSizeCandidate],
         compression_intent: CompressionIntentV1,
+        *,
+        upper_bound_bytes: int,
 ) -> TargetSizeCandidate | None:
     eligible = [
         candidate for candidate in candidates
-        if candidate.within_sample_band and candidate.quality_floor_met and not candidate.violates_source_cap
+        if _candidate_matches_size_intent(candidate, compression_intent, upper_bound_bytes)
+        and candidate.quality_floor_met and not candidate.violates_source_cap
     ]
     if not eligible:
         return None
@@ -2066,6 +2075,20 @@ def _select_candidate(
             metric_score=candidate.metric_score,
             crf=candidate.crf,
         ),
+    )
+
+
+def _candidate_matches_size_intent(
+        candidate: TargetSizeCandidate,
+        compression_intent: CompressionIntentV1,
+        upper_bound_bytes: int,
+) -> bool:
+    if candidate.within_sample_band:
+        return True
+    return bool(
+        compression_intent.accepts_under_target_result
+        and candidate.predicted_whole_episode_bytes is not None
+        and 0 < candidate.predicted_whole_episode_bytes <= upper_bound_bytes
     )
 
 
@@ -2121,6 +2144,7 @@ def _next_intent_probe_crf(
         min_crf: int,
         max_crf: int,
         compression_intent: CompressionIntentV1,
+        upper_bound_bytes: int,
 ) -> int | None:
     selected_crf = int(round(selected.crf))
     if not compression_intent.requires_confirmation and compression_intent.level == "reference":
@@ -2137,7 +2161,7 @@ def _next_intent_probe_crf(
         return None
     higher_crf_candidates = [candidate for candidate in candidates if candidate.crf > selected.crf]
     if any(
-            not candidate.within_sample_band
+            not _candidate_matches_size_intent(candidate, compression_intent, upper_bound_bytes)
             or not candidate.quality_floor_met
             or candidate.violates_source_cap
             for candidate in higher_crf_candidates

@@ -88,7 +88,29 @@ This makes the exact 130 MB versus 150 MB case deterministic: under
 higher metric score.
 
 An under-target result is accepted without an upward retry for `transparent`
-or `perceptual_floor`. For `balanced` and `reference`, a larger retry requires
+or `perceptual_floor`, including during sample selection. Their sample search
+may cross the lower projection band while respecting the upper bound, source
+video cap, quality floor, CRF bounds, and six-candidate limit. The trace records
+`quality_safe_under_target_accepted_by_intent` when that exception selects a
+candidate. Unconfirmed, `balanced`, and `reference` intents retain the lower
+band requirement.
+
+After a failed search, the workspace can show a safe smaller candidate's
+historical measurements and offer **Allow smaller and create review sample**.
+This explicitly selects `perceptual_floor` with the current size goal and
+creates a new proposal and sample through the ordinary provenance checks. It
+does not approve the failed job or trust old clips. The new search may select
+a different candidate; newly generated comparison pairs must pass the ordinary
+review and approval gates before production. Quality or source-cap failures
+do not expose this recovery suggestion.
+
+Remote sample review uses the worker-rendered source and preview clips for
+browser comparison. It uses existing fingerprint moments or duration coverage
+without controller source analysis, and omits the optional combined comparison
+movie to avoid a controller-side video render. Local sample review retains the
+combined movie.
+
+For `balanced` and `reference`, a larger retry requires
 item-, policy-, intent-, and job-bound `measured_item_variance` evidence plus an
 authorization decision. A measured retry must improve the selected quality
 score; merely filling unused bytes is not a benefit. Verification tolerances
