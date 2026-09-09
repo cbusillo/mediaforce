@@ -1836,8 +1836,9 @@ async function checkUnderTargetSampleRecovery(baseUrl, timeoutMs) {
       if (pathname !== prefix && pathname !== `${prefix}/status`) return route.continue();
       const response = await route.fetch();
       const payload = await response.json();
-      payload.calibration_job = { job_id: "smaller-search", status: confirmed ? "queued" : "failed", mode: "sample" };
-      payload.calibration_status = confirmed ? "queued" : "failed";
+      // The short-lived failed-job notice can expire while its trace remains.
+      payload.calibration_job = confirmed ? { job_id: "smaller-search", status: "queued", mode: "sample" } : null;
+      payload.calibration_status = confirmed ? "queued" : "idle";
       payload.retryable_sample_job = null;
       payload.workflow_state = null;
       if (pathname === prefix) {

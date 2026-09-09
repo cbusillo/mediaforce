@@ -1933,6 +1933,14 @@ describe('season experience translation', () => {
 			detail: expect.stringContaining('219 MB with VMAF 90.8')
 		});
 		expect(targetConstraintSummary(failed)?.detail).toContain('selected candidate may change');
+		expect(
+			detailSeasonState(failed, {
+				...status,
+				calibration_job: null,
+				calibration_status: 'idle',
+				workflow_state: undefined
+			})
+		).toMatchObject({ key: 'needs_help', recoveryKind: 'test' });
 		const intent = withCompressionIntent(currentOperatorIntent(failed)!, {
 			schema_version: 1,
 			level: 'perceptual_floor',

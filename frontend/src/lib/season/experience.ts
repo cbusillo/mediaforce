@@ -2084,7 +2084,7 @@ export function detailSeasonState(
 			tone: 'active'
 		};
 	}
-	if (retryableSample || isFailedJob(sampleJob)) {
+	if (retryableSample || isFailedJob(sampleJob) || folder.failed_target_size_search) {
 		return {
 			key: 'needs_help',
 			label: 'Sample needs retry',
