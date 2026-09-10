@@ -186,7 +186,9 @@ from mediaforce.web.runtime_lock import (
     exclusive_mediaforce_runtime_lock,
     reserve_mediaforce_database_identity,
 )
-from mediaforce.web.routes.queues import register_child_recovery_routes
+from mediaforce.web.routes.queues import (
+    CHILD_RECOVERY_APPLY_PATH, CHILD_RECOVERY_PREVIEW_PATH, register_child_recovery_routes,
+)
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
@@ -4730,9 +4732,9 @@ def _run_periodic_cleanup(
 
 
 def _request_triggers_periodic_cleanup(method: str, path: str = "") -> bool:
-    return method.upper() not in {"GET", "HEAD", "OPTIONS"} and path not in {
-        "/api/encode-queue/recover-children/preview",
-        "/api/encode-queue/recover-children/apply",
+    return method.upper() not in {"GET", "HEAD", "OPTIONS"} and path.rstrip("/") not in {
+        CHILD_RECOVERY_PREVIEW_PATH,
+        CHILD_RECOVERY_APPLY_PATH,
     }
 
 

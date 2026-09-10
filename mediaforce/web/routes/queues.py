@@ -7,6 +7,10 @@ from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 
+CHILD_RECOVERY_PREVIEW_PATH = "/api/encode-queue/recover-children/preview"
+CHILD_RECOVERY_APPLY_PATH = "/api/encode-queue/recover-children/apply"
+
+
 def register_queue_routes(
         app: FastAPI,
         *,
@@ -57,10 +61,14 @@ def register_child_recovery_routes(
         if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
             raise HTTPException(status_code=415, detail="Recovery requires application/json.")
         origin = request.headers.get("origin")
+        try:
+            parsed_origin = urlsplit(origin) if origin is not None else None
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Invalid recovery origin.") from None
         if request.headers.get("sec-fetch-site") == "cross-site" or (
-                origin is not None and (
-                    urlsplit(origin).scheme != request.url.scheme
-                    or urlsplit(origin).netloc != request.url.netloc
+                parsed_origin is not None and (
+                    parsed_origin.scheme != request.url.scheme
+                    or parsed_origin.netloc != request.url.netloc
                 )
         ):
             raise HTTPException(status_code=403, detail="Recovery must originate from this controller.")
@@ -85,10 +93,10 @@ def register_child_recovery_routes(
         result = await run_in_threadpool(recover_children_action, parent_id, child_ids, token)
         return JSONResponse(result)
 
-    @app.post("/api/encode-queue/recover-children/preview")
+    @app.post(CHILD_RECOVERY_PREVIEW_PATH)
     async def preview_child_recovery(request: Request) -> JSONResponse:
         return await dispatch(request, apply=False)
 
-    @app.post("/api/encode-queue/recover-children/apply")
+    @app.post(CHILD_RECOVERY_APPLY_PATH)
     async def apply_child_recovery(request: Request) -> JSONResponse:
         return await dispatch(request, apply=True)

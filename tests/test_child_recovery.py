@@ -92,11 +92,11 @@ class ChildRecoveryTests(unittest.TestCase):
             before = self._raw_jobs(connection)
             token = self._preview(connection, ["child-0", "child-1"])["token"]
             connection.commit()
-            def fail_second(_connection: DBClient, _child: dict[str, Any]) -> None:
+            def fail_sync(_connection: DBClient, _child: dict[str, Any]) -> None:
                 raise RuntimeError("sync failed")
 
             with self.assertRaisesRegex(RuntimeError, "sync failed"):
-                self._apply(connection, ["child-0", "child-1"], token, sync_parent=fail_second)
+                self._apply(connection, ["child-0", "child-1"], token, sync_parent=fail_sync)
             self.assertEqual(self._raw_jobs(connection), before)
             self.assertEqual(connection.execute(select(item_events)).all(), [])
 
