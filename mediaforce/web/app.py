@@ -186,6 +186,10 @@ from mediaforce.web.runtime_lock import (
     exclusive_mediaforce_runtime_lock,
     reserve_mediaforce_database_identity,
 )
+from mediaforce.web.routes.queues import register_child_recovery_routes
+from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
+from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
+from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle
@@ -657,7 +661,7 @@ def create_app(
     async def periodic_cleanup(
             request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if _request_triggers_periodic_cleanup(request.method):
+        if _request_triggers_periodic_cleanup(request.method, request.url.path):
             _run_periodic_cleanup(
                 config,
                 cleanup_lock,
@@ -1959,6 +1963,42 @@ def create_app(
                 membership_token=membership_token,
             )
 
+    def _recover_children_action(
+            parent_job_id: str,
+            child_ids: list[str],
+            token: str | None,
+    ) -> dict[str, Any]:
+        current_config = load_config(config_path)
+        with open_db(current_config.paths.db_path) as connection:
+            def approval(parent: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+                return child_recovery_approval(
+                    current_config, parent, manifest,
+                    load_calibration_state=_load_calibration_state,
+                    review_gate=_review_gate,
+                    load_advice_state=_load_advice_state_for_queue,
+                )
+
+            def candidates(
+                    current_connection: DBClient,
+                    parent: dict[str, Any],
+                    items: list[dict[str, Any]],
+            ) -> dict[str, Any]:
+                return child_recovery_candidate_evidence(current_connection, current_config, parent, items)
+
+            if token is None:
+                return preview_child_recovery(
+                    connection, current_config, parent_job_id, child_ids=child_ids,
+                    approval_contract=approval, candidate_eligibility=candidates,
+                )
+            return apply_child_recovery(
+                connection, current_config, parent_job_id, child_ids=child_ids,
+                expected_token=token, approval_contract=approval, candidate_eligibility=candidates,
+                sync_parent=lambda current_connection, child: sync_encode_job_parent(
+                    current_connection, child, _encode_queue_runtime_deps(),
+                ),
+                now_iso=_now_iso,
+            )
+
     def _pause_encode_queue_action() -> dict[str, Any]:
         return pause_encode_queue_action(
             connection_factory=lambda: open_db(config.paths.db_path),
@@ -2092,6 +2132,7 @@ def create_app(
         promote_folder_outputs_action=_promote_folder_outputs_action,
         save_profile_action=_save_profile_action,
     )
+    register_child_recovery_routes(app, recover_children_action=_recover_children_action)
     register_queue_routes(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
@@ -4688,8 +4729,11 @@ def _run_periodic_cleanup(
             raise
 
 
-def _request_triggers_periodic_cleanup(method: str) -> bool:
-    return method.upper() not in {"GET", "HEAD", "OPTIONS"}
+def _request_triggers_periodic_cleanup(method: str, path: str = "") -> bool:
+    return method.upper() not in {"GET", "HEAD", "OPTIONS"} and path not in {
+        "/api/encode-queue/recover-children/preview",
+        "/api/encode-queue/recover-children/apply",
+    }
 
 
 def _run_periodic_cleanup_task(config: MediaforceConfig, cleanup_lock: threading.Lock) -> None:

@@ -59,6 +59,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
 
 ## Developer workflows
 
+- `docs/development/targeted-child-recovery.md`: exact child recovery for host-setup failures in an active encode batch.
 - `docs/development/database-tooling.md`: SQLAlchemy/Alembic schema workflow,
   legacy-bridge notes, and migration validation commands
 - `docs/development/package-builds.md`: wheel/sdist resource boundaries and

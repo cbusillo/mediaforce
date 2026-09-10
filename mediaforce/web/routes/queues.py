@@ -1,7 +1,8 @@
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -45,3 +46,49 @@ def register_queue_routes(
     @app.post("/api/calibration-queue/stop")
     def api_stop_calibration_queue() -> JSONResponse:
         return JSONResponse(stop_calibration_queue_action())
+
+
+def register_child_recovery_routes(
+        app: FastAPI,
+        *,
+        recover_children_action: Callable[[str, list[str], str | None], dict[str, Any]],
+) -> None:
+    async def dispatch(request: Request, *, apply: bool) -> JSONResponse:
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            raise HTTPException(status_code=415, detail="Recovery requires application/json.")
+        origin = request.headers.get("origin")
+        if request.headers.get("sec-fetch-site") == "cross-site" or (
+                origin is not None and (
+                    urlsplit(origin).scheme != request.url.scheme
+                    or urlsplit(origin).netloc != request.url.netloc
+                )
+        ):
+            raise HTTPException(status_code=403, detail="Recovery must originate from this controller.")
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="A JSON recovery request is required.") from None
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="A recovery request object is required.")
+        parent_id = body.get("parent_job_id")
+        child_ids = body.get("child_ids")
+        if (
+                not isinstance(parent_id, str) or not parent_id.strip()
+                or not isinstance(child_ids, list) or not 1 <= len(child_ids) <= 100
+                or any(not isinstance(value, str) or not value.strip() for value in child_ids)
+                or len(set(child_ids)) != len(child_ids)
+        ):
+            raise HTTPException(status_code=400, detail="Specify one parent and 1–100 unique child IDs.")
+        token = body.get("token") if apply else None
+        if apply and (not isinstance(token, str) or not token):
+            raise HTTPException(status_code=400, detail="Apply requires the preview token.")
+        result = await run_in_threadpool(recover_children_action, parent_id, child_ids, token)
+        return JSONResponse(result)
+
+    @app.post("/api/encode-queue/recover-children/preview")
+    async def preview_child_recovery(request: Request) -> JSONResponse:
+        return await dispatch(request, apply=False)
+
+    @app.post("/api/encode-queue/recover-children/apply")
+    async def apply_child_recovery(request: Request) -> JSONResponse:
+        return await dispatch(request, apply=True)
