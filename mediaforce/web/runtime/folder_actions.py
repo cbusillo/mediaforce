@@ -2413,3 +2413,91 @@ def _parse_state_timestamp(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def child_recovery_approval(
+        config: MediaforceConfig,
+        parent: JobPayload,
+        manifest: ActionPayload,
+        *,
+        load_calibration_state: LoadCalibrationStateFn,
+        review_gate: ReviewGateFn,
+        load_advice_state: LoadAdviceStateFn,
+) -> ActionPayload:
+    prefix = str(parent["prefix"])
+    blocker = production_action_blocker(config, prefix)
+    if blocker is not None:
+        raise HTTPException(status_code=409, detail=blocker["message"])
+    calibration = object_dict(load_calibration_state(config, prefix))
+    gate = review_gate(calibration)
+    if not gate.get("can_confirm_full"):
+        raise HTTPException(status_code=409, detail=str(gate.get("message") or "Current approval is required."))
+    current = _production_approval_contract(calibration)
+    recorded = _valid_production_approval_contract(
+        object_dict(manifest.get("selection")).get("production_approval_contract")
+    )
+    if current is None or recorded is None or current != recorded:
+        raise HTTPException(status_code=409, detail="The manifest no longer matches the current production approval.")
+    advice = object_dict(load_advice_state(config, prefix))
+    risk = build_quality_risk_contract(
+        prefix=prefix,
+        sample_item=object_dict(calibration.get("sample_item")),
+        current_policy=object_dict(calibration.get("policy")),
+        preview_policy=object_dict(calibration.get("policy")),
+        operator_request=object_dict(advice.get("operator_request")) or None,
+        calibration=calibration,
+        advice_state=advice,
+    )
+    reason = _quality_risk_blocking_reason(risk)
+    if reason or object_dict(risk.get("operator_decision")).get("status") == "rejected":
+        raise HTTPException(status_code=409, detail=reason or "The current review was rejected.")
+    return current
+
+
+def child_recovery_candidate_evidence(
+        connection: DBClient,
+        config: MediaforceConfig,
+        parent: JobPayload,
+        items: list[ActionPayload],
+) -> ActionPayload:
+    prefix = str(parent["prefix"])
+    item_ids = {int(item["library_item_id"]) for item in items}
+    overrides = {
+        str(provenance.get("season_prefix"))
+        for item in items
+        if (provenance := object_dict(item.get("selection_provenance"))).get("override_applied") is True
+        and provenance.get("manual_override") is True
+        and str(provenance.get("season_prefix") or "").startswith(prefix.rstrip("/") + "/")
+    }
+    decisions = project_candidates(
+        connection, config, prefixes=[prefix], manual_override_prefixes=overrides,
+    )
+    selected = {decision.item_id: decision for decision in decisions if decision.item_id in item_ids}
+    if set(selected) != item_ids or any(not decision.eligible for decision in selected.values()):
+        raise HTTPException(status_code=409, detail="Current source, lifecycle or production policy blocks recovery.")
+    for item in items:
+        decision = selected[int(item["library_item_id"])]
+        if not decision.override_applied:
+            continue
+        original = object_dict(item.get("selection_provenance"))
+        original_codes = {str(reason.get("code")) for reason in object_list(original.get("hold_reasons")) if isinstance(reason, dict)}
+        current_codes = {reason.code for reason in decision.hold_reasons}
+        if (
+                current_codes != original_codes
+                or decision.is_current_season != original.get("is_current_season")
+        ):
+            raise HTTPException(status_code=409, detail="The original lifecycle override no longer covers current holds.")
+    cadence = cadence_safety_partition(connection, library_item_ids=sorted(item_ids), synchronize=False)
+    if cadence.cleared_item_ids != item_ids:
+        raise HTTPException(status_code=409, detail="Current cadence evidence is required for every recovery item.")
+    return {
+        "items": {
+            str(item_id): {
+                "eligible": selected[item_id].eligible,
+                "override_applied": selected[item_id].override_applied,
+                "hold_codes": [reason.code for reason in selected[item_id].hold_reasons],
+            }
+            for item_id in sorted(item_ids)
+        },
+        "cadence_cleared": sorted(cadence.cleared_item_ids),
+    }
