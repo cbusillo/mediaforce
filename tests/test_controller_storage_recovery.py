@@ -492,6 +492,37 @@ class ControllerStorageRecoveryTest(TestCase):
         snapshot = recovery.controller_storage_recovery_snapshot(self.config)
         self.assertEqual({item["status"] for item in snapshot["mounts"]}, {"action_required"})
 
+    def test_ready_admission_stays_available_during_healthy_probe(self) -> None:
+        def ready(mount: ControllerSmbMount, _paths: object) -> ControllerMountProbe:
+            return ControllerMountProbe(
+                True, True, mount.mount_point, mount.source, "smbfs", True
+            )
+
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", side_effect=ready,
+        ):
+            recovery.process_controller_storage_recovery_once(self.config)
+
+        admissions_during_probe: list[str | None] = []
+
+        def ready_with_admission(
+                mount: ControllerSmbMount,
+                _paths: object,
+        ) -> ControllerMountProbe:
+            admissions_during_probe.append(
+                recovery.controller_storage_admission_issue(self.config, None)
+            )
+            return ControllerMountProbe(
+                True, True, mount.mount_point, mount.source, "smbfs", True
+            )
+
+        with patch.object(recovery, "_utc_now", return_value=NOW), patch.object(
+            recovery, "probe_controller_mount", side_effect=ready_with_admission,
+        ):
+            recovery.process_controller_storage_recovery_once(self.config)
+
+        self.assertEqual(admissions_during_probe, [None, None, None])
+
 
 if __name__ == "__main__":
     import unittest

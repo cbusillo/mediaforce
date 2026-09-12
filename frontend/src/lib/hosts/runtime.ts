@@ -4,7 +4,14 @@ export const HOST_STATUS_PENDING_MESSAGE = 'Checking host status...';
 
 export type HostRuntimeBadgeState = {
 	tone: 'idle' | 'ready' | 'wait' | 'fail';
-	label: 'Not checked' | 'Ready' | 'Reachable' | 'Needs setup' | 'Checking' | 'Unavailable';
+	label:
+		| 'Not checked'
+		| 'Ready'
+		| 'Reachable'
+		| 'Needs setup'
+		| 'Checking'
+		| 'Unavailable'
+		| 'Storage blocked';
 };
 
 type QualitySearchMode = 'worker-local' | 'fully-remote' | 'local-assist';
@@ -97,6 +104,10 @@ export function hostsStatusPending(payload: HostsPayload | null | undefined): bo
 
 export function isPendingHostRuntime(runtime: HostRuntime | null | undefined): boolean {
 	return String(runtime?.message ?? '').trim() === HOST_STATUS_PENDING_MESSAGE;
+}
+
+export function hostStatusPollInterval(payload: HostsPayload | null, pollCount: number): number {
+	return payload && hostsStatusPending(payload) && pollCount < 40 ? 1_500 : 15_000;
 }
 
 export function hostRuntimeBadgeState(

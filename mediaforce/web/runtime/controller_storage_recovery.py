@@ -126,11 +126,6 @@ def process_controller_storage_recovery_once(
                     attempted=False,
                 )
                 continue
-            if not prior_indeterminate and (prior is None or prior.status != "action_required"):
-                states_by_mount[str(root)] = _checking_state(
-                    root, signature, prior, now
-                )
-                _save_snapshot(state_path, list(states_by_mount.values()), now)
             probe = (
                 probe_controller_mount(mount, required_paths)
                 if mount is not None
@@ -140,7 +135,7 @@ def process_controller_storage_recovery_once(
             checked_at = _utc_now()
             if probe.mounted and probe.accessible:
                 states_by_mount[str(root)] = _ready_state(
-                    root, signature, checked_at
+                    root, signature, checked_at, previous=prior
                 )
                 continue
 
@@ -256,6 +251,8 @@ def controller_storage_admission_issue(
         if state is None:
             return f"Controller storage at {root} has not been checked."
         if state.status != "ready":
+            if state.status == "checking":
+                return "Controller storage: readiness is being checked."
             message = state.reason or f"Storage at {root} is unavailable."
             if state.status == "action_required":
                 return (
@@ -362,7 +359,13 @@ def _state_from_mount_result(
         now: datetime,
 ) -> ControllerStorageMountState:
     if result.ok and result.probe.mounted and result.probe.accessible:
-        return _ready_state(mount.mount_point, requirement_signature, now, attempted=True)
+        return _ready_state(
+            mount.mount_point,
+            requirement_signature,
+            now,
+            previous=previous,
+            attempted=True,
+        )
     failure_kind = result.failure_kind or result.probe.failure_kind or "mount_failed"
     action_required = result.action_required or failure_kind in _ACTION_REQUIRED_FAILURES
     return _failed_state(
@@ -375,28 +378,6 @@ def _state_from_mount_result(
         detail=_safe_detail(failure_kind, result.detail),
         failure_kind=failure_kind,
         attempted=True,
-    )
-
-
-def _checking_state(
-        mount_point: Path,
-        requirement_signature: str,
-        previous: ControllerStorageMountState | None,
-        now: datetime,
-) -> ControllerStorageMountState:
-    return ControllerStorageMountState(
-        mount_point=str(mount_point),
-        requirement_signature=requirement_signature,
-        verification_generation=previous.verification_generation if previous else None,
-        status="checking",
-        reason=previous.reason if previous else None,
-        detail=previous.detail if previous else None,
-        last_failure_kind=previous.last_failure_kind if previous else None,
-        first_failure_at=previous.first_failure_at if previous else None,
-        last_check_at=_format_utc(now),
-        last_attempt_at=previous.last_attempt_at if previous else None,
-        next_retry_at=previous.next_retry_at if previous else None,
-        failure_count=previous.failure_count if previous else 0,
     )
 
 
@@ -428,6 +409,7 @@ def _ready_state(
         requirement_signature: str,
         now: datetime,
         *,
+        previous: ControllerStorageMountState | None = None,
         attempted: bool = False,
 ) -> ControllerStorageMountState:
     timestamp = _format_utc(now)
@@ -441,7 +423,9 @@ def _ready_state(
         last_failure_kind=None,
         first_failure_at=None,
         last_check_at=timestamp,
-        last_attempt_at=timestamp if attempted else None,
+        last_attempt_at=(
+            timestamp if attempted else (previous.last_attempt_at if previous else None)
+        ),
         next_retry_at=None,
         failure_count=0,
     )
