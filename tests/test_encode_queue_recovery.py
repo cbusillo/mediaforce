@@ -3099,6 +3099,31 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             f"Mediaforce cannot access {self.config.staging_root} on this computer. Mount the storage to continue.",
         )
 
+    def test_host_selection_resumes_after_controller_recovery_without_requeue(self) -> None:
+        host = {
+            "key": "remote-a", "host": "remote-a", "label": "Remote A",
+            "mode": "ssh", "media_access": "mounted", "priority": 10,
+            "capabilities": ["encode_queue"], "available": True,
+            "active_encode_count": 0, "max_parallel_encodes": 1,
+            "queue_active": True,
+        }
+        job = {"job_id": "unchanged", "attempt_count": 0}
+        with open_db(self.config.paths.db_path) as connection, patch(
+            "mediaforce.web.app._host_runtime_rows", return_value=[host],
+        ), patch("mediaforce.web.runtime.encode_runtime.os.access", return_value=True), patch(
+            "mediaforce.web.runtime.encode_runtime.controller_storage_admission_issue",
+            side_effect=["Controller storage is reconnecting.", None],
+        ):
+            blocked, reason = web_app._select_encode_host(connection, self.config, job)
+            selected, recovered_reason = web_app._select_encode_host(connection, self.config, job)
+        self.assertIsNone(blocked)
+        self.assertEqual(reason, "Controller storage is reconnecting.")
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected["key"], "remote-a")
+        self.assertIsNone(recovered_reason)
+        self.assertEqual(job, {"job_id": "unchanged", "attempt_count": 0})
+
     def test_host_selection_uses_controller_staging_storage_for_stream_host(self) -> None:
         self.config.staging_root.mkdir(parents=True)
         statuses = [
@@ -16509,8 +16534,9 @@ raise SystemExit(0)
         start_calibration.assert_not_called()
         start_encode.assert_not_called()
 
-    def test_start_background_workers_starts_both_workers_when_leader(self) -> None:
+    def test_start_background_workers_starts_all_workers_when_leader(self) -> None:
         lease = Mock(spec=WorkerLeadershipLease)
+        storage_handle = Mock()
         calibration_handle = Mock()
         encode_handle = Mock()
         with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=lease), patch(
@@ -16519,13 +16545,17 @@ raise SystemExit(0)
         ) as start_calibration, patch(
                 "mediaforce.web.app._start_encode_queue_worker",
                 return_value=encode_handle,
-        ) as start_encode:
+        ) as start_encode, patch(
+                "mediaforce.web.app._start_controller_storage_worker",
+                return_value=storage_handle,
+        ) as start_storage:
             runtime = web_app._start_background_workers(self.config)
 
         self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertIs(runtime.lease, lease)
-        self.assertEqual(runtime.handles, (calibration_handle, encode_handle))
+        self.assertEqual(runtime.handles, (storage_handle, calibration_handle, encode_handle))
+        start_storage.assert_called_once_with(self.config)
         start_calibration.assert_called_once_with(self.config)
         start_encode.assert_called_once_with(self.config)
 
@@ -16539,6 +16569,11 @@ raise SystemExit(0)
             stop_event.wait()
 
         cases = (
+            (
+                "controller-storage",
+                web_app._start_controller_storage_worker,
+                "mediaforce.web.app._controller_storage_worker_loop",
+            ),
             (
                 "calibration",
                 web_app._start_calibration_queue_worker,
@@ -16701,6 +16736,7 @@ raise SystemExit(0)
 
     def test_background_worker_start_failure_stops_workers_and_releases_lease(self) -> None:
         lease = Mock(spec=WorkerLeadershipLease)
+        storage_handle = Mock()
         calibration_handle = Mock()
         with patch(
             "mediaforce.web.app._acquire_background_worker_leadership",
@@ -16711,12 +16747,17 @@ raise SystemExit(0)
         ), patch(
             "mediaforce.web.app._start_encode_queue_worker",
             side_effect=RuntimeError("worker start failed"),
+        ), patch(
+            "mediaforce.web.app._start_controller_storage_worker",
+            return_value=storage_handle,
         ):
             with self.assertRaisesRegex(RuntimeError, "worker start failed"):
                 web_app._start_background_workers(self.config)
 
         calibration_handle.stop.assert_called_once_with()
         calibration_handle.join.assert_called_once_with()
+        storage_handle.stop.assert_called_once_with()
+        storage_handle.join.assert_called_once_with()
         lease.release.assert_called_once_with()
 
     def test_stop_encode_queue_action_sweeps_orphaned_processes_after_cancel(self) -> None:

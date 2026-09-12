@@ -8,12 +8,13 @@ from typing import Any
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.process_control import ManagedProcessController
+from mediaforce.hosts.controller_mount import controller_mount_lock
 from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQUIRED_ISSUE
 from mediaforce.hosts.config import execution_mode_for_host, host_media_access_for_host, \
     host_status_targets_current_machine, host_targets_current_machine, normalize_host_media_access, \
     remote_shell_path_export_line, ssh_target_for_host
 from mediaforce.hosts.mount_runtime import REMOTE_MOUNT_ATTEMPT_SECONDS, ControllerSmbMount, RemoteSmbMount, \
-    controller_smb_mounts_from_output, controller_smb_mounts_from_payload, controller_smb_mounts_path, \
+    configured_controller_smb_mounts, controller_smb_mounts_from_output, controller_smb_mounts_path, \
     finder_mount_roots_for_paths, load_controller_smb_mounts, mount_smb_shares, remote_smb_mounts_for_paths, \
     save_controller_smb_mounts
 from mediaforce.hosts.status_runtime import _current_machine_host_status as _current_machine_host_status_impl, \
@@ -107,6 +108,32 @@ def recover_remote_host_mounts(
         *,
         force: bool = False,
 ) -> HostSetupResult:
+    if host_targets_current_machine(host):
+        try:
+            with controller_mount_lock(config.paths.runtime_settings_path) as acquired:
+                if not acquired:
+                    return HostSetupResult(
+                        ok=False,
+                        message="A controller storage readiness check or connection is already running.",
+                        failure_kind="host_unavailable",
+                    )
+                return _recover_remote_host_mounts(config, host, status, force=force)
+        except OSError as exc:
+            return HostSetupResult(
+                ok=False,
+                message=f"Controller storage recovery lock is unavailable ({exc.__class__.__name__}).",
+                failure_kind="host_configuration",
+            )
+    return _recover_remote_host_mounts(config, host, status, force=force)
+
+
+def _recover_remote_host_mounts(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        status: HostStatus,
+        *,
+        force: bool,
+) -> HostSetupResult:
     mounts = _remote_smb_mounts_for_status(config, host, status)
     label = str(host.get("label") or status.label or host.get("host") or "Remote host").strip() or "Remote host"
     if not mounts:
@@ -177,10 +204,7 @@ def learn_controller_smb_mounts(config: MediaforceConfig) -> int:
 
 
 def _controller_smb_mounts_for_config(config: MediaforceConfig) -> list[ControllerSmbMount]:
-    override_mounts = controller_smb_mounts_from_payload(config.raw.get("controller_smb_mounts"))
-    learned_mounts = load_controller_smb_mounts(controller_smb_mounts_path(config.paths.runtime_settings_path))
-    resolved = {m.mount_point: m for m in [*learned_mounts, *override_mounts]}
-    return sorted(resolved.values(), key=lambda mount: len(mount.mount_point.parts), reverse=True)
+    return configured_controller_smb_mounts(config)
 
 
 def _controller_required_mount_roots(config: MediaforceConfig) -> set[Path]:

@@ -13,6 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.type_defs import float_value, object_dict
 from mediaforce.encoding.encode_queue import RUNNABLE_ENCODE_JOB_KINDS
+from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.remote import HostReadinessError, HostStatus, collect_host_statuses, host_status_targets_current_machine, \
     normalize_host_media_access, recover_remote_host_mounts, remote_mount_recovery_supported, \
     run_host_lifecycle_command
@@ -144,6 +145,12 @@ def host_runtime_rows(
             }
             if storage_recovery_available:
                 status_payload["message"] = "Storage will reconnect when work starts"
+        controller_issue = controller_storage_admission_issue(config, host_config)
+        if controller_issue:
+            queue_active = False
+            active_reason = controller_issue
+            if not active_encode_count and (status.available or probe_available):
+                status_payload["message"] = controller_issue
         rows.append(
             {
                 **status_payload,
@@ -164,6 +171,7 @@ def host_runtime_rows(
                 "queue_active": queue_active,
                 "active_flag": "active" if queue_active else "idle",
                 "active_reason": active_reason,
+                "controller_storage_issue": controller_issue,
             }
         )
     return rows
@@ -422,6 +430,12 @@ def _recover_host_mounts(
 ) -> HostStatus:
     if not status.missing_mounts:
         return status
+    if host_status_targets_current_machine(status):
+        raise HostReadinessError(
+            controller_storage_admission_issue(config, host)
+            or "Controller storage is unavailable; automatic recovery will check it again.",
+            failure_kind="controller_storage_unavailable",
+        )
     mount_result = recover_remote_host_mounts(config, host, status)
     if not mount_result.ok:
         detail = f" Details: {mount_result.detail}" if mount_result.detail else ""

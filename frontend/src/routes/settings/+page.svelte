@@ -3,7 +3,7 @@
 	import { fetchJson } from '$lib/api/client';
 	import type { ArchiveCleanupPayload, HostsPayload, SettingsPayload } from '$lib/api/types';
 	import SettingsEditor from '$lib/components/settings/SettingsEditor.svelte';
-	import { hostsStatusPending } from '$lib/hosts/runtime';
+	import { hostStatusPollInterval } from '$lib/hosts/runtime';
 
 	type SettledPayload<T> = { data: T; error: null } | { data: null; error: string };
 
@@ -12,8 +12,6 @@
 	let archiveCleanup = $state<ArchiveCleanupPayload | null>(null);
 	let archiveCleanupError = $state<string | null>(null);
 	let loadError = $state<string | null>(null);
-	const HOST_STATUS_POLL_INTERVAL_MS = 1_500;
-	const HOST_STATUS_POLL_LIMIT = 40;
 
 	function errorMessage(error: unknown): string {
 		return error instanceof Error ? error.message : 'Request failed.';
@@ -36,12 +34,10 @@
 			if (disposed) return;
 			if (result.data) hosts = result.data;
 			if (result.error && !hosts) loadError = result.error;
-			if (result.data && hostsStatusPending(result.data) && pollCount < HOST_STATUS_POLL_LIMIT) {
-				hostPollTimer = window.setTimeout(
-					() => void refreshHosts(pollCount + 1),
-					HOST_STATUS_POLL_INTERVAL_MS
-				);
-			}
+			hostPollTimer = window.setTimeout(
+				() => void refreshHosts(pollCount + 1),
+				hostStatusPollInterval(result.data, pollCount)
+			);
 		}
 
 		async function loadSettings() {
@@ -56,9 +52,10 @@
 			settings = settingsPayload.data;
 			hosts = hostsPayload.data;
 			loadError = [settingsPayload.error, hostsPayload.error].filter(Boolean).join(' · ') || null;
-			if (hostsPayload.data && hostsStatusPending(hostsPayload.data)) {
-				hostPollTimer = window.setTimeout(() => void refreshHosts(1), HOST_STATUS_POLL_INTERVAL_MS);
-			}
+			hostPollTimer = window.setTimeout(
+				() => void refreshHosts(1),
+				hostStatusPollInterval(hostsPayload.data, 0)
+			);
 			void archiveCleanupPayload.then((result) => {
 				if (disposed) return;
 				archiveCleanup = result.data;

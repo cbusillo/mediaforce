@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { HostRuntime, HostsPayload } from '$lib/api/types';
-import { HOST_STATUS_PENDING_MESSAGE, hostRuntimeBadgeState, hostsStatusPending } from './runtime';
+import {
+	HOST_STATUS_PENDING_MESSAGE,
+	hostRuntimeBadgeState,
+	hostStatusPollInterval,
+	hostsStatusPending
+} from './runtime';
 
 function runtime(overrides: Partial<HostRuntime> = {}): HostRuntime {
 	return {
@@ -25,6 +30,25 @@ function runtime(overrides: Partial<HostRuntime> = {}): HostRuntime {
 }
 
 describe('host runtime status', () => {
+	it('keeps checking for outages and recovery after startup polling ends', () => {
+		const pending = { compact: true, hosts: [runtime({ message: HOST_STATUS_PENDING_MESSAGE })] };
+		const ready = { compact: true, hosts: [runtime({ available: true, message: 'Ready' })] };
+		expect(hostStatusPollInterval(pending, 0)).toBe(1_500);
+		expect(hostStatusPollInterval(pending, 40)).toBe(15_000);
+		expect(hostStatusPollInterval(ready, 1)).toBe(15_000);
+		expect(hostStatusPollInterval(null, 1)).toBe(15_000);
+	});
+
+	it('shows a controller storage blocker even when the remote computer is ready', () => {
+		const blocked = runtime({
+			available: true,
+			message: 'Controller storage is reconnecting.',
+			controller_storage_issue: 'Controller storage is reconnecting.'
+		});
+
+		expect(hostRuntimeBadgeState(blocked)).toEqual({ tone: 'wait', label: 'Storage blocked' });
+	});
+
 	it('shows startup probes as checking instead of offline', () => {
 		const pending = runtime({ message: HOST_STATUS_PENDING_MESSAGE });
 

@@ -4,7 +4,14 @@ export const HOST_STATUS_PENDING_MESSAGE = 'Checking host status...';
 
 export type HostRuntimeBadgeState = {
 	tone: 'idle' | 'ready' | 'wait' | 'fail';
-	label: 'Not checked' | 'Ready' | 'Reachable' | 'Needs setup' | 'Checking' | 'Unavailable';
+	label:
+		| 'Not checked'
+		| 'Ready'
+		| 'Reachable'
+		| 'Needs setup'
+		| 'Checking'
+		| 'Unavailable'
+		| 'Storage blocked';
 };
 
 type QualitySearchMode = 'worker-local' | 'fully-remote' | 'local-assist';
@@ -99,10 +106,17 @@ export function isPendingHostRuntime(runtime: HostRuntime | null | undefined): b
 	return String(runtime?.message ?? '').trim() === HOST_STATUS_PENDING_MESSAGE;
 }
 
+export function hostStatusPollInterval(payload: HostsPayload | null, pollCount: number): number {
+	return payload && hostsStatusPending(payload) && pollCount < 40 ? 1_500 : 15_000;
+}
+
 export function hostRuntimeBadgeState(
 	runtime: HostRuntime | null | undefined
 ): HostRuntimeBadgeState {
 	if (!runtime) return { tone: 'idle', label: 'Not checked' };
+	if (runtime.controller_storage_issue && (runtime.available || runtime.probe_available)) {
+		return { tone: 'wait', label: 'Storage blocked' };
+	}
 	if (isPendingHostRuntime(runtime)) return { tone: 'wait', label: 'Checking' };
 	if (runtime.available && runtime.issues.length === 0) {
 		return { tone: 'ready', label: 'Ready' };

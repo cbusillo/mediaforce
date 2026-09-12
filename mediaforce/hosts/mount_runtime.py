@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, unquote
 
-from mediaforce.core.config import load_runtime_settings, save_runtime_settings
+from mediaforce.core.config import MediaforceConfig, load_runtime_settings, save_runtime_settings
 from mediaforce.hosts.types import HostSetupResult
 
 
@@ -64,6 +64,19 @@ def save_controller_smb_mounts(path: Path, mounts: list[ControllerSmbMount]) -> 
                 for mount in normalized
             ],
         },
+    )
+
+
+def configured_controller_smb_mounts(config: MediaforceConfig) -> list[ControllerSmbMount]:
+    learned = load_controller_smb_mounts(
+        controller_smb_mounts_path(config.paths.runtime_settings_path)
+    )
+    overrides = controller_smb_mounts_from_payload(config.raw.get("controller_smb_mounts"))
+    resolved = {mount.mount_point: mount for mount in [*learned, *overrides]}
+    return sorted(
+        resolved.values(),
+        key=lambda mount: len(mount.mount_point.parts),
+        reverse=True,
     )
 
 
@@ -511,6 +524,7 @@ __all__ = [
     "controller_smb_mounts_from_output",
     "controller_smb_mounts_from_payload",
     "controller_smb_mounts_path",
+    "configured_controller_smb_mounts",
     "finder_mount_roots_for_paths",
     "load_controller_smb_mounts",
     "mount_output_field",

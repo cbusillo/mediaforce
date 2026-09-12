@@ -15,6 +15,9 @@ from mediaforce.remote import HostStatus
 
 class RemoteMountRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
+        runtime_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runtime_dir.cleanup)
+        self.runtime_settings_path = Path(runtime_dir.name) / "runtime-settings.json"
         remote._MOUNT_RECOVERY_COOLDOWNS.clear()
         remote._MOUNT_RECOVERY_NO_GUI_SESSIONS.clear()
 
@@ -129,7 +132,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         )
         config = SimpleNamespace(
             raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
-            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+            paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path),
         )
         run_ssh = Mock(
             return_value=subprocess.CompletedProcess(args=["ssh"], returncode=41, stdout="", stderr="")
@@ -262,7 +265,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         )
         config = SimpleNamespace(
             raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
-            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+            paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path),
         )
 
         with patch("mediaforce.remote._controller_smb_mount_output") as mount_output:
@@ -291,7 +294,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
 
         config = SimpleNamespace(
             raw={},
-            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+            paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path),
         )
         result = remote.recover_remote_host_mounts(config, host, status)
 
@@ -314,7 +317,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         )
         config = SimpleNamespace(
             raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
-            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+            paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path),
         )
 
         with patch(
@@ -343,7 +346,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         )
         config = SimpleNamespace(
             raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
-            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+            paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path),
         )
         run_local = Mock(
             return_value=subprocess.CompletedProcess(args=["sh"], returncode=42, stdout="", stderr="")
@@ -375,7 +378,7 @@ class RemoteMountRuntimeTests(unittest.TestCase):
         )
         config = SimpleNamespace(
             raw={"controller_smb_mounts": [{"source": "//local@NAS.local/media", "mount_point": "/Volumes/media"}]},
-            paths=SimpleNamespace(runtime_settings_path=Path("/does/not/exist/runtime-settings.json")),
+            paths=SimpleNamespace(runtime_settings_path=self.runtime_settings_path),
         )
         run_local = Mock(
             side_effect=[

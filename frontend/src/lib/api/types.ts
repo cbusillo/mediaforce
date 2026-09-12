@@ -848,6 +848,7 @@ export interface DashboardFoldersPayload {
 }
 
 export interface HostRuntime {
+	controller_storage_issue?: string | null;
 	key: string;
 	label: string;
 	host?: string;
@@ -888,6 +889,27 @@ export interface HostRuntime {
 export interface HostsPayload {
 	compact: boolean;
 	hosts: HostRuntime[];
+	controller_storage?: ControllerStorageRecovery;
+}
+
+export interface ControllerStorageRecovery {
+	schema_version: number;
+	updated_at: string | null;
+	state_error: string | null;
+	mounts: Array<{
+		mount_point: string;
+		requirement_signature: string | null;
+		verification_generation: string | null;
+		status: 'checking' | 'retrying' | 'ready' | 'action_required';
+		reason: string | null;
+		detail: string | null;
+		last_failure_kind: string | null;
+		first_failure_at: string | null;
+		last_check_at: string | null;
+		last_attempt_at: string | null;
+		next_retry_at: string | null;
+		failure_count: number;
+	}>;
 }
 
 export type LibraryType = 'tv' | 'movie' | 'spatial' | 'other';
