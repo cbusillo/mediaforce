@@ -28,6 +28,17 @@ class ControllerMountTests(unittest.TestCase):
         self.assertEqual(flock.call_args_list[0].args[1], fcntl.LOCK_EX | fcntl.LOCK_NB)
         close.assert_called_once_with(17)
 
+    def test_controller_mount_lock_raises_sanitized_open_failure(self) -> None:
+        with patch(
+                "mediaforce.hosts.controller_mount.os.open",
+                side_effect=PermissionError("private runtime path"),
+        ):
+            with self.assertRaisesRegex(OSError, "Controller SMB mount lock could not be opened") as raised:
+                with controller_mount_lock(Path("/private/runtime-settings.json")):
+                    pass
+
+        self.assertNotIn("private runtime path", str(raised.exception))
+
     def test_controller_mount_lock_contends_and_releases_after_owner_process_is_killed(self) -> None:
         child_script = "\n".join(
             [
@@ -91,6 +102,7 @@ class ControllerMountTests(unittest.TestCase):
         probe_script = ready_run.call_args.args[0][2]
         self.assertIn('[ -d "$path" ] && [ -x "$path" ]', probe_script)
         self.assertIn('pwd -P', probe_script)
+        self.assertNotIn(self.mount.source, ready_run.call_args.args[0])
         self.assertEqual(wrong_share.failure_kind, "mount_identity_mismatch")
         self.assertTrue(wrong_share.occupied)
         self.assertEqual(unavailable.failure_kind, "path_unavailable")
@@ -101,6 +113,34 @@ class ControllerMountTests(unittest.TestCase):
 
         self.assertEqual(result.failure_kind, "probe_timeout")
         self.assertEqual(run.call_args.kwargs["timeout"], 4)
+
+    def test_credential_bearing_mapping_is_rejected_before_any_subprocess(self) -> None:
+        run = Mock()
+        credential_mount = ControllerSmbMount(
+            "//local%3Asecret@[fe80::1]/media",
+            Path("/Volumes/media"),
+        )
+
+        result = mount_controller_smb_no_ui(credential_mount, self.required_paths, run_subprocess=run)
+
+        self.assertEqual(result.failure_kind, "invalid_mapping")
+        self.assertTrue(result.action_required)
+        run.assert_not_called()
+
+    def test_ipv6_server_colons_are_not_mistaken_for_credentials(self) -> None:
+        absent = subprocess.CompletedProcess(
+            ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
+        )
+        unavailable = subprocess.CompletedProcess(
+            ["osascript"], 0, json.dumps({"status": -6602, "mountpoints": []}), "",
+        )
+        run = Mock(side_effect=[absent, unavailable])
+        ipv6_mount = ControllerSmbMount("//local@[fe80::1]/media", Path("/Volumes/media"))
+
+        result = mount_controller_smb_no_ui(ipv6_mount, self.required_paths, run_subprocess=run)
+
+        self.assertEqual(result.failure_kind, "mount_failed")
+        self.assertEqual(run.call_count, 2)
 
     def test_probe_rejects_ordinary_directory_or_symlink_at_mount_path(self) -> None:
         occupied = subprocess.CompletedProcess(
@@ -180,8 +220,28 @@ class ControllerMountTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(result.failure_kind, "unexpected_mount_path")
+        self.assertIn("/Volumes/media-1", result.detail or "")
         self.assertEqual(run.call_count, 2)
         self.assertNotIn("unmount", " ".join(run.call_args_list[1].args[0]).lower())
+
+    def test_probe_matches_escaped_mount_path_and_percent_encoded_share(self) -> None:
+        mount = ControllerSmbMount("//local@NAS.local/My%20Share", Path("/Volumes/My Share"))
+        output = subprocess.CompletedProcess(
+            ["sh"],
+            0,
+            "//local@nas.LOCAL/My\\040Share on /Volumes/My\\040Share (smbfs, nodev)\n"
+            "MEDIAFORCE_MOUNT_PATH_PRESENT=1\nMEDIAFORCE_ACCESS_BEGIN\n1\n",
+            "",
+        )
+
+        result = probe_controller_mount(
+            mount,
+            {Path("/Volumes/My Share/tv"): "read"},
+            run_subprocess=Mock(return_value=output),
+        )
+
+        self.assertTrue(result.mounted)
+        self.assertTrue(result.accessible)
 
     def test_mount_helper_output_requires_object_integer_status_and_string_paths(self) -> None:
         absent = subprocess.CompletedProcess(

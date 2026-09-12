@@ -103,7 +103,9 @@ export function hostRuntimeBadgeState(
 	runtime: HostRuntime | null | undefined
 ): HostRuntimeBadgeState {
 	if (!runtime) return { tone: 'idle', label: 'Not checked' };
-	if (runtime.controller_storage_issue) return { tone: 'wait', label: 'Storage blocked' };
+	if (runtime.controller_storage_issue && (runtime.available || runtime.probe_available)) {
+		return { tone: 'wait', label: 'Storage blocked' };
+	}
 	if (isPendingHostRuntime(runtime)) return { tone: 'wait', label: 'Checking' };
 	if (runtime.available && runtime.issues.length === 0) {
 		return { tone: 'ready', label: 'Ready' };

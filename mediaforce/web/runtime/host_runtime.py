@@ -149,7 +149,7 @@ def host_runtime_rows(
         if controller_issue:
             queue_active = False
             active_reason = controller_issue
-            if not active_encode_count:
+            if not active_encode_count and (status.available or probe_available):
                 status_payload["message"] = controller_issue
         rows.append(
             {

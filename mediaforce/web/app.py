@@ -4503,7 +4503,9 @@ def _acquire_background_worker_leadership(
 
 def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
     run_supervised_worker_loop(
-        process_once_fn=lambda: process_controller_storage_recovery_once(load_config(config_path)),
+        process_once_fn=lambda: process_controller_storage_recovery_once(
+            load_config(config_path), stop_event=stop_event,
+        ),
         poll_seconds=30.0,
         stop_event=stop_event,
         logger=LOGGER,

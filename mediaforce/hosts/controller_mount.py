@@ -22,14 +22,14 @@ _PROBE_SCRIPT = r'''set -u
 mount_output="$(/sbin/mount 2>/dev/null)" || exit 20
 /usr/bin/printf '%s\n' "$mount_output"
 /usr/bin/printf 'MEDIAFORCE_MOUNT_PATH_PRESENT='
-mount_point=$2
+mount_point=$1
 if [ -e "$mount_point" ] || [ -L "$mount_point" ]; then
   /usr/bin/printf '1\n'
 else
   /usr/bin/printf '0\n'
 fi
 /usr/bin/printf '%s\n' 'MEDIAFORCE_ACCESS_BEGIN'
-shift 2
+shift 1
 for access_spec in "$@"; do
   mode=${access_spec%%:*}
   path=${access_spec#*:}
@@ -95,8 +95,7 @@ def controller_mount_lock(runtime_settings_path: Path) -> Iterator[bool]:
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
-        yield False
-        return
+        raise OSError("Controller SMB mount lock could not be opened.") from None
     acquired = False
     try:
         try:
@@ -104,6 +103,8 @@ def controller_mount_lock(runtime_settings_path: Path) -> Iterator[bool]:
             acquired = True
         except BlockingIOError:
             pass
+        except OSError:
+            raise OSError("Controller SMB mount lock could not be acquired.") from None
         yield acquired
     finally:
         if acquired:
@@ -118,6 +119,12 @@ def probe_controller_mount(
         run_subprocess: SubprocessRunner = subprocess.run,
         timeout_seconds: int = _PROBE_TIMEOUT_SECONDS,
 ) -> ControllerMountProbe:
+    if _mapping_has_credentials(mount):
+        return _failed_probe(
+            mount.mount_point,
+            "invalid_mapping",
+            "The saved controller SMB mapping contains credentials and cannot be used.",
+        )
     return _probe_controller_volume(
         mount.mount_point,
         required_paths,
@@ -156,7 +163,7 @@ def _probe_controller_volume(
         result = run_subprocess(
             [
                 "/bin/sh", "-c", _PROBE_SCRIPT, "mediaforce-controller-probe",
-                expected_mount.source if expected_mount is not None else "", str(mount_point), *access_specs,
+                str(mount_point), *access_specs,
             ],
             capture_output=True,
             text=True,
@@ -222,6 +229,8 @@ def mount_controller_smb_no_ui(
     )
     if before.mounted and before.accessible:
         return ControllerMountResult(True, False, None, None, before)
+    if before.failure_kind == "invalid_mapping":
+        return ControllerMountResult(False, True, before.failure_kind, before.detail, before)
     if before.occupied or before.failure_kind in {"probe_timeout", "probe_failed"}:
         return ControllerMountResult(False, before.occupied, before.failure_kind, before.detail, before)
     planned = remote_smb_mounts_for_paths([str(mount.mount_point)], [mount], remote_user=None)
@@ -255,9 +264,11 @@ def mount_controller_smb_no_ui(
             False, False, "mount_failed", f"The no-UI SMB helper returned status {status}.", before,
         )
     if str(mount.mount_point) not in returned_paths:
+        safe_paths = _safe_returned_mount_paths(returned_paths)
+        location_detail = f" Returned path(s): {', '.join(safe_paths)}." if safe_paths else ""
         return ControllerMountResult(
             False, True, "unexpected_mount_path",
-            "The SMB helper did not mount the share at the saved controller path.", before,
+            f"The SMB helper did not mount the share at the saved controller path.{location_detail}", before,
         )
     after = probe_controller_mount(
         mount, required_paths, run_subprocess=run_subprocess, timeout_seconds=probe_timeout_seconds,
@@ -314,6 +325,28 @@ def _smb_identity(source: str) -> tuple[str, str, str] | None:
     if not user_separator:
         server = authority
     return user, unquote(server).lower(), unquote(raw_share)
+
+
+def _mapping_has_credentials(mount: ControllerSmbMount) -> bool:
+    source = mount.source
+    if not source.startswith("//"):
+        return False
+    authority = source[2:].partition("/")[0]
+    raw_user = authority.rpartition("@")[0] if "@" in authority else ""
+    return ":" in unquote(raw_user)
+
+
+def _safe_returned_mount_paths(paths: list[str]) -> list[str]:
+    safe: list[str] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if (
+                path.parent == Path("/Volumes")
+                and path.name
+                and not any(ord(character) < 32 for character in raw_path)
+        ):
+            safe.append(str(path))
+    return safe
 
 
 def _decode_mount_field(value: str) -> str:

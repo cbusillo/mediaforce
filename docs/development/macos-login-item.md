@@ -22,6 +22,10 @@ operator attention rather than another potentially overlapping mount request.
 The native helper must return the expected mount path, and a fresh check must
 confirm the saved SMB identity and required directory access. Merely finding a
 writable directory under `/Volumes` is not proof that the share is mounted.
+Saved readiness never authorizes a new web process: it must verify storage
+again after restart. Controller source paths and the existing controller-side
+staging requirements are checked; remote-only source overrides are not treated
+as paths on the controller. Archive creation remains part of promotion.
 
 Recovery state persists in `controller-storage-recovery.json` beside runtime
 settings. `GET /api/hosts` exposes it as `controller_storage` without attempting
@@ -29,6 +33,13 @@ a connection. A manual reconnect through Finder or the existing Prepare action
 is accepted after a fresh readiness check; no server restart is needed to clear
 the incident. Automatic and explicit controller connection attempts share a
 nonblocking process lock.
+
+If the expected volume path is occupied by an ordinary directory or another
+volume, recovery stops for inspection. Do not delete that directory without
+checking its contents and ownership. If NetFS mounts at a suffixed path such as
+`/Volumes/media-1`, the diagnostic records that path and leaves the mount intact.
+Check it in Finder and eject the unintended mount deliberately before restoring
+the expected path. Automatic recovery never unmounts volumes or removes folders.
 
 ### Installed acceptance
 
