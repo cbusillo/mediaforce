@@ -194,7 +194,11 @@ from mediaforce.web.runtime.folder_actions import child_recovery_approval, child
 from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
-from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle
+from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
+from mediaforce.web.runtime.controller_storage_recovery import (
+    controller_storage_recovery_snapshot,
+    process_controller_storage_recovery_once,
+)
 from mediaforce.web.runtime.encode_runtime import EncodeQueueRuntimeDeps, \
     clear_stale_encoding_items_when_idle as runtime_clear_stale_encoding_items_when_idle, \
     encode_job_heartbeat_loop as runtime_encode_job_heartbeat_loop, \
@@ -1059,7 +1063,11 @@ def create_app(
     def _hosts_payload(compact: int = 0) -> dict[str, Any]:
         with open_db(config.paths.db_path) as connection:
             hosts = _host_runtime_rows(connection, config, collect_statuses=_cached_host_statuses)
-        return {"compact": bool(compact), "hosts": hosts}
+        return {
+            "compact": bool(compact),
+            "hosts": hosts,
+            "controller_storage": controller_storage_recovery_snapshot(config),
+        }
 
     register_dashboard_routes(
         app,
@@ -4493,6 +4501,27 @@ def _acquire_background_worker_leadership(
     return None
 
 
+def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
+    run_supervised_worker_loop(
+        process_once_fn=lambda: process_controller_storage_recovery_once(load_config(config_path)),
+        poll_seconds=30.0,
+        stop_event=stop_event,
+        logger=LOGGER,
+        failure_message="Controller storage recovery pass failed; it will retry.",
+    )
+
+
+def _start_controller_storage_worker(config: MediaforceConfig) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_controller_storage_worker_loop,
+        kwargs={"config_path": config.paths.config_path, "stop_event": stop_event},
+        name="controller-storage-worker",
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
+
+
 def _start_background_workers(
         config: MediaforceConfig,
 ) -> BackgroundWorkerRuntime | None:
@@ -4501,6 +4530,7 @@ def _start_background_workers(
         return None
     handles: list[SupervisedWorkerHandle] = []
     try:
+        handles.append(_start_controller_storage_worker(config))
         handles.append(_start_calibration_queue_worker(config))
         handles.append(_start_encode_queue_worker(config))
     except BaseException:

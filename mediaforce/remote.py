@@ -107,6 +107,27 @@ def recover_remote_host_mounts(
         *,
         force: bool = False,
 ) -> HostSetupResult:
+    if host_targets_current_machine(host):
+        from mediaforce.hosts.controller_mount import controller_mount_lock
+
+        with controller_mount_lock(config.paths.runtime_settings_path) as acquired:
+            if not acquired:
+                return HostSetupResult(
+                    ok=False,
+                    message="Controller storage recovery is already in progress.",
+                    failure_kind="host_unavailable",
+                )
+            return _recover_remote_host_mounts(config, host, status, force=force)
+    return _recover_remote_host_mounts(config, host, status, force=force)
+
+
+def _recover_remote_host_mounts(
+        config: MediaforceConfig,
+        host: dict[str, Any],
+        status: HostStatus,
+        *,
+        force: bool,
+) -> HostSetupResult:
     mounts = _remote_smb_mounts_for_status(config, host, status)
     label = str(host.get("label") or status.label or host.get("host") or "Remote host").strip() or "Remote host"
     if not mounts:

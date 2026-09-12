@@ -22,6 +22,8 @@ from sqlalchemy import select
 from sqlalchemy import update
 
 from mediaforce.core.config import MediaforceConfig
+from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
+from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
 from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
@@ -1475,11 +1477,17 @@ def _controller_staging_access_issue(
         config: MediaforceConfig,
         host: dict[str, Any],
 ) -> str | None:
+    recovery_issue = controller_storage_admission_issue(config, host)
+    if recovery_issue:
+        return recovery_issue
     staging_root = (
         config.staging_root
         if host_media_access_for_host(host) == "stream"
         else config.staging_root_for_host(host)
     ).expanduser()
+    if finder_mount_roots_for_paths([staging_root]):
+        # The recovery worker performs bounded identity and access checks for volumes.
+        return None
     nearest_existing = staging_root
     try:
         while not nearest_existing.exists():

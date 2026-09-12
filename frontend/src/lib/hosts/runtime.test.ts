@@ -25,6 +25,16 @@ function runtime(overrides: Partial<HostRuntime> = {}): HostRuntime {
 }
 
 describe('host runtime status', () => {
+	it('shows a controller storage blocker even when the remote computer is ready', () => {
+		const blocked = runtime({
+			available: true,
+			message: 'Controller storage is reconnecting.',
+			controller_storage_issue: 'Controller storage is reconnecting.'
+		});
+
+		expect(hostRuntimeBadgeState(blocked)).toEqual({ tone: 'wait', label: 'Storage blocked' });
+	});
+
 	it('shows startup probes as checking instead of offline', () => {
 		const pending = runtime({ message: HOST_STATUS_PENDING_MESSAGE });
 

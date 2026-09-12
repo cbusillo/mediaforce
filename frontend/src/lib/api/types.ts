@@ -848,6 +848,7 @@ export interface DashboardFoldersPayload {
 }
 
 export interface HostRuntime {
+	controller_storage_issue?: string | null;
 	key: string;
 	label: string;
 	host?: string;
