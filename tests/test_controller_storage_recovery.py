@@ -524,6 +524,15 @@ class ControllerStorageRecoveryTest(TestCase):
         self.assertEqual(admissions_during_probe, [None, None, None])
 
 
+    def test_unknown_helper_diagnostic_preserves_only_exit_and_error_class(self) -> None:
+        detail = "osascript exit 1 (TypeError). smb://user:secret@private.example/share"
+        self.assertEqual(
+            recovery._safe_detail("mount_result_unknown", detail),
+            "osascript exit 1 (TypeError).",
+        )
+        self.assertIsNone(recovery._safe_detail("mount_result_unknown", "private credentials"))
+
+
 if __name__ == "__main__":
     import unittest
 

@@ -19,8 +19,8 @@ settings. Automatic connections use the system NetFS API with `UIOption=NoUI`;
 Mediaforce does not retrieve passwords or fall back to Finder dialogs. Clean
 connection failures retry with bounded backoff. An ambiguous timeout requires
 operator attention rather than another potentially overlapping mount request.
-The native helper must return the expected mount path, and a fresh check must
-confirm the saved SMB identity and required directory access. Merely finding a
+The native helper reports its status code; a fresh check must confirm the exact
+expected mount path, saved SMB identity and required directory access. Merely finding a
 writable directory under `/Volumes` is not proof that the share is mounted.
 Saved readiness never authorizes a new web process: it must verify storage
 again after restart. Controller source paths and the existing controller-side
@@ -37,8 +37,8 @@ nonblocking process lock.
 If the expected volume path is occupied by an ordinary directory or another
 volume, recovery stops for inspection. Do not delete that directory without
 checking its contents and ownership. If NetFS mounts at a suffixed path such as
-`/Volumes/media-1`, the diagnostic records that path and leaves the mount intact.
-Check it in Finder and eject the unintended mount deliberately before restoring
+`/Volumes/media-1`, the expected-path check fails and leaves the mount intact.
+Inspect Finder for such a mount and eject it deliberately before restoring
 the expected path. Automatic recovery never unmounts volumes or removes folders.
 
 ### Installed acceptance

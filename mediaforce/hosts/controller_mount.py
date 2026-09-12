@@ -59,11 +59,7 @@ function run(argv) {
     openOptions.setObjectForKey($("NoUI"), $("UIOption"));
     const mountpoints = Ref();
     const status = $.NetFSMountURLSync(url, null, null, null, openOptions, null, mountpoints);
-    let paths = [];
-    if (mountpoints[0]) {
-        paths = ObjC.deepUnwrap(mountpoints[0]);
-    }
-    return JSON.stringify({status: Number(status), mountpoints: paths});
+    return JSON.stringify({status: Number(status)});
 }
 '''
 
@@ -254,21 +250,19 @@ def mount_controller_smb_no_ui(
         return ControllerMountResult(
             False, False, "mount_helper_failed", f"The no-UI SMB helper failed with {exc.__class__.__name__}.", before,
         )
-    status, returned_paths = _mount_helper_output(result)
+    status = _mount_helper_output(result)
     if result.returncode != 0 or status is None:
+        diagnostic_class = _helper_error_class(result.stderr)
+        diagnostic_detail = f" ({diagnostic_class})" if diagnostic_class else ""
         return ControllerMountResult(
-            False, True, "mount_result_unknown", "The no-UI SMB helper returned an unreadable result.", before,
+            False, True, "mount_result_unknown",
+            f"The no-UI SMB helper returned an unreadable result: osascript exit {result.returncode}"
+            f"{diagnostic_detail}.",
+            before,
         )
     if status != 0:
         return ControllerMountResult(
             False, False, "mount_failed", f"The no-UI SMB helper returned status {status}.", before,
-        )
-    if str(mount.mount_point) not in returned_paths:
-        safe_paths = _safe_returned_mount_paths(returned_paths)
-        location_detail = f" Returned path(s): {', '.join(safe_paths)}." if safe_paths else ""
-        return ControllerMountResult(
-            False, True, "unexpected_mount_path",
-            f"The SMB helper did not mount the share at the saved controller path.{location_detail}", before,
         )
     after = probe_controller_mount(
         mount, required_paths, run_subprocess=run_subprocess, timeout_seconds=probe_timeout_seconds,
@@ -286,20 +280,17 @@ def _failed_probe(mount_point: Path, failure_kind: str, detail: str) -> Controll
     return ControllerMountProbe(False, False, mount_point, failure_kind=failure_kind, detail=detail)
 
 
-def _mount_helper_output(result: subprocess.CompletedProcess[str]) -> tuple[int | None, list[str]]:
+def _mount_helper_output(result: subprocess.CompletedProcess[str]) -> int | None:
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return None, []
+        return None
     if not isinstance(payload, dict):
-        return None, []
+        return None
     status = payload.get("status")
-    paths = payload.get("mountpoints")
     if isinstance(status, bool) or not isinstance(status, int):
-        return None, []
-    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-        return None, []
-    return status, paths
+        return None
+    return status
 
 
 def _mounted_identity_at(raw_output: str, mount_point: Path) -> tuple[str | None, str | None]:
@@ -336,17 +327,9 @@ def _mapping_has_credentials(mount: ControllerSmbMount) -> bool:
     return ":" in unquote(raw_user)
 
 
-def _safe_returned_mount_paths(paths: list[str]) -> list[str]:
-    safe: list[str] = []
-    for raw_path in paths:
-        path = Path(raw_path)
-        if (
-                path.parent == Path("/Volumes")
-                and path.name
-                and not any(ord(character) < 32 for character in raw_path)
-        ):
-            safe.append(str(path))
-    return safe
+def _helper_error_class(stderr: str) -> str | None:
+    match = re.search(r"\b(TypeError|ReferenceError|SyntaxError)\b", stderr)
+    return match.group(1) if match else None
 
 
 def _decode_mount_field(value: str) -> str:

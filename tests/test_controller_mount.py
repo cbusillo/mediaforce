@@ -177,7 +177,7 @@ class ControllerMountTests(unittest.TestCase):
             ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
         )
         mounted = subprocess.CompletedProcess(
-            ["osascript"], 0, json.dumps({"status": 0, "mountpoints": ["/Volumes/media"]}), "",
+            ["osascript"], 0, json.dumps({"status": 0}), "",
         )
         run = Mock(side_effect=[absent, mounted, self._probe()])
 
@@ -207,22 +207,34 @@ class ControllerMountTests(unittest.TestCase):
         self.assertEqual(result.failure_kind, "mount_timeout")
         self.assertEqual(run.call_count, 2)
 
-    def test_unexpected_returned_mount_path_fails_closed_without_unmount(self) -> None:
+    def test_status_zero_without_expected_fresh_mount_fails_closed_without_unmount(self) -> None:
         absent = subprocess.CompletedProcess(
             ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
         )
-        mounted_elsewhere = subprocess.CompletedProcess(
-            ["osascript"], 0, json.dumps({"status": 0, "mountpoints": ["/Volumes/media-1"]}), "",
-        )
-        run = Mock(side_effect=[absent, mounted_elsewhere])
+        mounted = subprocess.CompletedProcess(["osascript"], 0, json.dumps({"status": 0}), "")
+        run = Mock(side_effect=[absent, mounted, absent])
 
         result = mount_controller_smb_no_ui(self.mount, self.required_paths, run_subprocess=run)
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.failure_kind, "unexpected_mount_path")
-        self.assertIn("/Volumes/media-1", result.detail or "")
-        self.assertEqual(run.call_count, 2)
+        self.assertTrue(result.action_required)
+        self.assertEqual(result.failure_kind, "mount_absent")
+        self.assertEqual(run.call_count, 3)
         self.assertNotIn("unmount", " ".join(run.call_args_list[1].args[0]).lower())
+
+    def test_status_zero_with_wrong_fresh_identity_fails_closed(self) -> None:
+        absent = subprocess.CompletedProcess(
+            ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
+        )
+        mounted = subprocess.CompletedProcess(["osascript"], 0, json.dumps({"status": 0}), "")
+        wrong_identity = self._probe(source="//local@other.invalid/media")
+        run = Mock(side_effect=[absent, mounted, wrong_identity])
+
+        result = mount_controller_smb_no_ui(self.mount, self.required_paths, run_subprocess=run)
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.action_required)
+        self.assertEqual(result.failure_kind, "mount_identity_mismatch")
 
     def test_probe_matches_escaped_mount_path_and_percent_encoded_share(self) -> None:
         mount = ControllerSmbMount("//local@NAS.local/My%20Share", Path("/Volumes/My Share"))
@@ -243,16 +255,15 @@ class ControllerMountTests(unittest.TestCase):
         self.assertTrue(result.mounted)
         self.assertTrue(result.accessible)
 
-    def test_mount_helper_output_requires_object_integer_status_and_string_paths(self) -> None:
+    def test_mount_helper_output_requires_object_integer_status(self) -> None:
         absent = subprocess.CompletedProcess(
             ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
         )
         malformed_payloads = (
             [],
-            {"status": True, "mountpoints": ["/Volumes/media"]},
-            {"status": 0.0, "mountpoints": ["/Volumes/media"]},
-            {"status": 0, "mountpoints": None},
-            {"status": 0, "mountpoints": [17]},
+            {"status": True},
+            {"status": 0.0},
+            {"mountpoints": []},
         )
         for payload in malformed_payloads:
             with self.subTest(payload=payload):
@@ -263,6 +274,21 @@ class ControllerMountTests(unittest.TestCase):
 
                 self.assertEqual(result.failure_kind, "mount_result_unknown")
                 self.assertTrue(result.action_required)
+
+    def test_unknown_mount_result_reports_only_exit_and_known_error_class(self) -> None:
+        absent = subprocess.CompletedProcess(
+            ["sh"], 0, "MEDIAFORCE_MOUNT_PATH_PRESENT=0\nMEDIAFORCE_ACCESS_BEGIN\n0\n0\n", "",
+        )
+        helper = subprocess.CompletedProcess(
+            ["osascript"], 1, "", "TypeError near private secret material",
+        )
+        run = Mock(side_effect=[absent, helper])
+
+        result = mount_controller_smb_no_ui(self.mount, self.required_paths, run_subprocess=run)
+
+        self.assertEqual(result.failure_kind, "mount_result_unknown")
+        self.assertIn("osascript exit 1 (TypeError)", result.detail or "")
+        self.assertNotIn("secret", result.detail or "")
 
 
 if __name__ == "__main__":

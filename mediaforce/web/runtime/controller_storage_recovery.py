@@ -500,6 +500,12 @@ def _stable_reason(failure_kind: str) -> str:
 
 
 def _safe_detail(failure_kind: str, detail: str | None) -> str | None:
+    if failure_kind == "mount_result_unknown" and detail:
+        exit_match = re.search(r"\bosascript exit (-?\d+)\b", detail)
+        error_match = re.search(r"\b(TypeError|ReferenceError|SyntaxError)\b", detail)
+        if exit_match:
+            error_class = f" ({error_match.group(1)})" if error_match else ""
+            return f"osascript exit {exit_match.group(1)}{error_class}."
     if not detail:
         return None
     if failure_kind == "mount_failed":
