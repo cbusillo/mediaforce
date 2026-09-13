@@ -46,3 +46,26 @@ If an output exists, preserve it and validate/reconcile it separately before
 considering a re-encode. For example, the retained S01E20 output in the #593
 incident is intentionally outside this recovery path. Never manually mark an
 output completed or edit the live SQLite database to bypass these checks.
+
+## Progress and heartbeat failures
+
+A live heartbeat is lease evidence, not proof that encoder frames are advancing.
+Compare the latest frame-progress timestamp with the running process when work
+appears stalled. A database exception while publishing progress must not stop
+the reader that drains encoder stderr: the runner retains the first error and
+reports it from the owning thread. Local commands terminate through their
+managed controller. SSH commands keep draining until the remote command exits,
+then report the error, because stopping the SSH client alone does not prove the
+remote encoder stopped. This can leave an output requiring operator review;
+existing output and failure checks still apply.
+
+Heartbeat database/path exceptions are logged and retried at the normal
+heartbeat interval; status and worker-ownership checks remain mandatory. This
+does not establish remote termination or make an expired lease safe to reclaim
+while a writer may still exist. Those containment and reconciliation cases remain
+under #593.
+
+During database connection setup, a ctime-only change before SQLite opens the
+file receives at most three fresh pinning attempts. Legitimate writes or WAL
+checkpoints can change that timestamp. Parent, inode and link-count changes fail
+immediately, and all checks after SQLite opens the database remain unchanged.
