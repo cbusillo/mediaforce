@@ -9,8 +9,10 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 from mediaforce import execution
-from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError
-from mediaforce.encoding.runner import run_encode_command, run_streamed_remote_encode_command, run_tracked_process
+from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
+    ProcessDeadlineEnforcementError
+from mediaforce.encoding.runner import _ProgressCallbackFailure, _join_process_threads, run_encode_command, \
+    run_streamed_remote_encode_command, run_tracked_process
 from mediaforce.web.runtime import encode_runtime
 
 
@@ -23,6 +25,19 @@ def _progress_state(_state: dict[str, str], line: str, *, elapsed_seconds: float
 
 
 class RunnerProgressFailureTests(unittest.TestCase):
+    def test_bounded_reader_join_marks_cleanup_unproven_and_preserves_progress_error(self) -> None:
+        callback_failure = _ProgressCallbackFailure()
+        callback_failure.report(RuntimeError("progress persistence failed"))
+        thread = Mock()
+        thread.is_alive.return_value = True
+
+        with self.assertRaises(ProcessDeadlineEnforcementError) as raised:
+            _join_process_threads((thread,), callback_failure)
+
+        thread.join.assert_called_once_with(timeout=1.0)
+        self.assertTrue(callback_failure.cleanup_unproven)
+        self.assertIn("progress persistence failed", " ".join(raised.exception.__notes__))
+
     def test_execution_wrapper_forwards_progress_failure_termination_policy(self) -> None:
         with patch.object(execution, "_run_tracked_process_impl") as implementation:
             execution._run_tracked_process(

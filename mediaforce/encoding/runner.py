@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from mediaforce.core.process_control import ManagedProcessController, ScheduleWindowClosedError
+from mediaforce.core.process_control import ManagedProcessController, ProcessDeadlineEnforcementError, \
+    ScheduleWindowClosedError
 from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadline, \
     guard_shell_script_for_schedule_deadline, process_result_reached_schedule_deadline, \
     managed_schedule_close_deadline
@@ -81,6 +82,17 @@ def _join_process_threads(
 ) -> None:
     for thread in threads:
         thread.join(timeout=1.0 if callback_failure.ready.is_set() else None)
+    if callback_failure.ready.is_set() and any(thread.is_alive() for thread in threads):
+        callback_failure.cleanup_unproven = True
+        error = ProcessDeadlineEnforcementError(
+            "Managed process stream cleanup remained active after the bounded join."
+        )
+        if callback_failure.error is not None:
+            error.add_note(
+                "Progress reporting also failed: "
+                f"{type(callback_failure.error).__name__}: {callback_failure.error}"
+            )
+        raise error
 
 
 def run_encode_command(
@@ -272,12 +284,14 @@ def run_streamed_remote_encode_command(
             terminate_on_progress_failure=terminate_on_progress_failure,
         )
     finally:
-        _join_process_threads((source_thread, output_thread, stderr_thread), callback_failure)
-        if process_controller is not None:
-            process_controller.clear(
-                process_handle,
-                cleanup_unproven=callback_failure.cleanup_unproven,
-            )
+        try:
+            _join_process_threads((source_thread, output_thread, stderr_thread), callback_failure)
+        finally:
+            if process_controller is not None:
+                process_controller.clear(
+                    process_handle,
+                    cleanup_unproven=callback_failure.cleanup_unproven,
+                )
 
     _raise_progress_callback_failure(callback_failure)
     if process_controller is not None and process_controller.cancelled:
@@ -353,12 +367,14 @@ def run_tracked_process(
             terminate_on_progress_failure=terminate_on_progress_failure,
         )
     finally:
-        _join_process_threads((stdout_thread, stderr_thread), callback_failure)
-        if process_controller is not None:
-            process_controller.clear(
-                process,
-                cleanup_unproven=callback_failure.cleanup_unproven,
-            )
+        try:
+            _join_process_threads((stdout_thread, stderr_thread), callback_failure)
+        finally:
+            if process_controller is not None:
+                process_controller.clear(
+                    process,
+                    cleanup_unproven=callback_failure.cleanup_unproven,
+                )
 
     _raise_progress_callback_failure(callback_failure)
     if process_controller is not None and process_controller.cancelled:
