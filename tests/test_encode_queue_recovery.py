@@ -12863,7 +12863,8 @@ raise SystemExit(0)
                 self.stderr = io.StringIO("out_time_ms=45000000\nprogress=continue\n")
 
             @staticmethod
-            def wait() -> int:
+            def wait(timeout: float | None = None) -> int:
+                _ = timeout
                 return 0
 
         snapshots: list[dict[str, object]] = []
@@ -12888,7 +12889,8 @@ raise SystemExit(0)
                 self.stderr = io.BytesIO(b"out_time_ms=45000000\nprogress=continue\n")
 
             @staticmethod
-            def wait() -> int:
+            def wait(timeout: float | None = None) -> int:
+                _ = timeout
                 return 0
 
         source_path = self._create_source_file("episode-stream.mkv")
@@ -12923,7 +12925,8 @@ raise SystemExit(0)
                 self.stderr = io.BytesIO()
 
             @staticmethod
-            def wait() -> int:
+            def wait(timeout: float | None = None) -> int:
+                _ = timeout
                 return 0
 
         source_path = self._create_source_file("episode-stream-deadline.mkv")

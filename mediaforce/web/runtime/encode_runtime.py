@@ -20,6 +20,7 @@ from sqlalchemy import func
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
@@ -2147,21 +2148,24 @@ def encode_job_heartbeat_loop(
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     while not stop_event.wait(deps.encode_job_heartbeat_seconds):
-        with open_db(deps.load_config(config_path).paths.db_path) as connection:
-            job = load_encode_job(connection, job_id)
-            if job is None or str(job.get("status") or "") != "running":
-                return
-            if str(job.get("worker_id") or "") != worker_id:
-                return
-            job.update(
-                {
-                    "heartbeat_at": deps.now_iso(),
-                    "lease_expires_at": _encode_job_lease_expires_at(deps),
-                    "process_pid": process_controller.pid,
-                    "updated_at": deps.now_iso(),
-                }
-            )
-            save_encode_job(connection, job)
+        try:
+            with open_db(deps.load_config(config_path).paths.db_path) as connection:
+                job = load_encode_job(connection, job_id)
+                if job is None or str(job.get("status") or "") != "running":
+                    return
+                if str(job.get("worker_id") or "") != worker_id:
+                    return
+                job.update(
+                    {
+                        "heartbeat_at": deps.now_iso(),
+                        "lease_expires_at": _encode_job_lease_expires_at(deps),
+                        "process_pid": process_controller.pid,
+                        "updated_at": deps.now_iso(),
+                    }
+                )
+                save_encode_job(connection, job)
+        except (OSError, RuntimeError, SQLAlchemyError):
+            deps.logger.exception("Encode job heartbeat update failed for %s; retrying", job_id)
 
 
 def encode_job_schedule_deadline_loop(

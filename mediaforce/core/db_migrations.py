@@ -74,6 +74,10 @@ class _DatabaseIdentityConnection(sqlite3.Connection):
             raise close_error
 
 
+class _DatabaseConnectionVolatileMetadataChanged(RuntimeError):
+    pass
+
+
 def database_url(
         db_path: Path,
         *,
@@ -136,15 +140,25 @@ def database_identity_connection_factory(
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         identity_guard()
-        expected_parent, expected = _database_connection_path_snapshot(
-            resolved_path
-        )
-        identity_guard()
-        pinned_path, descriptors = _pin_database_connection_path(
-            resolved_path,
-            expected_parent=expected_parent,
-            expected=expected,
-        )
+        for attempt in range(3):
+            expected_parent, expected = _database_connection_path_snapshot(
+                resolved_path
+            )
+            identity_guard()
+            try:
+                pinned_path, descriptors = _pin_database_connection_path(
+                    resolved_path,
+                    expected_parent=expected_parent,
+                    expected=expected,
+                )
+                break
+            except _DatabaseConnectionVolatileMetadataChanged:
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Mediaforce database identity changed during connection"
+                    ) from None
+        else:
+            raise AssertionError("database identity pin retry loop did not terminate")
         connection: _DatabaseIdentityConnection | None = None
         descriptors_retained = False
         try:
@@ -291,23 +305,23 @@ def _pin_database_connection_path(
     descriptors = (file_descriptor, directory_descriptor)
     try:
         file_info = os.fstat(file_descriptor)
-        if (
-            not stat.S_ISREG(file_info.st_mode)
-            or _database_connection_info_snapshot(file_info) != expected
+        observed = _database_connection_info_snapshot(file_info)
+        if not stat.S_ISREG(file_info.st_mode) or (observed[0], observed[1], observed[3]) != (
+            expected[0], expected[1], expected[3]
         ):
             raise RuntimeError(
                 "Mediaforce database identity changed during connection"
             )
+        if observed[2] != expected[2]:
+            raise _DatabaseConnectionVolatileMetadataChanged
         pinned_path = _database_connection_path_for_directory_descriptor(
             directory_descriptor,
             directory_info=directory_info,
             filename=db_path.name,
         )
         pinned_info = pinned_path.stat()
-        if (
-            not stat.S_ISREG(pinned_info.st_mode)
-            or _database_connection_info_snapshot(pinned_info) != expected
-        ):
+        pinned_observed = _database_connection_info_snapshot(pinned_info)
+        if not stat.S_ISREG(pinned_info.st_mode) or pinned_observed != expected:
             raise RuntimeError(
                 "Mediaforce database identity changed during connection"
             )

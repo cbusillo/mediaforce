@@ -7,11 +7,92 @@ import time
 from pathlib import Path
 from typing import Any, Callable, cast
 
-from mediaforce.core.process_control import ScheduleWindowClosedError
+from mediaforce.core.process_control import ManagedProcessController, ProcessDeadlineEnforcementError, \
+    ScheduleWindowClosedError
 from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadline, \
     guard_shell_script_for_schedule_deadline, process_result_reached_schedule_deadline, \
     managed_schedule_close_deadline
 from mediaforce.core.type_defs import object_dict
+
+
+_PROCESS_WAIT_POLL_SECONDS = 0.1
+
+
+class _ProgressCallbackFailure:
+    def __init__(self) -> None:
+        self.error: BaseException | None = None
+        self.ready = threading.Event()
+        self.cleanup_unproven = False
+
+    def report(self, error: BaseException) -> None:
+        if self.error is None:
+            self.error = error
+            self.ready.set()
+
+    def call(self, operation: Callable[[], None]) -> None:
+        if self.ready.is_set():
+            return
+        try:
+            operation()
+        except Exception as exc:
+            self.report(exc)
+
+
+def _wait_for_process_or_progress_failure(
+        process: subprocess.Popen[Any],
+        process_controller: Any,
+        callback_failure: _ProgressCallbackFailure,
+        *,
+        terminate_on_progress_failure: bool,
+) -> int:
+    while True:
+        try:
+            return process.wait(timeout=_PROCESS_WAIT_POLL_SECONDS)
+        except subprocess.TimeoutExpired:
+            if not callback_failure.ready.is_set() or not terminate_on_progress_failure:
+                continue
+            active_controller = process_controller
+            ephemeral_controller = active_controller is None
+            if ephemeral_controller:
+                active_controller = ManagedProcessController()
+                active_controller.attach(process, terminate_process_group=True)
+            try:
+                active_controller.terminate()
+            except BaseException as cleanup_error:
+                callback_failure.cleanup_unproven = True
+                if callback_failure.error is not None:
+                    cleanup_error.add_note(
+                        "Progress reporting also failed: "
+                        f"{type(callback_failure.error).__name__}: {callback_failure.error}"
+                    )
+                raise
+            finally:
+                if ephemeral_controller:
+                    active_controller.clear(process)
+
+
+def _raise_progress_callback_failure(callback_failure: _ProgressCallbackFailure) -> None:
+    if callback_failure.error is not None:
+        raise callback_failure.error
+
+
+def _join_process_threads(
+        threads: tuple[threading.Thread, ...],
+        callback_failure: _ProgressCallbackFailure,
+) -> None:
+    for thread in threads:
+        thread.join(timeout=1.0 if callback_failure.ready.is_set() else None)
+    if callback_failure.ready.is_set() and any(thread.is_alive() for thread in threads):
+        callback_failure.cleanup_unproven = True
+        error = ProcessDeadlineEnforcementError(
+            "Managed process stream cleanup remained active after the bounded join."
+        )
+        if callback_failure.error is not None:
+            error.add_note(
+                "Progress reporting also failed: "
+                f"{type(callback_failure.error).__name__}: {callback_failure.error}"
+            )
+        raise error
 
 
 def run_encode_command(
@@ -91,6 +172,7 @@ def run_encode_command(
         ssh_cmd,
         process_controller=process_controller,
         progress_callback=progress_callback,
+        terminate_on_progress_failure=False,
     )
     _raise_if_schedule_deadline_reached(result, host_payload)
     return result
@@ -108,6 +190,7 @@ def run_streamed_remote_encode_command(
         build_streaming_remote_ffmpeg_command: Callable[..., list[str]],
         update_ffmpeg_progress_state: Callable[..., dict[str, Any] | None],
         process_cancelled_error: type[Exception],
+        terminate_on_progress_failure: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     host_payload = object_dict(host)
     deadline = managed_schedule_close_deadline(host_payload, process_controller)
@@ -140,6 +223,7 @@ def run_streamed_remote_encode_command(
 
     stderr_lines: list[str] = []
     progress_state: dict[str, str] = {}
+    callback_failure = _ProgressCallbackFailure()
     start_time = time.monotonic()
 
     def pump_source() -> None:
@@ -170,15 +254,19 @@ def run_streamed_remote_encode_command(
         stream = io.TextIOWrapper(process.stderr, encoding="utf-8", errors="replace")
         for line in iter(stream.readline, ""):
             stderr_lines.append(line)
-            if progress_callback is None:
+            if progress_callback is None or callback_failure.ready.is_set():
                 continue
-            snapshot = update_ffmpeg_progress_state(
-                progress_state,
-                line,
-                elapsed_seconds=time.monotonic() - start_time,
-            )
-            if snapshot is not None:
-                progress_callback(snapshot)
+
+            def update_progress() -> None:
+                snapshot = update_ffmpeg_progress_state(
+                    progress_state,
+                    line,
+                    elapsed_seconds=time.monotonic() - start_time,
+                )
+                if snapshot is not None:
+                    progress_callback(snapshot)
+
+            callback_failure.call(update_progress)
         stream.close()
 
     source_thread = threading.Thread(target=pump_source, daemon=True)
@@ -189,14 +277,23 @@ def run_streamed_remote_encode_command(
     stderr_thread.start()
 
     try:
-        return_code = process.wait()
+        return_code = _wait_for_process_or_progress_failure(
+            process_handle,
+            process_controller,
+            callback_failure,
+            terminate_on_progress_failure=terminate_on_progress_failure,
+        )
     finally:
-        source_thread.join()
-        output_thread.join()
-        stderr_thread.join()
-        if process_controller is not None:
-            process_controller.clear(process_handle)
+        try:
+            _join_process_threads((source_thread, output_thread, stderr_thread), callback_failure)
+        finally:
+            if process_controller is not None:
+                process_controller.clear(
+                    process_handle,
+                    cleanup_unproven=callback_failure.cleanup_unproven,
+                )
 
+    _raise_progress_callback_failure(callback_failure)
     if process_controller is not None and process_controller.cancelled:
         process_controller.throw_if_cancelled()
         raise process_cancelled_error("Operation was cancelled.")
@@ -213,6 +310,7 @@ def run_tracked_process(
         run_command: Callable[[list[str]], subprocess.CompletedProcess[str]],
         update_ffmpeg_progress_state: Callable[..., dict[str, Any] | None],
         process_cancelled_error: type[Exception],
+        terminate_on_progress_failure: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     if process_controller is None and progress_callback is None:
         return run_command(cmd)
@@ -226,6 +324,7 @@ def run_tracked_process(
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     progress_state: dict[str, str] = {}
+    callback_failure = _ProgressCallbackFailure()
     start_time = time.monotonic()
 
     def consume_stdout() -> None:
@@ -240,15 +339,19 @@ def run_tracked_process(
             return
         for line in iter(process.stderr.readline, ""):
             stderr_lines.append(line)
-            if progress_callback is None:
+            if progress_callback is None or callback_failure.ready.is_set():
                 continue
-            snapshot = update_ffmpeg_progress_state(
-                progress_state,
-                line,
-                elapsed_seconds=time.monotonic() - start_time,
-            )
-            if snapshot is not None:
-                progress_callback(snapshot)
+
+            def update_progress() -> None:
+                snapshot = update_ffmpeg_progress_state(
+                    progress_state,
+                    line,
+                    elapsed_seconds=time.monotonic() - start_time,
+                )
+                if snapshot is not None:
+                    progress_callback(snapshot)
+
+            callback_failure.call(update_progress)
         process.stderr.close()
 
     stdout_thread = threading.Thread(target=consume_stdout, daemon=True)
@@ -257,13 +360,23 @@ def run_tracked_process(
     stderr_thread.start()
 
     try:
-        return_code = process.wait()
+        return_code = _wait_for_process_or_progress_failure(
+            process,
+            process_controller,
+            callback_failure,
+            terminate_on_progress_failure=terminate_on_progress_failure,
+        )
     finally:
-        stdout_thread.join()
-        stderr_thread.join()
-        if process_controller is not None:
-            process_controller.clear(process)
+        try:
+            _join_process_threads((stdout_thread, stderr_thread), callback_failure)
+        finally:
+            if process_controller is not None:
+                process_controller.clear(
+                    process,
+                    cleanup_unproven=callback_failure.cleanup_unproven,
+                )
 
+    _raise_progress_callback_failure(callback_failure)
     if process_controller is not None and process_controller.cancelled:
         process_controller.throw_if_cancelled()
         raise process_cancelled_error("Operation was cancelled.")
