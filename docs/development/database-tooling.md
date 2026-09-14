@@ -55,17 +55,25 @@ Mediaforce's SQLite schema.
   context exit. Derivation runtime-context commitments include the database
   device and inode so a replacement between separately locked phases cannot be
   adopted as the same frozen context.
-- Guarded SQLite connects bind two identities: the canonical parent directory
-  device/inode and the database leaf's device, inode, change time, and link
-  count. The parent and leaf are opened with no-follow descriptor-relative
-  operations; the opened parent descriptor must match the expected canonical
-  parent before SQLite is called. After the DBAPI connection opens, Mediaforce
-  revalidates the canonical parent and leaf, the held parent and leaf
-  descriptors, the descriptor-relative leaf, and the platform-pinned path
-  (`/.vol` on macOS or `/proc/self/fd` on Linux). Both descriptors remain open
-  until the SQLite connection closes. This prevents a substituted directory or
-  a hardlink to the same database inode from redirecting SQLite's WAL/SHM
-  namespace to another parent.
+- The runtime lease keeps custody of the exact OFD-locked database descriptor
+  and arms a sticky namespace witness before guarded SQLite opens. The witness
+  watches leaf replacement or relinking and parent detachment while ignoring
+  ordinary database writes and WAL checkpoints. Each connection
+  borrows that database descriptor without duplicating or closing it and owns a
+  separate no-follow parent descriptor used for its platform-pinned path
+  (`/.vol` on macOS or `/proc/self/fd` on Linux). Before and after SQLite opens,
+  and again around statements, Mediaforce compares the canonical parent and
+  leaf, descriptor-relative leaf, pinned path, parent descriptor, and borrowed
+  database descriptor by device, inode, and link count. The connection closes
+  only its parent descriptor; the lease closes the database descriptor after
+  every borrower has closed. This keeps legitimate ctime changes from writes
+  from looking like replacement while retaining sticky detection of transient
+  namespace swaps. Borrow release is explicit because it may close the raw
+  descriptor; abandoned connections retain custody until process exit instead
+  of using finalizer-time descriptor cleanup. A witnessed violation is terminal
+  for that lease. Linux also treats leaf attribute changes as violations because
+  inotify reports link-count changes through the same event class; macOS can
+  monitor link changes separately.
 - The one-time legacy `state/library.sqlite3` relocation is a separate,
   runtime-locked transfer rather than a file move. It fails closed unless the
   legacy source is a stable, single-link regular file protected by the same OFD

@@ -11,6 +11,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import RowMapping
 
+from mediaforce.core.db_custody import DatabaseFileCustody
 from mediaforce.core.db_migrations import SQLITE_BUSY_TIMEOUT_MS
 from mediaforce.core.db_migrations import create_engine_for_path
 from mediaforce.core.db_migrations import database_identity_connection_factory
@@ -25,8 +26,13 @@ DatabaseIdentityProvider = Callable[
     [Path, DatabaseLeaseIdentity | None],
     DatabaseLeaseIdentity | None,
 ]
+DatabaseCustodyProvider = Callable[
+    [Path, DatabaseLeaseIdentity],
+    DatabaseFileCustody,
+]
 
 _DATABASE_IDENTITY_PROVIDER: DatabaseIdentityProvider | None = None
+_DATABASE_CUSTODY_PROVIDER: DatabaseCustodyProvider | None = None
 
 
 @lru_cache(maxsize=None)
@@ -43,19 +49,23 @@ def _engine_for_db_path(
         reserved_identity: DatabaseLeaseIdentity | None,
 ) -> Engine:
     db_path = Path(db_path_str)
+    identity_guard = _database_identity_guard(
+        db_path,
+        reserved_identity,
+    )
+    database_custody = _database_custody(
+        db_path,
+        reserved_identity,
+    )
     run_migrations(
         db_path,
-        identity_guard=_database_identity_guard(
-            db_path,
-            reserved_identity,
-        ),
+        identity_guard=identity_guard,
+        database_custody=database_custody,
     )
     return create_engine_for_path(
         db_path,
-        identity_guard=_database_identity_guard(
-            db_path,
-            reserved_identity,
-        ),
+        identity_guard=identity_guard,
+        database_custody=database_custody,
     )
 
 
@@ -183,6 +193,10 @@ def open_readonly_db(db_path: Path) -> Iterator[Connection]:
     connection_factory = database_identity_connection_factory(
         resolved_path,
         identity_guard,
+        database_custody=_database_custody(
+            resolved_path,
+            reserved_lease_identity,
+        ),
     )
     if connection_factory is not None:
         connect_args["factory"] = connection_factory
@@ -222,6 +236,18 @@ def register_database_identity_provider(
     _DATABASE_IDENTITY_PROVIDER = provider
 
 
+def register_database_custody_provider(
+        provider: DatabaseCustodyProvider,
+) -> None:
+    global _DATABASE_CUSTODY_PROVIDER
+    if (
+        _DATABASE_CUSTODY_PROVIDER is not None
+        and _DATABASE_CUSTODY_PROVIDER is not provider
+    ):
+        raise RuntimeError("Mediaforce database custody provider is already registered")
+    _DATABASE_CUSTODY_PROVIDER = provider
+
+
 def _assert_writable_database_identity_reserved(
         db_path: Path,
         expected_identity: DatabaseLeaseIdentity | None = None,
@@ -246,3 +272,17 @@ def _database_identity_guard(
         )
 
     return assert_identity
+
+
+def _database_custody(
+        db_path: Path,
+        reserved_identity: DatabaseLeaseIdentity | None,
+) -> DatabaseFileCustody | None:
+    if reserved_identity is None:
+        return None
+    provider = _DATABASE_CUSTODY_PROVIDER
+    if provider is None:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
+    return provider(db_path, reserved_identity)

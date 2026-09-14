@@ -19,6 +19,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 
+from mediaforce.core.db_custody import DatabaseCustodyBorrow
+from mediaforce.core.db_custody import DatabaseCustodyError
+from mediaforce.core.db_custody import DatabaseFileCustody
+
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 INITIAL_REVISION = "20260401_0001"
 SQLiteConnectionFactory = Callable[..., sqlite3.Connection]
@@ -29,36 +33,44 @@ DatabaseConnectionLifetimeIdentity = tuple[int, int, int]
 
 class _DatabaseIdentityConnection(sqlite3.Connection):
     _database_identity_descriptors: tuple[int, ...] = ()
-    _database_identity_validator: Callable[[], bool] | None = None
+    _database_identity_validator: Callable[[], str | None] | None = None
+    _database_custody_borrow: DatabaseCustodyBorrow | None = None
 
     def retain_database_identity_descriptors(
             self,
             descriptors: tuple[int, ...],
-            validator: Callable[[], bool],
+            validator: Callable[[], str | None],
+            custody_borrow: DatabaseCustodyBorrow,
     ) -> None:
-        if self._database_identity_descriptors:
+        if (
+            self._database_identity_descriptors
+            or self._database_custody_borrow is not None
+        ):
             raise RuntimeError(
                 "Mediaforce database identity descriptors are already retained"
             )
         self._database_identity_descriptors = descriptors
         self._database_identity_validator = validator
+        self._database_custody_borrow = custody_borrow
 
     def assert_database_identity(self) -> None:
         validator = self._database_identity_validator
-        if validator is None or not validator():
-            raise RuntimeError(
+        failure_detail = validator() if validator is not None else "validator missing"
+        if failure_detail is not None:
+            error = RuntimeError(
                 "Mediaforce database identity changed during connection"
             )
+            error.add_note(f"Database custody detail: {failure_detail}")
+            raise error
 
     def close(self) -> None:
+        self._close_sqlite_connection()
         descriptors = self._database_identity_descriptors
+        custody_borrow = self._database_custody_borrow
         self._database_identity_descriptors = ()
         self._database_identity_validator = None
+        self._database_custody_borrow = None
         close_error: BaseException | None = None
-        try:
-            super().close()
-        except BaseException as exc:
-            close_error = exc
         for descriptor in descriptors:
             try:
                 os.close(descriptor)
@@ -70,8 +82,22 @@ class _DatabaseIdentityConnection(sqlite3.Connection):
                         "Database identity descriptor cleanup also failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
+        if custody_borrow is not None:
+            try:
+                custody_borrow.release()
+            except BaseException as exc:
+                if close_error is None:
+                    close_error = exc
+                else:
+                    close_error.add_note(
+                        "Database custody borrow cleanup also failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
         if close_error is not None:
             raise close_error
+
+    def _close_sqlite_connection(self) -> None:
+        super().close()
 
 
 class _DatabaseConnectionVolatileMetadataChanged(RuntimeError):
@@ -106,7 +132,8 @@ def _alembic_script_location() -> Iterator[str]:
 def create_engine_for_path(
         db_path: Path,
         *,
-    identity_guard: Callable[[], None] | None = None,
+        identity_guard: Callable[[], None] | None = None,
+        database_custody: DatabaseFileCustody | None = None,
 ) -> Engine:
     connect_args: dict[str, Any] = {
         "timeout": SQLITE_BUSY_TIMEOUT_MS / 1000,
@@ -114,6 +141,7 @@ def create_engine_for_path(
     connection_factory = database_identity_connection_factory(
         db_path,
         identity_guard,
+        database_custody=database_custody,
     )
     if connection_factory is not None:
         connect_args["factory"] = connection_factory
@@ -133,35 +161,55 @@ def create_engine_for_path(
 def database_identity_connection_factory(
         db_path: Path,
         identity_guard: Callable[[], None] | None,
+        *,
+        database_custody: DatabaseFileCustody | None = None,
 ) -> SQLiteConnectionFactory | None:
     if identity_guard is None:
         return None
+    if database_custody is None:
+        raise RuntimeError(
+            "Mediaforce database actual-opened identity inspection is unavailable"
+        )
     resolved_path = db_path.expanduser().resolve()
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         identity_guard()
-        for attempt in range(3):
-            expected_parent, expected = _database_connection_path_snapshot(
-                resolved_path
-            )
-            identity_guard()
-            try:
-                pinned_path, descriptors = _pin_database_connection_path(
-                    resolved_path,
-                    expected_parent=expected_parent,
-                    expected=expected,
-                )
-                break
-            except _DatabaseConnectionVolatileMetadataChanged:
-                if attempt == 2:
-                    raise RuntimeError(
-                        "Mediaforce database identity changed during connection"
-                    ) from None
-        else:
-            raise AssertionError("database identity pin retry loop did not terminate")
-        connection: _DatabaseIdentityConnection | None = None
-        descriptors_retained = False
         try:
+            custody_borrow = database_custody.borrow()
+        except DatabaseCustodyError as exc:
+            raise _database_identity_changed(
+                "lease custody was unavailable before SQLite open",
+                cause=exc,
+            ) from exc
+        connection: _DatabaseIdentityConnection | None = None
+        directory_descriptor = -1
+        resources_retained = False
+        try:
+            for attempt in range(3):
+                expected_parent, expected = _database_connection_path_snapshot(
+                    resolved_path
+                )
+                identity_guard()
+                custody_borrow.assert_quiet()
+                try:
+                    pinned_path, directory_descriptor = (
+                        _pin_database_connection_path(
+                            resolved_path,
+                            file_descriptor=custody_borrow.file_descriptor,
+                            expected_parent=expected_parent,
+                            expected=expected,
+                        )
+                    )
+                    break
+                except _DatabaseConnectionVolatileMetadataChanged:
+                    if attempt == 2:
+                        raise _database_identity_changed(
+                            "volatile metadata did not stabilize before SQLite open"
+                        ) from None
+            else:
+                raise AssertionError(
+                    "database identity pin retry loop did not terminate"
+                )
             connection_args, connection_kwargs = (
                 _database_connection_arguments_for_pinned_path(
                     args,
@@ -175,8 +223,8 @@ def database_identity_connection_factory(
                 **connection_kwargs,
             )
             connection.retain_database_identity_descriptors(
-                descriptors,
-                lambda: _database_connection_path_remains_bound(
+                (directory_descriptor,),
+                lambda: _database_connection_validation_detail(
                     resolved_path,
                     pinned_path=pinned_path,
                     expected_parent=expected_parent,
@@ -185,39 +233,47 @@ def database_identity_connection_factory(
                         expected[1],
                         expected[3],
                     ),
-                    descriptors=descriptors,
+                    descriptors=(
+                        custody_borrow.file_descriptor,
+                        directory_descriptor,
+                    ),
+                    custody_borrow=custody_borrow,
                 ),
+                custody_borrow,
             )
-            descriptors_retained = True
+            resources_retained = True
             identity_guard()
-            if not _database_connection_path_remains_pinned(
-                resolved_path,
-                pinned_path=pinned_path,
-                expected_parent=expected_parent,
-                expected=expected,
-                descriptors=descriptors,
-            ):
-                raise RuntimeError(
-                    "Mediaforce database identity changed during connection"
-                )
             connection.assert_database_identity()
         except BaseException as exc:
+            failure = (
+                _database_identity_changed(
+                    "lease custody reported a namespace event or binding change",
+                    cause=exc,
+                )
+                if isinstance(exc, DatabaseCustodyError)
+                else exc
+            )
             if connection is not None:
                 try:
                     connection.close()
                 except BaseException as cleanup_error:
-                    exc.add_note(
+                    failure.add_note(
                         "Database connection cleanup also failed: "
                         f"{type(cleanup_error).__name__}: {cleanup_error}"
                     )
-            if not descriptors_retained:
+            if not resources_retained:
                 try:
-                    _close_database_identity_descriptors(descriptors)
+                    _release_database_connection_resources(
+                        directory_descriptor,
+                        custody_borrow,
+                    )
                 except BaseException as cleanup_error:
-                    exc.add_note(
-                        "Database identity descriptor cleanup also failed: "
+                    failure.add_note(
+                        "Database custody resource cleanup also failed: "
                         f"{type(cleanup_error).__name__}: {cleanup_error}"
                     )
+            if failure is not exc:
+                raise failure from exc
             raise
         return connection
 
@@ -261,18 +317,17 @@ def _database_connection_lifetime_info_snapshot(
 def _pin_database_connection_path(
         db_path: Path,
         *,
+        file_descriptor: int,
         expected_parent: DatabaseDirectoryIdentity,
         expected: DatabaseConnectionPathSnapshot,
-) -> tuple[Path, tuple[int, int]]:
+) -> tuple[Path, int]:
     directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
         raise RuntimeError(
             "Mediaforce database actual-opened identity inspection is unavailable"
         )
     directory_flags |= os.O_DIRECTORY
     directory_flags |= os.O_NOFOLLOW
-    file_flags |= os.O_NOFOLLOW
     try:
         directory_descriptor = os.open(db_path.parent, directory_flags)
     except OSError as exc:
@@ -292,18 +347,6 @@ def _pin_database_connection_path(
         os.close(directory_descriptor)
         raise
     try:
-        file_descriptor = os.open(
-            db_path.name,
-            file_flags,
-            dir_fd=directory_descriptor,
-        )
-    except OSError as exc:
-        os.close(directory_descriptor)
-        raise RuntimeError(
-            "Mediaforce database identity changed during connection"
-        ) from exc
-    descriptors = (file_descriptor, directory_descriptor)
-    try:
         file_info = os.fstat(file_descriptor)
         observed = _database_connection_info_snapshot(file_info)
         if not stat.S_ISREG(file_info.st_mode) or (observed[0], observed[1], observed[3]) != (
@@ -321,14 +364,24 @@ def _pin_database_connection_path(
         )
         pinned_info = pinned_path.stat()
         pinned_observed = _database_connection_info_snapshot(pinned_info)
-        if not stat.S_ISREG(pinned_info.st_mode) or pinned_observed != expected:
+        if not stat.S_ISREG(pinned_info.st_mode) or (
+            pinned_observed[0],
+            pinned_observed[1],
+            pinned_observed[3],
+        ) != (
+            expected[0],
+            expected[1],
+            expected[3],
+        ):
             raise RuntimeError(
                 "Mediaforce database identity changed during connection"
             )
+        if pinned_observed[2] != expected[2]:
+            raise _DatabaseConnectionVolatileMetadataChanged
     except BaseException:
-        _close_database_identity_descriptors(descriptors)
+        os.close(directory_descriptor)
         raise
-    return pinned_path, descriptors
+    return pinned_path, directory_descriptor
 
 
 def _database_connection_path_for_directory_descriptor(
@@ -409,24 +462,6 @@ def _database_connection_arguments_for_pinned_path(
     return tuple(connection_args), connection_kwargs
 
 
-def _database_connection_path_remains_pinned(
-        db_path: Path,
-        *,
-        pinned_path: Path,
-        expected_parent: DatabaseDirectoryIdentity,
-        expected: DatabaseConnectionPathSnapshot,
-        descriptors: tuple[int, int],
-) -> bool:
-    return _database_connection_path_matches(
-        db_path,
-        pinned_path=pinned_path,
-        expected_parent=expected_parent,
-        expected=expected,
-        descriptors=descriptors,
-        snapshot=_database_connection_info_snapshot,
-    )
-
-
 def _database_connection_path_remains_bound(
         db_path: Path,
         *,
@@ -494,18 +529,117 @@ def _database_connection_path_matches(
     )
 
 
-def _close_database_identity_descriptors(
-        descriptors: tuple[int, ...],
+def _database_connection_validation_detail(
+        db_path: Path,
+        *,
+        pinned_path: Path,
+        expected_parent: DatabaseDirectoryIdentity,
+        expected: DatabaseConnectionLifetimeIdentity,
+        descriptors: tuple[int, int],
+        custody_borrow: DatabaseCustodyBorrow,
+) -> str | None:
+    try:
+        custody_borrow.assert_quiet()
+    except DatabaseCustodyError as exc:
+        return f"namespace witness failed: {type(exc).__name__}: {exc}"
+    if _database_connection_path_remains_bound(
+        db_path,
+        pinned_path=pinned_path,
+        expected_parent=expected_parent,
+        expected=expected,
+        descriptors=descriptors,
+    ):
+        return None
+    return _database_connection_path_diagnostics(
+        db_path,
+        pinned_path=pinned_path,
+        expected_parent=expected_parent,
+        expected=expected,
+        descriptors=descriptors,
+    )
+
+
+def _release_database_connection_resources(
+        directory_descriptor: int,
+        custody_borrow: DatabaseCustodyBorrow,
 ) -> None:
-    close_error: OSError | None = None
-    for descriptor in descriptors:
+    cleanup_error: BaseException | None = None
+    if directory_descriptor >= 0:
         try:
-            os.close(descriptor)
+            os.close(directory_descriptor)
+        except BaseException as exc:
+            cleanup_error = exc
+    try:
+        custody_borrow.release()
+    except BaseException as exc:
+        if cleanup_error is None:
+            cleanup_error = exc
+        else:
+            cleanup_error.add_note(
+                "Database custody borrow cleanup also failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+def _database_identity_changed(
+        detail: str,
+        *,
+        cause: BaseException | None = None,
+) -> RuntimeError:
+    error = RuntimeError(
+        "Mediaforce database identity changed during connection"
+    )
+    cause_detail = ""
+    if cause is not None:
+        cause_detail = f"; cause={type(cause).__name__}: {cause}"
+    error.add_note(f"Database custody detail: {detail}{cause_detail}")
+    return error
+
+
+def _database_connection_path_diagnostics(
+        db_path: Path,
+        *,
+        pinned_path: Path,
+        expected_parent: DatabaseDirectoryIdentity,
+        expected: DatabaseConnectionLifetimeIdentity,
+        descriptors: tuple[int, int],
+) -> str:
+    file_descriptor, directory_descriptor = descriptors
+    observations: list[str] = []
+
+    def observe(label: str, loader: Callable[[], os.stat_result]) -> None:
+        try:
+            info = loader()
         except OSError as exc:
-            if close_error is None:
-                close_error = exc
-    if close_error is not None:
-        raise close_error
+            observations.append(f"{label}=unavailable({exc.errno})")
+            return
+        identity = (
+            _database_directory_identity(info)
+            if stat.S_ISDIR(info.st_mode)
+            else _database_connection_lifetime_info_snapshot(info)
+        )
+        observations.append(f"{label}={identity}")
+
+    observe("database_fd", lambda: os.fstat(file_descriptor))
+    observe("directory_fd", lambda: os.fstat(directory_descriptor))
+    observe(
+        "relative_leaf",
+        lambda: os.stat(
+            db_path.name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        ),
+    )
+    observe("path", lambda: db_path.stat(follow_symlinks=False))
+    observe("parent", lambda: db_path.parent.stat(follow_symlinks=False))
+    observe("pinned", lambda: pinned_path.stat(follow_symlinks=False))
+    observe("pinned_parent", lambda: pinned_path.parent.stat())
+    return (
+        f"expected_file={expected}; expected_parent={expected_parent}; "
+        + "; ".join(observations)
+    )
 
 
 def register_database_identity_guards(
@@ -564,12 +698,14 @@ def run_migrations(
         db_path: Path,
         *,
         identity_guard: Callable[[], None] | None = None,
+        database_custody: DatabaseFileCustody | None = None,
 ) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     _run_identity_guard(identity_guard)
     engine = create_engine_for_path(
         db_path,
         identity_guard=identity_guard,
+        database_custody=database_custody,
     )
     try:
         with engine.connect() as connection:
@@ -578,6 +714,7 @@ def run_migrations(
                 _upgrade_with_alembic(
                     db_path,
                     identity_guard=identity_guard,
+                    database_custody=database_custody,
                 )
                 _run_identity_guard(identity_guard)
                 return
@@ -591,10 +728,12 @@ def run_migrations(
                     db_path,
                     INITIAL_REVISION,
                     identity_guard=identity_guard,
+                    database_custody=database_custody,
                 )
                 _upgrade_with_alembic(
                     db_path,
                     identity_guard=identity_guard,
+                    database_custody=database_custody,
                 )
                 _run_identity_guard(identity_guard)
                 return
@@ -602,6 +741,7 @@ def run_migrations(
         _upgrade_with_alembic(
             db_path,
             identity_guard=identity_guard,
+            database_custody=database_custody,
         )
         _run_identity_guard(identity_guard)
     finally:
@@ -684,12 +824,14 @@ def _upgrade_with_alembic(
         db_path: Path,
         *,
         identity_guard: Callable[[], None] | None = None,
+        database_custody: DatabaseFileCustody | None = None,
 ) -> None:
     with _alembic_script_location() as script_location:
         config = _alembic_config(
             db_path,
             script_location,
             identity_guard=identity_guard,
+            database_custody=database_custody,
         )
         command.upgrade(config, "head")
 
@@ -699,12 +841,14 @@ def _stamp_revision(
         revision: str,
         *,
         identity_guard: Callable[[], None] | None = None,
+        database_custody: DatabaseFileCustody | None = None,
 ) -> None:
     with _alembic_script_location() as script_location:
         config = _alembic_config(
             db_path,
             script_location,
             identity_guard=identity_guard,
+            database_custody=database_custody,
         )
         command.stamp(config, revision)
 
@@ -714,6 +858,7 @@ def _alembic_config(
         script_location: str,
         *,
         identity_guard: Callable[[], None] | None = None,
+        database_custody: DatabaseFileCustody | None = None,
 ) -> Config:
     config = Config()
     config.set_main_option("script_location", script_location)
@@ -728,7 +873,11 @@ def _alembic_config(
     if identity_guard is not None:
         config.attributes["database_identity_guard"] = identity_guard
         config.attributes["database_identity_connection_factory"] = (
-            database_identity_connection_factory(db_path, identity_guard)
+            database_identity_connection_factory(
+                db_path,
+                identity_guard,
+                database_custody=database_custody,
+            )
         )
     return config
 

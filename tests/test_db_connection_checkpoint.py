@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 import os
 import sqlite3
@@ -8,18 +9,41 @@ import unittest
 from unittest.mock import Mock, patch
 
 from mediaforce.core import db_migrations
+from mediaforce.core.db_custody import DatabaseFileCustody
 from mediaforce.core.db_migrations import database_identity_connection_factory
+
+
+def _fixture_database_custody(db_path: Path) -> DatabaseFileCustody:
+    descriptor = os.open(
+        db_path,
+        os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        return DatabaseFileCustody(
+            db_path,
+            file_descriptor=descriptor,
+            close_file_descriptor=lambda: os.close(descriptor),
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 class DatabaseConnectionCheckpointTests(unittest.TestCase):
     def test_connection_accepts_legitimate_sqlite_change_between_snapshot_and_open(self) -> None:
         with TemporaryDirectory() as raw_root:
             db_path = Path(raw_root) / "library.sqlite3"
-            with sqlite3.connect(db_path) as connection:
+            with closing(sqlite3.connect(db_path)) as connection:
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("CREATE TABLE events (value INTEGER)")
 
-            factory = database_identity_connection_factory(db_path, Mock())
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+                database_custody=custody,
+            )
             assert factory is not None
             real_snapshot = db_migrations._database_connection_path_snapshot
             before = db_path.stat()
@@ -32,7 +56,7 @@ class DatabaseConnectionCheckpointTests(unittest.TestCase):
                 snapshot = real_snapshot(path)
                 if not checkpointed:
                     checkpointed = True
-                    with sqlite3.connect(db_path) as writer:
+                    with closing(sqlite3.connect(db_path)) as writer:
                         writer.execute("INSERT INTO events VALUES (1)")
                         writer.commit()
                         writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -59,12 +83,18 @@ class DatabaseConnectionCheckpointTests(unittest.TestCase):
             root = Path(raw_root)
             db_path = root / "library.sqlite3"
             replacement = root / "replacement.sqlite3"
-            with sqlite3.connect(db_path) as connection:
+            with closing(sqlite3.connect(db_path)) as connection:
                 connection.execute("CREATE TABLE expected (value INTEGER)")
-            with sqlite3.connect(replacement) as connection:
+            with closing(sqlite3.connect(replacement)) as connection:
                 connection.execute("CREATE TABLE replacement (value INTEGER)")
 
-            factory = database_identity_connection_factory(db_path, Mock())
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+                database_custody=custody,
+            )
             assert factory is not None
             real_snapshot = db_migrations._database_connection_path_snapshot
 
@@ -86,8 +116,17 @@ class DatabaseConnectionCheckpointTests(unittest.TestCase):
     def test_connection_bounds_repeated_pre_open_metadata_churn(self) -> None:
         with TemporaryDirectory() as raw_root:
             db_path = Path(raw_root) / "library.sqlite3"
-            sqlite3.connect(db_path).close()
-            factory = database_identity_connection_factory(db_path, Mock())
+            with closing(sqlite3.connect(db_path)) as setup_connection:
+                setup_connection.execute("PRAGMA journal_mode=WAL")
+                setup_connection.execute("CREATE TABLE events (value INTEGER)")
+                setup_connection.commit()
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+                database_custody=custody,
+            )
             assert factory is not None
             real_snapshot = db_migrations._database_connection_path_snapshot
 
@@ -95,7 +134,24 @@ class DatabaseConnectionCheckpointTests(unittest.TestCase):
                     path: Path,
             ) -> tuple[tuple[int, int], tuple[int, int, int, int]]:
                 snapshot = real_snapshot(path)
-                os.utime(db_path, None)
+                with closing(sqlite3.connect(db_path)) as writer:
+                    writer.execute(
+                        "INSERT INTO events VALUES (?)",
+                        (snapshot_mock.call_count,),
+                    )
+                    writer.commit()
+                    self.assertEqual(
+                        writer.execute(
+                            "PRAGMA wal_checkpoint(TRUNCATE)"
+                        ).fetchone(),
+                        (0, 0, 0),
+                    )
+                after = db_path.stat()
+                self.assertEqual(
+                    (after.st_dev, after.st_ino, after.st_nlink),
+                    (snapshot[1][0], snapshot[1][1], snapshot[1][3]),
+                )
+                self.assertNotEqual(after.st_ctime_ns, snapshot[1][2])
                 return snapshot
 
             with patch.object(
