@@ -21,7 +21,11 @@ from mediaforce.core.config import (
     MediaforceConfig,
     legacy_sqlite_migration_quarantine_name,
 )
+from mediaforce.core.db import register_database_custody_provider
 from mediaforce.core.db import register_database_identity_provider
+from mediaforce.core.db import reset_engine_cache
+from mediaforce.core.db_custody import DatabaseCustodyError
+from mediaforce.core.db_custody import DatabaseFileCustody
 from mediaforce.core.file_integrity import (
     FileIntegrityError,
     MacOSFileIntegrityGuard,
@@ -44,6 +48,11 @@ class MediaforceRuntimeLease:
     owner_pid: int
     _database_path_key: str | None = field(default=None, repr=False)
     _database_identity: tuple[int, int] | None = field(default=None, repr=False)
+    _database_custody: DatabaseFileCustody | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     _active: bool = field(default=False, init=False, repr=False)
     _state_lock: threading.Lock = field(
         default_factory=threading.Lock,
@@ -118,6 +127,7 @@ class MediaforceRuntimeLease:
                         "Mediaforce runtime db_path identity changed under the active lease"
                     )
                 self.assert_database_identity_reserved(db_path)
+                self._assert_database_custody_available(db_path)
                 return
             if identity is None and not create_if_missing:
                 return
@@ -132,6 +142,8 @@ class MediaforceRuntimeLease:
                 ),
                 lock_path=mediaforce_runtime_lock_path(config),
             )
+            custody: DatabaseFileCustody | None = None
+            descriptor_adopted = False
             try:
                 descriptor_identity = os.fstat(descriptor)
                 try:
@@ -153,7 +165,21 @@ class MediaforceRuntimeLease:
                 inode_key = (
                     f"file:{descriptor_identity.st_dev}:{descriptor_identity.st_ino}"
                 )
+                try:
+                    custody = DatabaseFileCustody(
+                        db_path,
+                        file_descriptor=descriptor,
+                        close_file_descriptor=(
+                            lambda descriptor=descriptor: os.close(descriptor)
+                        ),
+                    )
+                except DatabaseCustodyError as exc:
+                    raise MediaforceRuntimeBusyError(
+                        "Mediaforce writable database custody is unavailable"
+                    ) from exc
                 self._extra_descriptors.append(descriptor)
+                descriptor_adopted = True
+                self._database_custody = custody
                 self.namespace_keys = tuple(
                     sorted({*self.namespace_keys, inode_key})
                 )
@@ -162,8 +188,17 @@ class MediaforceRuntimeLease:
                     descriptor_identity.st_ino,
                 )
                 self.assert_database_identity_reserved(db_path)
-            except BaseException:
-                if descriptor not in self._extra_descriptors:
+            except BaseException as exc:
+                if descriptor_adopted:
+                    assert custody is not None
+                    try:
+                        custody.close()
+                    except BaseException as cleanup_error:
+                        exc.add_note(
+                            "Database custody cleanup also failed: "
+                            f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        )
+                else:
                     os.close(descriptor)
                 raise
 
@@ -190,6 +225,42 @@ class MediaforceRuntimeLease:
                 "Mediaforce runtime db_path identity is not reserved by the active lease"
             )
         return self._database_identity
+
+    def database_custody(self, db_path: Path) -> DatabaseFileCustody:
+        identity = self.assert_database_identity_reserved(db_path)
+        with self._extension_lock:
+            self.assert_active()
+            custody = self._database_custody
+            if custody is None or not custody.matches(db_path, identity):
+                raise MediaforceRuntimeBusyError(
+                    "Mediaforce writable database custody is unavailable"
+                )
+            try:
+                custody.assert_quiet()
+            except DatabaseCustodyError as exc:
+                raise MediaforceRuntimeBusyError(
+                    "Mediaforce writable database custody changed under the active lease"
+                ) from exc
+            return custody
+
+    def _assert_database_custody_available(self, db_path: Path) -> None:
+        custody = self._database_custody
+        if (
+            custody is None
+            or self._database_identity is None
+            or not custody.matches(db_path, self._database_identity)
+        ):
+            raise MediaforceRuntimeBusyError(
+                "Mediaforce writable database custody is unavailable"
+            )
+
+    def _close_database_custody(self) -> None:
+        custody = self._database_custody
+        try:
+            if custody is not None:
+                custody.close()
+        finally:
+            reset_engine_cache()
 
     def _activate(self, authority: object) -> None:
         if authority is not _RUNTIME_LEASE_AUTHORITY:
@@ -296,6 +367,27 @@ def assert_mediaforce_database_identity_reserved(
 register_database_identity_provider(
     assert_mediaforce_database_identity_reserved,
 )
+
+
+def database_custody_for_reserved_identity(
+        db_path: Path,
+        expected_identity: tuple[int, int, int],
+) -> DatabaseFileCustody:
+    with _RUNTIME_LEASE_REGISTRY_LOCK:
+        leases = tuple(_REGISTERED_RUNTIME_LEASES.values())
+    for lease in leases:
+        try:
+            identity = lease.assert_database_identity_reserved(db_path)
+        except MediaforceRuntimeBusyError:
+            continue
+        if (id(lease), identity[0], identity[1]) == expected_identity:
+            return lease.database_custody(db_path)
+    raise MediaforceRuntimeBusyError(
+        "Mediaforce writable database custody is unavailable"
+    )
+
+
+register_database_custody_provider(database_custody_for_reserved_identity)
 
 
 def mediaforce_runtime_lock_path(config: MediaforceConfig) -> Path:
@@ -1727,10 +1819,12 @@ def _runtime_namespace_reservation_locations(
 @dataclass(frozen=True, slots=True)
 class _RuntimeNamespaceLocks:
     descriptors: tuple[int, ...]
+    database_descriptor: int | None
 
-    def close(self) -> None:
+    def close(self, *, excluded_descriptors: frozenset[int] = frozenset()) -> None:
         for descriptor in reversed(self.descriptors):
-            os.close(descriptor)
+            if descriptor not in excluded_descriptors:
+                os.close(descriptor)
 
 
 def _directory_descriptor_matches_path(
@@ -2417,6 +2511,7 @@ def _acquire_runtime_namespace_locks(
             locations_by_directory[directory_key] = (location.directory, set())
         locations_by_directory[directory_key][1].add(location.name)
     descriptors: list[int] = []
+    database_descriptor: int | None = None
     try:
         for directory_key in sorted(locations_by_directory):
             directory, names = locations_by_directory[directory_key]
@@ -2446,12 +2541,21 @@ def _acquire_runtime_namespace_locks(
                 lock_path=lock_path,
             )
             descriptors.append(descriptor)
-            if not file_lock.database_identity_lock:
+            if file_lock.database_identity_lock:
+                if database_descriptor is not None:
+                    raise MediaforceRuntimeBusyError(
+                        "Mediaforce runtime database custody layout is invalid"
+                    )
+                database_descriptor = descriptor
+            else:
                 _acquire_nonblocking_lock(
                     descriptor,
                     lock_path=lock_path,
                 )
-        return _RuntimeNamespaceLocks(descriptors=tuple(descriptors))
+        return _RuntimeNamespaceLocks(
+            descriptors=tuple(descriptors),
+            database_descriptor=database_descriptor,
+        )
     except BaseException:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
@@ -2576,11 +2680,31 @@ def exclusive_mediaforce_runtime_lock(
                 _database_path_key=namespace_state.database_path_key,
                 _database_identity=namespace_state.database_identity,
             )
+            database_descriptor = namespace_locks.database_descriptor
+            if database_descriptor is not None:
+                try:
+                    lease._database_custody = DatabaseFileCustody(
+                        config.paths.db_path,
+                        file_descriptor=database_descriptor,
+                        close_file_descriptor=(
+                            lambda descriptor=database_descriptor: os.close(descriptor)
+                        ),
+                    )
+                except DatabaseCustodyError as exc:
+                    raise MediaforceRuntimeBusyError(
+                        "Mediaforce writable database custody is unavailable"
+                    ) from exc
             lease._activate(_RUNTIME_LEASE_AUTHORITY)
             lease_binding = _ACTIVE_RUNTIME_LEASE.set(lease)
             try:
                 yield lease
             finally:
+                active_error = sys.exception()
+                custody_cleanup_error: BaseException | None = None
+                try:
+                    lease._close_database_custody()
+                except BaseException as exc:
+                    custody_cleanup_error = exc
                 lease._deactivate(_RUNTIME_LEASE_AUTHORITY)
                 if lease_binding is not None:
                     _ACTIVE_RUNTIME_LEASE.reset(lease_binding)
@@ -2593,26 +2717,64 @@ def exclusive_mediaforce_runtime_lock(
                 lock_file.flush()
                 os.fsync(lock_file.fileno())
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                if custody_cleanup_error is not None:
+                    if active_error is not None:
+                        active_error.add_note(
+                            "Database custody cleanup also failed: "
+                            f"{type(custody_cleanup_error).__name__}: "
+                            f"{custody_cleanup_error}"
+                        )
+                    else:
+                        raise custody_cleanup_error
     finally:
-        if lock_descriptor >= 0:
-            os.close(lock_descriptor)
+        outer_active_error = sys.exception()
+        custody_descriptor = (
+            lease._database_custody.file_descriptor
+            if lease is not None and lease._database_custody is not None
+            else None
+        )
+        excluded_descriptors = (
+            frozenset({custody_descriptor})
+            if custody_descriptor is not None
+            else frozenset()
+        )
         try:
-            if directory_locked and directory_descriptor >= 0:
-                fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
-        finally:
+            if lock_descriptor >= 0:
+                os.close(lock_descriptor)
             try:
-                if directory_descriptor >= 0:
-                    os.close(directory_descriptor)
+                if directory_locked and directory_descriptor >= 0:
+                    fcntl.flock(directory_descriptor, fcntl.LOCK_UN)
             finally:
                 try:
-                    if lease is not None:
-                        for descriptor in reversed(lease._extra_descriptors):
-                            try:
-                                os.close(descriptor)
-                            except OSError:
-                                pass
+                    if directory_descriptor >= 0:
+                        os.close(directory_descriptor)
                 finally:
-                    namespace_locks.close()
+                    try:
+                        if lease is not None:
+                            for descriptor in reversed(lease._extra_descriptors):
+                                if descriptor in excluded_descriptors:
+                                    continue
+                                try:
+                                    os.close(descriptor)
+                                except OSError:
+                                    pass
+                    finally:
+                        namespace_locks.close(
+                            excluded_descriptors=excluded_descriptors,
+                        )
+        finally:
+            cleanup_active_error = sys.exception()
+            if lease is not None:
+                try:
+                    lease._close_database_custody()
+                except BaseException as exc:
+                    active_error = cleanup_active_error or outer_active_error
+                    if active_error is None:
+                        raise
+                    active_error.add_note(
+                        "Database custody cleanup retry also failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
     if not parent_identity_valid:
         raise MediaforceRuntimeBusyError(
             "Mediaforce runtime lock path changed while active"

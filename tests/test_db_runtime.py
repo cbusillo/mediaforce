@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -29,6 +29,7 @@ from mediaforce.core.db import connect
 from mediaforce.core.db import open_db
 from mediaforce.core.db import open_readonly_db
 from mediaforce.core.db import reset_engine_cache
+from mediaforce.core.db_custody import DatabaseFileCustody
 from mediaforce.core.db_tables import alembic_version
 from mediaforce.core.db_tables import background_work_state
 from mediaforce.core.db_tables import calibration_jobs
@@ -57,6 +58,22 @@ from mediaforce.web.runtime_lock import (
 from mediaforce.web import runtime_lock as runtime_lock_module
 
 CURRENT_DB_REVISION = "20260908_0022"
+
+
+def _fixture_database_custody(db_path: Path) -> DatabaseFileCustody:
+    descriptor = os.open(
+        db_path,
+        os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        return DatabaseFileCustody(
+            db_path,
+            file_descriptor=descriptor,
+            close_file_descriptor=lambda: os.close(descriptor),
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 class DatabaseRuntimeTests(unittest.TestCase):
@@ -5718,7 +5735,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
             factory = database_identity_connection_factory(
                 db_path,
                 identity_guard,
+                database_custody=(
+                    custody := _fixture_database_custody(db_path)
+                ),
             )
+            self.addCleanup(custody.close)
             assert factory is not None
             real_connection = db_migrations_module._DatabaseIdentityConnection
             legitimate_connections: list[sqlite3.Connection] = []
@@ -5786,7 +5807,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
             factory = database_identity_connection_factory(
                 db_path,
                 identity_guard,
+                database_custody=(
+                    custody := _fixture_database_custody(resolved_path)
+                ),
             )
+            self.addCleanup(custody.close)
             assert factory is not None
             real_connection = db_migrations_module._DatabaseIdentityConnection
 
@@ -5839,7 +5864,13 @@ class DatabaseRuntimeTests(unittest.TestCase):
             sqlite3.connect(db_path).close()
             replacement_path = replacement_root / db_path.name
             replacement_path.hardlink_to(db_path)
-            factory = database_identity_connection_factory(db_path, Mock())
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+                database_custody=custody,
+            )
             assert factory is not None
             real_snapshot = (
                 db_migrations_module._database_connection_path_snapshot
@@ -5890,7 +5921,13 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 connection.execute("CREATE TABLE expected_database (value INTEGER)")
             replacement_path = replacement_root / db_path.name
             replacement_path.hardlink_to(db_path)
-            factory = database_identity_connection_factory(db_path, Mock())
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+                database_custody=custody,
+            )
             assert factory is not None
             real_connection = db_migrations_module._DatabaseIdentityConnection
             parent_swapped = False
@@ -5938,7 +5975,13 @@ class DatabaseRuntimeTests(unittest.TestCase):
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("CREATE TABLE expected_database (value INTEGER)")
             (replacement_root / db_path.name).hardlink_to(db_path)
-            engine = create_engine_for_path(db_path, identity_guard=Mock())
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            engine = create_engine_for_path(
+                db_path,
+                identity_guard=Mock(),
+                database_custody=custody,
+            )
             try:
                 with engine.connect() as connection:
                     database_root.rename(retired_root)
@@ -5955,22 +5998,36 @@ class DatabaseRuntimeTests(unittest.TestCase):
             finally:
                 engine.dispose()
 
-    def test_connection_factory_retains_verified_descriptors_until_close(self) -> None:
+    def test_connection_factory_closes_owned_directory_but_not_borrowed_database_fd(
+            self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
             sqlite3.connect(db_path).close()
-            factory = database_identity_connection_factory(db_path, Mock())
+            custody = _fixture_database_custody(db_path)
+            self.addCleanup(custody.close)
+            factory = database_identity_connection_factory(
+                db_path,
+                Mock(),
+                database_custody=custody,
+            )
             assert factory is not None
 
             connection = factory(str(db_path), check_same_thread=False)
             descriptors = connection._database_identity_descriptors
-            self.assertEqual(len(descriptors), 2)
+            database_descriptor = custody.file_descriptor
+            self.assertEqual(len(descriptors), 1)
             for descriptor in descriptors:
                 os.fstat(descriptor)
+            os.fstat(database_descriptor)
             connection.close()
             for descriptor in descriptors:
                 with self.assertRaises(OSError):
                     os.fstat(descriptor)
+            os.fstat(database_descriptor)
+            custody.close()
+            with self.assertRaises(OSError):
+                os.fstat(database_descriptor)
 
     def test_sqlite_urls_quote_legal_special_characters_without_changing_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5998,7 +6055,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
             guarded_engine = create_engine_for_path(
                 db_path,
                 identity_guard=identity_guard,
+                database_custody=(
+                    custody := _fixture_database_custody(db_path)
+                ),
             )
+            self.addCleanup(custody.close)
             try:
                 with guarded_engine.connect() as connection:
                     self.assertEqual(
@@ -6040,17 +6101,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "library.sqlite3"
             sqlite3.connect(db_path).close()
-            factory = database_identity_connection_factory(
-                db_path,
-                Mock(),
-            )
-            assert factory is not None
-
             with (
-                patch(
-                    "mediaforce.core.db_migrations.sys.platform",
-                    "unsupported",
-                ),
                 patch(
                     "mediaforce.core.db_migrations._DatabaseIdentityConnection",
                 ) as connection,
@@ -6059,7 +6110,7 @@ class DatabaseRuntimeTests(unittest.TestCase):
                     "actual-opened identity inspection is unavailable",
                 ),
             ):
-                factory(str(db_path), check_same_thread=False)
+                database_identity_connection_factory(db_path, Mock())
 
             connection.assert_not_called()
 
@@ -6074,7 +6125,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
             factory = database_identity_connection_factory(
                 resolved_path,
                 identity_guard,
+                database_custody=(
+                    custody := _fixture_database_custody(resolved_path)
+                ),
             )
+            self.addCleanup(custody.close)
             assert factory is not None
 
             connection = factory(

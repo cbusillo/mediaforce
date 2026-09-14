@@ -116,6 +116,7 @@ jobs:
   file-integrity-macos:
     name: file-integrity-macos
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - name: Check out repo
         uses: actions/checkout@v6
@@ -135,5 +136,10 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Run macOS file-integrity tests
-        run: uv run --with pytest pytest -q tests/test_file_integrity.py
+      - name: Run macOS file-integrity and database-custody tests
+        run: >-
+          uv run --with pytest pytest -q
+          tests/test_file_integrity.py
+          tests/test_db_connection_custody.py
+          tests/test_db_connection_checkpoint.py
+          tests/test_db_runtime.py

@@ -37,6 +37,10 @@ def run_migrations_online() -> None:
     connection_factory = config.attributes.get(
         "database_identity_connection_factory"
     )
+    if identity_guard is not None and connection_factory is None:
+        raise RuntimeError(
+            "Alembic database identity connection factory is not configured"
+        )
     if identity_guard is not None:
         identity_guard()
     connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_MS / 1000}
