@@ -67,8 +67,11 @@ under #593.
 
 During database connection setup, volatile metadata changes before SQLite opens
 the file receive at most three fresh pinning attempts. The lease-owned namespace
-witness treats leaf replacement or relinking, parent detachment, and supported
-link or attribute violations as terminal custody failures, while ordinary
-in-place writes and WAL checkpoints remain valid. The retained custody borrow
-and descriptor-relative identity checks continue through the SQLite connection
-lifetime and fail closed if the database or its parent identity changes.
+witness treats leaf replacement or relinking and parent detachment as terminal
+custody failures on supported platforms. Linux also treats leaf attribute events
+as terminal. On macOS, attribute-only metadata changes before SQLite opens remain
+eligible for the bounded retries; the witness tracks replacement, relinking, and
+parent detachment. Ordinary in-place writes and WAL checkpoints remain valid.
+The retained custody borrow and descriptor-relative identity checks continue
+through the SQLite connection lifetime and fail closed if the database or its
+parent identity changes.
