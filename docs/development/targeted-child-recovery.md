@@ -65,7 +65,13 @@ does not establish remote termination or make an expired lease safe to reclaim
 while a writer may still exist. Those containment and reconciliation cases remain
 under #593.
 
-During database connection setup, a ctime-only change before SQLite opens the
-file receives at most three fresh pinning attempts. Legitimate writes or WAL
-checkpoints can change that timestamp. Parent, inode and link-count changes fail
-immediately, and all checks after SQLite opens the database remain unchanged.
+During database connection setup, volatile metadata changes before SQLite opens
+the file receive at most three fresh pinning attempts. The lease-owned namespace
+witness treats leaf replacement or relinking and parent detachment as terminal
+custody failures on supported platforms. Linux also treats leaf attribute events
+as terminal. On macOS, attribute-only metadata changes before SQLite opens remain
+eligible for the bounded retries; the witness tracks replacement, relinking, and
+parent detachment. Ordinary in-place writes and WAL checkpoints remain valid.
+The retained custody borrow and descriptor-relative identity checks continue
+through the SQLite connection lifetime and fail closed if the database or its
+parent identity changes.
