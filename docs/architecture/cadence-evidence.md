@@ -45,6 +45,14 @@ results compile to one of four symbolic plans:
 - `bwdif_bff`
 - `fieldmatch_decimate`
 
+Progressive is judged against determined frames: at least 95% of the frames
+idet could classify must be progressive, and at least 80% of the sample must be
+determined. idet reports a frame as undetermined when it lacks field detail,
+which includes the first frames of each sampled range while its multi-frame
+state warms up, so undetermined frames are not evidence of interlacing.
+Confidence still counts every sampled frame. Interlaced, telecine and mixed
+rules are unchanged.
+
 Only those IDs can become filter graphs. Raw policy or model-generated filter
 strings are never accepted.
 

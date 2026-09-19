@@ -20,6 +20,7 @@ CADENCE_TOOL_VERSION = "1"
 DEFAULT_IDET_MAX_FRAMES = 600
 DEFAULT_IDET_RANGE_COUNT = 3
 MIN_IDET_FRAMES = 120
+MIN_DETERMINED_FRAME_SHARE = 0.80
 
 CadenceClass = Literal["progressive", "tff", "bff", "telecine", "mixed", "unknown"]
 CadenceTransform = Literal["none", "bwdif_tff", "bwdif_bff", "fieldmatch_decimate"]
@@ -250,7 +251,15 @@ def classify_cadence(
             transform="fieldmatch_decimate" if confidence >= 0.80 else None,
             rationale="Repeated fields and mixed progressive/interlaced measurements match a 3:2 telecine pattern.",
         )
-    if progressive_ratio >= 0.95:
+    # idet reports a frame as undetermined when it has too little field detail to judge, which
+    # includes the first frames of every sampled range while its multi-frame state warms up.
+    # Those frames are not evidence of interlacing, so progressive is judged against determined
+    # frames, provided most of the sample was determined. Confidence still counts every frame.
+    determined = tff + bff + progressive
+    if (
+            determined / total >= MIN_DETERMINED_FRAME_SHARE
+            and progressive / max(1, determined) >= 0.95
+    ):
         confidence = _bounded(progressive_ratio * coverage_value)
         return _decision(
             classification="progressive",

@@ -318,6 +318,19 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual((mixed["classification"], mixed["status"]), ("mixed", "blocked"))
         self.assertEqual((unknown["classification"], unknown["status"]), ("unknown", "blocked"))
 
+    def test_undetermined_frames_do_not_count_against_progressive(self) -> None:
+        # House S03E02 (#599): 557 progressive, 46 undetermined, no interlaced frames.
+        warm_up = self._decision(progressive_frames=557, undetermined_frames=46)
+        some_interlaced = self._decision(progressive_frames=520, tff_frames=37, undetermined_frames=46)
+        mostly_undetermined = self._decision(progressive_frames=450, undetermined_frames=153)
+
+        self.assertEqual((warm_up["classification"], warm_up["transform"]), ("progressive", "none"))
+        self.assertEqual((some_interlaced["classification"], some_interlaced["status"]), ("unknown", "blocked"))
+        self.assertEqual(
+            (mostly_undetermined["classification"], mostly_undetermined["status"]),
+            ("unknown", "blocked"),
+        )
+
     def test_transform_compiler_rejects_unresolved_or_mismatched_plans(self) -> None:
         tff, tff_evidence = self._backed_decision(tff_frames=190, progressive_frames=10)
         self.assertEqual(
