@@ -186,6 +186,7 @@
 	const exactFilename = $derived(exactItemFilename(folder));
 	const seriesSeasonCount = $derived(Object.keys(folder.summary?.seasons ?? {}).length);
 	const seriesSeasonLabel = $derived(seriesSeasonCount === 1 ? 'season' : 'seasons');
+	const hostListFormat = new Intl.ListFormat('en', { style: 'long', type: 'conjunction' });
 	const lifecycle = $derived(folder.lifecycle ?? null);
 	const seriesFolderCards = $derived(
 		lifecycle ? applySeriesLifecycle(foldersPayload, lifecycle) : foldersPayload
@@ -1802,7 +1803,9 @@
 								<span class="goal-label">{goal.title}</span>
 								<strong>{goal.megabytesPerEpisode} MB</strong>
 								<small
-									>per episode · about {formatDecimalFileSize(goal.targetSizeBytes * episodeCount)} total</small
+									>per episode · about {formatDecimalFileSize(
+										goal.targetSizeBytes * (productionEpisodeCount || episodeCount)
+									)} total</small
 								>
 								<p>{goal.detail}</p>
 							</span>
@@ -2741,14 +2744,16 @@
 						{activeOlderSeasonCount > 0
 							? `Compressing ${activeOlderSeasonCount} older ${activeOlderSeasonCount === 1 ? 'season' : 'seasons'}`
 							: isSeriesScope
-								? `Compressing all ${seriesSeasonCount} ${seriesSeasonLabel}`
+								? `Compressing ${scopeName}`
 								: isExactItemScope
 									? `Compressing ${exactEpisodeName}`
 									: `Compressing ${identity.season}`}
 					</h1>
 					<p class="lede">
 						{encodeProgress.currentEpisode === 'A representative episode'
-							? `The ${scopeNoun} is waiting for its next available computer.`
+							? encodeProgress.hosts.length > 0
+								? `${hostListFormat.format(encodeProgress.hosts)} ${encodeProgress.hosts.length === 1 ? 'is' : 'are'} compressing episodes now.`
+								: `The ${scopeNoun} is waiting for its next available computer.`
 							: isExactItemScope
 								? `${encodeProgress.currentEpisode} is being compressed now.`
 								: `${encodeProgress.currentEpisode} is being compressed now.`}

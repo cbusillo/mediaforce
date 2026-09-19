@@ -1892,6 +1892,34 @@ describe('season experience translation', () => {
 			detail: expect.stringContaining('VMAF floor of 93')
 		});
 
+		const floorError =
+			'The approved target size conflicts with the configured quality floor (target_band_violates_quality_floor); target=225000000 bytes, best_reachable=523458023 bytes.';
+		const stoppedEncode = {
+			job_id: 'ff5d63a529ce',
+			prefix: 'tv/Big Brother (US)',
+			status: 'needs_attention',
+			error: floorError,
+			finished_at: '2026-07-26T04:21:50+00:00'
+		};
+		expect(targetConstraintSummary(folder({ encode_job: stoppedEncode }))).toMatchObject({
+			kind: 'quality_conflict',
+			recoveryLabel: 'Choose a roomier goal',
+			detail: expect.stringMatching(/could not reach 225 MB.*about 523 MB.*Retrying would stop/)
+		});
+		expect(
+			targetConstraintSummary(
+				folder({
+					encode_job: stoppedEncode,
+					calibration_job: { status: 'completed', finished_at: '2026-08-01T00:00:00+00:00' }
+				})
+			)
+		).toBeNull();
+		expect(
+			targetConstraintSummary(
+				folder({ encode_job: { ...stoppedEncode, error: 'ssh: connection reset' } })
+			)
+		).toBeNull();
+
 		expect(
 			targetConstraintSummary(
 				folder({

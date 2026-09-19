@@ -246,8 +246,19 @@
 			return detailsPending ? 'Checking lifecycle policy' : 'Lifecycle policy unavailable';
 		if (lifecycle.provider_state === 'active') return lifecycle.provider_status || 'Active series';
 		if (lifecycle.provider_state === 'ended') return lifecycle.provider_status || 'Ended series';
-		if (lifecycle.provider_state === 'stale') return 'Cached status is stale';
+		if (lifecycle.provider_state === 'stale') {
+			return lifecycle.provider_status
+				? `${lifecycle.provider_status} when last checked`
+				: 'Series status is out of date';
+		}
 		return 'Series status unknown';
+	}
+
+	function staleStatusCopy(observedAt: string | null | undefined): string {
+		const observed = observedAt ? new Date(observedAt) : null;
+		if (!observed || Number.isNaN(observed.getTime())) return 'Series status has not refreshed.';
+		const day = observed.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+		return `Series status last refreshed ${day}.`;
 	}
 
 	function lifecycleModeCopy(): string {
@@ -518,6 +529,12 @@
 										<strong>{providerStateCopy()}</strong>
 										{#if lifecycleAvailable}
 											<span>{eligibleEpisodeCount} eligible · {heldEpisodeCount} held</span>
+											{#if selectedLifecycle?.provider_state === 'stale'}
+												<span
+													>{staleStatusCopy(selectedLifecycle.provider_observed_at)} Refresh the library
+													in Activity, or choose Off to release the held season.</span
+												>
+											{/if}
 										{:else}
 											<span
 												>{detailsPending
