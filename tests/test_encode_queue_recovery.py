@@ -13153,6 +13153,73 @@ raise SystemExit(0)
         self.assertFalse(target.exists())
         sleep_mock.assert_called_once_with(staging_runtime.TRANSIENT_FILE_BUSY_RETRY_DELAY_SECONDS)
 
+    def test_encode_one_item_drops_header_only_output_and_keeps_large_unreadable_output(self) -> None:
+        quality_result = QualitySearchResult(crf=28.0, metric="XPSNR", target=41.0, score=41.5, stdout="ok")
+        probe_failure = subprocess.CalledProcessError(1, ["ffprobe"])
+        cases = (
+            ("header-only", 1369, staging_runtime.UnreadableEncodeOutputError, False),
+            ("large", staging_runtime.HEADER_ONLY_OUTPUT_MAX_BYTES + 1, subprocess.CalledProcessError, True),
+        )
+        for label, output_size, expected_error, output_kept in cases:
+            with self.subTest(label), open_db(self.config.paths.db_path) as connection:
+                source_path = self._create_source_file(f"episode-unreadable-{label}.mkv")
+                staging_path = self._staging_path(f"episode-unreadable-{label}.mkv")
+
+                def run_encode_side_effect(
+                        *, temp_output: Path, size: int = output_size, **_: object,
+                ) -> subprocess.CompletedProcess[str]:
+                    temp_output.parent.mkdir(parents=True, exist_ok=True)
+                    temp_output.write_bytes(b"x" * size)
+                    return subprocess.CompletedProcess(args=["ffmpeg"], returncode=0, stdout="", stderr="")
+
+                item_id = self._insert_library_item(connection, source_path)
+                item = {
+                    "library_item_id": item_id,
+                    "resolved_policy": {"video": {"preset": 4, "encoder": "libsvtav1"}, "audio": {}, "subtitle": {}},
+                    "rel_path": f"tv/show/episode-unreadable-{label}.mkv",
+                    "duration_seconds": 1500.0,
+                    "video_codec": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "source_path": str(source_path),
+                    "source_fingerprint": "source-fingerprint",
+                    "source_size_bytes": 1024 * 1024,
+                    "output_container": "mkv",
+                }
+                item["stream_budget_ledger"] = execution.resolve_stream_budget_ledger(
+                    item,
+                    default_video_policy=item["resolved_policy"]["video"],
+                    output_container="mkv",
+                    prefer_persisted=False,
+                ).to_payload()
+                with patch("mediaforce.execution.resolve_item_source_path", return_value=source_path), patch(
+                        "mediaforce.execution.resolve_item_staging_path", return_value=staging_path
+                ), patch("mediaforce.execution._search_quality", return_value=quality_result), patch(
+                    "mediaforce.execution._build_ffmpeg_command",
+                    return_value=["ffmpeg", "-i", str(source_path), str(staging_path)],
+                ), patch("mediaforce.execution._run_encode_command", side_effect=run_encode_side_effect), patch(
+                    "mediaforce.execution.probe_media", side_effect=probe_failure
+                ), self.assertRaises(expected_error) as raised:
+                    execution.encode_one_item(
+                        connection,
+                        self.config,
+                        self.root / "runs" / "manifest-unreadable.json",
+                        {"run_id": "run-unreadable", "items": []},
+                        0,
+                        item,
+                        overwrite=False,
+                        host={"key": "stream-a", "label": "Stream A", "mode": "ssh", "media_access": "stream"},
+                        encode_context={"origin": "queue", "encode_job_id": "job-1", "encode_worker_id": "worker-1"},
+                    )
+
+                self.assertEqual(staging_path.exists(), output_kept)
+                self.assertIsNone(self._staged_artifact_value(connection, item_id, staged_artifacts.c.staging_path))
+                self.assertEqual(
+                    encode_runtime._classify_encode_failure(raised.exception, {"host": {"mode": "ssh"}}),
+                    "deterministic" if output_kept else "unreadable_output",
+                )
+        self.assertTrue(encode_runtime._encode_failure_is_retryable("unreadable_output", "", {"mode": "ssh"}))
+
     def test_encode_one_item_records_staged_artifact_on_success(self) -> None:
         source_path = self._create_source_file("episode-encode.mkv")
         staging_path = self._staging_path("episode-encode.mkv")

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
-from mediaforce.encoding.staging import partial_output_path
+from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
 from mediaforce.web.runtime.child_recovery import (
     DATABASE_IDENTITY_ERROR,
     apply_child_recovery,
@@ -287,6 +287,45 @@ class ChildRecoveryTests(unittest.TestCase):
             )
             preview = self._preview(connection, ["child-0", "child-1"])
             self.assertEqual(preview["child_ids"], ["child-0", "child-1"])
+
+    def test_header_only_output_is_named_and_handed_to_retry_cleanup(self) -> None:
+        staged = self.root / "staging" / "Show/Season 01/Episode 001.mkv"
+        probe_error = f"Command '['/opt/homebrew/bin/ffprobe', '{staged}']' returned non-zero exit status 1."
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection, count=1, failure_kinds=["deterministic"], errors=[probe_error],
+                parent_status="needs_attention",
+            )
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_bytes(b"\x1aE\xdf\xa3header-only")
+            preview = self._preview(connection, ["child-0"])
+            self.assertEqual(preview["items"][0]["header_only_output"]["path"], str(staged))
+            connection.commit()
+
+            self._apply(connection, ["child-0"], preview["token"])
+            row = self._raw_jobs(connection)["child-0"]
+
+            self.assertEqual(row["status"], "retry_backoff")
+            self.assertEqual(row["retry_not_before"], RECOVERED_AT)
+            self.assertTrue(staged.is_file())
+
+    def test_large_or_foreign_class_outputs_still_block_recovery(self) -> None:
+        staged = self.root / "staging" / "Show/Season 01/Episode 001.mkv"
+        probe_error = f"Command '['/opt/homebrew/bin/ffprobe', '{staged}']' returned non-zero exit status 1."
+        cases = (
+            ("large unreadable output", "deterministic", probe_error, HEADER_ONLY_OUTPUT_MAX_BYTES + 1),
+            ("stub under an identity failure", "deterministic", DATABASE_IDENTITY_ERROR, 16),
+            ("stub under a host failure", "host_configuration", "failure", 16),
+        )
+        for label, failure_kind, error, size in cases:
+            with self.subTest(label), open_db(self.config.paths.db_path) as connection:
+                self._seed(connection, count=1, failure_kinds=[failure_kind], errors=[error])
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_bytes(b"x" * size)
+                self._assert_http(409, lambda: self._preview(connection, ["child-0"]))
+                self.assertTrue(staged.is_file())
+                staged.unlink()
+            self._reset_database()
 
     def test_other_deterministic_failures_and_foreign_probe_paths_stay_ineligible(self) -> None:
         foreign_probe = "Command '['/opt/homebrew/bin/ffprobe', '/elsewhere/Episode.mkv']' returned non-zero exit status 1."

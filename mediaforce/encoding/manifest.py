@@ -23,7 +23,12 @@ from mediaforce.encoding.quality import (
     resolve_local_quality_temp_root,
 )
 from mediaforce.encoding.quality_search import QualitySearchPlan
-from mediaforce.encoding.staging import partial_output_path, safe_unlink
+from mediaforce.encoding.staging import (
+    HEADER_ONLY_OUTPUT_MAX_BYTES,
+    UnreadableEncodeOutputError,
+    partial_output_path,
+    safe_unlink,
+)
 from mediaforce.encoding.streams import ProductionStreamPlan
 from mediaforce.encoding.video_filters import planned_output_dimensions
 from mediaforce.tuning.production_lineage import capture_production_identity, completed_target_lineage
@@ -1082,7 +1087,19 @@ def encode_one_item(
         raise
 
     staged_stat = staging_path.stat()
-    staged_probe = probe_media(staging_path)
+    try:
+        staged_probe = probe_media(staging_path)
+    except Exception as exc:
+        if staged_stat.st_size > HEADER_ONLY_OUTPUT_MAX_BYTES:
+            raise
+        # A stream host can exit cleanly after writing only a container header. Nothing is
+        # recorded for the item yet, so drop the stub and let the queue retry the encode.
+        # A larger unreadable output may be repairable and stays held for review.
+        failure = UnreadableEncodeOutputError(
+            f"Encoded output is header-only and unreadable ({staged_stat.st_size} bytes): {staging_path}"
+        )
+        _cleanup_paths_without_masking(failure, temp_output, staging_path)
+        raise failure from exc
     staged_fingerprint = file_fingerprint(staging_path, staged_stat, staged_probe.duration_seconds)
     quality_observation_context, quality_observation_partial_context = _completed_quality_observation_context(
         command=ffmpeg_cmd,
