@@ -113,7 +113,7 @@ class DatabaseConnectionCheckpointTests(unittest.TestCase):
                 factory(str(db_path), check_same_thread=False)
             snapshot_mock.assert_called_once()
 
-    def test_connection_bounds_repeated_pre_open_metadata_churn(self) -> None:
+    def test_connection_accepts_sustained_pre_open_metadata_churn_on_stable_identity(self) -> None:
         with TemporaryDirectory() as raw_root:
             db_path = Path(raw_root) / "library.sqlite3"
             with closing(sqlite3.connect(db_path)) as setup_connection:
@@ -158,11 +158,12 @@ class DatabaseConnectionCheckpointTests(unittest.TestCase):
                 db_migrations,
                 "_database_connection_path_snapshot",
                 side_effect=snapshot_then_change,
-            ) as snapshot_mock, self.assertRaisesRegex(
-                RuntimeError,
-                "identity changed during connection",
-            ):
-                factory(str(db_path), check_same_thread=False)
+            ) as snapshot_mock:
+                with closing(factory(str(db_path), check_same_thread=False)) as connection:
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM events").fetchone(),
+                        (3,),
+                    )
             self.assertEqual(snapshot_mock.call_count, 3)
 
 

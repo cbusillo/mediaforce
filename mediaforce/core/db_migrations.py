@@ -192,20 +192,21 @@ def database_identity_connection_factory(
                 identity_guard()
                 custody_borrow.assert_quiet()
                 try:
+                    # Concurrent SQLite writes and checkpoints move ctime on the same inode, so
+                    # sustained churn is not replacement: the last attempt pins on the stable
+                    # device/inode/link-count identity, which every attempt still enforces.
                     pinned_path, directory_descriptor = (
                         _pin_database_connection_path(
                             resolved_path,
                             file_descriptor=custody_borrow.file_descriptor,
                             expected_parent=expected_parent,
                             expected=expected,
+                            tolerate_volatile_change=attempt == 2,
                         )
                     )
                     break
                 except _DatabaseConnectionVolatileMetadataChanged:
-                    if attempt == 2:
-                        raise _database_identity_changed(
-                            "volatile metadata did not stabilize before SQLite open"
-                        ) from None
+                    continue
             else:
                 raise AssertionError(
                     "database identity pin retry loop did not terminate"
@@ -320,6 +321,7 @@ def _pin_database_connection_path(
         file_descriptor: int,
         expected_parent: DatabaseDirectoryIdentity,
         expected: DatabaseConnectionPathSnapshot,
+        tolerate_volatile_change: bool = False,
 ) -> tuple[Path, int]:
     directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
@@ -355,7 +357,7 @@ def _pin_database_connection_path(
             raise RuntimeError(
                 "Mediaforce database identity changed during connection"
             )
-        if observed[2] != expected[2]:
+        if observed[2] != expected[2] and not tolerate_volatile_change:
             raise _DatabaseConnectionVolatileMetadataChanged
         pinned_path = _database_connection_path_for_directory_descriptor(
             directory_descriptor,
@@ -376,7 +378,7 @@ def _pin_database_connection_path(
             raise RuntimeError(
                 "Mediaforce database identity changed during connection"
             )
-        if pinned_observed[2] != expected[2]:
+        if pinned_observed[2] != expected[2] and not tolerate_volatile_change:
             raise _DatabaseConnectionVolatileMetadataChanged
     except BaseException:
         os.close(directory_descriptor)
