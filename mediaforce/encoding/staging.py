@@ -1,8 +1,10 @@
 import errno
 import json
 import logging
+import os
 import shutil
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -35,6 +37,7 @@ TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
 TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS = 8
 TRANSIENT_FILE_BUSY_RETRY_DELAY_SECONDS = 0.25
 PACKET_DURATION_STREAM_SELECTORS = ("v:0", "a:0")
+PRIOR_REPAIR_RECONCILE_MTIME_SLACK_SECONDS = 300
 
 
 def _retry_transient_file_busy(operation: Callable[[], Any]) -> Any:
@@ -170,6 +173,7 @@ def validate_one_item(
     source_duration_seconds = float_value(item.get("duration_seconds") or row.get("source_duration_seconds"))
     staged_duration_seconds = float_value(staged_probe.duration_seconds)
     repair_candidate_path: Path | None = None
+    installed_repair_stat: os.stat_result | None = None
     if source_duration_seconds > 0:
         repair = _maybe_repair_unreadable_container_duration(
             item,
@@ -258,6 +262,7 @@ def validate_one_item(
         if validation["passed"]:
             try:
                 repair_candidate_path.replace(staging_path)
+                installed_repair_stat = staging_path.stat()
                 if isinstance(repair_payload, dict):
                     repair_payload["repaired"] = True
             except Exception as exc:  # noqa: BLE001 - leave validation failed if the repaired file cannot be installed.
@@ -270,9 +275,25 @@ def validate_one_item(
                 repair_payload["skipped_reason"] = "normal validation failed after remux candidate"
             safe_unlink(repair_candidate_path)
 
+    if installed_repair_stat is None and validation["passed"]:
+        prior_repair = _unrecorded_prior_container_repair(row, staging_path)
+        if prior_repair is not None:
+            prior_repair_payload, installed_repair_stat = prior_repair
+            validation["container_metadata_repair"] = {**prior_repair_payload, "record_reconciled": True}
+
     if validation["passed"] and row.get("target_lineage_json"):
         validation["target_lineage_identity"] = validated_target_identity(row, item, staging_path)
     now = timestamp()
+    # The repair replaces the staged file, so the recorded stat must follow it or the
+    # integrity report sees drift. staging_fingerprint stays bound to the original encode.
+    repaired_stat_values = (
+        {
+            "staging_size_bytes": installed_repair_stat.st_size,
+            "staging_mtime_ns": installed_repair_stat.st_mtime_ns,
+        }
+        if installed_repair_stat is not None
+        else {}
+    )
     connection.execute(
         update(staged_artifacts)
         .where(staged_artifacts.c.library_item_id == item["library_item_id"])
@@ -280,6 +301,7 @@ def validate_one_item(
             validation_json=json.dumps(validation, separators=(",", ":")),
             validated_at=now,
             updated_at=now,
+            **repaired_stat_values,
         )
     )
     if validation["passed"]:
@@ -291,6 +313,35 @@ def validate_one_item(
     record_event(connection, item["library_item_id"], "validation_completed", validation)
     connection.commit()
     return validation
+
+
+def _unrecorded_prior_container_repair(
+        row: Any,
+        staging_path: Path,
+) -> tuple[dict[str, Any], os.stat_result] | None:
+    """Recognize a staged file that an earlier validation repaired without recording its new stat."""
+    try:
+        prior_validation = object_dict(json.loads(str(row["validation_json"] or "")))
+    except ValueError:
+        return None
+    prior_repair = object_dict(prior_validation.get("container_metadata_repair"))
+    if prior_repair.get("repaired") is not True or not prior_validation.get("passed"):
+        return None
+    current_stat = staging_path.stat()
+    if (
+            current_stat.st_size == int_value(row["staging_size_bytes"])
+            and current_stat.st_mtime_ns == int_value(row["staging_mtime_ns"])
+    ):
+        return None
+    if current_stat.st_size != int_value(prior_validation.get("staged_size_bytes")):
+        return None
+    try:
+        validated_at = datetime.fromisoformat(str(row["validated_at"] or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if current_stat.st_mtime > validated_at.timestamp() + PRIOR_REPAIR_RECONCILE_MTIME_SLACK_SECONDS:
+        return None
+    return prior_repair, current_stat
 
 
 def _maybe_repair_unreadable_container_duration(

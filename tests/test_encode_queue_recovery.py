@@ -12300,6 +12300,90 @@ raise SystemExit(0)
             assert stored_validation_row is not None
             self.assertEqual(stored_status_row["status"], "validated")
             self.assertTrue(json.loads(cast(str, stored_validation_row["validation_json"]))["passed"])
+            recorded_stat_row = self._staged_artifact_value(
+                connection,
+                item_id,
+                staged_artifacts.c.staging_size_bytes,
+                staged_artifacts.c.staging_mtime_ns,
+            )
+            assert recorded_stat_row is not None
+            repaired_stat = staging_path.stat()
+            self.assertEqual(staging_path.read_text(), "remuxed")
+            self.assertEqual(recorded_stat_row["staging_size_bytes"], repaired_stat.st_size)
+            self.assertEqual(recorded_stat_row["staging_mtime_ns"], repaired_stat.st_mtime_ns)
+
+    def test_validate_one_item_reconciles_stat_left_stale_by_prior_container_repair(self) -> None:
+        readable_probe = ProbeSummary(
+            duration_seconds=120.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        cases = (
+            ("explained", len("remuxed"), True),
+            ("unexplained", len("remuxed") + 1, False),
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            for label, prior_validated_size, expect_reconciled in cases:
+                with self.subTest(label):
+                    source_path = self._create_source_file(f"episode-prior-repair-{label}.mkv")
+                    staging_path = self._staging_path(f"episode-prior-repair-{label}.mkv")
+                    staging_path.parent.mkdir(parents=True, exist_ok=True)
+                    staging_path.write_text("remuxed")
+                    item_id = self._insert_library_item(connection, source_path, status="validated")
+                    self._insert_staged_artifact(connection, item_id, staging_path)
+                    connection.execute(
+                        update(staged_artifacts)
+                        .where(staged_artifacts.c.library_item_id == item_id)
+                        .values(
+                            staging_size_bytes=len("encoded-before-remux"),
+                            staging_mtime_ns=1,
+                            validated_at=web_app._now_iso(),
+                            validation_json=json.dumps({
+                                "passed": True,
+                                "staged_size_bytes": prior_validated_size,
+                                "container_metadata_repair": {"attempted": True, "repaired": True},
+                            }),
+                        )
+                    )
+                    item = {
+                        "library_item_id": item_id,
+                        "source_path": str(source_path),
+                        "source_size_bytes": 1024,
+                        "duration_seconds": 120.0,
+                        "subtitle_summary": [],
+                    }
+                    with patch("mediaforce.execution.probe_media", return_value=readable_probe):
+                        validation = execution.validate_one_item(connection, self.config, item)
+
+                    self.assertTrue(validation["passed"])
+                    recorded_stat_row = self._staged_artifact_value(
+                        connection,
+                        item_id,
+                        staged_artifacts.c.staging_size_bytes,
+                        staged_artifacts.c.staging_mtime_ns,
+                    )
+                    assert recorded_stat_row is not None
+                    current_stat = staging_path.stat()
+                    if expect_reconciled:
+                        self.assertEqual(validation["container_metadata_repair"]["record_reconciled"], True)
+                        self.assertEqual(recorded_stat_row["staging_size_bytes"], current_stat.st_size)
+                        self.assertEqual(recorded_stat_row["staging_mtime_ns"], current_stat.st_mtime_ns)
+                    else:
+                        self.assertNotIn("container_metadata_repair", validation)
+                        self.assertEqual(recorded_stat_row["staging_size_bytes"], len("encoded-before-remux"))
+                        self.assertEqual(recorded_stat_row["staging_mtime_ns"], 1)
 
     def test_validate_one_item_keeps_original_when_remux_candidate_fails_validation(self) -> None:
         source_path = self._create_source_file("episode-remux-candidate-fails.mkv")
