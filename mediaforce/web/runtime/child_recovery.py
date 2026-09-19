@@ -1,14 +1,17 @@
 """Fail-closed preview/apply support for terminal folder children.
 
 This module deliberately contains no cleanup, media probing/hashing, or transport
-work.  The caller supplies the approval and candidate-policy gates.
+work.  The caller supplies the approval and candidate-policy gates.  A header-only
+output that the encoder itself failed to probe is named in the preview and handed
+to the queue's existing retry cleanup by requeueing the child as retry_backoff.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping, Sequence
+import stat as stat_module
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +30,7 @@ from mediaforce.core.db_tables import (
 )
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, save_encode_job
-from mediaforce.encoding.staging import partial_output_path
+from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
 
 
 ACTIVE_PARENT_STATUSES = frozenset({"queued", "retry_backoff", "running"})
@@ -136,9 +139,14 @@ def apply_child_recovery(
                 }
             )
             progress["recovery_receipts"] = receipts
+            needs_retry_cleanup = any(
+                item.get("header_only_output")
+                for item in preview.items
+                if set(item["manifest_indexes"]) & set(child["manifest_indexes"])
+            )
             updated.update(
                 {
-                    "status": "queued",
+                    "status": "retry_backoff" if needs_retry_cleanup else "queued",
                     "host": {},
                     "last_host": object_dict(child.get("last_host")),
                     "process_pid": None,
@@ -147,8 +155,10 @@ def apply_child_recovery(
                     "heartbeat_at": None,
                     "worker_id": None,
                     "schedule_close_deadline_at": None,
-                    "retry_not_before": None,
-                    "waiting_reason": None,
+                    "retry_not_before": now if needs_retry_cleanup else None,
+                    "waiting_reason": (
+                        "waiting to clean header-only output before retry" if needs_retry_cleanup else None
+                    ),
                     "terminal_reason": None,
                     "host_cooldown_until": child.get("host_cooldown_until"),
                     "finished_at": None,
@@ -346,7 +356,15 @@ def _build_preview(
         approval_contract(parent_job, manifest),
         object_dict(object_dict(manifest).get("selection")).get("production_approval_contract"),
     )
-    item_rows = _validate_sources(connection, config, items, sorted(all_indexes))
+    stub_tolerant_indexes = {
+        index
+        for child in eligible
+        if _recoverable_failure_class(child) == "unreadable_staged_output"
+        for index in indexes_by_child[str(child["job_id"])]
+    }
+    item_rows = _validate_sources(
+        connection, config, items, sorted(all_indexes), stub_tolerant_indexes=stub_tolerant_indexes,
+    )
     eligible_result = candidate_eligibility(connection, parent_job, [items[index] for index in sorted(all_indexes)])
     if not isinstance(eligible_result, Mapping) or not eligible_result:
         raise HTTPException(status_code=409, detail="Current candidate policy blocks recovery.")
@@ -381,6 +399,7 @@ def _build_preview(
                 "size": int(row["size_bytes"]),
                 "fingerprint": str(row["fingerprint"]),
                 "stat": row.get("_stat"),
+                "header_only_output": row.get("_header_only_output"),
             }
             for row in item_rows
         ],
@@ -397,6 +416,7 @@ def _build_preview(
             "manifest_indexes": [
                 index for index in all_indexes if int(items[index].get("library_item_id") or 0) == int(row["id"])
             ],
+            "header_only_output": row.get("_header_only_output"),
         }
         for row in item_rows
     )
@@ -431,6 +451,8 @@ def _validate_sources(
     config: MediaforceConfig,
     items: list[dict[str, Any]],
     indexes: list[int],
+    *,
+    stub_tolerant_indexes: Collection[int] = (),
 ) -> list[dict[str, Any]]:
     ids = [int(items[index].get("library_item_id") or 0) for index in indexes]
     if any(item_id <= 0 for item_id in ids) or len(set(ids)) != len(ids):
@@ -490,14 +512,25 @@ def _validate_sources(
                 )
             for candidate in (output_path, partial_output_path(output_path)):
                 try:
-                    candidate.lstat()
+                    candidate_stat = candidate.lstat()
                 except FileNotFoundError:
-                    pass
-                else:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="A final or partial output already exists for a recovery item.",
-                    )
+                    continue
+                if (
+                    candidate == output_path
+                    and index in stub_tolerant_indexes
+                    and stat_module.S_ISREG(candidate_stat.st_mode)
+                    and candidate_stat.st_size <= HEADER_ONLY_OUTPUT_MAX_BYTES
+                ):
+                    row["_header_only_output"] = {
+                        "path": str(candidate),
+                        "size": int(candidate_stat.st_size),
+                        "mtime_ns": int(candidate_stat.st_mtime_ns),
+                    }
+                    continue
+                raise HTTPException(
+                    status_code=409,
+                    detail="A final or partial output already exists for a recovery item.",
+                )
         except OSError:
             raise HTTPException(status_code=409, detail="Recovery output storage is inaccessible.") from None
         stage = (

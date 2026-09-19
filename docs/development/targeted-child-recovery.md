@@ -22,8 +22,11 @@ Three failure classes are recoverable:
   during connection`: the controller lost its database connection while the
   encode ran (#604, #608).
 - `deterministic` where the post-encode `ffprobe` of the child's own staged path
-  exited non-zero. The unreadable file still blocks recovery while it exists;
-  inspect and remove it under the retained-output rules below first (#620).
+  exited non-zero (#620). A header-only output of at most 64 KiB with no
+  `staged_artifacts` row does not block this class: the preview names it as
+  `header_only_output`, and apply requeues the child as `retry_backoff` so the
+  queue's ordinary retry cleanup removes it before the encode starts. A larger
+  unreadable output still blocks and follows the retained-output rules below.
 
 Every other `deterministic` failure, including a final-size miss, stays
 ineligible. Host isolation and retained-output reconciliation remain
@@ -45,10 +48,12 @@ Both requests require JSON and reject cross-origin browser requests. They do not
 Both phases reject missing/duplicate IDs, invalid or overlapping manifest
 indexes, failures outside the recoverable classes, completed, stopped or failed
 parents, active ownership, changed approval or source,
-current policy/cadence blockers, and any recorded or visible final/partial output.
+current policy/cadence blockers, and any recorded or visible final/partial output
+other than the header-only case above.
 Storage must be visible to the controller; inaccessible paths are a blocker,
 not proof of absence. No media decode, content hash, deletion, promotion or
-output adoption occurs. Source checks use existing fingerprints and current
+output adoption occurs in either phase; removal of a named header-only output
+happens later in the queue's retry cleanup. Source checks use existing fingerprints and current
 size/modification time; they are not a new full-content verification.
 
 Apply repeats all checks under one database transaction and rejects a stale
@@ -62,6 +67,14 @@ If an output exists, preserve it and validate/reconcile it separately before
 considering a re-encode. For example, the retained S01E20 output in the #593
 incident is intentionally outside this recovery path. Never manually mark an
 output completed or edit the live SQLite database to bypass these checks.
+
+## Header-only encoder output
+
+New encodes no longer reach this state. When the encoder exits cleanly but the
+staged output is at most 64 KiB and cannot be probed, the encode removes that
+output and fails with the retryable kind `unreadable_output`, so the queue
+retries within its normal attempt limit. A larger unreadable output is kept and
+ends `needs_attention`, because it may be repairable.
 
 ## Progress and heartbeat failures
 

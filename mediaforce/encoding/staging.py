@@ -37,6 +37,12 @@ TRANSIENT_FILE_BUSY_ERRNOS = {errno.EBUSY}
 TRANSIENT_FILE_BUSY_RETRY_ATTEMPTS = 8
 TRANSIENT_FILE_BUSY_RETRY_DELAY_SECONDS = 0.25
 PACKET_DURATION_STREAM_SELECTORS = ("v:0", "a:0")
+# Observed header-only stream outputs were 1,116 and 1,369 bytes (#620); no real encode is this small.
+HEADER_ONLY_OUTPUT_MAX_BYTES = 64 * 1024
+
+
+class UnreadableEncodeOutputError(RuntimeError):
+    """The encoder reported success but its staged output cannot be probed."""
 PRIOR_REPAIR_RECONCILE_MTIME_SLACK_SECONDS = 300
 
 
