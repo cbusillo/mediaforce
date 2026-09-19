@@ -31,7 +31,11 @@ from mediaforce.encoding.staging import partial_output_path
 
 
 ACTIVE_PARENT_STATUSES = frozenset({"queued", "retry_backoff", "running"})
+# A folder parent aggregates to needs_attention once its last active child ends, which is
+# exactly when the remaining terminal children most need targeted recovery.
+RECOVERABLE_PARENT_STATUSES = ACTIVE_PARENT_STATUSES | frozenset({"needs_attention"})
 ELIGIBLE_CHILD_STATUSES = frozenset({"needs_attention", "failed"})
+DATABASE_IDENTITY_ERROR = "Mediaforce database identity changed during connection"
 MAX_CHILDREN = 100
 MAX_RECEIPTS = 8
 
@@ -127,6 +131,7 @@ def apply_child_recovery(
                     "previous_status": str(child.get("status") or ""),
                     "previous_attempt_count": int_value(child.get("attempt_count")),
                     "previous_failure_kind": str(child.get("last_failure_kind") or ""),
+                    "recoverable_failure_class": _recoverable_failure_class(child),
                     "previous_error": str(child.get("error") or "")[:2000],
                 }
             )
@@ -199,8 +204,8 @@ def _build_preview(
     if parent is None:
         raise HTTPException(status_code=400, detail="The folder recovery parent does not exist.")
     parent_job = _hydrate_minimal_job(parent)
-    if parent_job["job_kind"] != "folder" or parent_job["status"] not in ACTIVE_PARENT_STATUSES:
-        raise HTTPException(status_code=409, detail="The folder recovery parent is no longer active.")
+    if parent_job["job_kind"] != "folder" or parent_job["status"] not in RECOVERABLE_PARENT_STATUSES:
+        raise HTTPException(status_code=409, detail="The folder recovery parent is no longer recoverable.")
     children = list_child_encode_jobs(connection, parent_job_id)
     if (
         not isinstance(child_ids, (list, tuple))
@@ -225,12 +230,12 @@ def _build_preview(
         for child in children
         if str(child.get("job_id")) in requested_ids
         if str(child.get("status") or "") in ELIGIBLE_CHILD_STATUSES
-        and str(child.get("last_failure_kind") or "") == "host_configuration"
+        and _recoverable_failure_class(child) is not None
     ]
     if not eligible:
         raise HTTPException(
             status_code=409,
-            detail="No host-configuration child is eligible for recovery.",
+            detail="No selected child has a recoverable failure.",
         )
     if {str(child.get("job_id")) for child in eligible} != requested_ids:
         raise HTTPException(
@@ -295,6 +300,15 @@ def _build_preview(
             raise HTTPException(
                 status_code=409,
                 detail="A recoverable child has duplicate manifest indexes.",
+            )
+        if _recoverable_failure_class(child) == "unreadable_staged_output" and not any(
+            str(items[index].get("staging_path") or "").strip() in str(child.get("error") or "")
+            for index in indexes
+            if str(items[index].get("staging_path") or "").strip()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="A probe failure does not name the child's own staged output.",
             )
         indexes_by_child[child_id] = indexes
         all_indexes.extend(indexes)
@@ -395,6 +409,21 @@ def _build_preview(
         token,
         public_items,
     )
+
+
+def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
+    """Name the narrow failure classes that did not judge the source, policy or encode result."""
+    failure_kind = str(child.get("last_failure_kind") or "")
+    if failure_kind == "host_configuration":
+        return "host_configuration"
+    if failure_kind != "deterministic":
+        return None
+    error = str(child.get("error") or "")
+    if error == DATABASE_IDENTITY_ERROR:
+        return "database_identity"
+    if error.startswith("Command '[") and "ffprobe" in error and "returned non-zero exit status" in error:
+        return "unreadable_staged_output"
+    return None
 
 
 def _validate_sources(

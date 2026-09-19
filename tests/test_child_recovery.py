@@ -14,7 +14,11 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
 from mediaforce.encoding.staging import partial_output_path
-from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
+from mediaforce.web.runtime.child_recovery import (
+    DATABASE_IDENTITY_ERROR,
+    apply_child_recovery,
+    preview_child_recovery,
+)
 from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
 
 
@@ -268,6 +272,42 @@ class ChildRecoveryTests(unittest.TestCase):
             self.assertEqual([self._job(connection, child)["status"] for child in ("child-0", "child-1")],
                              ["needs_attention", "needs_attention"])
 
+    def test_database_identity_and_own_output_probe_failures_recover_under_attention_parent(self) -> None:
+        staged = self.root / "staging" / "Show/Season 01/Episode 002.mkv"
+        probe_error = (
+            f"Command '['/opt/homebrew/bin/ffprobe', '-v', 'error', '{staged}']' returned non-zero exit status 1."
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection,
+                count=2,
+                failure_kinds=["deterministic", "deterministic"],
+                errors=[DATABASE_IDENTITY_ERROR, probe_error],
+                parent_status="needs_attention",
+            )
+            preview = self._preview(connection, ["child-0", "child-1"])
+            self.assertEqual(preview["child_ids"], ["child-0", "child-1"])
+
+    def test_other_deterministic_failures_and_foreign_probe_paths_stay_ineligible(self) -> None:
+        foreign_probe = "Command '['/opt/homebrew/bin/ffprobe', '/elsewhere/Episode.mkv']' returned non-zero exit status 1."
+        cases = (
+            "Final output size missed the approved target band: status=over_target",
+            DATABASE_IDENTITY_ERROR + " (wrapped)",
+            foreign_probe,
+        )
+        for error in cases:
+            with self.subTest(error=error), open_db(self.config.paths.db_path) as connection:
+                self._seed(connection, count=1, failure_kinds=["deterministic"], errors=[error])
+                self._assert_http(409, lambda: self._preview(connection, ["child-0"]))
+            self._reset_database()
+
+    def test_completed_and_stopped_parents_are_not_recoverable(self) -> None:
+        for parent_status in ("completed", "stopped", "failed"):
+            with self.subTest(parent_status=parent_status), open_db(self.config.paths.db_path) as connection:
+                self._seed(connection, count=1, parent_status=parent_status)
+                self._assert_http(409, lambda: self._preview(connection, ["child-0"]))
+            self._reset_database()
+
     def _seed(
             self,
             connection: DBClient,
@@ -278,6 +318,8 @@ class ChildRecoveryTests(unittest.TestCase):
             indexes: list[Any] | None = None,
             item_count: int | None = None,
             rel_paths: list[str] | None = None,
+            errors: list[str] | None = None,
+            parent_status: str = "running",
     ) -> list[int]:
         actual_item_count = count if item_count is None else item_count
         item_ids: list[int] = []
@@ -305,7 +347,7 @@ class ChildRecoveryTests(unittest.TestCase):
             "selection": {"production_approval_contract": APPROVAL}, "items": items,
         }), encoding="utf-8")
         connection.execute(encode_jobs.insert().values(
-            job_id="parent", prefix="tv/Show", job_kind="folder", status="running",
+            job_id="parent", prefix="tv/Show", job_kind="folder", status=parent_status,
             manifest_path=str(self.manifest_path), item_count=actual_item_count, host_json="{}", last_host_json="{}",
             created_at=NOW, updated_at=NOW,
         ))
@@ -316,7 +358,7 @@ class ChildRecoveryTests(unittest.TestCase):
                 status=(statuses or ["needs_attention"] * count)[index], manifest_path=str(self.manifest_path),
                 manifest_indexes_json=json.dumps(child_indexes) if child_indexes is not None else None,
                 item_count=1, host_json=json.dumps({"key": "bad-host"}), last_host_json=json.dumps({"key": "bad-host"}),
-                process_pid=None, error=f"failure {index}", attempt_count=3 + index,
+                process_pid=None, error=(errors or [f"failure {index}"] * count)[index], attempt_count=3 + index,
                 leased_at=None, lease_expires_at=None, heartbeat_at=None, worker_id=None,
                 retry_not_before=NOW, waiting_reason="waiting", terminal_reason="terminal",
                 last_failure_kind=(failure_kinds or ["host_configuration"] * count)[index], last_failure_at=NOW,
