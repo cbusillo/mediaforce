@@ -32,6 +32,7 @@ IntegrityDisposition = Literal[
     "partial_or_temporary",
     "remote_only_or_unreachable",
     "not_started",
+    "retained",
 ]
 
 MAX_INTEGRITY_RECORDS = 500
@@ -52,6 +53,10 @@ _BLOCKING_DISPOSITIONS = frozenset(_BLOCKING_DISPOSITION_VALUES)
 _TEMPORARY_SUFFIXES = (".part", ".partial", ".tmp", ".temp", ".working")
 _TEMPORARY_MARKERS = (".partial.", ".part.", ".tmp.", ".temp.", ".working.")
 _IGNORED_DISCOVERY_NAMES = frozenset({".ds_store"})
+# Incident recovery parks an untracked output beside the staging names as a hidden
+# ".retained-<job>-<date>" file. It can never be promoted or overwritten by an encode, so it
+# is reported without blocking the season's own outputs.
+_RETAINED_OUTPUT_PREFIX = ".retained-"
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +463,15 @@ def _discover_untracked_outputs(
             if candidate.name.lower() in _IGNORED_DISCOVERY_NAMES:
                 continue
             rel_path = str(candidate.relative_to(root.path))
+            if candidate.name.lower().startswith(_RETAINED_OUTPUT_PREFIX):
+                records.append(_record(
+                    "retained",
+                    None,
+                    rel_path,
+                    str(candidate),
+                    "An operator retained this untracked output for incident review. It is not part of promotion.",
+                ))
+                continue
             if _is_temporary_path(candidate):
                 records.append(_record(
                     "partial_or_temporary",
@@ -545,6 +559,7 @@ def _next_action(disposition: IntegrityDisposition) -> str:
         "partial_or_temporary": "wait_or_inspect_temporary_output",
         "remote_only_or_unreachable": "restore_staging_access",
         "not_started": "queue_encode",
+        "retained": "release_retained_output",
     }[disposition]
 
 
