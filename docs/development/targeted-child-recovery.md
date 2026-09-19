@@ -1,7 +1,9 @@
-# Targeted recovery of host-setup failures
+# Targeted recovery of terminal folder children
 
-Use this operator API when a folder batch is still active but explicitly
-selected child jobs failed with `host_configuration`. It requeues those same
+Use this operator API when explicitly selected child jobs of a folder batch
+failed for a reason that did not judge the source, policy or encode result. The
+parent may still be active, or may have aggregated to `needs_attention` after
+its last active child ended. It requeues those same
 children; it does not recreate the batch or reset its other jobs. It preserves
 attempt counts, failure history, host cooldowns, original manifest indexes and
 sample approval lineage. The normal scheduler still decides host availability,
@@ -11,14 +13,27 @@ First restore the failed host's storage/readiness or keep it excluded from
 admission. This recovery API does not implement host isolation or prove remote
 process termination. Only unleased terminal shards are eligible. Do not use it
 to work around a quality failure, timeout, containment failure or an unverified
-completed output. Host isolation and retained-output reconciliation remain
+completed output.
+
+Three failure classes are recoverable:
+
+- `host_configuration`.
+- `deterministic` with exactly the error `Mediaforce database identity changed
+  during connection`: the controller lost its database connection while the
+  encode ran (#604, #608).
+- `deterministic` where the post-encode `ffprobe` of the child's own staged path
+  exited non-zero. The unreadable file still blocks recovery while it exists;
+  inspect and remove it under the retained-output rules below first (#620).
+
+Every other `deterministic` failure, including a final-size miss, stays
+ineligible. Host isolation and retained-output reconciliation remain
 separate work under #593.
 
 Send a POST to `/api/encode-queue/recover-children/preview` on the running
 controller, using its normal trusted operator access:
 
 ```json
-{"parent_job_id":"<active folder job>","child_ids":["<exact failed child>"]}
+{"parent_job_id":"<folder job>","child_ids":["<exact failed child>"]}
 ```
 
 Inspect the returned child IDs, manifest indexes and source items. POST the
@@ -28,7 +43,8 @@ intended. Start with one child and observe its admission before expanding.
 Both requests require JSON and reject cross-origin browser requests. They do not run the application's unrelated periodic artifact cleanup.
 
 Both phases reject missing/duplicate IDs, invalid or overlapping manifest
-indexes, non-host-setup failures, active ownership, changed approval or source,
+indexes, failures outside the recoverable classes, completed, stopped or failed
+parents, active ownership, changed approval or source,
 current policy/cadence blockers, and any recorded or visible final/partial output.
 Storage must be visible to the controller; inaccessible paths are a blocker,
 not proof of absence. No media decode, content hash, deletion, promotion or
@@ -66,11 +82,13 @@ while a writer may still exist. Those containment and reconciliation cases remai
 under #593.
 
 During database connection setup, volatile metadata changes before SQLite opens
-the file receive at most three fresh pinning attempts. The lease-owned namespace
+the file receive up to three fresh pinning attempts; the last attempt pins on the
+stable device, inode and link-count identity, because sustained concurrent SQLite
+writes move `ctime` on the same inode. The lease-owned namespace
 witness treats leaf replacement or relinking and parent detachment as terminal
 custody failures on supported platforms. Linux also treats leaf attribute events
 as terminal. On macOS, attribute-only metadata changes before SQLite opens remain
-eligible for the bounded retries; the witness tracks replacement, relinking, and
+tolerated this way; the witness tracks replacement, relinking, and
 parent detachment. Ordinary in-place writes and WAL checkpoints remain valid.
 The retained custody borrow and descriptor-relative identity checks continue
 through the SQLite connection lifetime and fail closed if the database or its
