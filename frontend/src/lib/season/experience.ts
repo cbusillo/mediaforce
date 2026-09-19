@@ -105,6 +105,10 @@ const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAc
 	not_started: {
 		label: 'Not compressed yet',
 		nextAction: 'Compress the remaining episode before replacing the originals.'
+	},
+	retained: {
+		label: 'Held aside for review',
+		nextAction: 'Kept from an earlier incident. It does not affect replacing the originals.'
 	}
 };
 
@@ -1564,7 +1568,35 @@ export function targetConstraintSummary(
 			recoveryLabel: 'Choose a roomier goal'
 		};
 	}
-	return null;
+	return encodeTargetConstraint(folder, sampleJob);
+}
+
+// A full encode can hit the quality floor after its sample passed. Retrying repeats the
+// same result, so it needs the same "choose a roomier goal" path as a failed sample.
+function encodeTargetConstraint(
+	folder: FolderPayload,
+	sampleJob: Record<string, unknown>
+): TargetConstraintSummary | null {
+	const encodeJob = folder.encode_job;
+	const error = text(record(encodeJob).error);
+	if (!isFailedJob(encodeJob) || !error.includes('target_band_violates_quality_floor')) {
+		return null;
+	}
+	if (jobTimestamp(sampleJob) > jobTimestamp(encodeJob)) return null;
+	const targetMb = Math.round(numberValue(error.match(/target=(\d+) bytes/)?.[1]) / 1_000_000);
+	const reachableMb = Math.round(
+		numberValue(error.match(/best_reachable=(\d+) bytes/)?.[1]) / 1_000_000
+	);
+	const measured =
+		targetMb > 0 && reachableMb > 0
+			? `The full encode could not reach ${targetMb} MB; the smallest result that kept the required quality was about ${reachableMb} MB.`
+			: 'The full encode could not reach the saved size while keeping the required quality.';
+	return {
+		kind: 'quality_conflict',
+		title: 'This size conflicts with the quality floor.',
+		detail: `${measured} Retrying would stop the same way. Choose a roomier goal instead of silently lowering quality.`,
+		recoveryLabel: 'Choose a roomier goal'
+	};
 }
 
 function normalizedOperatorText(value: string, limit = 600): string {

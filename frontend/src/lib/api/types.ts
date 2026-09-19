@@ -1676,7 +1676,8 @@ export type StagedIntegrityDisposition =
 	| 'orphaned'
 	| 'partial_or_temporary'
 	| 'remote_only_or_unreachable'
-	| 'not_started';
+	| 'not_started'
+	| 'retained';
 
 export interface StagedIntegrityBlocker {
 	code: string;

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,12 @@ def archive_cleanup_summary(config: MediaforceConfig, *, transcode_root: str | N
     }
 
 
-def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: str | None = None) -> dict[str, Any]:
+def clear_archive_cleanup_action(
+        config: MediaforceConfig,
+        *,
+        transcode_root: str | None = None,
+        on_removed: Callable[[Path], None] | None = None,
+) -> dict[str, Any]:
     archive_root = _archive_root_for_cleanup(config, transcode_root=transcode_root)
     summary = archive_cleanup_summary(config, transcode_root=transcode_root)
     if archive_root is None:
@@ -65,6 +71,8 @@ def clear_archive_cleanup_action(config: MediaforceConfig, *, transcode_root: st
             pass
         safe_unlink(path)
         removed_count += 1
+        if on_removed is not None:
+            on_removed(path)
 
     # Remove empty directories from the bottom up, but keep the archive root itself.
     for path in sorted(archive_root.rglob("*"), reverse=True):

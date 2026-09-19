@@ -97,6 +97,7 @@ from mediaforce.web.runtime.completed_runtime import (
     clear_completed_backups_action,
     completed_page_payload,
     confirm_originals_removed_action,
+    record_deleted_original_backups,
 )
 from mediaforce.web.runtime.dashboard_payloads import dashboard_summary_payload, reconcile_pending_review_samples
 from mediaforce.library.media_scopes import MediaScopeConflict
@@ -2108,6 +2109,39 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(payload["folders"][0]["archived_backup_count"], 1)
         self.assertEqual(event_count, 0)
 
+    def test_deleting_backups_records_removal_so_the_folder_is_cleaned(self) -> None:
+        from mediaforce.web import app as web_app
+
+        for episode in ("Episode 01.mkv", "Episode 02.mkv"):
+            self._insert_promoted_artifact(
+                rel_path=f"tv/Example Show/Season 1/{episode}",
+                promoted_at="2026-04-10T10:00:00+00:00",
+                archived_size_bytes=3,
+                bytes_saved=12,
+            )
+        removed_paths: list[Path] = []
+
+        result = clear_completed_backups_action(
+            self.config,
+            folder_group=web_app._folder_group,
+            prefixes=["tv/Example Show/Season 1"],
+            valid_prefixes={"tv/Example Show/Season 1"},
+            on_removed=removed_paths.append,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            recorded = record_deleted_original_backups(
+                connection, removed_paths, folder_group=web_app._folder_group,
+            )
+            repeated = record_deleted_original_backups(
+                connection, removed_paths, folder_group=web_app._folder_group,
+            )
+            payload = completed_page_payload(self.config, connection, folder_group=web_app._folder_group)
+
+        self.assertEqual(result["removed_count"], 2)
+        self.assertEqual((recorded, repeated), (2, 0))
+        self.assertEqual(payload["folders"][0]["cleanup_state"], "cleaned")
+        self.assertEqual(payload["folders"][0]["originals_removed_count"], 2)
+
     def test_clear_completed_backups_action_removes_selected_prefixes(self) -> None:
         from mediaforce.web import app as web_app
 
@@ -2332,8 +2366,10 @@ class TuningRuntimeTests(unittest.TestCase):
                 folder_group: object,
                 prefixes: list[str] | None = None,
                 valid_prefixes: set[str] | None = None,
+                on_removed: object = None,
         ) -> dict[str, object]:
             _ = folder_group, valid_prefixes
+            self.assertTrue(callable(on_removed))
             captured.append(prefixes)
             return {
                 "ok": True,
@@ -2538,7 +2574,9 @@ class TuningRuntimeTests(unittest.TestCase):
                 _config: MediaforceConfig,
                 *,
                 transcode_root: str | None = None,
+                on_removed: object = None,
         ) -> dict[str, object]:
+            self.assertTrue(callable(on_removed))
             captured.append(transcode_root)
             return {"ok": True, "transcode_root": transcode_root}
 

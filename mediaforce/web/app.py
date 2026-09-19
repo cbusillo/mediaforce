@@ -151,6 +151,7 @@ from mediaforce.web.runtime import FolderCard, cached_folder_cards, cached_host_
     FolderAiTuneDeps, FolderStateDeps, FolderTuningRuntimeDeps, clear_pending_proposal, \
     archive_cleanup_summary, clear_archive_cleanup_action, \
     clear_completed_backups_action, completed_page_payload, confirm_originals_removed_action, \
+    record_deleted_original_backups, \
     list_completed_folders, \
     ensure_encode_host_ready, ensure_sample_host_ready, \
     folder_ai_tune_action, folder_ai_tune_confirm_action, folder_ai_tune_preview_action, \
@@ -1090,10 +1091,7 @@ def create_app(
             config,
             transcode_root=transcode_root,
         ),
-        clear_archive_cleanup_action=lambda transcode_root=None: clear_archive_cleanup_action(
-            config,
-            transcode_root=transcode_root,
-        ),
+        clear_archive_cleanup_action=lambda transcode_root=None: _clear_archive_cleanup_action(transcode_root),
     )
     register_completed_routes(
         app,
@@ -1589,6 +1587,28 @@ def create_app(
                 ),
             )
 
+    def _record_deleted_original_backups(removed_paths: list[Path]) -> None:
+        with open_db(config.paths.db_path) as connection:
+            record_deleted_original_backups(
+                connection,
+                removed_paths,
+                folder_group=lambda rel_path: _folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
+            )
+
+    def _clear_archive_cleanup_action(transcode_root: str | None) -> dict[str, Any]:
+        removed_paths: list[Path] = []
+        try:
+            return clear_archive_cleanup_action(
+                config,
+                transcode_root=transcode_root,
+                on_removed=removed_paths.append,
+            )
+        finally:
+            _record_deleted_original_backups(removed_paths)
+
     def _clear_completed_backups_action(prefixes: list[str] | None) -> dict[str, Any]:
         try:
             archive_root = config.archive_root
@@ -1604,15 +1624,20 @@ def create_app(
                 archive_root=archive_root,
             )
         valid_prefixes = {folder.prefix for folder in folders}
-        result = clear_completed_backups_action(
-            config,
-            folder_group=lambda rel_path: _folder_group(
-                rel_path,
-                library_types=config.library_type_map,
-            ),
-            prefixes=prefixes,
-            valid_prefixes=valid_prefixes,
-        )
+        removed_paths: list[Path] = []
+        try:
+            result = clear_completed_backups_action(
+                config,
+                folder_group=lambda rel_path: _folder_group(
+                    rel_path,
+                    library_types=config.library_type_map,
+                ),
+                prefixes=prefixes,
+                valid_prefixes=valid_prefixes,
+                on_removed=removed_paths.append,
+            )
+        finally:
+            _record_deleted_original_backups(removed_paths)
         result["completed"] = _completed_page_payload()
         return result
 

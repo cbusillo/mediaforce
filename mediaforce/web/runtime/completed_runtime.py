@@ -285,6 +285,59 @@ def confirm_originals_removed_action(
     }
 
 
+def record_deleted_original_backups(
+        connection: DBClient,
+        removed_paths: list[Path],
+        *,
+        folder_group: Callable[[str], FolderGroup | None],
+) -> int:
+    """Record originals Mediaforce itself deleted, so the operator is not asked to confirm them again."""
+    removed = {str(path) for path in removed_paths}
+    if not removed:
+        return 0
+    confirmed_item_ids = _confirmed_originals_removed_item_ids(connection)
+    rows = connection.execute(
+        select(
+            library_items.c.id,
+            library_items.c.rel_path,
+            staged_artifacts.c.archived_source_path,
+        )
+        .select_from(
+            staged_artifacts.join(
+                library_items,
+                staged_artifacts.c.library_item_id == library_items.c.id,
+            )
+        )
+        .where(staged_artifacts.c.promoted_at.is_not(None))
+    ).mappings().fetchall()
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    recorded_count = 0
+    for row in rows:
+        archived_source_path = _clean_text(row["archived_source_path"])
+        library_item_id = int(row["id"])
+        if archived_source_path not in removed or library_item_id in confirmed_item_ids:
+            continue
+        group = folder_group(str(row["rel_path"] or ""))
+        connection.execute(
+            item_events.insert().values(
+                library_item_id=library_item_id,
+                created_at=now,
+                event_type=ORIGINALS_REMOVED_EVENT,
+                details_json=json.dumps(
+                    {
+                        "prefix": group[0] if group is not None else None,
+                        "archived_source_path": archived_source_path,
+                        "note": "Mediaforce deleted this original backup from the Cleanup folder.",
+                    }
+                ),
+            )
+        )
+        recorded_count += 1
+    if recorded_count > 0:
+        connection.commit()
+    return recorded_count
+
+
 def list_completed_history_events(
         connection: DBClient,
         *,
@@ -364,6 +417,7 @@ def clear_completed_backups_action(
         folder_group: Callable[[str], FolderGroup | None],
         prefixes: list[str] | None = None,
         valid_prefixes: set[str] | None = None,
+        on_removed: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
     archive_root = _configured_archive_root(config)
     normalized_prefixes = _normalized_prefixes(prefixes)
@@ -413,6 +467,8 @@ def clear_completed_backups_action(
             pass
         safe_unlink(path)
         removed_count += 1
+        if on_removed is not None:
+            on_removed(path)
 
     _prune_empty_dirs(archive_root)
 

@@ -1,6 +1,6 @@
 from mediaforce.web.runtime.archive_cleanup import archive_cleanup_summary, clear_archive_cleanup_action
 from mediaforce.web.runtime.completed_runtime import clear_completed_backups_action, completed_page_payload, \
-    confirm_originals_removed_action, list_completed_folders
+    confirm_originals_removed_action, list_completed_folders, record_deleted_original_backups
 from mediaforce.web.runtime.dashboard_payloads import dashboard_folders_payload, dashboard_library_payload, \
     dashboard_summary_payload, folder_status_payload, reconcile_pending_review_samples
 from mediaforce.web.runtime.folder_ai_tuning import FolderAiTuneDeps, folder_ai_tune_action, \
@@ -45,6 +45,7 @@ __all__ = [
     "completed_page_payload",
     "confirm_originals_removed_action",
     "list_completed_folders",
+    "record_deleted_original_backups",
     "dashboard_folders_payload",
     "dashboard_library_payload",
     "dashboard_summary_payload",

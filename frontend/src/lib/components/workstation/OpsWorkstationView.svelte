@@ -1063,10 +1063,14 @@
 		-webkit-line-clamp: 3;
 	}
 
-	.schedule-cell__content > span {
+	/* The work window sentence carries the stop time and what happens next; never clamp it. */
+	.ops-table--jobs .schedule-cell__content > span {
 		color: var(--mf-fg-secondary);
 		display: block;
+		line-clamp: unset;
 		line-height: 1.35;
+		overflow: visible;
+		-webkit-line-clamp: unset;
 	}
 
 	.schedule-cell__content .inline-link {

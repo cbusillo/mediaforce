@@ -13,6 +13,7 @@ from mediaforce.library.staged_integrity import (
     MAX_DETAIL_PAGE_SIZE,
     CheckedStagedOutputUnavailable,
     checked_staged_output,
+    integrity_disposition_blocks_promotion,
     staged_integrity_report,
 )
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
@@ -63,6 +64,8 @@ class StagedIntegrityTests(unittest.TestCase):
 
             self._write_stage("tv/Show/Season 1/Orphan.mkv", b"orphan")
             self._write_stage("tv/Show/Season 1/Partial.partial.mkv", b"partial")
+            self._write_stage("tv/Show/Season 1/.retained-480ee39f9a56-20260914.mkv", b"retained")
+            self._write_stage("tv/Show/Season 1/.hidden-working.mkv", b"hidden")
             report = staged_integrity_report(
                 connection,
                 self.config,
@@ -83,7 +86,10 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertEqual(report.counts["remote_only_or_unreachable"], 1)
         self.assertEqual(report.counts["not_started"], 1)
         self.assertEqual(report.counts["orphaned"], 1)
-        self.assertEqual(report.counts["partial_or_temporary"], 1)
+        self.assertEqual(report.counts["partial_or_temporary"], 2)
+        self.assertEqual(report.counts["retained"], 1)
+        self.assertFalse(integrity_disposition_blocks_promotion("retained"))
+        self.assertTrue(integrity_disposition_blocks_promotion("partial_or_temporary"))
         self.assertFalse(report.discovery_truncated)
 
     def test_remote_only_is_distinct_from_missing(self) -> None:
