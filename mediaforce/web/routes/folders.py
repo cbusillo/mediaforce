@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 from fastapi.responses import Response
@@ -196,4 +196,35 @@ def register_folder_routes(
             str(body.get("reviewed_draft_hash", "")),
             str(body.get("scope_membership_token", "")),
         )
+        start_mode = str(body.get("start_encode", "")).strip()
+        if result.get("ok") and start_mode:
+            result = {
+                **result,
+                "start_encode": await run_in_threadpool(_start_approved_encode, prefix.strip("/"), start_mode, body),
+            }
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    def _start_approved_encode(prefix: str, start_mode: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Queue the encode the operator just approved, in the same request as the approval.
+
+        The approval is already saved, so a queue failure is reported beside it instead of
+        failing the request; the page then shows the approved state with one retry action.
+        """
+        notes = str(body.get("start_notes", "")) or "Approved after comparing the representative sample."
+        token = str(body.get("scope_membership_token", ""))
+        try:
+            if start_mode == "older_seasons":
+                queued = queue_older_seasons_encode_action(prefix, notes, False, True, token)
+            elif start_mode == "scope":
+                queued = queue_folder_encode_action(prefix, notes, False, False, token)
+            else:
+                return {"mode": start_mode, "ok": False, "message": "Unknown start mode."}
+        except HTTPException as exc:
+            return {"mode": start_mode, "ok": False, "message": str(exc.detail)}
+        already_active = queued.get("code") == "encode_already_active"
+        return {
+            "mode": start_mode,
+            "ok": bool(queued.get("ok")) or already_active,
+            "already_active": already_active,
+            "message": str(queued.get("message") or ""),
+        }

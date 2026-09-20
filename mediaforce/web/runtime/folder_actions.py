@@ -553,6 +553,7 @@ def queue_folder_encode_action(
             active_status = str(active_encode_job.get("status") or "queued").replace("_", " ")
             return {
                 "ok": False,
+                "code": "encode_already_active",
                 "message": f"A folder encode is already {active_status} for {active_prefix}.",
             }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)

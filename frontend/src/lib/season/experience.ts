@@ -2238,6 +2238,54 @@ export function scopedEncodeProgress(
 	};
 }
 
+export type ApprovalStartMode = 'scope' | 'older_seasons';
+
+export interface ApprovalStartPlan {
+	mode: ApprovalStartMode;
+	episodeCount: number;
+	label: string;
+	detail: string;
+}
+
+/**
+ * Approving a sample starts the encode only when exactly one start action exists and it
+ * needs no further confirmation. Anything that bypasses a hold keeps its own explicit step.
+ */
+export function approvalStartPlan(input: {
+	scope: 'episode' | 'season' | 'series';
+	episodeCount: number;
+	eligibleEpisodeCount: number;
+	heldEpisodeCount: number;
+	olderSeasons: { candidateCount: number; overriddenCount: number; seasonCount: number } | null;
+}): ApprovalStartPlan | null {
+	const plan = (mode: ApprovalStartMode, count: number, what: string): ApprovalStartPlan => ({
+		mode,
+		episodeCount: count,
+		label: `Keep and compress ${what}`,
+		detail: `Keeping this version starts compressing ${what} now. Originals stay in place until you replace them.`
+	});
+	const episodes = (count: number) => `${count} ${count === 1 ? 'episode' : 'episodes'}`;
+	if (input.scope === 'episode') return plan('scope', 1, 'this episode');
+	if (input.scope === 'season') {
+		if (input.heldEpisodeCount > 0 || input.episodeCount <= 0) return null;
+		return plan('scope', input.episodeCount, `${episodes(input.episodeCount)} in this season`);
+	}
+	const older = input.olderSeasons;
+	if (older && older.overriddenCount > 0) return null;
+	if (input.eligibleEpisodeCount > 0) {
+		if (older && older.candidateCount !== input.eligibleEpisodeCount) return null;
+		return plan('scope', input.eligibleEpisodeCount, episodes(input.eligibleEpisodeCount));
+	}
+	if (older && older.candidateCount > 0) {
+		return plan(
+			'older_seasons',
+			older.candidateCount,
+			`${episodes(older.candidateCount)} in ${older.seasonCount} older ${older.seasonCount === 1 ? 'season' : 'seasons'}`
+		);
+	}
+	return null;
+}
+
 export function plainFailureMessage(folder: FolderPayload, status: FolderStatusPayload): string {
 	const targetConstraint = targetConstraintSummary(folder, status);
 	if (targetConstraint) return targetConstraint.detail;
