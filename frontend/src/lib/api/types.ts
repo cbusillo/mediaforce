@@ -979,6 +979,7 @@ export interface SettingsHost {
 	allowed_libraries: string[];
 	source_roots_json: string;
 	staging_root: string;
+	scratch_root: string;
 }
 
 export interface ScheduleProfile {

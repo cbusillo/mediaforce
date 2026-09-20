@@ -267,6 +267,7 @@ def _settings_remote_row(host: dict[str, Any]) -> dict[str, Any]:
         "allowed_libraries": normalize_allowed_libraries(host.get("allowed_libraries")),
         "source_roots_json": settings_host_source_roots_json(host.get("source_roots")),
         "staging_root": str(host.get("staging_root") or ""),
+        "scratch_root": str(host.get("scratch_root") or ""),
     }
 
 
@@ -291,6 +292,7 @@ def index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1)
             "allowed_libraries": normalize_allowed_libraries(row.get("allowed_libraries")),
             "source_roots_json": row.get("source_roots_json", ""),
             "staging_root": row.get("staging_root", ""),
+            "scratch_root": row.get("scratch_root", ""),
         }
         for index, row in enumerate(rows)
     ]
@@ -313,6 +315,7 @@ def index_settings_remote_rows(rows: list[dict[str, Any]], *, min_rows: int = 1)
                 "allowed_libraries": [],
                 "source_roots_json": "",
                 "staging_root": "",
+            "scratch_root": "",
             }
         )
     return indexed
@@ -875,6 +878,14 @@ def build_runtime_settings_payload(
         staging_root_override = _text(row.get("staging_root", ""))
         if staging_root_override:
             payload["staging_root"] = str(Path(staging_root_override).expanduser())
+        scratch_root = _text(row.get("scratch_root", ""))
+        if scratch_root:
+            # The path lives on the encode host, so it is kept verbatim and never expanded here.
+            if not scratch_root.startswith("/") or not scratch_root.strip("/"):
+                raise SettingsValidationError(
+                    f"Scratch folder for {label or host} must be an absolute folder path on that computer."
+                )
+            payload["scratch_root"] = scratch_root.rstrip("/")
         normalized_remotes.append(payload)
 
     normalized_profiles: list[dict[str, Any]] = []

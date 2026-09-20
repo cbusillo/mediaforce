@@ -1,4 +1,6 @@
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -43,7 +45,8 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict
 from mediaforce.encoding.quality import QualitySearchResult, QualitySearchWarmStart, SampleEncodeResult, \
     run_crf_search, run_sample_encode, select_quality_metric
 from mediaforce.remote import execution_mode_for_host, host_media_access_for_host, remote_shell_path_export_line, \
-    run_remote_command, ssh_client_options
+    run_remote_command, ssh_client_options, ssh_target_for_host
+from mediaforce.encoding.staged_host import STAGED_JOB_KEY, host_scratch_root, staged_job, staged_job_for_host
 from mediaforce.core.utils import file_fingerprint, timestamp
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, \
     resolve_stream_budget_ledger as resolve_stream_budget_ledger_impl
@@ -175,6 +178,9 @@ def resolve_item_quality_source_path(
         *,
         host: dict[str, Any] | None = None,
 ) -> Path:
+    staged = staged_job_for_host(host)
+    if staged is not None:
+        return Path(str(staged.source_path))
     if host_media_access_for_host(host) != "stream":
         return resolve_item_source_path(config, item, host=host)
     try:
@@ -203,6 +209,75 @@ def encode_one_item(
         host: dict[str, Any] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         encode_context: dict[str, Any] | None = None,
+) -> EncodeResult:
+    with _staged_encode_host(config, item, host, process_controller, progress_callback) as encode_host:
+        return _encode_one_item_on_host(
+            connection,
+            config,
+            manifest_path,
+            manifest,
+            index,
+            item,
+            overwrite=overwrite,
+            process_controller=process_controller,
+            host=encode_host,
+            progress_callback=progress_callback,
+            encode_context=encode_context,
+        )
+
+
+@contextmanager
+def _staged_encode_host(
+        config: MediaforceConfig,
+        item: dict[str, Any],
+        host: dict[str, Any] | None,
+        process_controller: ManagedProcessController | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+) -> Iterator[dict[str, Any] | None]:
+    """Stage the source on a stream host that has scratch space; other hosts pass through."""
+    if (
+            not isinstance(host, dict)
+            or host_media_access_for_host(host) != "stream"
+            or execution_mode_for_host(host) != "ssh"
+            or host_scratch_root(host) is None
+    ):
+        yield host
+        return
+    if progress_callback is not None:
+        progress_callback({
+            "progress_state": "staging_source",
+            "phase_label": "Copying to the computer",
+            "fps": None,
+            "speed": None,
+            "eta_seconds": None,
+            "elapsed_seconds": 0.0,
+            "out_time_seconds": 0.0,
+        })
+    with staged_job(
+            host,
+            resolve_item_source_path(config, item, host=host),
+            output_suffix=resolve_item_staging_path(config, item, host=host).suffix,
+            ssh_target=ssh_target_for_host(host),
+            ssh_options=ssh_client_options(),
+            run_remote_command=run_remote_command,
+            process_controller=process_controller,
+    ) as job:
+        yield {**host, STAGED_JOB_KEY: job.to_payload()}
+
+
+def _encode_one_item_on_host(
+        connection: DBClient,
+        config: MediaforceConfig,
+        manifest_path: Path,
+        manifest: dict[str, Any],
+        index: int,
+        item: dict[str, Any],
+        *,
+        overwrite: bool,
+        process_controller: ManagedProcessController | None,
+        host: dict[str, Any] | None,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        encode_context: dict[str, Any] | None,
 ) -> EncodeResult:
     return encode_one_item_impl(
         connection,

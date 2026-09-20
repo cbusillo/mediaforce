@@ -1358,6 +1358,21 @@
 													/>
 												</label>
 												<label>
+													<span>Scratch folder on that computer</span>
+													<input
+														class="field field--path"
+														value={host.scratch_root}
+														placeholder="None: stream the file instead"
+														oninput={(event) =>
+															updateHost(index, { scratch_root: inputValue(event) })}
+													/>
+													<small
+														>For a computer without the media share. Mediaforce copies each file
+														here, searches and compresses it on that computer, then deletes the
+														copy.</small
+													>
+												</label>
+												<label>
 													<span>Start command</span>
 													<input
 														class="field field--path"

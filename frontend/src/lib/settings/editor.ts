@@ -426,7 +426,8 @@ export function addHostDraft(
 			capabilities: ['encode_queue', 'sample_calibration'],
 			allowed_libraries: [],
 			source_roots_json: '',
-			staging_root: ''
+			staging_root: '',
+			scratch_root: ''
 		}
 	];
 }

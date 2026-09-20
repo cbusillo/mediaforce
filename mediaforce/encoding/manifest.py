@@ -23,6 +23,7 @@ from mediaforce.encoding.quality import (
     resolve_local_quality_temp_root,
 )
 from mediaforce.encoding.quality_search import QualitySearchPlan
+from mediaforce.encoding.staged_host import staged_job_for_host
 from mediaforce.encoding.staging import (
     HEADER_ONLY_OUTPUT_MAX_BYTES,
     UnreadableEncodeOutputError,
@@ -1659,6 +1660,11 @@ def _failure_kind_for_exception(exc: BaseException, verification: FinalSizeVerif
 
 
 def _quality_temp_dir_for_encode_host(config: MediaforceConfig, host: dict[str, Any] | None) -> Path:
+    staged = staged_job_for_host(host)
+    if staged is not None:
+        # The search runs on the host against the staged source, so its samples belong in the
+        # same scratch directory and disappear with it.
+        return Path(str(staged.scratch_dir)) / "quality"
     if isinstance(host, dict) and str(host.get("media_access") or "").strip().lower() == "stream":
         return resolve_local_quality_temp_root(
             config.staging_root,

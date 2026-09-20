@@ -44,6 +44,7 @@ _PERSISTED_ENCODE_HOST_KEYS = (
     "repo_path",
     "schedule_profile",
     "schedule_timezone",
+    "scratch_root",
     "source_roots",
     "staging_root",
     "start_command",
