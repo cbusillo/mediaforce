@@ -31,6 +31,7 @@ from mediaforce.core.db_tables import (
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, save_encode_job
 from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
+from mediaforce.hosts.types import is_vmaf_model_load_failure
 
 
 ACTIVE_PARENT_STATUSES = frozenset({"queued", "retry_backoff", "running"})
@@ -445,6 +446,10 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if failure_kind != "deterministic":
         return None
     error = str(child.get("error") or "")
+    if is_vmaf_model_load_failure(error):
+        # Recorded before this failure was classified as the host's: the computer could not load
+        # a VMAF model, which judged nothing about the item.
+        return "host_configuration"
     if error == DATABASE_IDENTITY_ERROR:
         return "database_identity"
     if error.startswith("Command '[") and "ffprobe" in error and "returned non-zero exit status" in error:

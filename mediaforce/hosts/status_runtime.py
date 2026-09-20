@@ -80,7 +80,7 @@ def _merge_cached_remote_tools(payload: dict[str, object], cached: dict[str, obj
         return payload
     merged_tools = dict(object_dict(cached.get("tools")))
     merged_tools.update(tools)
-    for key in ("ffmpeg_videotoolbox", "ffmpeg_libvmaf", "ffmpeg_xpsnr", "ffmpeg_libsvtav1"):
+    for key in ("ffmpeg_videotoolbox", "ffmpeg_libvmaf", "ffmpeg_libvmaf_usable", "ffmpeg_xpsnr", "ffmpeg_libsvtav1"):
         if key in object_dict(cached.get("tools")) and key not in tools:
             merged_tools[key] = object_dict(cached.get("tools"))[key]
     merged_tool_paths = dict(object_dict(cached.get("tool_paths")))

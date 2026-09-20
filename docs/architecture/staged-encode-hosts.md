@@ -53,6 +53,19 @@ Three layers cover every exit.
 A scratch failure is classified `host_scratch` and retried like other host
 problems.
 
+## Readiness
+
+A host that runs its own quality search must be able to measure, not merely list
+a filter. The host probe runs a one-second `libvmaf` self-test on a generated
+pattern and reports `ffmpeg_libvmaf_usable`. A mounted host, a stream host with
+mapped source roots, and a staged host are all held back with a plain issue when
+that self-test fails. The usual cause on a hand-built Linux ffmpeg is a libvmaf
+compiled without `xxd` installed, which silently omits its built-in models.
+
+If a VMAF model still fails to load during a job, the failure is classified
+`host_configuration`: it says nothing about the item, and targeted recovery can
+requeue it.
+
 ## Choosing the scratch root
 
 The path is on the encode host and must be absolute. Prefer a disk. A RAM-backed

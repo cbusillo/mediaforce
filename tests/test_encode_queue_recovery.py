@@ -64,6 +64,7 @@ from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
+from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
 from mediaforce.remote import HostStatus
 from mediaforce.tuning.calibration_jobs import list_queue_summary, \
     load_active_overlapping_job as load_active_overlapping_calibration_job, \
@@ -11304,6 +11305,62 @@ raise SystemExit(0)
         self.assertFalse(status.available)
         self.assertEqual(status.message, "Install ab-av1 first")
         self.assertIn(remote.AB_AV1_MISSING_ISSUE, status.issues)
+
+    def test_remote_host_status_holds_back_a_staged_host_whose_vmaf_cannot_measure(self) -> None:
+        calls = iter(range(10))
+
+        def status_for(usable_line: str | None, *, scratch_root: str = "/var/tmp/mediaforce-scratch") -> Any:
+            host: dict[str, object] = {
+                # Tool probes are cached per SSH host, so each case uses its own.
+                "host": f"root@stage-host-{next(calls)}",
+                "label": "Stage Host",
+                "capabilities": ["encode_queue"],
+                "media_access": "stream",
+                "scratch_root": scratch_root,
+            }
+            lines = [
+                f"path|{self.config.staging_root}|1",
+                "tool|xcode_clt|0",
+                "tool|brew|0",
+                "tool|ffmpeg|1",
+                "tool|ffmpeg_videotoolbox|0",
+                "tool|ffmpeg_libvmaf|1",
+                "tool|ffmpeg_xpsnr|1",
+                "tool|ffmpeg_libsvtav1|1",
+                "tool|ab_av1|1",
+                "meta|platform|linux",
+                "time|utc_offset|+0000",
+                "repo|exists|1",
+            ]
+            if usable_line is not None:
+                lines.insert(6, usable_line)
+            with patch(
+                    "mediaforce.remote._run_remote_ssh",
+                    return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="\n".join(lines), stderr=""),
+            ), patch("mediaforce.remote._learn_remote_wake_mac"):
+                return remote._remote_host_status(self.config, host)
+
+        broken = status_for("tool|ffmpeg_libvmaf_usable|0")
+        working = status_for("tool|ffmpeg_libvmaf_usable|1")
+        not_reported = status_for(None)
+        plain_stream = status_for("tool|ffmpeg_libvmaf_usable|0", scratch_root="")
+
+        self.assertFalse(broken.available)
+        self.assertIn(VMAF_MODEL_MISSING_ISSUE, broken.issues)
+        self.assertNotIn(VMAF_MODEL_MISSING_ISSUE, working.issues)
+        self.assertNotIn(VMAF_MODEL_MISSING_ISSUE, not_reported.issues)
+        self.assertNotIn(VMAF_MODEL_MISSING_ISSUE, plain_stream.issues)
+
+    def test_vmaf_model_load_failure_is_the_hosts_problem(self) -> None:
+        job = {"host": {"key": "stage-host", "mode": "ssh"}}
+        exc = quality.QualitySearchError(
+            "Error: ffmpeg vmaf exit code 234\nlibvmaf WARNING no such built-in model: \"vmaf_v0.6.1\"\n"
+            "[Parsed_libvmaf_6] could not load libvmaf model with version: vmaf_v0.6.1"
+        )
+
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "host_configuration")
+        self.assertTrue(is_vmaf_model_load_failure(str(exc)))
+        self.assertFalse(is_vmaf_model_load_failure("Error: Failed to find a suitable crf"))
 
     def test_remote_host_status_stream_hosts_ignore_missing_staging_root(self) -> None:
         host: dict[str, object] = {

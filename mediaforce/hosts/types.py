@@ -8,6 +8,27 @@ REMOTE_SHELL_PATH = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-ful
 FFMPEG_MISSING_ISSUE = "ffmpeg is not installed on the remote PATH."
 AB_AV1_MISSING_ISSUE = "ab-av1 is not installed on the remote PATH."
 SAMPLE_METRIC_MISSING_ISSUE = "ffmpeg is missing both libvmaf and xpsnr support required for sampled calibration."
+# One second of a generated test pattern measured against itself: cheap, and it fails exactly
+# when libvmaf cannot load a model.
+VMAF_SELF_TEST_ARGS = (
+    "-v", "error", "-f", "lavfi", "-i", "testsrc=d=1:s=64x64:r=5",
+    "-f", "lavfi", "-i", "testsrc=d=1:s=64x64:r=5", "-lavfi", "libvmaf", "-f", "null", "-",
+)
+# ffmpeg's own words when libvmaf has no model to load. Seeing them in a failure means the
+# computer is misconfigured; they say nothing about the file being encoded.
+VMAF_MODEL_LOAD_FAILURE_MARKERS = ("could not load libvmaf model", "no such built-in model")
+
+
+def is_vmaf_model_load_failure(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in VMAF_MODEL_LOAD_FAILURE_MARKERS)
+
+
+VMAF_MODEL_MISSING_ISSUE = (
+    "ffmpeg lists libvmaf but cannot run a VMAF measurement on this computer, usually because libvmaf "
+    "was built without its built-in models (that build step needs xxd). Rebuild or reinstall libvmaf with "
+    "models before this computer measures quality."
+)
 SAMPLE_AV1_ENCODER_MISSING_ISSUE = "ffmpeg is missing libsvtav1 support required for sampled calibration."
 LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE = "Sampled calibration is not supported on Linux hosts."
 SOURCE_ROOT_READ_MISSING_ISSUE = "Source root is not readable on this host."
