@@ -37,7 +37,7 @@ ACTIVE_PARENT_STATUSES = frozenset({"queued", "retry_backoff", "running"})
 # A folder parent aggregates to needs_attention once its last active child ends, which is
 # exactly when the remaining terminal children most need targeted recovery.
 RECOVERABLE_PARENT_STATUSES = ACTIVE_PARENT_STATUSES | frozenset({"needs_attention"})
-ELIGIBLE_CHILD_STATUSES = frozenset({"needs_attention", "failed"})
+ELIGIBLE_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 DATABASE_IDENTITY_ERROR = "Mediaforce database identity changed during connection"
 MAX_CHILDREN = 100
 MAX_RECEIPTS = 8
@@ -434,6 +434,9 @@ def _build_preview(
 def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     """Name the narrow failure classes that did not judge the source, policy or encode result."""
     failure_kind = str(child.get("last_failure_kind") or "")
+    if str(child.get("status") or "") == "stopped":
+        # An operator stop ends the child without judging it; its output was already cleaned up.
+        return "operator_stopped"
     if failure_kind == "host_configuration":
         return "host_configuration"
     if failure_kind != "deterministic":

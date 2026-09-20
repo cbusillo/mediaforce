@@ -15,9 +15,11 @@ process termination. Only unleased terminal shards are eligible. Do not use it
 to work around a quality failure, timeout, containment failure or an unverified
 completed output.
 
-Three failure classes are recoverable:
+Four classes are recoverable:
 
 - `host_configuration`.
+- A child in `stopped` status: an operator stop ended it without judging the
+  source, policy or result, and the stop already cleaned up its output.
 - `deterministic` with exactly the error `Mediaforce database identity changed
   during connection`: the controller lost its database connection while the
   encode ran (#604, #608).
