@@ -711,10 +711,10 @@ describe('season experience translation', () => {
 			finalHeadline: 'Final result must meet the final band.'
 		});
 		expect(contracts.balanced).toMatchObject({
-			sizeLabel: 'Size target',
-			searchLabel: 'Closest result in the band',
+			sizeLabel: 'Size goal',
+			searchLabel: 'Closest result to the goal',
 			qualityLabel: 'Measured quality floor',
-			finalHeadline: 'Final result must meet the final band.'
+			finalHeadline: 'The finished file must stay under the size limit.'
 		});
 		expect(contracts.perceptual_floor).toMatchObject({
 			sizeLabel: 'Size ceiling',

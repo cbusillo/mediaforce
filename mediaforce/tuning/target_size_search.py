@@ -2376,7 +2376,11 @@ def _source_cap_blocker(ledger: StreamBudgetLedger) -> StreamBudgetProjectionBlo
 
 def _sample_bounds(ledger: StreamBudgetLedger) -> tuple[int, int]:
     target = ledger.total_target_bytes or 0
-    return _bounds(target, _sample_tolerance_percent(ledger))
+    lower, upper = _bounds(target, _sample_tolerance_percent(ledger))
+    # A sample may not be accepted above the limit the finished file must meet: that candidate
+    # would be re-encoded even if its prediction were exact.
+    _final_lower, final_upper = _bounds(target, _final_tolerance_percent(ledger))
+    return lower, min(upper, final_upper)
 
 
 def _bounds(target: int, tolerance_percent: float) -> tuple[int, int]:

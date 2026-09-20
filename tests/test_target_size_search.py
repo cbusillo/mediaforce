@@ -12,6 +12,7 @@ from mediaforce.tuning.compression_intent import (
 )
 from mediaforce.tuning.size_goals import SizeGoalIntent
 from mediaforce.tuning.stream_budget import StreamBudgetLedger, resolve_stream_budget_ledger
+from mediaforce.tuning import target_size_search
 from mediaforce.tuning.target_size_search import (
     FINAL_RETRY_SKIP_REASONS,
     FinalSizeVerification,
@@ -63,8 +64,19 @@ class TargetSizeSearchTests(unittest.TestCase):
                 self.assertFalse(trace["selected_candidate"]["violates_source_cap"])
                 self.assertLessEqual(len(trace["candidates"]), 6)
 
+    def test_sample_band_never_exceeds_the_final_size_limit(self) -> None:
+        tight = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
+        aligned = self._ledger(
+            target_bytes=140_000_000, source_size_bytes=1_000_000_000, final_tolerance_percent=10.0,
+        )
+
+        self.assertEqual(target_size_search._sample_bounds(tight), (126_000_000, 147_000_000))
+        self.assertEqual(target_size_search._sample_bounds(aligned), (126_000_000, 154_000_000))
+
     def test_perceptual_floor_selects_130_mb_over_150_mb(self) -> None:
-        ledger = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
+        ledger = self._ledger(
+            target_bytes=140_000_000, source_size_bytes=1_000_000_000, final_tolerance_percent=10.0,
+        )
         measured: list[int] = []
         progress: list[tuple[int, int]] = []
 
@@ -124,7 +136,9 @@ class TargetSizeSearchTests(unittest.TestCase):
         )
 
     def test_optional_compression_floor_probe_failure_keeps_valid_candidate(self) -> None:
-        ledger = self._ledger(target_bytes=140_000_000, source_size_bytes=1_000_000_000)
+        ledger = self._ledger(
+            target_bytes=140_000_000, source_size_bytes=1_000_000_000, final_tolerance_percent=10.0,
+        )
         measured: list[int] = []
 
         def run_sample(_source_path: Path, *, crf: float, **_: Any) -> SampleEncodeResult:
@@ -2735,6 +2749,7 @@ class TargetSizeSearchTests(unittest.TestCase):
             target_bytes: int,
             source_size_bytes: int,
             max_encoded_percent: int = 80,
+            final_tolerance_percent: float = 5.0,
     ) -> StreamBudgetLedger:
         item = {
             "library_item_id": 7,
@@ -2754,7 +2769,7 @@ class TargetSizeSearchTests(unittest.TestCase):
             value_bytes=target_bytes,
             reference_runtime_seconds=None,
             sample_projection_tolerance_percent=10.0,
-            final_output_tolerance_percent=5.0,
+            final_output_tolerance_percent=final_tolerance_percent,
             source="test",
         ).resolve(3600.0)
         return resolve_stream_budget_ledger(item, resolved_size_goal=size_goal, prefer_persisted=False)

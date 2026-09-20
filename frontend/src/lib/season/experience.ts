@@ -1434,16 +1434,16 @@ export function compressionIntentContract(
 							'Under-target is accepted while the measured floor holds; larger or below-floor results stop.'
 					}
 				: {
-						sizeLabel: 'Size target',
-						sizeRule: 'The result closest to the selected size wins.',
-						searchLabel: 'Closest result in the band',
+						sizeLabel: 'Size goal',
+						sizeRule: 'Aims for this size and stays under the limit.',
+						searchLabel: 'Closest result to the goal',
 						searchRule:
-							'Searches around the target and ranks the nearest candidate after quality clears.',
+							'Searches around the goal and ranks the nearest candidate after quality clears.',
 						qualityLabel: 'Measured quality floor',
 						qualityRule: 'Picture and sound still have to clear the measured floor.',
-						finalHeadline: 'Final result must meet the final band.',
+						finalHeadline: 'The finished file must stay under the size limit.',
 						finalRule:
-							'Outside-band results stop after the bounded correction path instead of silently passing.'
+							'A smaller file is kept once it meets the quality target. A file over the limit gets one measured correction, then stops for review.'
 					};
 	return {
 		...contract,

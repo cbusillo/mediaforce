@@ -582,9 +582,9 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   const states = [
     [
       "Balance size and detail",
-      "Size target",
-      "Closest result in the band",
-      "Final result must meet the final band.",
+      "Size goal",
+      "Closest result to the goal",
+      "The finished file must stay under the size limit.",
     ],
     [
       "Smallest that still looks good",
@@ -660,7 +660,7 @@ async function checkCompressionIntentContract(page, timeoutMs, label) {
   }
   const contractText = await page.locator(".goal-contract").innerText();
   for (const requiredCopy of [
-    "Sample search band",
+    "Sample search range",
     "Final acceptance band",
     "Quality rule",
     "Final acceptance",

@@ -311,6 +311,16 @@
 		draft.video_defaults = { ...draft.video_defaults, [key]: value };
 	}
 
+	// One operator-facing limit drives both stored tolerances, so a sample can never be accepted
+	// above what the finished file is allowed to be.
+	function updateOverGoalTolerance(value: string) {
+		draft.video_defaults = {
+			...draft.video_defaults,
+			sample_projection_tolerance_percent: value,
+			final_output_tolerance_percent: value
+		};
+	}
+
 	function updatePlexMetadata(patch: Partial<SettingsPayload['metadata']['plex']>) {
 		draft.metadata = {
 			...draft.metadata,
@@ -805,20 +815,7 @@
 									/>
 								</label>
 								<label class="stacked-field">
-									<span>Test target band %</span>
-									<input
-										class="field field--number"
-										type="number"
-										min="0.1"
-										max="100"
-										step="0.1"
-										value={draft.video_defaults.sample_projection_tolerance_percent}
-										oninput={(event) =>
-											updateVideoDefault('sample_projection_tolerance_percent', inputValue(event))}
-									/>
-								</label>
-								<label class="stacked-field">
-									<span>Final output band %</span>
+									<span>Size limit over goal %</span>
 									<input
 										class="field field--number"
 										type="number"
@@ -826,9 +823,12 @@
 										max="100"
 										step="0.1"
 										value={draft.video_defaults.final_output_tolerance_percent}
-										oninput={(event) =>
-											updateVideoDefault('final_output_tolerance_percent', inputValue(event))}
+										oninput={(event) => updateOverGoalTolerance(inputValue(event))}
 									/>
+									<small
+										>A finished file may be this much over its size goal. Samples are held to the
+										same limit. Smaller is never a failure by itself.</small
+									>
 								</label>
 								<label class="stacked-field">
 									<span>Decision model</span>
@@ -955,9 +955,8 @@
 											.target_runtime_minutes} min</strong
 									>
 									<small>
-										Scaled to each episode runtime · ±{draft.video_defaults
-											.sample_projection_tolerance_percent}% sample · ±{draft.video_defaults
-											.final_output_tolerance_percent}% final
+										Scaled to each episode runtime · up to {draft.video_defaults
+											.final_output_tolerance_percent}% over the goal
 									</small>
 								</div>
 								<div class="encode-defaults-readout">

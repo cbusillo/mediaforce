@@ -125,6 +125,17 @@ authorization path above, and `reference` still prefers fidelity under its cap.
 In production on one 66-item show, 18 of 25 second encodes had been spent
 enlarging results that already cleared the target (#578).
 
+## Size limit
+
+The size goal is a budget. The operator sets one "size limit over goal"
+percentage; Settings writes it to both stored tolerances. The sample search may
+not accept a candidate predicted above the final limit, because that candidate
+would be re-encoded even if its prediction were exact. On one production show
+10 of 25 second encodes came from a ±10% sample band feeding a ±5% final band
+(#578). Being under the goal is not a failure by itself: `transparent` and
+`perceptual_floor` accept it, `balanced` accepts it once the quality target is
+met, and `reference` treats it as headroom to spend on fidelity.
+
 ## Recovery boundaries
 
 Automatic cap growth requires a confirmed frozen intent plus deterministic
