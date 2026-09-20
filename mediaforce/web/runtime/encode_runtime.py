@@ -46,6 +46,7 @@ from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, Encode
 from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
+from mediaforce.encoding.staged_host import StagedScratchError
 from mediaforce.encoding.staging import UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
@@ -3002,6 +3003,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "host_unavailable",
         "ssh_transport",
         "unreadable_output",
+        "host_scratch",
     }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
@@ -3031,6 +3033,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "controller_storage_unavailable": "controller storage issue",
         "ssh_transport": "SSH transport failure",
         "unreadable_output": "unreadable encoder output",
+        "host_scratch": "scratch folder problem on the computer",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
 
@@ -3212,6 +3215,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "containment_unproven"
     if isinstance(exc, UnreadableEncodeOutputError):
         return "unreadable_output"
+    if isinstance(exc, StagedScratchError):
+        return "host_scratch"
     if isinstance(exc, PermissionError):
         return "controller_media_access"
     if isinstance(exc, QualityTempSetupError) and _quality_temp_setup_is_host_related(message):

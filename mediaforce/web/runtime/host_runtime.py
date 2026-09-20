@@ -82,6 +82,7 @@ def host_runtime_rows(
             "allowed_libraries": allowed_libraries,
             "source_roots": merged_source_roots,
             "staging_root": str(host_config.get("staging_root") or "").strip() or None,
+            "scratch_root": str(host_config.get("scratch_root") or "").strip() or None,
             "storage_recovery_available": storage_recovery_available,
         }
         max_parallel_encodes = host_max_parallel_encodes(host_config)

@@ -13,6 +13,7 @@ from mediaforce.core.schedule_deadline import guard_command_for_schedule_deadlin
     guard_shell_script_for_schedule_deadline, process_result_reached_schedule_deadline, \
     managed_schedule_close_deadline
 from mediaforce.core.type_defs import object_dict
+from mediaforce.encoding.staged_host import pull_output, remote_ffmpeg_command, staged_job_for_host
 
 
 _PROCESS_WAIT_POLL_SECONDS = 0.1
@@ -127,6 +128,42 @@ def run_encode_command(
             progress_callback=progress_callback,
         )
         _raise_if_schedule_deadline_reached(result, host_payload)
+        return result
+
+    staged = staged_job_for_host(host)
+    if staged is not None:
+        # The source already sits in the host's scratch directory, so the encoder reads and
+        # writes real files there and only the finished output crosses the network.
+        ssh_host = str(host_payload.get("host") or host_payload.get("key") or "").strip()
+        if not ssh_host:
+            raise RuntimeError("Remote encode host is missing an SSH target.")
+        staged_cmd = ffmpeg_command_with_progress(
+            remote_ffmpeg_command(ffmpeg_cmd, staged, executable=str(host_payload.get("ffmpeg_path") or "") or None)
+        )
+        staged_script = " && ".join(
+            [
+                remote_shell_path_export_line(),
+                f"rm -f {shlex.quote(str(staged.output_path))}",
+                shlex.join(staged_cmd),
+            ]
+        )
+        if deadline is not None:
+            staged_script = guard_shell_script_for_schedule_deadline(staged_script, deadline)
+        result = run_tracked_process_fn(
+            ["ssh", *ssh_client_options(), ssh_host, f"sh -lc {shlex.quote(staged_script)}"],
+            process_controller=process_controller,
+            progress_callback=progress_callback,
+            terminate_on_progress_failure=False,
+        )
+        _raise_if_schedule_deadline_reached(result, host_payload)
+        if result.returncode == 0:
+            pull_output(
+                staged,
+                temp_output,
+                ssh_target=ssh_host,
+                ssh_options=ssh_client_options(),
+                process_controller=process_controller,
+            )
         return result
 
     if host_media_access_for_host(host) == "stream":

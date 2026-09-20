@@ -18,6 +18,8 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   boundary map after the structural refactor pass
 - `docs/architecture/representative-evidence.md`: deterministic representative
   selection, coverage, and the versioned evidence contract
+- `docs/architecture/staged-encode-hosts.md`: mounted, stream and staged hosts, the
+  per-job scratch lifecycle and how scratch space is always recovered
 - `docs/architecture/cadence-evidence.md`: measured cadence classification,
   versioned evidence, and safe allow-listed transforms
 - `docs/architecture/media-fingerprint-evidence.md`: measured visual/audio

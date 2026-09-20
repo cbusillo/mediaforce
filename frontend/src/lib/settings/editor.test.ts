@@ -164,7 +164,8 @@ describe('settings draft helpers', () => {
 				capabilities: ['encode_queue'],
 				allowed_libraries: ['tv'],
 				source_roots_json: '',
-				staging_root: ''
+				staging_root: '',
+				scratch_root: ''
 			}
 		],
 		transcode_root: '/Volumes/Transcode',
