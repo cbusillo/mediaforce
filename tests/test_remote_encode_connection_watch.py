@@ -42,8 +42,12 @@ class RemoteEncodeConnectionWatchTests(unittest.TestCase):
 
             self.assertTrue(_wait_until(lambda: not owned.exists()), "the partial output must be removed")
             process.wait(timeout=15)
-            survivors = subprocess.run(["pgrep", "-f", str(owned)], capture_output=True, text=True).stdout.split()
-            self.assertEqual(survivors, [])
+
+            def survivors() -> list[str]:
+                return subprocess.run(["pgrep", "-f", str(owned)], capture_output=True, text=True).stdout.split()
+
+            # The signal is sent before the wrapper exits; a loaded machine can take a moment to end the encoder.
+            self.assertTrue(_wait_until(lambda: not survivors()), f"encoder processes survived: {survivors()}")
             self.assertFalse(marker.exists())
 
     def test_a_finished_encode_keeps_its_output_and_exit_status(self) -> None:
