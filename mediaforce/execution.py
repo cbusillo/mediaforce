@@ -771,6 +771,7 @@ def _run_tracked_process(
         process_controller: ManagedProcessController | None,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         terminate_on_progress_failure: bool = True,
+        hold_stdin_open: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     return _run_tracked_process_impl(
         cmd,
@@ -780,6 +781,7 @@ def _run_tracked_process(
         update_ffmpeg_progress_state=_update_ffmpeg_progress_state,
         process_cancelled_error=ProcessCancelledError,
         terminate_on_progress_failure=terminate_on_progress_failure,
+        hold_stdin_open=hold_stdin_open,
     )
 
 

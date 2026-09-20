@@ -89,7 +89,15 @@ the reader that drains encoder stderr: the runner retains the first error and
 reports it from the owning thread. Local commands terminate through their
 managed controller. SSH commands keep draining until the remote command exits,
 then report the error, because stopping the SSH client alone does not prove the
-remote encoder stopped. This can leave an output requiring operator review;
+remote encoder stopped.
+
+A queued encode on a mounted SSH host runs inside a connection watcher. The
+controller holds the connection's input open; when the controller stops the
+job, restarts, or loses the link, the watcher on the host ends the processes
+writing that job's partial output and removes the partial file. Before this, a
+stopped encode kept running on the host, competed with the host's next job and
+could leave a complete but unrecorded output (observed on 2026-09-19 and
+2026-09-20). A plain command-line encode is not watched. This can leave an output requiring operator review;
 existing output and failure checks still apply.
 
 Heartbeat database/path exceptions are logged and retried at the normal

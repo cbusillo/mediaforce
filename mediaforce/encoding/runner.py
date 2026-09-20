@@ -96,6 +96,33 @@ def _join_process_threads(
         raise error
 
 
+def remote_script_ending_with_connection(script: str, owned_output: Path) -> str:
+    """Make a remote encode die with the SSH connection that started it.
+
+    Stopping an encode only ends the controller's SSH client. Without a terminal the remote
+    shell is not signalled, so its encoder kept running, competed with the host's next job and
+    left an unrecorded output. The watcher blocks on the connection's input; when the controller
+    stops, restarts or loses the link it ends the processes writing this job's output and removes
+    that partial file. The caller must hold the connection's stdin open for the whole run.
+    """
+    owned = shlex.quote(str(owned_output))
+    return "\n".join(
+        [
+            # A background command's stdin is /dev/null in some shells, so hand it over explicitly.
+            "exec 3<&0",
+            # The watcher's own command line contains the path, so it ignores the TERM it sends and
+            # removes the partial before the final KILL takes everything that mentions the path.
+            f"( trap '' TERM; cat <&3 >/dev/null 2>&1; pkill -TERM -f -- {owned} 2>/dev/null; sleep 2; "
+            f"rm -f {owned}; pkill -KILL -f -- {owned} 2>/dev/null ) &",
+            "mediaforce_connection_watch=$!",
+            f"( {script} )",
+            "mediaforce_encode_status=$?",
+            'kill "$mediaforce_connection_watch" 2>/dev/null',
+            'exit "$mediaforce_encode_status"',
+        ]
+    )
+
+
 def run_encode_command(
         *,
         ffmpeg_cmd: list[str],
@@ -199,6 +226,11 @@ def run_encode_command(
     remote_script = " && ".join(remote_script_parts)
     if deadline is not None:
         remote_script = guard_shell_script_for_schedule_deadline(remote_script, deadline)
+    # Queue work is tracked through a pipe this process holds open. A plain command-line run
+    # is not, and end-of-input there would look like a lost controller.
+    watch_connection = process_controller is not None or progress_callback is not None
+    if watch_connection:
+        remote_script = remote_script_ending_with_connection(remote_script, temp_output)
     ssh_cmd = [
         "ssh",
         *ssh_client_options(),
@@ -210,6 +242,7 @@ def run_encode_command(
         process_controller=process_controller,
         progress_callback=progress_callback,
         terminate_on_progress_failure=False,
+        hold_stdin_open=watch_connection,
     )
     _raise_if_schedule_deadline_reached(result, host_payload)
     return result
@@ -348,12 +381,16 @@ def run_tracked_process(
         update_ffmpeg_progress_state: Callable[..., dict[str, Any] | None],
         process_cancelled_error: type[Exception],
         terminate_on_progress_failure: bool = True,
+        hold_stdin_open: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    if process_controller is None and progress_callback is None:
+    if process_controller is None and progress_callback is None and not hold_stdin_open:
         return run_command(cmd)
 
     process_controller.throw_if_cancelled() if process_controller is not None else None
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
+    # A remote script that watches its connection treats end-of-input as "the controller is gone",
+    # so its stdin has to be a pipe this process keeps open until the command ends.
+    process = subprocess.Popen(cmd, stdin=subprocess.PIPE if hold_stdin_open else None,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
                                start_new_session=True)
     if process_controller is not None:
         process_controller.attach(process, terminate_process_group=True)
@@ -404,6 +441,12 @@ def run_tracked_process(
             terminate_on_progress_failure=terminate_on_progress_failure,
         )
     finally:
+        held_stdin = getattr(process, "stdin", None)
+        if held_stdin is not None:
+            try:
+                held_stdin.close()
+            except OSError:
+                pass
         try:
             _join_process_threads((stdout_thread, stderr_thread), callback_failure)
         finally:
