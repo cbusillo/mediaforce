@@ -2081,6 +2081,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
     }
     for (const forbiddenAction of [
       "Keep this version",
+      "Keep and compress 1 episode in this season",
       "Use less space",
       "Improve picture or sound",
     ]) {
@@ -2127,7 +2128,7 @@ async function checkComparisonWorkspace(baseUrl, route, timeoutMs) {
       );
     }
     for (const label of [
-      "Keep this version",
+      "Keep and compress 1 episode in this season",
       "Use less space",
       "Improve picture or sound",
     ]) {

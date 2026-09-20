@@ -5,7 +5,7 @@ import time
 import unittest
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from starlette.requests import Request
@@ -37,6 +37,9 @@ def _json_request(payload: dict[str, Any]) -> Request:
         },
         receive,
     )
+
+
+ANY_NOTES = "Approved after comparing the representative sample."
 
 
 def _route_endpoint(app: FastAPI, path: str, method: str) -> Any:
@@ -232,6 +235,64 @@ class WebRouteSecurityTests(unittest.TestCase):
                 ("save", "membership-v2"),
             ],
         )
+
+    def test_save_profile_can_start_the_approved_encode_in_the_same_request(self) -> None:
+        queue_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        def build(save_result: dict[str, Any], queue_result: Any) -> Any:
+            def queue(kind: str, *args: Any) -> dict[str, Any]:
+                queue_calls.append((kind, args))
+                if isinstance(queue_result, Exception):
+                    raise queue_result
+                return queue_result
+
+            app = FastAPI()
+            register_folder_routes(
+                app,
+                folder_status_payload=lambda _prefix: {},
+                folder_content_payload=lambda _prefix: ({}, 200),
+                download_review_compare_action=_empty_file_response,
+                folder_ai_tune_action=lambda *_args: {},
+                folder_ai_tune_preview_action=lambda *_args: {},
+                folder_ai_tune_confirm_action=lambda *_args: {},
+                clear_folder_tuning_action=lambda _prefix: {},
+                save_series_lifecycle_action=lambda _prefix, _mode: {},
+                approve_measured_encode_recovery_action=lambda *_args: {},
+                queue_folder_encode_action=lambda *args: queue("scope", *args),
+                queue_older_seasons_encode_action=lambda *args: queue("older_seasons", *args),
+                validate_folder_outputs_action=lambda *_args: {},
+                promote_folder_outputs_action=lambda *_args: {},
+                save_profile_action=lambda *_args: save_result,
+            )
+            return _route_endpoint(app, "/api/folders/{prefix:path}/save-profile", "POST")
+
+        def call(endpoint: Any, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            response = asyncio.run(endpoint("tv/Show", _json_request(payload)))
+            return response.status_code, json.loads(response.body)
+
+        status, body = call(build({"ok": True}, {"ok": True, "message": "Queued."}), {"start_encode": "scope"})
+        self.assertEqual((status, body["start_encode"]["ok"], body["start_encode"]["mode"]), (200, True, "scope"))
+        self.assertEqual(queue_calls, [("scope", ("tv/Show", ANY_NOTES, False, False, ""))])
+
+        queue_calls.clear()
+        status, body = call(build({"ok": True}, {"ok": True}), {"start_encode": "older_seasons"})
+        self.assertEqual(queue_calls, [("older_seasons", ("tv/Show", ANY_NOTES, False, True, ""))])
+
+        queue_calls.clear()
+        status, body = call(build({"ok": True}, {"ok": True}), {})
+        self.assertEqual((status, "start_encode" in body, queue_calls), (200, False, []))
+
+        status, body = call(build({"ok": False, "message": "blocked"}, {"ok": True}), {"start_encode": "scope"})
+        self.assertEqual((status, "start_encode" in body, queue_calls), (409, False, []))
+
+        already = {"ok": False, "code": "encode_already_active", "message": "A folder encode is already queued."}
+        status, body = call(build({"ok": True}, already), {"start_encode": "scope"})
+        self.assertEqual((status, body["start_encode"]["ok"], body["start_encode"]["already_active"]), (200, True, True))
+
+        refused = HTTPException(status_code=409, detail="Motion-pattern safety evidence is needed.")
+        status, body = call(build({"ok": True}, refused), {"start_encode": "scope"})
+        self.assertEqual((status, body["ok"], body["start_encode"]["ok"]), (200, True, False))
+        self.assertIn("Motion-pattern", body["start_encode"]["message"])
 
     def test_folder_save_profile_failure_returns_conflict_status(self) -> None:
         app = FastAPI()

@@ -62,6 +62,7 @@ import {
 	stagedEpisodeLinks,
 	shouldPrioritizeScopeActivity,
 	sizeGoals,
+	approvalStartPlan,
 	targetConstraintSummary,
 	targetProvenanceSummary,
 	testRequestWithInstructions,
@@ -2641,5 +2642,56 @@ describe('season experience translation', () => {
 
 		expect(calibrationLivenessLabel(completed)).toBe('Sample finished');
 		expect(calibrationEtaSummary(completed)).toMatchObject({ value: 'Finished', tone: 'quiet' });
+	});
+});
+
+describe('approvalStartPlan', () => {
+	const series = (overrides: Partial<Parameters<typeof approvalStartPlan>[0]>) =>
+		approvalStartPlan({
+			scope: 'series',
+			episodeCount: 88,
+			eligibleEpisodeCount: 66,
+			heldEpisodeCount: 22,
+			olderSeasons: { candidateCount: 66, overriddenCount: 0, seasonCount: 3 },
+			...overrides
+		});
+
+	it('starts the one unambiguous action', () => {
+		expect(series({})).toMatchObject({ mode: 'scope', episodeCount: 66 });
+		expect(series({})?.label).toBe('Keep and compress 66 episodes');
+		expect(
+			series({
+				eligibleEpisodeCount: 0,
+				olderSeasons: { candidateCount: 10, overriddenCount: 0, seasonCount: 3 }
+			})
+		).toMatchObject({ mode: 'older_seasons', episodeCount: 10 });
+		expect(
+			approvalStartPlan({
+				scope: 'episode',
+				episodeCount: 1,
+				eligibleEpisodeCount: 1,
+				heldEpisodeCount: 0,
+				olderSeasons: null
+			})
+		).toMatchObject({ mode: 'scope', label: 'Keep and compress this episode' });
+	});
+
+	it('keeps a separate step when a hold would be bypassed or the choice is ambiguous', () => {
+		expect(
+			series({ olderSeasons: { candidateCount: 66, overriddenCount: 4, seasonCount: 3 } })
+		).toBeNull();
+		expect(
+			series({ olderSeasons: { candidateCount: 70, overriddenCount: 0, seasonCount: 3 } })
+		).toBeNull();
+		expect(series({ eligibleEpisodeCount: 0, olderSeasons: null })).toBeNull();
+		expect(
+			approvalStartPlan({
+				scope: 'season',
+				episodeCount: 22,
+				eligibleEpisodeCount: 0,
+				heldEpisodeCount: 22,
+				olderSeasons: null
+			})
+		).toBeNull();
 	});
 });

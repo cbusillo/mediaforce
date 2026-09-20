@@ -72,6 +72,7 @@
 		stagedEpisodeLinks,
 		shouldPrioritizeScopeActivity,
 		sizeGoals,
+		approvalStartPlan,
 		targetConstraintSummary,
 		targetProvenanceSummary,
 		technicalVideoPolicy,
@@ -99,6 +100,7 @@
 		ok?: boolean;
 		message?: string;
 		proposal?: Record<string, unknown> | null;
+		start_encode?: { ok?: boolean; message?: string } | null;
 	};
 
 	type HostOption = {
@@ -328,6 +330,22 @@
 						expectedEpisodeBytes * olderSeasonOverride.candidate_count
 				)
 			: null
+	);
+	const approvalStart = $derived(
+		approvalStartPlan({
+			scope: isExactItemScope ? 'episode' : isSeriesScope ? 'series' : 'season',
+			episodeCount,
+			eligibleEpisodeCount,
+			heldEpisodeCount,
+			olderSeasons:
+				canQueueOlderSeasons && olderSeasonOverride
+					? {
+							candidateCount: olderSeasonOverride.candidate_count,
+							overriddenCount: olderSeasonOverride.overridden_candidate_count,
+							seasonCount: olderSeasonOverride.season_count
+						}
+					: null
+		})
 	);
 	const actualSampleSizes = $derived(reviewSampleSizes(folder));
 	const sizeTarget = $derived(folderSizeTargetAnalysis(folder));
@@ -831,16 +849,22 @@
 		actionPhase = 'approving';
 		let succeeded = false;
 		try {
-			ensureOk(
+			const saved = ensureOk(
 				await postJson<ActionResponse>(endpoint('save-profile'), {
 					confirm_high_impact: confirmHighImpact,
 					confirm_size_tradeoff: confirmSizeTradeoff,
-					reviewed_draft_hash: draftHash
+					reviewed_draft_hash: draftHash,
+					start_encode: approvalStart?.mode ?? ''
 				}),
 				'We couldn’t save your decision.'
 			);
 			await onMutate();
 			succeeded = true;
+			if (approvalStart && saved.start_encode && !saved.start_encode.ok) {
+				// The approval is saved; the approved page that follows carries the one retry action.
+				actionError =
+					`Your approval is saved, but compression did not start. ${saved.start_encode.message ?? ''}`.trim();
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : '';
 			const guard = approvalGuardFromMessage(message, confirmHighImpact, confirmSizeTradeoff);
@@ -2439,7 +2463,11 @@
 							</p>
 						{:else}
 							<h2>Keep this version?</h2>
-							<p>Nothing is compressed or queued until you choose a separate production action.</p>
+							<p>
+								{approvalStart
+									? approvalStart.detail
+									: 'Nothing is compressed or queued until you choose a separate production action.'}
+							</p>
 						{/if}
 					</div>
 					<div class="decision-actions">
@@ -2518,7 +2546,7 @@
 								onclick={() => approveTest()}
 								disabled={!currentPair || approvalBlocked}
 							>
-								Keep this version
+								{approvalStart ? approvalStart.label : 'Keep this version'}
 								<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m4 10 3.5 3.5L16 5" /></svg>
 							</button>
 						{/if}
