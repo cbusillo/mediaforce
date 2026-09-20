@@ -175,7 +175,24 @@ class LibraryLifecycleTests(unittest.TestCase):
             recently_replaced = project_candidates(connection, config, prefixes=["tv/Other"], now=NOW)
 
         self.assertTrue(settled[0].eligible)
-        self.assertEqual([reason.code for reason in recently_replaced[0].hold_reasons], ["current_season"])
+        # A replacement 40 days ago is past the acquisition hold and is not a new episode, so nothing holds the season.
+        self.assertTrue(recently_replaced[0].eligible)
+
+    def test_a_replaced_file_restarts_the_acquisition_hold_but_not_the_current_season_hold(self) -> None:
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            item = self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=100)
+            self._insert_plex_metadata(connection, item, added_at=NOW - timedelta(days=900), season_index=3)
+            connection.execute(
+                library_items.update()
+                .where(library_items.c.id == item)
+                .values(content_version_changed_at=(NOW - timedelta(days=3)).isoformat(timespec="seconds"))
+            )
+            self._insert_series_metadata(connection, "tv/Show", status="Returning Series", in_production=True)
+
+            decisions = project_candidates(connection, config, prefixes=["tv/Show"], now=NOW)
+
+        self.assertEqual([reason.code for reason in decisions[0].hold_reasons], ["recent_acquisition"])
 
     def test_acquisition_guard_holds_whole_season_from_newest_episode(self) -> None:
         config = self._config(mode="off")

@@ -254,6 +254,10 @@ def project_candidates(
         season_prefix: _latest_timestamp(_content_activity_at(row) for row in grouped_rows)
         for season_prefix, grouped_rows in season_rows.items()
     }
+    season_arrival = {
+        season_prefix: _latest_timestamp(_media_age(row).timestamp for row in grouped_rows)
+        for season_prefix, grouped_rows in season_rows.items()
+    }
     season_rank_age = {
         season_prefix: _newest_age_evidence(_media_age(row) for row in grouped_rows)
         for season_prefix, grouped_rows in season_rows.items()
@@ -394,6 +398,7 @@ def project_candidates(
             and season.season_number == highest_number
         )
         activity_at = season_activity.get(season.season_prefix) if season is not None else None
+        arrival_at = season_arrival.get(season.season_prefix) if season is not None else None
         rank_age = season_rank_age.get(season.season_prefix, _media_age(row)) if season is not None else _media_age(row)
         manual_override = bool(
             normalized_overrides
@@ -407,6 +412,7 @@ def project_candidates(
             provider_state=provider_state,
             is_current=is_current,
             activity_at=activity_at,
+            arrival_at=arrival_at,
             now=current_time,
             acquisition_days=acquisition_days,
             inactive_days=inactive_days,
@@ -854,6 +860,7 @@ def _hold_reasons(
         provider_state: ProviderState,
         is_current: bool,
         activity_at: datetime | None,
+        arrival_at: datetime | None,
         now: datetime,
         acquisition_days: int,
         inactive_days: int,
@@ -888,7 +895,8 @@ def _hold_reasons(
                 release_at=acquisition_release,
             )
         )
-    inactivity_release = activity_at + timedelta(days=inactive_days)
+    # A replaced file is not a new episode: only arrivals say the season is still being released.
+    inactivity_release = (arrival_at or activity_at) + timedelta(days=inactive_days)
     protection_enabled = mode == "on" or (mode == "auto" and provider_state in {"active", "unknown", "stale"})
     if is_current and protection_enabled and now < inactivity_release:
         reasons.append(
@@ -897,7 +905,7 @@ def _hold_reasons(
                 label="Current season",
                 detail=(
                     "This is the highest numbered season. It releases when a newer season appears "
-                    f"or after {inactive_days} days without new or replaced episodes."
+                    f"or after {inactive_days} days without new episodes."
                 ),
                 release_at=inactivity_release,
             )
