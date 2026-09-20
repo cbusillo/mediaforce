@@ -568,6 +568,7 @@ def verify_final_output_size(
         compression_intent: CompressionIntentV1 | None = None,
         compression_evidence: CompressionEvidenceRef | None = None,
         compression_authorization: CompressionAuthorizationDecision | None = None,
+        quality_target_met: bool = False,
 ) -> FinalSizeVerification:
     if ledger is None or ledger.total_target_bytes is None:
         return FinalSizeVerification(
@@ -591,9 +592,20 @@ def verify_final_output_size(
     else:
         status = "inside_target_band"
     intent = compression_intent or legacy_compression_intent()
-    under_target_accepted = status == "under_target" and intent.accepts_under_target_result
+    # Under `balanced`, spending upward needs a measured benefit. A result that already meets
+    # the quality target has none to gain, so the smaller file is the outcome to keep.
+    quality_met_under_target = bool(
+        status == "under_target"
+        and quality_target_met
+        and not intent.requires_confirmation
+        and intent.level == "balanced"
+    )
+    under_target_accepted = status == "under_target" and (
+        intent.accepts_under_target_result or quality_met_under_target
+    )
     under_target_growth_authorized = bool(
         status == "under_target"
+        and not quality_met_under_target
         and not intent.requires_confirmation
         and intent.level in {"balanced", "reference"}
         and compression_authorization is not None
@@ -618,7 +630,9 @@ def verify_final_output_size(
             if retry_allowed
             else (
                 (
-                    "The active compression goal accepts this smaller result without spending unused bytes."
+                    "This smaller result already meets the quality target, so a larger retry has no measured benefit."
+                    if quality_met_under_target
+                    else "The active compression goal accepts this smaller result without spending unused bytes."
                     if under_target_accepted
                     else "Choose a compression goal before Mediaforce spends unused bytes."
                     if intent.requires_confirmation
