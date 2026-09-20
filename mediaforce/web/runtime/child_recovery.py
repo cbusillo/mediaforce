@@ -439,6 +439,9 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
         return "operator_stopped"
     if failure_kind == "host_configuration":
         return "host_configuration"
+    if failure_kind == "unreadable_output":
+        # The encode removed its own header-only output and used up its automatic retries.
+        return "unreadable_output"
     if failure_kind != "deterministic":
         return None
     error = str(child.get("error") or "")
