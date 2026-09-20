@@ -327,6 +327,35 @@ class ChildRecoveryTests(unittest.TestCase):
                 staged.unlink()
             self._reset_database()
 
+    def test_operator_stopped_children_recover_under_attention_parent(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection,
+                count=2,
+                statuses=["stopped", "stopped"],
+                failure_kinds=["", ""],
+                errors=["Encode queue job was stopped and cleaned up."] * 2,
+                parent_status="needs_attention",
+            )
+            preview = self._preview(connection, ["child-0", "child-1"])
+            connection.commit()
+            self._apply(connection, ["child-0", "child-1"], preview["token"])
+            rows = self._raw_jobs(connection)
+
+        self.assertEqual([rows[child]["status"] for child in ("child-0", "child-1")], ["queued", "queued"])
+
+    def test_children_that_exhausted_unreadable_output_retries_recover(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection,
+                count=1,
+                failure_kinds=["unreadable_output"],
+                errors=["Encoded output is header-only and unreadable (1369 bytes): /staging/Episode 001.mkv"],
+                parent_status="needs_attention",
+            )
+            preview = self._preview(connection, ["child-0"])
+            self.assertEqual(preview["child_ids"], ["child-0"])
+
     def test_other_deterministic_failures_and_foreign_probe_paths_stay_ineligible(self) -> None:
         foreign_probe = "Command '['/opt/homebrew/bin/ffprobe', '/elsewhere/Episode.mkv']' returned non-zero exit status 1."
         cases = (
