@@ -2753,6 +2753,17 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
 
+    def test_media_share_read_and_write_errors_are_retryable_storage_failures(self) -> None:
+        job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
+        for message in (
+            "[Errno 16] Resource busy: '/Volumes/media/transcode/tv/Show/Season 8/Episode.partial.mkv'",
+            "[in#0/mov,mp4 @ 0x1] Error during demuxing: Input/output error\nConversion failed!",
+        ):
+            with self.subTest(message=message):
+                kind = encode_runtime._classify_encode_failure(RuntimeError(message), job)
+                self.assertEqual(kind, "storage_io")
+                self.assertTrue(encode_runtime._encode_failure_is_retryable(kind, message, job["host"]))
+
     def test_quality_temp_setup_timeout_is_ssh_transport_for_remote_host(self) -> None:
         job = {
             "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},

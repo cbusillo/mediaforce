@@ -24,6 +24,21 @@ def is_vmaf_model_load_failure(message: str) -> bool:
     return any(marker in lowered for marker in VMAF_MODEL_LOAD_FAILURE_MARKERS)
 
 
+STORAGE_IO_FAILURE_MARKERS = (
+    "input/output error",
+    "resource busy",
+    "stale nfs file handle",
+    "device not configured",
+    "socket is not connected",
+)
+
+
+def is_storage_io_failure(message: str) -> bool:
+    """A read or write on the media share failed mid-encode; it says nothing about the source or the settings."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in STORAGE_IO_FAILURE_MARKERS)
+
+
 VMAF_MODEL_MISSING_ISSUE = (
     "ffmpeg lists libvmaf but cannot run a VMAF measurement on this computer, usually because libvmaf "
     "was built without its built-in models (that build step needs xxd). Rebuild or reinstall libvmaf with "

@@ -31,7 +31,7 @@ from mediaforce.core.db_tables import (
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, save_encode_job
 from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
-from mediaforce.hosts.types import is_vmaf_model_load_failure
+from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 
 
 ACTIVE_PARENT_STATUSES = frozenset({"queued", "retry_backoff", "running"})
@@ -443,9 +443,15 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if failure_kind == "unreadable_output":
         # The encode removed its own header-only output and used up its automatic retries.
         return "unreadable_output"
+    if failure_kind in {"storage_io", "stale_lease", "worker_restart"}:
+        # The share or the controller failed and the automatic retries ran out; nothing judged the item.
+        return failure_kind
     if failure_kind != "deterministic":
         return None
     error = str(child.get("error") or "")
+    if is_storage_io_failure(error):
+        # Recorded before storage errors had their own failure kind.
+        return "storage_io"
     if is_vmaf_model_load_failure(error):
         # Recorded before this failure was classified as the host's: the computer could not load
         # a VMAF model, which judged nothing about the item.
