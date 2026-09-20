@@ -112,6 +112,7 @@ class EncodeQueueRuntimeDeps:
     encode_job_retry_max_delay_seconds: int
     encode_job_max_attempts: int
     encode_host_cooldown_seconds: int
+    live_encode_job_controller: Any = None
 
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
@@ -154,6 +155,10 @@ def reconcile_encode_jobs(
         if not restart_recovery and lease_expires_at is not None and lease_expires_at > now:
             continue
         schedule_close_due = _encode_job_schedule_close_due(payload, now=now)
+        if not restart_recovery and not schedule_close_due and _renew_lease_for_live_worker(
+                connection, payload, deps, now=now,
+        ):
+            continue
         failure_kind = "worker_restart" if restart_recovery else "stale_lease"
         failure_message = (
             "Encode queue job was interrupted by a web process restart."
@@ -268,6 +273,50 @@ def reconcile_encode_jobs(
     connection.commit()
     clear_stale_encoding_items_when_idle(connection, config, deps)
     connection.commit()
+
+
+LIVE_WORKER_PROGRESS_GRACE = timedelta(minutes=10)
+
+
+def _renew_lease_for_live_worker(
+        connection: DBClient,
+        payload: dict[str, Any],
+        deps: EncodeQueueRuntimeDeps,
+        *,
+        now: datetime,
+) -> bool:
+    """Keep a job whose worker still runs in this process; end a silent worker's encoder before the job is reclaimed."""
+    job_id = str(payload.get("job_id") or "")
+    controller = deps.live_encode_job_controller(job_id) if deps.live_encode_job_controller is not None else None
+    if controller is None:
+        return False
+    progress_at = deps.parse_iso(object_dict(payload.get("progress")).get("updated_at"))
+    started_at = deps.parse_iso(payload.get("started_at"))
+    last_sign_of_life = max((value for value in (progress_at, started_at) if value is not None), default=None)
+    if last_sign_of_life is None or now - last_sign_of_life > LIVE_WORKER_PROGRESS_GRACE:
+        deps.logger.error(
+            "Encode job %s lost its lease and its worker has been silent since %s; ending its encoder before reclaim.",
+            job_id, last_sign_of_life,
+        )
+        controller.cancel()
+        return False
+    claimed = _claim_stale_encode_job(connection, job_id, deps, restart_recovery=False)
+    if claimed is None:
+        return True
+    claimed.update(
+        {
+            "heartbeat_at": deps.now_iso(),
+            "lease_expires_at": _encode_job_lease_expires_at(deps),
+            "updated_at": deps.now_iso(),
+        }
+    )
+    save_encode_job(connection, claimed)
+    connection.commit()
+    deps.logger.warning(
+        "Encode job %s missed its heartbeat but its worker is still running (last progress %s); lease renewed.",
+        job_id, last_sign_of_life,
+    )
+    return True
 
 
 def _claim_stale_encode_job(
@@ -2150,12 +2199,20 @@ def encode_job_heartbeat_loop(
         deps: EncodeQueueRuntimeDeps,
 ) -> None:
     while not stop_event.wait(deps.encode_job_heartbeat_seconds):
+        # noinspection PyBroadException
         try:
             with open_db(deps.load_config(config_path).paths.db_path) as connection:
                 job = load_encode_job(connection, job_id)
-                if job is None or str(job.get("status") or "") != "running":
+                status = str(job.get("status") or "") if job is not None else "missing"
+                if job is None or status != "running":
+                    if not stop_event.is_set():
+                        deps.logger.warning("Encode job heartbeat for %s ended: job is %s.", job_id, status)
                     return
                 if str(job.get("worker_id") or "") != worker_id:
+                    deps.logger.warning(
+                        "Encode job heartbeat for %s ended: owned by %s, not %s.",
+                        job_id, job.get("worker_id"), worker_id,
+                    )
                     return
                 job.update(
                     {
@@ -2166,7 +2223,8 @@ def encode_job_heartbeat_loop(
                     }
                 )
                 save_encode_job(connection, job)
-        except (OSError, RuntimeError, SQLAlchemyError):
+        except Exception:
+            # A heartbeat that dies leaves a live encoder to be reclaimed as dead, so no error may end this loop.
             deps.logger.exception("Encode job heartbeat update failed for %s; retrying", job_id)
 
 

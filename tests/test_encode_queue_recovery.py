@@ -358,6 +358,99 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(job["last_failure_kind"], "stale_lease")
             self.assertIn("stale worker lease", str(job["waiting_reason"]))
 
+    def _running_job_with_expired_lease(self, connection: DBClient, *, progress_age: timedelta) -> None:
+        source_path = self._create_source_file("episode-live.mkv")
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        self._write_manifest(
+            "manifest-live.json",
+            [{"library_item_id": item_id, "staging_path": str(self._staging_path("episode-live.mkv"))}],
+        )
+        self._save_job(
+            connection,
+            job_id="job-live",
+            manifest_name="manifest-live.json",
+            host={"key": "local", "label": "Local", "mode": "local"},
+            status="running",
+            attempt_count=1,
+            lease_expires_at="2000-01-01T00:00:00+00:00",
+        )
+        job = load_encode_job(connection, "job-live")
+        assert job is not None
+        job["progress"] = {"updated_at": (datetime.now(tz=UTC) - progress_age).isoformat(timespec="seconds")}
+        save_encode_job(connection, job)
+        connection.commit()
+
+    def test_stale_lease_reconciler_keeps_a_job_whose_worker_is_still_running(self) -> None:
+        controller = Mock()
+        with open_db(self.config.paths.db_path) as connection:
+            self._running_job_with_expired_lease(connection, progress_age=timedelta(seconds=5))
+
+            with patch.object(web_app, "_live_encode_job_controller", return_value=controller):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-live")
+        assert job is not None
+        self.assertEqual(job["status"], "running")
+        self.assertGreater(str(job["lease_expires_at"]), "2026")
+        controller.cancel.assert_not_called()
+
+    def test_stale_lease_reconciler_ends_the_encoder_of_a_silent_worker_before_reclaiming(self) -> None:
+        controller = Mock()
+        with open_db(self.config.paths.db_path) as connection:
+            self._running_job_with_expired_lease(connection, progress_age=timedelta(hours=1))
+            job = load_encode_job(connection, "job-live")
+            assert job is not None
+            job["started_at"] = (datetime.now(tz=UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+            save_encode_job(connection, job)
+            connection.commit()
+
+            with patch.object(web_app, "_live_encode_job_controller", return_value=controller):
+                web_app._reconcile_encode_jobs(connection, self.config)
+
+            job = load_encode_job(connection, "job-live")
+        assert job is not None
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertEqual(job["last_failure_kind"], "stale_lease")
+        controller.cancel.assert_called_once()
+
+    def test_heartbeat_survives_an_unexpected_error_and_keeps_renewing(self) -> None:
+        from mediaforce.web.runtime import encode_runtime
+
+        stop_event = threading.Event()
+        calls: list[int] = []
+
+        def load_config_failing_once(path: Path) -> Any:
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("unexpected")
+            stop_event.set()
+            return self.config
+
+        with open_db(self.config.paths.db_path) as connection:
+            self._running_job_with_expired_lease(connection, progress_age=timedelta(seconds=5))
+            job = load_encode_job(connection, "job-live")
+            assert job is not None
+            job["worker_id"] = "worker-a"
+            save_encode_job(connection, job)
+            connection.commit()
+        deps = replace(
+            web_app._encode_queue_runtime_deps(),
+            load_config=load_config_failing_once,
+            encode_job_heartbeat_seconds=0.01,
+            logger=Mock(),
+        )
+
+        encode_runtime.encode_job_heartbeat_loop(
+            config_path=self.config.paths.config_path, job_id="job-live", worker_id="worker-a",
+            stop_event=stop_event, process_controller=Mock(pid=4242), deps=deps,
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            job = load_encode_job(connection, "job-live")
+        assert job is not None
+        self.assertEqual(len(calls), 2)
+        self.assertGreater(str(job["lease_expires_at"]), "2026")
+
     def test_stale_lease_reconciler_preserves_a_fresh_heartbeat(self) -> None:
         source_path = self._create_source_file("episode-fresh-heartbeat.mkv")
         staging_path = self._staging_path("episode-fresh-heartbeat.mkv")
