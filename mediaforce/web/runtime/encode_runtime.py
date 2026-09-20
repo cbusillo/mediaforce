@@ -47,7 +47,7 @@ from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflig
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError
-from mediaforce.hosts.types import is_vmaf_model_load_failure
+from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.staging import UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
@@ -3063,6 +3063,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "ssh_transport",
         "unreadable_output",
         "host_scratch",
+        "storage_io",
     }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
@@ -3093,6 +3094,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "ssh_transport": "SSH transport failure",
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
+        "storage_io": "media storage read or write error",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
 
@@ -3282,6 +3284,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "ssh_transport"
     if is_vmaf_model_load_failure(message):
         return "host_configuration"
+    if is_storage_io_failure(message):
+        return "storage_io"
     if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
     if _encode_failure_is_quality_policy_failure(message):

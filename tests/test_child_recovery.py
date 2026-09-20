@@ -288,6 +288,22 @@ class ChildRecoveryTests(unittest.TestCase):
             preview = self._preview(connection, ["child-0", "child-1"])
             self.assertEqual(preview["child_ids"], ["child-0", "child-1"])
 
+    def test_storage_and_lost_worker_failures_recover_after_retries_run_out(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection,
+                count=3,
+                failure_kinds=["deterministic", "storage_io", "stale_lease"],
+                errors=[
+                    "[out#0/matroska] Task finished with error code: -5 (Input/output error)",
+                    "[Errno 16] Resource busy: '/staging/Episode.partial.mkv'",
+                    "Encode queue job stopped heartbeating and was reclaimed for retry.",
+                ],
+                parent_status="needs_attention",
+            )
+            preview = self._preview(connection, ["child-0", "child-1", "child-2"])
+            self.assertEqual(preview["child_ids"], ["child-0", "child-1", "child-2"])
+
     def test_header_only_output_is_named_and_handed_to_retry_cleanup(self) -> None:
         staged = self.root / "staging" / "Show/Season 01/Episode 001.mkv"
         probe_error = f"Command '['/opt/homebrew/bin/ffprobe', '{staged}']' returned non-zero exit status 1."
