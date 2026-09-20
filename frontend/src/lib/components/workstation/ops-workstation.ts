@@ -694,9 +694,16 @@ export function buildEncodeRows(
 			schedulerDetail: schedule.detail,
 			schedulerTone: schedule.tone,
 			scheduleState: schedule.state,
+			// While the show is still compressing, keep its speed and time remaining first; the
+			// note about items that need a new goal follows it instead of replacing it.
 			detail: needsChangedInputs
-				? job.progress?.failure_analysis?.summary ||
-					'Open this item and choose a fresh size or compression goal before retrying.'
+				? [
+						activeJobStatus(job.status) ? encodeJobDetail(job) : '',
+						job.progress?.failure_analysis?.summary ||
+							'Open this item and choose a fresh size or compression goal before retrying.'
+					]
+						.filter(Boolean)
+						.join(' · ')
 				: encodeJobDetail(job),
 			action: canRetryPrefix ? 'retry-encode-prefix' : undefined,
 			actionScope: canRetryPrefix ? 'row' : undefined
