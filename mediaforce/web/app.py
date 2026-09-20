@@ -3797,6 +3797,7 @@ def _encode_queue_runtime_deps() -> EncodeQueueRuntimeDeps:
         encode_job_retry_max_delay_seconds=ENCODE_JOB_RETRY_MAX_DELAY_SECONDS,
         encode_job_max_attempts=ENCODE_JOB_MAX_ATTEMPTS,
         encode_host_cooldown_seconds=ENCODE_HOST_COOLDOWN_SECONDS,
+        live_encode_job_controller=_live_encode_job_controller,
     )
 
 
@@ -4666,6 +4667,15 @@ def _unregister_encode_process_controller(
     with ENCODE_QUEUE_PROCESSES_LOCK:
         if ENCODE_QUEUE_PROCESSES.get(job_id) is controller:
             ENCODE_QUEUE_PROCESSES.pop(job_id, None)
+
+
+def _live_encode_job_controller(job_id: str) -> ManagedProcessController | None:
+    with ENCODE_QUEUE_THREADS_CONDITION:
+        thread = ENCODE_QUEUE_THREADS.get(job_id)
+        if thread is None or not thread.is_alive():
+            return None
+    with ENCODE_QUEUE_PROCESSES_LOCK:
+        return ENCODE_QUEUE_PROCESSES.get(job_id)
 
 
 def _active_encode_process_controllers() -> list[ManagedProcessController]:
