@@ -1897,6 +1897,63 @@ class TargetSizeSearchTests(unittest.TestCase):
         self.assertTrue(allowed.retry_allowed)
         self.assertEqual(allowed.compression_authorization["outcome"], "authorized")
 
+    def test_balanced_keeps_an_under_target_result_that_already_meets_the_quality_target(self) -> None:
+        intent = CompressionIntentV1("balanced", "operator", True)
+        ledger = self._ledger(target_bytes=300_000_000, source_size_bytes=1_000_000_000)
+        evidence = CompressionEvidenceRef(
+            kind="measured_item_variance",
+            evidence_id="ev1",
+            intent_id=intent.semantic_id,
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+        authorization = authorize_compression_change(
+            intent,
+            authoritative_anchor_bytes=280_000_000,
+            candidate_bytes=300_000_000,
+            evidence=(evidence,),
+            source_id="source-1",
+            policy_hash="policy-1",
+            job_id="job-1",
+        )
+
+        kept = verify_final_output_size(
+            ledger,
+            280_000_000,
+            compression_intent=intent,
+            compression_evidence=evidence,
+            compression_authorization=authorization,
+            quality_target_met=True,
+        )
+        below_quality_target = verify_final_output_size(
+            ledger,
+            280_000_000,
+            compression_intent=intent,
+            compression_evidence=evidence,
+            compression_authorization=authorization,
+            quality_target_met=False,
+        )
+        over_target = verify_final_output_size(
+            ledger, 330_000_000, compression_intent=intent, quality_target_met=True,
+        )
+        reference = verify_final_output_size(
+            ledger,
+            280_000_000,
+            compression_intent=CompressionIntentV1("reference", "operator", True),
+            quality_target_met=True,
+        )
+        unconfirmed = verify_final_output_size(ledger, 280_000_000, quality_target_met=True)
+
+        self.assertTrue(kept.passed)
+        self.assertFalse(kept.retry_allowed)
+        self.assertIn("no measured benefit", kept.retry_reason or "")
+        self.assertTrue(below_quality_target.retry_allowed)
+        self.assertFalse(below_quality_target.passed)
+        self.assertEqual((over_target.status, over_target.retry_allowed, over_target.passed), ("over_target", True, False))
+        self.assertFalse(reference.passed)
+        self.assertFalse(unconfirmed.passed)
+
     def test_under_target_retry_rejects_non_finite_selected_quality(self) -> None:
         selected = {
             "crf": 34.0,

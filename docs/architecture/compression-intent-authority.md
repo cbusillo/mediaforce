@@ -117,6 +117,14 @@ score; merely filling unused bytes is not a benefit. Verification tolerances
 still classify measured variance, but they do not create headroom or authorize
 growth.
 
+Under `balanced`, an under-target result whose measured score already reaches
+the quality target is accepted as it is. Reaching the target leaves no measured
+benefit to buy, so the item is not re-encoded to fill unused bytes and no growth
+evidence is consulted. A result below the quality target still follows the
+authorization path above, and `reference` still prefers fidelity under its cap.
+In production on one 66-item show, 18 of 25 second encodes had been spent
+enlarging results that already cleared the target (#578).
+
 ## Recovery boundaries
 
 Automatic cap growth requires a confirmed frozen intent plus deterministic

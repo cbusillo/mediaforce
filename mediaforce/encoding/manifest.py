@@ -772,6 +772,7 @@ def encode_one_item(
                 compression_intent=compression_intent,
                 compression_evidence=compression_evidence,
                 compression_authorization=compression_authorization,
+                quality_target_met=_quality_target_met(quality_result),
             )
             final_trace = target_trace_with_actual_output(
                 object_dict(getattr(quality_result, "target_size_trace", None)) or None,
@@ -1677,6 +1678,13 @@ def _encode_context_text(encode_context: dict[str, Any] | None, key: str) -> str
     payload = object_dict(encode_context)
     value = str(payload.get(key) or "").strip()
     return value or None
+
+
+def _quality_target_met(quality_result: Any) -> bool:
+    """True when the measured score at the chosen setting reaches the quality target."""
+    score = float_value(getattr(quality_result, "score", None))
+    target = float_value(getattr(quality_result, "target", None))
+    return score > 0 and target > 0 and score >= target
 
 
 def _final_size_growth_authorization(

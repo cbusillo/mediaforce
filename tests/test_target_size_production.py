@@ -124,6 +124,36 @@ class TargetSizeProductionTests(unittest.TestCase):
             self.assertEqual(shadow["comparison"]["candidate_count"], 2)
             self.assertEqual(shadow["comparison"]["size_error_percent"], 2.0)
 
+    def test_balanced_encode_keeps_an_under_target_result_that_meets_the_quality_target(self) -> None:
+        source_path = self._source_file("episode-under-target-ok.mkv")
+        staging_path = self._staging_path("episode-under-target-ok.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, source_path)
+            item = self._manifest_item(item_id, source_path, staging_path)
+            item["compression_intent"] = {
+                "schema_version": 1, "level": "balanced", "source": "operator", "confirmed": True,
+            }
+            self._attach_stream_budget(item)
+            quality = QualitySearchResult(
+                crf=45.0,
+                metric="VMAF",
+                target=85.0,
+                score=89.4,
+                stdout="target-size-search",
+                target_size_trace=self._trace(item, selected_crf=45.0),
+            )
+
+            build_calls, measure_calls = self._encode_with_output_sizes(connection, item, quality, [4_300_000])
+
+            artifact = self._staged_artifact(connection, item_id, staged_artifacts.c.validation_json)
+            assert artifact is not None
+            final_output = json.loads(cast(str, artifact["validation_json"]))["target_size_trace"]["final_output"]
+            self.assertEqual(final_output["status"], "under_target")
+            self.assertTrue(final_output["accepted"])
+            self.assertEqual(final_output["actual_output_bytes"], 4_300_000)
+            self.assertEqual(len(build_calls), 1)
+            self.assertEqual(measure_calls, [])
+
     def test_quality_only_encode_persists_structured_observation(self) -> None:
         source_path = self._source_file("episode-quality-only.mkv")
         staging_path = self._staging_path("episode-quality-only.mkv")
