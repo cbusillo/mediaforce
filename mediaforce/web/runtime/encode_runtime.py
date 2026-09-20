@@ -1521,6 +1521,7 @@ def select_encode_host(
         host_admission: Any | None = None,
         host_rank: Any | None = None,
         globally_blocked_hosts: dict[str, dict[str, Any]] | None = None,
+        requires_seekable_source: bool = False,
 ) -> tuple[dict[str, Any] | None, str | None]:
     library_key = _encode_job_library_key(job)
     current_time = now or datetime.now(tz=UTC)
@@ -1530,6 +1531,8 @@ def select_encode_host(
     )
     if library_key:
         host_rows = [host for host in host_rows if _host_allows_library(host, library_key)]
+    if requires_seekable_source:
+        host_rows = [host for host in host_rows if host_media_access_for_host(host) != "stream"]
     bypass_schedule = bool(job.get("bypass_schedule"))
 
     def _admitted(hosts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2130,6 +2133,20 @@ def _encode_host_best_fit_score(
     return 0, max(remaining_seconds - estimate.total_seconds, 0.0), priority, label
 
 
+# A stream host reads the source from a pipe. MP4-family files usually keep their index (moov)
+# after the media data, which ffmpeg can only reach by seeking, so the encoder exits cleanly
+# after writing a bare container header (#620). These sources need a host that mounts the media.
+_SEEK_REQUIRED_SOURCE_SUFFIXES = frozenset({".mp4", ".m4v", ".mov", ".3gp", ".3g2"})
+
+
+def _job_requires_seekable_source(items: list[dict[str, Any]]) -> bool:
+    return any(
+        Path(str(item.get("source_path") or item.get("rel_path") or "")).suffix.lower()
+        in _SEEK_REQUIRED_SOURCE_SUFFIXES
+        for item in items
+    )
+
+
 def _host_allows_library(host: dict[str, Any], library_key: str) -> bool:
     allowed_libraries = host.get("allowed_libraries")
     if not isinstance(allowed_libraries, list) or not allowed_libraries:
@@ -2364,9 +2381,10 @@ def load_next_runnable_encode_job(
         capacity_cache=shared_capacity_cache,
     )
     host_selection_cache: dict[
-        tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None],
+        tuple[str, bool, str, str, bool, tuple[tuple[str, int, bool], ...] | None, bool],
         tuple[dict[str, Any] | None, str | None],
     ] = {}
+    stream_host_present = any(host_media_access_for_host(host) == "stream" for host in host_rows)
     saw_duration_block = False
     best_fit_candidates: list[
         tuple[tuple[int, float, int], dict[str, Any], dict[str, Any], EncodeDurationEstimate | None]
@@ -2451,6 +2469,11 @@ def load_next_runnable_encode_job(
             if duration_estimation_relevant
             else []
         )
+        # Only read the manifest for this when a stream host could actually be chosen.
+        requires_seekable_source = stream_host_present and _job_requires_seekable_source(
+            estimate_items
+            or _encode_job_estimate_items(job, manifest_items_cache=manifest_items_cache)
+        )
         estimates_by_host: dict[str, EncodeDurationEstimate] = {}
 
         def estimate_for_host(host: dict[str, Any]) -> EncodeDurationEstimate:
@@ -2489,7 +2512,12 @@ def load_next_runnable_encode_job(
                     now=now,
                 )
         best_fit_host_selection = host_rank is not None
-        selection_key = (*_encode_host_selection_key(job), best_fit_host_selection, admission_key)
+        selection_key = (
+            *_encode_host_selection_key(job),
+            best_fit_host_selection,
+            admission_key,
+            requires_seekable_source,
+        )
         selection = host_selection_cache.get(selection_key)
         if selection is None:
             selection = select_encode_host(
@@ -2502,6 +2530,7 @@ def load_next_runnable_encode_job(
                 host_admission=host_admission,
                 host_rank=host_rank,
                 globally_blocked_hosts=globally_blocked_hosts,
+                requires_seekable_source=requires_seekable_source,
             )
             host_selection_cache[selection_key] = selection
         host_payload, waiting_reason = selection

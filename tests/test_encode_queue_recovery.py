@@ -1090,6 +1090,43 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIn("rm -f /srv/media/transcode/.mediaforce-ab-av1-stale/clip.mkv", temp_script)
         self.assertIn("rmdir /srv/media/transcode/.mediaforce-ab-av1-stale", temp_script)
 
+    def test_host_selection_keeps_seek_required_sources_off_stream_hosts(self) -> None:
+        def host(key: str, priority: int, media_access: str) -> dict[str, object]:
+            return {
+                "key": key,
+                "label": key,
+                "priority": priority,
+                "mode": "ssh",
+                "media_access": media_access,
+                "capabilities": ["encode_queue"],
+                "available": True,
+                "active_encode_count": 0,
+                "max_parallel_encodes": 1,
+                "queue_active": True,
+            }
+
+        statuses = [host("stream-host", 90, "stream"), host("mounted-host", 10, "mounted")]
+        deps = web_app._encode_queue_runtime_deps()
+        self.config.staging_root.mkdir(parents=True, exist_ok=True)
+        with open_db(self.config.paths.db_path) as connection:
+            streamable, _ = encode_runtime.select_encode_host(
+                connection, self.config, {}, deps, host_rows=statuses,
+            )
+            seek_required, _ = encode_runtime.select_encode_host(
+                connection, self.config, {}, deps, host_rows=statuses, requires_seekable_source=True,
+            )
+            only_stream, waiting_reason = encode_runtime.select_encode_host(
+                connection, self.config, {}, deps, host_rows=statuses[:1], requires_seekable_source=True,
+            )
+
+        assert streamable is not None and seek_required is not None
+        self.assertEqual((streamable["key"], seek_required["key"]), ("stream-host", "mounted-host"))
+        self.assertIsNone(only_stream)
+        self.assertTrue(waiting_reason)
+        self.assertTrue(encode_runtime._job_requires_seekable_source([{"source_path": "/media/tv/Show/E01.MP4"}]))
+        self.assertTrue(encode_runtime._job_requires_seekable_source([{"rel_path": "tv/Show/E01.mkv"}, {"rel_path": "tv/Show/E02.mov"}]))
+        self.assertFalse(encode_runtime._job_requires_seekable_source([{"source_path": "/media/tv/Show/E01.mkv"}]))
+
     def test_host_selection_prefers_other_encode_capable_host_during_cooldown(self) -> None:
         job = {
             "last_host": {"key": "remote-a", "label": "Remote A", "host": "remote-a"},
