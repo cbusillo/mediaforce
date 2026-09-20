@@ -137,6 +137,46 @@ class LibraryLifecycleTests(unittest.TestCase):
         self.assertTrue(active[0].eligible)
         self.assertTrue(ended[0].eligible)
 
+    def test_ended_series_stays_released_when_its_metadata_is_stale(self) -> None:
+        config = self._config()
+        long_ago = NOW - timedelta(days=60)
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(connection, "tv/Ended/Season 8/Episode 01.mkv", age_days=100)
+            self._insert_item(connection, "tv/Active/Season 2/Episode 01.mkv", age_days=100)
+            self._insert_series_metadata(connection, "tv/Ended", status="Ended", in_production=False, observed_at=long_ago)
+            self._insert_series_metadata(
+                connection, "tv/Active", status="Returning Series", in_production=True, observed_at=long_ago,
+            )
+
+            ended = project_candidates(connection, config, prefixes=["tv/Ended"], now=NOW)
+            active = project_candidates(connection, config, prefixes=["tv/Active"], now=NOW)
+
+        self.assertEqual(ended[0].provider_state, "ended")
+        self.assertTrue(ended[0].eligible)
+        self.assertEqual(active[0].provider_state, "stale")
+        self.assertEqual([reason.code for reason in active[0].hold_reasons], ["current_season"])
+
+    def test_first_discovery_is_not_activity_when_plex_knows_the_arrival_date(self) -> None:
+        config = self._config()
+        with open_db(config.paths.db_path) as connection:
+            long_held = self._insert_item(connection, "tv/Show/Season 3/Episode 01.mkv", age_days=100)
+            self._insert_plex_metadata(connection, long_held, added_at=NOW - timedelta(days=900), season_index=3)
+            replaced = self._insert_item(connection, "tv/Other/Season 3/Episode 01.mkv", age_days=100)
+            self._insert_plex_metadata(connection, replaced, added_at=NOW - timedelta(days=900), season_index=3)
+            connection.execute(
+                library_items.update()
+                .where(library_items.c.id == replaced)
+                .values(content_version_changed_at=(NOW - timedelta(days=40)).isoformat(timespec="seconds"))
+            )
+            for prefix in ("tv/Show", "tv/Other"):
+                self._insert_series_metadata(connection, prefix, status="Returning Series", in_production=True)
+
+            settled = project_candidates(connection, config, prefixes=["tv/Show"], now=NOW)
+            recently_replaced = project_candidates(connection, config, prefixes=["tv/Other"], now=NOW)
+
+        self.assertTrue(settled[0].eligible)
+        self.assertEqual([reason.code for reason in recently_replaced[0].hold_reasons], ["current_season"])
+
     def test_acquisition_guard_holds_whole_season_from_newest_episode(self) -> None:
         config = self._config(mode="off")
         with open_db(config.paths.db_path) as connection:
@@ -587,16 +627,17 @@ class LibraryLifecycleTests(unittest.TestCase):
             *,
             status: str,
             in_production: bool,
+            observed_at: datetime = NOW,
     ) -> None:
-        observed_at = NOW.isoformat(timespec="seconds")
+        observed_text = observed_at.isoformat(timespec="seconds")
         connection.execute(
             series_metadata.insert().values(
                 series_prefix=prefix,
                 plex_guids_json="[]",
                 tmdb_status=status,
                 tmdb_in_production=1 if in_production else 0,
-                tmdb_observed_at=observed_at,
-                updated_at=observed_at,
+                tmdb_observed_at=observed_text,
+                updated_at=observed_text,
             )
         )
 

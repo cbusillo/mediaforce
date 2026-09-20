@@ -915,17 +915,22 @@ def _provider_state(
     observed_at = _parse_timestamp(row.get("tmdb_observed_at"))
     if observed_at is None:
         return "unknown", status, None
-    if now - observed_at > stale_after:
+    verdict = _provider_verdict(status, row.get("tmdb_in_production"))
+    # An ended verdict does not expire. A revival shows up as a new season or new episodes, which hold on their own.
+    if verdict != "ended" and now - observed_at > stale_after:
         return "stale", status, observed_at
-    in_production = row.get("tmdb_in_production")
+    return verdict, status, observed_at
+
+
+def _provider_verdict(status: str | None, in_production: object) -> ProviderState:
     if in_production in {1, True}:
-        return "active", status, observed_at
+        return "active"
     normalized = str(status or "").strip().lower()
     if normalized in {"returning series", "planned", "in production", "pilot"}:
-        return "active", status, observed_at
+        return "active"
     if normalized in {"ended", "canceled", "cancelled"} or in_production in {0, False}:
-        return "ended", status, observed_at
-    return "unknown", status, observed_at
+        return "ended"
+    return "unknown"
 
 
 def _media_age(row: dict[str, Any]) -> AgeEvidence:
@@ -945,11 +950,14 @@ def _media_age(row: dict[str, Any]) -> AgeEvidence:
 
 
 def _content_activity_at(row: dict[str, Any]) -> datetime | None:
-    return _latest_timestamp((
-        _parse_timestamp(row.get("plex_added_at")),
-        _parse_timestamp(row.get("content_version_changed_at")),
-        _parse_timestamp(row.get("discovered_at")),
-    ))
+    plex_added_at = _parse_timestamp(row.get("plex_added_at"))
+    discovered_at = _parse_timestamp(row.get("discovered_at"))
+    changed_at = _parse_timestamp(row.get("content_version_changed_at"))
+    if plex_added_at is None:
+        return _latest_timestamp((changed_at, discovered_at))
+    # Plex knows when the file arrived, so Mediaforce first seeing it later is not activity; a later replacement is.
+    replaced_at = changed_at if changed_at is not None and (discovered_at is None or changed_at > discovered_at) else None
+    return _latest_timestamp((plex_added_at, replaced_at))
 
 
 def _newest_age_evidence(values: Any) -> AgeEvidence:
