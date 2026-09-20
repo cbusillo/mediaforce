@@ -13,6 +13,7 @@ from mediaforce.encoding.ffmpeg import SVT_AV1_REQUIRED_ISSUE, VIDEOTOOLBOX_REQU
 from mediaforce.hosts.config import _host_supports_capability, host_media_access_for_host, \
     _parse_utc_offset_minutes, remote_shell_path_export_line, stream_host_has_remote_source_roots
 from mediaforce.hosts.mount_runtime import mount_output_field
+from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, VMAF_SELF_TEST_ARGS
 from mediaforce.hosts.types import AB_AV1_MISSING_ISSUE, FFMPEG_MISSING_ISSUE, HostStatus, \
     LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE, SAMPLE_AV1_ENCODER_MISSING_ISSUE, SAMPLE_METRIC_MISSING_ISSUE, \
     SOURCE_ROOT_READ_MISSING_ISSUE, STAGING_ROOT_WRITE_MISSING_ISSUE
@@ -29,6 +30,11 @@ def _local_tool_status_snapshot() -> dict[str, bool]:
         "ffmpeg": bool(ffmpeg_bin),
         "ffmpeg_videotoolbox": has_videotoolbox_hwaccel(ffmpeg_hwaccels),
         "ffmpeg_libvmaf": "libvmaf" in ffmpeg_filters.lower(),
+        "ffmpeg_libvmaf_usable": bool(
+            ffmpeg_bin
+            and "libvmaf" in ffmpeg_filters.lower()
+            and _command_succeeds([ffmpeg_bin, *VMAF_SELF_TEST_ARGS])
+        ),
         "ffmpeg_xpsnr": "xpsnr" in ffmpeg_filters.lower(),
         "ffmpeg_libsvtav1": "libsvtav1" in ffmpeg_encoders.lower(),
         "ab_av1": bool(
@@ -71,11 +77,20 @@ def _host_capability_issues(
     supports_encode = _host_supports_capability(host, "encode_queue")
     if supports_remote_stream_quality is None:
         supports_remote_stream_quality = stream_host_has_remote_source_roots(host)
-    needs_remote_ab_av1 = supports_sample or (
-        supports_encode and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)
+    # A stream host with a scratch folder stages its source and runs the search itself.
+    runs_quality_search = (
+        host_media_access_for_host(host) != "stream"
+        or supports_remote_stream_quality
+        or bool(str(host.get("scratch_root") or "").strip())
     )
-    needs_remote_quality_metric = supports_sample or (
-        supports_encode and (host_media_access_for_host(host) != "stream" or supports_remote_stream_quality)
+    needs_remote_ab_av1 = supports_sample or (supports_encode and runs_quality_search)
+    needs_remote_quality_metric = supports_sample or (supports_encode and runs_quality_search)
+    # A listed libvmaf filter proves nothing: a build without models fails every measurement.
+    # Only a host that reported the self-test result and failed it is held back.
+    vmaf_unusable = (
+        needs_remote_quality_metric
+        and bool(tools.get("ffmpeg_libvmaf"))
+        and tools.get("ffmpeg_libvmaf_usable") is False
     )
 
     if platform_name == "macos":
@@ -93,6 +108,8 @@ def _host_capability_issues(
                 bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
         ):
             capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
+        if vmaf_unusable:
+            capability_issues.append(VMAF_MODEL_MISSING_ISSUE)
         if supports_sample:
             if bool(tools.get("ffmpeg")) and not bool(tools.get("ffmpeg_libsvtav1")):
                 capability_issues.append(SAMPLE_AV1_ENCODER_MISSING_ISSUE)
@@ -107,6 +124,8 @@ def _host_capability_issues(
                 bool(tools.get("ffmpeg_libvmaf")) or bool(tools.get("ffmpeg_xpsnr"))
         ):
             capability_issues.append(SAMPLE_METRIC_MISSING_ISSUE)
+        if vmaf_unusable:
+            capability_issues.append(VMAF_MODEL_MISSING_ISSUE)
         if supports_sample:
             capability_issues.append(LINUX_SAMPLE_CALIBRATION_UNSUPPORTED_ISSUE)
     else:
@@ -447,6 +466,9 @@ def _remote_status_script(
         lines.extend([
             'if printf "%s\\n" "$FFMPEG_HWACCELS" | grep -qi "videotoolbox"; then printf "tool|ffmpeg_videotoolbox|1\\n"; else printf "tool|ffmpeg_videotoolbox|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf"; then printf "tool|ffmpeg_libvmaf|1\\n"; else printf "tool|ffmpeg_libvmaf|0\\n"; fi',
+            'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "libvmaf" && "$FFMPEG_BIN" '
+            + " ".join(shlex.quote(arg) for arg in VMAF_SELF_TEST_ARGS)
+            + ' >/dev/null 2>&1; then printf "tool|ffmpeg_libvmaf_usable|1\\n"; else printf "tool|ffmpeg_libvmaf_usable|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_FILTERS" | grep -qi "xpsnr"; then printf "tool|ffmpeg_xpsnr|1\\n"; else printf "tool|ffmpeg_xpsnr|0\\n"; fi',
             'if printf "%s\\n" "$FFMPEG_ENCODERS" | grep -qi "libsvtav1"; then printf "tool|ffmpeg_libsvtav1|1\\n"; else printf "tool|ffmpeg_libsvtav1|0\\n"; fi',
         ])

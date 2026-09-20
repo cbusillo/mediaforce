@@ -356,6 +356,16 @@ class ChildRecoveryTests(unittest.TestCase):
             preview = self._preview(connection, ["child-0"])
             self.assertEqual(preview["child_ids"], ["child-0"])
 
+    def test_children_that_failed_on_a_host_without_a_vmaf_model_recover(self) -> None:
+        error = (
+            "Error: ffmpeg vmaf exit code 234\nlibvmaf WARNING no such built-in model: \"vmaf_v0.6.1\"\n"
+            "could not load libvmaf model with version: vmaf_v0.6.1"
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(connection, count=1, failure_kinds=["deterministic"], errors=[error])
+            preview = self._preview(connection, ["child-0"])
+            self.assertEqual(preview["child_ids"], ["child-0"])
+
     def test_other_deterministic_failures_and_foreign_probe_paths_stay_ineligible(self) -> None:
         foreign_probe = "Command '['/opt/homebrew/bin/ffprobe', '/elsewhere/Episode.mkv']' returned non-zero exit status 1."
         cases = (

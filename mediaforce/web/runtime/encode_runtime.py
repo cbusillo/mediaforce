@@ -47,6 +47,7 @@ from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflig
 from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError
+from mediaforce.hosts.types import is_vmaf_model_load_failure
 from mediaforce.encoding.staging import UnreadableEncodeOutputError, partial_output_path, safe_unlink
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
@@ -3221,6 +3222,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "controller_media_access"
     if isinstance(exc, QualityTempSetupError) and _quality_temp_setup_is_host_related(message):
         return "ssh_transport"
+    if is_vmaf_model_load_failure(message):
+        return "host_configuration"
     if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
     if _encode_failure_is_quality_policy_failure(message):
