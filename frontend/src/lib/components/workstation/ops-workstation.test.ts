@@ -972,6 +972,37 @@ describe('Ops workstation mapping', () => {
 		});
 	});
 
+	it('keeps speed and time remaining ahead of a size-miss note while the show is still running', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.queued = [];
+		dashboard.encode_queue.queued_count = 0;
+		dashboard.encode_queue.running = [
+			{
+				job_id: 'show-with-misses',
+				prefix: 'tv/Raising Hope',
+				job_kind: 'folder',
+				item_count: 66,
+				status: 'running',
+				telemetry_summary: '54% · 2.63x · 63.1 fps · Est. ETA 4h 8m',
+				progress: {
+					percent_complete: 54,
+					failure_analysis: {
+						kind: 'final_size_target_miss',
+						retry_strategy: 'fresh_goal_required',
+						summary: '2 selected items missed the approved final size contract.'
+					}
+				}
+			}
+		];
+		dashboard.encode_queue.running_count = 1;
+
+		const row = buildOpsQueueRows(dashboard, hostsFixture()).find(
+			(candidate) => candidate.key === 'encode:show-with-misses'
+		);
+
+		expect(row?.detail).toMatch(/^.*ETA 4h 8m.* · 2 selected items missed/);
+	});
+
 	it('uses media-item copy for mixed attention work', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.running = [];
