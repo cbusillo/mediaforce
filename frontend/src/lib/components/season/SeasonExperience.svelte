@@ -1892,10 +1892,10 @@
 							<small>{selectedCompressionIntentContract.sizeRule}</small>
 						</div>
 						<div>
-							<span>Sample search band</span>
+							<span>Sample search range</span>
 							<strong
 								>{formatDecimalFileSize(selectedGoalSampleLower)}–{formatDecimalFileSize(
-									selectedGoalSampleUpper
+									Math.min(selectedGoalSampleUpper, selectedGoalFinalUpper)
 								)}</strong
 							>
 							<small
@@ -1904,13 +1904,20 @@
 						</div>
 						<div>
 							<span
-								>{selectedCompressionIntent?.accepts_under_target_result
-									? 'Final size ceiling'
+								>{selectedCompressionIntent?.accepts_under_target_result ||
+								selectedCompressionIntent?.key === 'balanced'
+									? 'Final size limit'
 									: 'Final acceptance band'}</span
 							>
 							{#if selectedCompressionIntent?.accepts_under_target_result}
 								<strong>Up to {formatDecimalFileSize(selectedGoalFinalUpper)}</strong>
 								<small>Smaller outputs may pass when the measured quality rule still holds.</small>
+							{:else if selectedCompressionIntent?.key === 'balanced'}
+								<strong>Up to {formatDecimalFileSize(selectedGoalFinalUpper)}</strong>
+								<small
+									>Goal + {selectedGoal.operatorIntent.size_goal.final_output_tolerance_percent}%. A
+									smaller file is kept once it meets the quality target.</small
+								>
 							{:else}
 								<strong
 									>{formatDecimalFileSize(selectedGoalFinalLower)}–{formatDecimalFileSize(
