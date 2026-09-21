@@ -14,6 +14,8 @@ periodic_sweep_minutes = 60
 staging_root = "scratch/web-smoke/transcode"
 archive_root = "scratch/web-smoke/transcode/_replaced"
 output_container = "mkv"
+# The seeded catalog has no media files behind it; an automatic refresh would mark every fixture missing.
+catalog_refresh_hours = 0
 
 [media.source_roots]
 movies = "scratch/web-smoke/source/movies"
