@@ -10,7 +10,7 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -300,6 +300,9 @@ MIN_RECOMMENDED_SAVINGS_BYTES = 100 * 1024 * 1024
 REPRESENTATIVE_SELECTION_CACHE_LIMIT = 32
 REPRESENTATIVE_SELECTION_CACHE_TTL_SECONDS = 60.0
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
+CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH = timedelta(days=1)
+CATALOG_REFRESH_POLL_SECONDS = 60.0
+CATALOG_REFRESH_FAILURE_COOLDOWN = timedelta(minutes=30)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
 SCAN_INTERRUPTED_ERROR = "Background scan was interrupted by a web process restart."
@@ -3928,7 +3931,16 @@ def _maybe_schedule_scan(
 
 
 def _scan_is_stale(connection: DBClient, config: MediaforceConfig, prefix: str | None) -> bool:
-    return runtime_scan_is_stale(connection, config, prefix, _job_runtime_deps())
+    return runtime_scan_is_stale(
+        connection, config, prefix, _job_runtime_deps(),
+        full_stale_after=_catalog_stale_after(config),
+    )
+
+
+def _catalog_stale_after(config: MediaforceConfig) -> timedelta:
+    # One missed refresh is not yet stale; with automatic refresh off, a day without one is.
+    interval = config.catalog_refresh_interval
+    return interval * 2 if interval is not None else CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH
 
 
 def _latest_scan_completed_at(connection: DBClient, prefix: str | None) -> datetime | None:
@@ -4539,6 +4551,44 @@ def _controller_storage_worker_loop(*, config_path: Path, stop_event: threading.
     )
 
 
+def _refresh_catalog_when_due(config_path: Path) -> None:
+    """Start an inventory-only catalog refresh when the last finished one is older than the configured interval."""
+    config = load_config(config_path)
+    interval = config.catalog_refresh_interval
+    if interval is None:
+        return
+    with open_db(config.paths.db_path) as connection:
+        runtime_maybe_schedule_scan(
+            connection, config, None,
+            replace(_job_runtime_deps(), scan_retry_cooldown=CATALOG_REFRESH_FAILURE_COOLDOWN),
+            full_stale_after=interval,
+        )
+
+
+def _catalog_refresh_worker_loop(*, config_path: Path, stop_event: threading.Event) -> None:
+    # Startup recovery and the encode queue settle first; a refresh is never urgent.
+    if stop_event.wait(CATALOG_REFRESH_POLL_SECONDS):
+        return
+    run_supervised_worker_loop(
+        process_once_fn=lambda: _refresh_catalog_when_due(config_path),
+        poll_seconds=CATALOG_REFRESH_POLL_SECONDS,
+        stop_event=stop_event,
+        logger=LOGGER,
+        failure_message="Automatic catalog refresh check failed; it will retry.",
+    )
+
+
+def _start_catalog_refresh_worker(config: MediaforceConfig) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_catalog_refresh_worker_loop,
+        kwargs={"config_path": config.paths.config_path, "stop_event": stop_event},
+        name="catalog-refresh-worker",
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
+
+
 def _start_controller_storage_worker(config: MediaforceConfig) -> SupervisedWorkerHandle:
     stop_event = threading.Event()
     thread = threading.Thread(
@@ -4561,6 +4611,7 @@ def _start_background_workers(
         handles.append(_start_controller_storage_worker(config))
         handles.append(_start_calibration_queue_worker(config))
         handles.append(_start_encode_queue_worker(config))
+        handles.append(_start_catalog_refresh_worker(config))
     except BaseException:
         for handle in handles:
             handle.stop()

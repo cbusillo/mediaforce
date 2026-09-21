@@ -17,6 +17,7 @@ import sys
 import tempfile
 import tomllib
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -63,6 +64,7 @@ def _default_config_path() -> Path:
 DEFAULT_CONFIG_PATH = _default_config_path()
 FOLDER_POLICY_OVERRIDES_KEY = "folder_policy_overrides"
 BENCH_SAVED_OVERRIDE_NOTE = "Saved from the calibration bench."
+DEFAULT_CATALOG_REFRESH_HOURS = 6
 _FREE_SPACE_RESERVE_DEFAULTS = {
     "operating_headroom_gib": 16,
     "staged_output_overhead_percent": 10,
@@ -265,6 +267,14 @@ class MediaforceConfig:
             **_FREE_SPACE_RESERVE_DEFAULTS,
             **(configured if isinstance(configured, dict) else {}),
         }
+
+    @property
+    def catalog_refresh_interval(self) -> timedelta | None:
+        """How often the catalog refreshes itself; None when automatic refresh is turned off."""
+        hours = self.media.get("catalog_refresh_hours", DEFAULT_CATALOG_REFRESH_HOURS)
+        if isinstance(hours, bool) or not isinstance(hours, (int, float)) or hours <= 0:
+            return None
+        return timedelta(hours=float(hours))
 
     @property
     def output_container(self) -> str:
