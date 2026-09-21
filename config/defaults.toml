@@ -17,6 +17,8 @@ periodic_sweep_minutes = 60
 staging_root = "/Volumes/media/transcode"
 archive_root = "/Volumes/media/transcode/_replaced"
 output_container = "mkv"
+# Hours between automatic catalog refreshes (file inventory only). 0 turns them off.
+catalog_refresh_hours = 6
 
 [media.free_space_reserve]
 operating_headroom_gib = 16

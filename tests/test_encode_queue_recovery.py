@@ -26,6 +26,7 @@ from typing import Any, Callable, cast
 from unittest.mock import ANY, Mock, patch
 
 from fastapi import HTTPException
+from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy import update
@@ -34,6 +35,7 @@ from mediaforce import execution, quality, remote, review, state_cleanup
 from mediaforce.core import binaries, config as config_runtime
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
+from mediaforce.library.background_work import set_background_work_paused
 from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.db_tables import encode_jobs
@@ -4792,12 +4794,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
             self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
 
-    def test_full_scan_becomes_stale_after_fifteen_minutes(self) -> None:
+    def test_full_scan_becomes_stale_after_two_missed_refresh_intervals(self) -> None:
         source_path = self._create_source_file("episode-b.mkv")
 
         with open_db(self.config.paths.db_path) as connection:
             self._insert_library_item(connection, source_path)
-            completed_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat(timespec="seconds")
+            self.config.raw["media"]["catalog_refresh_hours"] = 2
+            completed_at = (datetime.now(UTC) - timedelta(hours=4, minutes=1)).isoformat(timespec="seconds")
             self._insert_scan_run(
                 connection,
                 scan_id="scan-older-than-threshold",
@@ -4814,6 +4817,60 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             web_app._save_catalog_signature(self.config)
 
             self.assertTrue(web_app._scan_is_stale(connection, self.config, prefix=None))
+
+    def _insert_finished_full_scan(self, connection: DBClient, *, age: timedelta) -> None:
+        completed_at = (datetime.now(UTC) - age).isoformat(timespec="seconds")
+        self._insert_scan_run(
+            connection,
+            scan_id=f"scan-{int(age.total_seconds())}",
+            started_at=completed_at,
+            completed_at=completed_at,
+            roots_json=json.dumps(self.config.raw["media"]["source_roots"]),
+            scope="full",
+            prefixes_json=None,
+            file_count=1,
+            reprobed_count=0,
+            unchanged_count=0,
+        )
+        web_app._save_catalog_signature(self.config)
+
+    def test_automatic_refresh_starts_only_when_the_interval_has_passed(self) -> None:
+        self.config.raw["media"]["catalog_refresh_hours"] = 6
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, self._create_source_file("episode-auto.mkv"))
+            self._insert_finished_full_scan(connection, age=timedelta(hours=5))
+            connection.commit()
+
+        with patch.object(web_app, "load_config", return_value=self.config), \
+                patch.object(web_app, "_start_scan_job_thread") as start_scan:
+            web_app._refresh_catalog_when_due(self.config.paths.config_path)
+            start_scan.assert_not_called()
+
+            with open_db(self.config.paths.db_path) as connection:
+                self._insert_finished_full_scan(connection, age=timedelta(hours=7))
+                connection.execute(delete(scan_runs).where(scan_runs.c.scan_id == f"scan-{5 * 3600}"))
+                connection.commit()
+            web_app._refresh_catalog_when_due(self.config.paths.config_path)
+            start_scan.assert_called_once()
+
+    def test_automatic_refresh_can_be_turned_off_and_respects_the_background_pause(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_library_item(connection, self._create_source_file("episode-off.mkv"))
+            self._insert_finished_full_scan(connection, age=timedelta(days=3))
+            connection.commit()
+
+        with patch.object(web_app, "load_config", return_value=self.config), \
+                patch.object(web_app, "_start_scan_job_thread") as start_scan:
+            self.config.raw["media"]["catalog_refresh_hours"] = 0
+            web_app._refresh_catalog_when_due(self.config.paths.config_path)
+
+            self.config.raw["media"]["catalog_refresh_hours"] = 6
+            with open_db(self.config.paths.db_path) as connection:
+                set_background_work_paused(connection, is_paused=True)
+                connection.commit()
+            web_app._refresh_catalog_when_due(self.config.paths.config_path)
+
+            start_scan.assert_not_called()
 
     def test_orphaned_scan_run_is_expired_before_rescheduling(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -16854,6 +16911,7 @@ raise SystemExit(0)
         storage_handle = Mock()
         calibration_handle = Mock()
         encode_handle = Mock()
+        catalog_handle = Mock()
         with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=lease), patch(
                 "mediaforce.web.app._start_calibration_queue_worker",
                 return_value=calibration_handle,
@@ -16863,13 +16921,17 @@ raise SystemExit(0)
         ) as start_encode, patch(
                 "mediaforce.web.app._start_controller_storage_worker",
                 return_value=storage_handle,
-        ) as start_storage:
+        ) as start_storage, patch(
+                "mediaforce.web.app._start_catalog_refresh_worker",
+                return_value=catalog_handle,
+        ) as start_catalog:
             runtime = web_app._start_background_workers(self.config)
 
         self.assertIsNotNone(runtime)
         assert runtime is not None
         self.assertIs(runtime.lease, lease)
-        self.assertEqual(runtime.handles, (storage_handle, calibration_handle, encode_handle))
+        self.assertEqual(runtime.handles, (storage_handle, calibration_handle, encode_handle, catalog_handle))
+        start_catalog.assert_called_once_with(self.config)
         start_storage.assert_called_once_with(self.config)
         start_calibration.assert_called_once_with(self.config)
         start_encode.assert_called_once_with(self.config)

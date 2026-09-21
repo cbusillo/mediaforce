@@ -539,6 +539,7 @@ def maybe_schedule_scan(
         deps: JobRuntimeDeps,
         *,
         force: bool = False,
+        full_stale_after: timedelta | None = None,
 ) -> dict[str, Any] | None:
     with _SCAN_SCHEDULE_LOCK:
         active_scan = active_scan_from_db(connection, config, prefix, deps)
@@ -563,7 +564,7 @@ def maybe_schedule_scan(
             return job
         if background_work_is_paused(connection):
             return job
-        if not force and not scan_is_stale(connection, config, prefix, deps):
+        if not force and not scan_is_stale(connection, config, prefix, deps, full_stale_after=full_stale_after):
             return job
         if not force and job and job.get("status") == "failed":
             finished_at = deps.parse_iso(job.get("finished_at") or job.get("started_at"))
@@ -887,6 +888,8 @@ def scan_is_stale(
         config: MediaforceConfig,
         prefix: str | None,
         deps: JobRuntimeDeps,
+        *,
+        full_stale_after: timedelta | None = None,
 ) -> bool:
     if prefix is None:
         if deps.load_catalog_signature(config) != deps.current_catalog_signature(config):
@@ -897,7 +900,7 @@ def scan_is_stale(
         latest = latest_scan_completed_at(connection, prefix=None)
         if latest is None:
             return True
-        return datetime.now(tz=UTC) - latest > deps.full_scan_stale_after
+        return datetime.now(tz=UTC) - latest > (full_stale_after or deps.full_scan_stale_after)
 
     scope = resolve_media_scope(connection, prefix)
     item_count = int(
