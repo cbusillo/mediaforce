@@ -89,6 +89,7 @@
 		libraries: [],
 		remote_hosts: [],
 		transcode_root: '',
+		catalog_refresh_hours: '6',
 		video_defaults: {
 			quality_metric: 'vmaf',
 			target_vmaf: '85',
@@ -992,6 +993,21 @@
 								? 'credentials ready'
 								: 'credentials needed'}
 						>
+							<div class="metadata-refresh-setting">
+								<label class="stacked-field">
+									<span>Catalog refresh interval</span>
+									<input
+										class="field field--number"
+										type="number"
+										min="0"
+										max="8760"
+										step="0.5"
+										value={draft.catalog_refresh_hours}
+										oninput={(event) => (draft.catalog_refresh_hours = inputValue(event))}
+									/>
+								</label>
+								<p>Hours between automatic inventory refreshes. Use 0 to turn them off.</p>
+							</div>
 							<div class="metadata-grid">
 								<label class="toggle-chip metadata-toggle">
 									<input
@@ -1991,6 +2007,21 @@
 		padding: var(--mf-space-5);
 	}
 
+	.metadata-refresh-setting {
+		align-items: end;
+		display: grid;
+		gap: var(--mf-space-4);
+		grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+		padding: var(--mf-space-5);
+	}
+
+	.metadata-refresh-setting p {
+		color: var(--mf-fg-tertiary);
+		font-size: var(--mf-text-xs);
+		line-height: var(--mf-leading-normal);
+		margin: 0 0 var(--mf-space-2);
+	}
+
 	.metadata-grid--tmdb {
 		border-top: var(--mf-border);
 		grid-template-columns: minmax(280px, 1fr) minmax(190px, auto);
@@ -2369,6 +2400,7 @@
 		.settings-console,
 		.settings-overview,
 		.storage-grid,
+		.metadata-refresh-setting,
 		.metadata-grid,
 		.danger-zone,
 		.host-options {

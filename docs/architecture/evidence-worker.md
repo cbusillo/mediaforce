@@ -125,8 +125,9 @@ The Activity workstation exposes the same bounded state machine:
 1. `Refresh catalog` performs inventory only. It updates changed file facts and
    never starts cadence or fingerprint analysis. The same inventory also runs
    by itself: a leader-owned worker starts one when the last finished refresh
-   is older than `media.catalog_refresh_hours` (default 6, `0` turns it off),
-   re-runs a refresh that a restart interrupted, and waits 30 minutes after a
+   is older than `media.catalog_refresh_hours` (default 6, `0` turns it off).
+   Settings exposes this interval under Metadata. The worker re-runs a refresh
+   that a restart interrupted, and waits 30 minutes after a
    failed one. It never runs from a read path and it honours
    `Pause new background work`. The catalog is shown as stale after two missed
    intervals, or after a day when automatic refresh is off.

@@ -1,10 +1,11 @@
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from mediaforce.core.config import FOLDER_POLICY_OVERRIDES_KEY, MediaforceConfig
+from mediaforce.core.config import DEFAULT_CATALOG_REFRESH_HOURS, FOLDER_POLICY_OVERRIDES_KEY, MediaforceConfig
 from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY
 from mediaforce.hosts.config import normalize_host_capabilities
 from mediaforce.library.library_settings import DEFAULT_LIBRARY_PROFILES, LIBRARY_PROFILE_OPTIONS, \
@@ -444,6 +445,12 @@ def settings_transcode_root_value(config: MediaforceConfig) -> str:
     return stringify_pathlike(media.get("staging_root") if isinstance(media, dict) else None)
 
 
+def settings_catalog_refresh_hours_for_config(config: MediaforceConfig) -> str:
+    media = config.raw.get("media")
+    value = media.get("catalog_refresh_hours") if isinstance(media, dict) else None
+    return _settings_number_text(value, str(DEFAULT_CATALOG_REFRESH_HOURS))
+
+
 def settings_video_defaults_for_config(config: MediaforceConfig) -> dict[str, str]:
     video = config.raw.get("video")
     if not isinstance(video, dict):
@@ -707,6 +714,7 @@ def build_runtime_settings_payload(
         libraries: list[dict[str, Any]],
         remote_hosts: list[dict[str, Any]],
         transcode_root: str,
+        catalog_refresh_hours: Any = DEFAULT_CATALOG_REFRESH_HOURS,
         video_defaults: dict[str, Any] | None = None,
         encode_queue_scheduler: dict[str, Any],
         schedule_profiles: list[dict[str, Any]],
@@ -733,6 +741,13 @@ def build_runtime_settings_payload(
     staging_root = Path(transcode_root).expanduser()
     if not staging_root.is_absolute():
         raise SettingsValidationError("The working folder must be an absolute path.")
+    try:
+        refresh_hours = float(str(catalog_refresh_hours).strip())
+    except (TypeError, ValueError) as exc:
+        raise SettingsValidationError("Catalog refresh interval must be a number of hours.") from exc
+    if not math.isfinite(refresh_hours) or refresh_hours < 0 or refresh_hours > 8760:
+        raise SettingsValidationError("Catalog refresh interval must be between 0 and 8760 hours.")
+    normalized_refresh_hours: int | float = int(refresh_hours) if refresh_hours.is_integer() else refresh_hours
     for row in libraries:
         key_text = _text(row.get("key", ""))
         label_text = _text(row.get("label", ""))
@@ -971,6 +986,7 @@ def build_runtime_settings_payload(
             "libraries": library_definitions,
             "staging_root": str(staging_root),
             "archive_root": str(staging_root / "_replaced"),
+            "catalog_refresh_hours": normalized_refresh_hours,
         },
         "video": normalized_video_defaults,
         "remote_hosts": normalized_remotes,

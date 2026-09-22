@@ -8,6 +8,7 @@
 	import StateBadge from './StateBadge.svelte';
 	import WorkstationPanel from './WorkstationPanel.svelte';
 	import {
+		catalogProviderNotices,
 		catalogStateView,
 		evidenceKindLabel,
 		evidenceReasonCopy,
@@ -31,6 +32,8 @@
 	} = $props();
 
 	const catalogView = $derived(catalogStateView(work?.catalog));
+	const providerNotices = $derived(catalogProviderNotices(work?.catalog));
+	const automaticCatalogRefresh = $derived((work?.catalog.automatic_refresh_hours ?? 0) > 0);
 	const evidenceView = $derived(evidenceStateView(work?.evidence));
 	const backgroundPaused = $derived(work?.background.is_paused ?? false);
 	const backlog = $derived(work?.evidence.backlog ?? null);
@@ -49,22 +52,26 @@
 		backgroundPaused ? 'wait' : work?.refresh.mode === 'active' ? 'active' : 'idle'
 	);
 	const maintenanceTone = $derived(
-		catalogView.tone === 'fail' || evidenceView.tone === 'fail'
-			? 'fail'
-			: catalogView.tone === 'active' || evidenceView.tone === 'active'
-				? 'active'
-				: backgroundPaused
-					? 'wait'
-					: 'idle'
+		backgroundPaused
+			? 'wait'
+			: catalogView.tone === 'fail' || evidenceView.tone === 'fail'
+				? 'fail'
+				: catalogView.tone === 'active' || evidenceView.tone === 'active'
+					? 'active'
+					: catalogView.tone === 'wait' || providerNotices.length
+						? 'wait'
+						: 'idle'
 	);
 	const maintenanceLabel = $derived(
-		maintenanceTone === 'fail'
-			? 'Needs attention'
-			: maintenanceTone === 'active'
-				? 'Working'
-				: backgroundPaused
-					? 'Paused'
-					: 'Available'
+		backgroundPaused
+			? 'Paused'
+			: maintenanceTone === 'fail'
+				? 'Needs attention'
+				: maintenanceTone === 'active'
+					? 'Working'
+					: maintenanceTone === 'wait'
+						? 'Needs attention'
+						: 'Available'
 	);
 
 	let actionPending = $state('');
@@ -179,8 +186,12 @@
 				<div class="work-console__lead-copy">
 					<StateBadge tone={overallTone} label={overallLabel} />
 					<div>
-						<strong>Maintenance runs only when you start it.</strong>
-						<p>Refresh the catalog or prepare analysis for a specific folder when needed.</p>
+						<strong
+							>{automaticCatalogRefresh
+								? `The catalog refreshes every ${work?.catalog.automatic_refresh_hours} hours.`
+								: 'Catalog refresh is manual.'}</strong
+						>
+						<p>Refresh it now or prepare analysis for a specific folder when needed.</p>
 					</div>
 				</div>
 				<button
@@ -227,6 +238,16 @@
 								<div class="source-warning">
 									<strong>{warning.label} stayed remembered</strong>
 									<span>{warning.message}</span>
+								</div>
+							{/each}
+						</div>
+					{/if}
+					{#if providerNotices.length}
+						<div class="source-warnings" aria-label="Catalog metadata notices">
+							{#each providerNotices as notice (notice.title)}
+								<div class="source-warning">
+									<strong>{notice.title}</strong>
+									<span>{notice.detail}</span>
 								</div>
 							{/each}
 						</div>

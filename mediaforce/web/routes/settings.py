@@ -36,6 +36,7 @@ def register_settings_routes(
                 libraries=[dict(item) for item in body.get("libraries", [])],
                 remote_hosts=[dict(item) for item in body.get("remote_hosts", [])],
                 transcode_root=str(body.get("transcode_root", "")).strip(),
+                catalog_refresh_hours=body.get("catalog_refresh_hours", 6),
                 video_defaults=dict(body.get("video_defaults", {})),
                 encode_queue_scheduler=dict(body.get("encode_queue_scheduler", {})),
                 schedule_profiles=[dict(item) for item in body.get("schedule_profiles", [])],

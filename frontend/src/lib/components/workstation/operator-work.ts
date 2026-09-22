@@ -14,6 +14,38 @@ export interface OperatorStateView {
 	detail: string;
 }
 
+export interface OperatorProviderNotice {
+	title: string;
+	detail: string;
+}
+
+export function catalogProviderNotices(
+	catalog: OperatorCatalogState | null | undefined
+): OperatorProviderNotice[] {
+	const providers = catalog?.providers;
+	if (!providers) return [];
+	const notices: OperatorProviderNotice[] = [];
+	if (providers.plex.enabled && !providers.plex.base_url) {
+		notices.push({
+			title: 'Plex metadata needs setup',
+			detail:
+				'Add the Plex server URL in Settings so refreshes can preserve original arrival dates.'
+		});
+	} else if (providers.plex.enabled && !providers.plex.token_configured) {
+		notices.push({
+			title: 'Plex metadata is not updating',
+			detail: `Set ${providers.plex.token_env} for the Mediaforce service so refreshes can preserve original arrival dates.`
+		});
+	}
+	if (providers.tmdb.enabled && !providers.tmdb.token_configured) {
+		notices.push({
+			title: 'TMDB status is not updating',
+			detail: `Set ${providers.tmdb.token_env} for the Mediaforce service so refreshes can resolve current-series status.`
+		});
+	}
+	return notices;
+}
+
 export interface OperatorWorkQuery {
 	offset?: number;
 	limit?: number;

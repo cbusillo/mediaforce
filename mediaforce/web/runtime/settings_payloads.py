@@ -6,7 +6,7 @@ from mediaforce.library.metadata_sync import metadata_configuration_status
 from mediaforce.web.settings_runtime import HOST_CAPABILITY_OPTIONS, index_schedule_profile_rows, \
     index_settings_library_rows, index_settings_remote_rows, schedule_profile_options, settings_archive_root, \
     settings_library_rows_for_config, settings_remote_rows_for_config, settings_schedule_profile_rows_for_config, \
-    settings_transcode_root_value, settings_video_defaults_for_config
+    settings_catalog_refresh_hours_for_config, settings_transcode_root_value, settings_video_defaults_for_config
 
 
 def settings_page_payload(
@@ -51,6 +51,7 @@ def settings_page_payload(
         },
         "remote_hosts": index_settings_remote_rows(remote_hosts) if remote_hosts is not None else settings_remote_rows_for_config(config),
         "transcode_root": resolved_transcode_root,
+        "catalog_refresh_hours": settings_catalog_refresh_hours_for_config(config),
         "video_defaults": dict(video_defaults) if video_defaults is not None else settings_video_defaults_for_config(config),
         "encode_queue_scheduler": resolved_encode_queue_scheduler,
         "schedule_profiles": resolved_schedule_profiles,

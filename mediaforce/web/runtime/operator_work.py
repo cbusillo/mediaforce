@@ -15,6 +15,7 @@ from mediaforce.library.background_work import list_evidence_backlog, load_backg
     summarize_evidence_inventory
 from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, evidence_queue_summary
 from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
+from mediaforce.library.metadata_sync import metadata_configuration_status
 
 LOGGER = logging.getLogger(__name__)
 
@@ -140,9 +141,15 @@ def build_operator_work_payload(
                 if latest_scan_completed_at is not None
                 else None
             ),
+            "automatic_refresh_hours": (
+                config.catalog_refresh_interval.total_seconds() / 3600
+                if config.catalog_refresh_interval is not None
+                else 0
+            ),
             "job": scan_job,
             "source_roots": root_rows,
             "warnings": warnings,
+            "providers": metadata_configuration_status(config),
             "can_refresh": not background_paused and scan_status not in ACTIVE_SCAN_STATUSES,
         },
         "evidence": {

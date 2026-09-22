@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { OperatorEvidenceBacklogRow, OperatorEvidenceState } from '$lib/api/types';
 import {
+	catalogProviderNotices,
 	catalogStateView,
 	evidenceStateView,
 	evidenceWorkReasonView,
@@ -61,6 +62,40 @@ function evidenceFixture(status: string, runnerActive = false): OperatorEvidence
 }
 
 describe('operator work copy', () => {
+	it('warns only for enabled metadata providers that are not configured', () => {
+		const notices = catalogProviderNotices({
+			status: 'idle',
+			freshness: 'current',
+			item_count: 20,
+			last_completed_at: null,
+			job: null,
+			source_roots: [],
+			warnings: [],
+			providers: {
+				plex: {
+					enabled: true,
+					base_url: 'http://plex.local:32400',
+					token_env: 'MEDIAFORCE_PLEX_TOKEN',
+					token_configured: false
+				},
+				tmdb: {
+					enabled: false,
+					token_env: 'MEDIAFORCE_TMDB_TOKEN',
+					token_configured: false
+				}
+			},
+			can_refresh: true
+		});
+
+		expect(notices).toEqual([
+			{
+				title: 'Plex metadata is not updating',
+				detail:
+					'Set MEDIAFORCE_PLEX_TOKEN for the Mediaforce service so refreshes can preserve original arrival dates.'
+			}
+		]);
+	});
+
 	it('distinguishes current, stale, and failed catalog states', () => {
 		expect(
 			catalogStateView({

@@ -29,6 +29,7 @@ export type SettingsSavePayload = {
 	libraries: SettingsLibrary[];
 	remote_hosts: SettingsHost[];
 	transcode_root: string;
+	catalog_refresh_hours: string;
 	video_defaults: SettingsPayload['video_defaults'];
 	encode_queue_scheduler: SettingsPayload['encode_queue_scheduler'];
 	schedule_profiles: ScheduleProfile[];
@@ -137,6 +138,7 @@ export function draftFromSettings(payload: SettingsPayload) {
 				allowed_libraries: [...host.allowed_libraries]
 			})),
 		transcode_root: payload.transcode_root,
+		catalog_refresh_hours: payload.catalog_refresh_hours,
 		video_defaults: { ...payload.video_defaults },
 		metadata: {
 			plex: {
@@ -163,6 +165,7 @@ export function buildSettingsSavePayload(
 			allowed_libraries: [...host.allowed_libraries]
 		})),
 		transcode_root: draft.transcode_root,
+		catalog_refresh_hours: draft.catalog_refresh_hours,
 		video_defaults: { ...draft.video_defaults },
 		encode_queue_scheduler: { ...settings.encode_queue_scheduler },
 		schedule_profiles: draft.schedule_profiles.map((profile) => cloneScheduleProfile(profile)),
