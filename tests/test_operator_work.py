@@ -76,6 +76,8 @@ class OperatorWorkTests(unittest.TestCase):
 
         self.assertEqual(payload["background"]["status"], "active")
         self.assertEqual(payload["catalog"]["freshness"], "current")
+        self.assertEqual(payload["catalog"]["automatic_refresh_hours"], 6)
+        self.assertFalse(payload["catalog"]["providers"]["plex"]["token_configured"])
         self.assertEqual(payload["evidence"]["live_status"], "idle")
         self.assertEqual(payload["refresh"], {"mode": "manual", "interval_ms": None})
         self.assertEqual(payload["evidence"]["backlog"]["total"], 2)

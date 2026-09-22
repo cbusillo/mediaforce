@@ -632,10 +632,22 @@ export interface OperatorCatalogState {
 	freshness: 'current' | 'stale' | 'unknown';
 	item_count: number;
 	last_completed_at: string | null;
+	automatic_refresh_hours?: number;
 	job: DashboardScanJob | null;
 	source_roots: OperatorCatalogRoot[];
 	warnings: DashboardScanWarning[];
+	providers?: {
+		plex: OperatorMetadataProviderState;
+		tmdb: OperatorMetadataProviderState;
+	};
 	can_refresh: boolean;
+}
+
+export interface OperatorMetadataProviderState {
+	enabled: boolean;
+	base_url?: string;
+	token_env: string;
+	token_configured: boolean;
 }
 
 export interface OperatorEvidenceScope extends MediaScopePayload {
@@ -1000,6 +1012,7 @@ export interface SettingsPayload {
 	library_profile_options: Record<LibraryType, Array<{ key: string; label: string }>>;
 	remote_hosts: SettingsHost[];
 	transcode_root: string;
+	catalog_refresh_hours: string;
 	video_defaults: {
 		quality_metric: string;
 		target_vmaf: string;

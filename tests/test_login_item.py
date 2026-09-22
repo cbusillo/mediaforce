@@ -58,6 +58,34 @@ class LoginItemTests(unittest.TestCase):
         self.assertEqual(self.paths.plist.stat().st_mtime_ns, first_mtime)
         self.assertTrue(self.paths.log_dir.is_dir())
 
+    def test_install_carries_env_forward_when_runtime_checkout_changes(self) -> None:
+        previous_root = self.root / "previous-runtime"
+        previous_env = previous_root / ".env"
+        previous_env.parent.mkdir(parents=True)
+        previous_env.write_text("MEDIAFORCE_PLEX_TOKEN=plex-secret\nMEDIAFORCE_TMDB_TOKEN=tmdb-secret\n")
+        previous_paths = LoginItemPaths(project_root=previous_root, home=self.home)
+        self.paths.plist.parent.mkdir(parents=True)
+        self.paths.plist.write_bytes(render_login_item_plist(previous_paths))
+
+        with patch("mediaforce.ops.login_item._require_supported_platform"):
+            install_login_item(self.paths)
+
+        target_env = self.project_root / ".env"
+        self.assertEqual(target_env.read_bytes(), previous_env.read_bytes())
+        self.assertEqual(target_env.stat().st_mode & 0o777, 0o600)
+
+    def test_install_rejects_runtime_switch_without_existing_or_target_env(self) -> None:
+        previous_root = self.root / "previous-runtime"
+        previous_root.mkdir()
+        previous_paths = LoginItemPaths(project_root=previous_root, home=self.home)
+        self.paths.plist.parent.mkdir(parents=True)
+        self.paths.plist.write_bytes(render_login_item_plist(previous_paths))
+
+        with patch("mediaforce.ops.login_item._require_supported_platform"), self.assertRaisesRegex(
+                LoginItemError, "existing runtime has no credential file"
+        ):
+            install_login_item(self.paths)
+
     def test_enable_orders_launchctl_operations(self) -> None:
         calls: list[list[str]] = []
         rotation_call_count: int | None = None

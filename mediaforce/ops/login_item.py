@@ -68,6 +68,7 @@ def install_login_item(paths: LoginItemPaths) -> str:
     _require_program(paths.program)
     paths.plist.parent.mkdir(parents=True, exist_ok=True)
     paths.log_dir.mkdir(parents=True, exist_ok=True)
+    _carry_forward_runtime_env(paths)
     rendered = render_login_item_plist(paths)
     existed = paths.plist.exists()
     if paths.plist.exists() and paths.plist.read_bytes() == rendered:
@@ -193,7 +194,7 @@ def run_login_item_command(
     raise ValueError(f"Unsupported login item action: {action}")
 
 
-def _atomic_write(path: Path, payload: bytes) -> None:
+def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o644) -> None:
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as temp_file:
@@ -201,11 +202,37 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             temp_file.write(payload)
             temp_file.flush()
             os.fsync(temp_file.fileno())
-        os.chmod(temp_path, 0o644)
+        os.chmod(temp_path, mode)
         os.replace(temp_path, path)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
+
+
+def _carry_forward_runtime_env(paths: LoginItemPaths) -> None:
+    target = paths.project_root / ".env"
+    if target.is_file() or not paths.plist.exists():
+        return
+    if target.exists():
+        raise LoginItemError(f"the runtime credential path is not a file: {target}")
+    try:
+        installed = plistlib.loads(paths.plist.read_bytes())
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise LoginItemError(
+            f"could not identify the existing runtime credential file from {paths.plist}; create {target} first"
+        ) from exc
+    previous_root_value = installed.get("WorkingDirectory")
+    if not isinstance(previous_root_value, str) or not previous_root_value.strip():
+        raise LoginItemError(f"the existing login item has no working directory; create {target} first")
+    previous_root = Path(previous_root_value).expanduser().resolve()
+    if previous_root == paths.project_root.resolve():
+        return
+    source = previous_root / ".env"
+    if not source.is_file():
+        raise LoginItemError(
+            f"the existing runtime has no credential file at {source}; create {target} before switching runtimes"
+        )
+    _atomic_write(target, source.read_bytes(), mode=0o600)
 
 
 def _bootout(runner: CommandRunner, target: str) -> None:

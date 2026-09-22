@@ -89,6 +89,8 @@ The generated plist:
 - executes `.venv/bin/mediaforce-web --no-reload` directly;
 - uses the checkout as its working directory;
 - reads the normal repo-local `.env` through the web entrypoint;
+- carries the existing runtime's `.env` into a new runtime checkout with mode
+  `0600`, and refuses the checkout switch when neither location has one;
 - contains no `/Volumes`, `WatchPaths`, or `QueueDirectories` dependency;
 - restarts through launchd's `KeepAlive` behavior with a 30-second throttle;
 - writes durable logs to `~/Library/Logs/mediaforce/web.log` and

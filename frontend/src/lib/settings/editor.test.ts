@@ -169,6 +169,7 @@ describe('settings draft helpers', () => {
 			}
 		],
 		transcode_root: '/Volumes/Transcode',
+		catalog_refresh_hours: '6',
 		video_defaults: {
 			quality_metric: 'vmaf',
 			target_vmaf: '85',
@@ -242,6 +243,7 @@ describe('settings draft helpers', () => {
 		expect(savePayload.remote_hosts[0]?.capabilities).toEqual(['encode_queue']);
 		expect(savePayload.schedule_profiles).toEqual([]);
 		expect(savePayload.metadata.plex.library_roots).toEqual({ tv: '/data/tv' });
+		expect(savePayload.catalog_refresh_hours).toBe('6');
 	});
 
 	it('detects meaningful draft changes and ignores unchanged clones', () => {
