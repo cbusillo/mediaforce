@@ -6,7 +6,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 import uuid
 from pathlib import Path
-from typing import Any, Protocol, TypeAlias
+from typing import Any, cast, Protocol, TypeAlias
 
 from fastapi import HTTPException
 from sqlalchemy import delete, func, or_, select, update
@@ -24,7 +24,8 @@ from mediaforce.encoding.staging import partial_output_path
 from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
-from mediaforce.library.staged_integrity import StagedIntegrityReport, integrity_disposition_blocks_promotion, \
+from mediaforce.library.staged_integrity import IntegrityDisposition, StagedIntegrityReport, \
+    integrity_disposition_blocks_promotion, \
     staged_integrity_report_for_scope
 from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest, write_manifest
@@ -148,6 +149,43 @@ def _terminal_production_approval_contract(job: JobPayload) -> ActionPayload | N
     return _valid_production_approval_contract(selection.get("production_approval_contract"))
 
 
+def _legacy_final_size_goal_changed(
+        job: JobPayload,
+        current_contract: ActionPayload,
+) -> bool:
+    """Compare a fresh size goal with a pre-contract manifest's measured target."""
+    failure_analysis = object_dict(object_dict(job.get("progress")).get("failure_analysis"))
+    verification = object_dict(failure_analysis.get("target_size_verification"))
+    previous_target_bytes = _normalized_number(verification.get("target_size_bytes"))
+    request = object_dict(current_contract.get("operator_intent"))
+    size_goal = object_dict(request.get("size_goal"))
+    value_mb = _normalized_number(size_goal.get("value_mb"))
+    if previous_target_bytes is None or value_mb is None:
+        return False
+    mode = str(size_goal.get("mode") or "").strip()
+    if mode == "absolute":
+        current_target_bytes = value_mb * 1_000_000
+    elif mode == "normalized":
+        reference_minutes = _normalized_number(size_goal.get("reference_runtime_minutes"))
+        manifest_value = str(job.get("manifest_path") or "").strip()
+        if reference_minutes is None or reference_minutes <= 0 or not manifest_value:
+            return False
+        try:
+            manifest = object_dict(json.loads(Path(manifest_value).read_text()))
+        except (OSError, json.JSONDecodeError):
+            return False
+        items = object_list(manifest.get("items"))
+        if len(items) != 1:
+            return False
+        duration_seconds = _normalized_number(object_dict(items[0]).get("duration_seconds"))
+        if duration_seconds is None or duration_seconds <= 0:
+            return False
+        current_target_bytes = value_mb * 1_000_000 * duration_seconds / (reference_minutes * 60)
+    else:
+        return False
+    return not math.isclose(previous_target_bytes, current_target_bytes, rel_tol=1e-6, abs_tol=1.0)
+
+
 def _final_size_requeue_contract_blocker(
         job: JobPayload | None,
         current_contract: ActionPayload | None,
@@ -169,6 +207,8 @@ def _final_size_requeue_contract_blocker(
         and str(previous_contract.get("operator_intent_hash")) != str(current.get("operator_intent_hash"))
     )
     if changed_sample and changed_intent:
+        return None
+    if previous_contract is None and current and _legacy_final_size_goal_changed(job_payload, current):
         return None
     return {
         "ok": False,
@@ -887,6 +927,7 @@ def queue_folder_encode_action(
     }
 
 
+# noinspection PyShadowingNames
 def approve_measured_encode_recovery_action(
         config: MediaforceConfig,
         normalized_prefix: str,
@@ -1453,7 +1494,7 @@ def tv_promotion_readiness_payload(
         return {"applicable": False, "can_promote": True, "blockers": []}
     blockers: list[ActionPayload] = []
     for disposition, count in sorted(report.counts.items()):
-        if count and integrity_disposition_blocks_promotion(disposition):
+        if count and integrity_disposition_blocks_promotion(cast(IntegrityDisposition, disposition)):
             blockers.append({
                 "code": f"season_{'staged_integrity_' + disposition}",
                 "count": count,
@@ -2481,7 +2522,11 @@ def child_recovery_candidate_evidence(
         if not decision.override_applied:
             continue
         original = object_dict(item.get("selection_provenance"))
-        original_codes = {str(reason.get("code")) for reason in object_list(original.get("hold_reasons")) if isinstance(reason, dict)}
+        original_codes = {
+            reason["code"]
+            for reason in object_list(original.get("hold_reasons"))
+            if isinstance(reason, dict) and isinstance(reason.get("code"), str)
+        }
         current_codes = {reason.code for reason in decision.hold_reasons}
         if (
                 current_codes != original_codes
