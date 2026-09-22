@@ -128,7 +128,11 @@ quality, resolution, and retained streams. Recovery requires both a new
 representative sample and a changed operator-intent contract; a new approval
 timestamp, unrelated policy edit, lifecycle override, schedule bypass, or raw
 policy-hash change is not sufficient. Missing or malformed historical contract
-evidence fails closed and requires another sampled review.
+evidence fails closed and requires another sampled review. For a legacy
+single-item manifest written before approval contracts existed, Mediaforce may
+recover after that review only when the recorded failed target, item duration,
+and newly approved size goal prove that the size contract changed. Missing
+duration or target evidence still fails closed.
 
 ## Fallbacks and migration
 
