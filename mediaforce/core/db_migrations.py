@@ -17,6 +17,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import URL
 from sqlalchemy.pool import NullPool
 
 from mediaforce.core.db_custody import DatabaseCustodyBorrow
@@ -119,7 +120,12 @@ def readonly_database_url(db_path: Path) -> str:
 
 def _database_uri_url(db_path: Path, *, mode: str) -> str:
     quoted_path = quote(os.fspath(db_path), safe="/")
-    return f"sqlite+pysqlite:///file:{quoted_path}?mode={mode}&uri=true"
+    url = URL.create(
+        "sqlite+pysqlite",
+        database=f"file:{quoted_path}",
+        query={"mode": mode, "uri": "true"},
+    )
+    return url.render_as_string(hide_password=False)
 
 
 @contextmanager
