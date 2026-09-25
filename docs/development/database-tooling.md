@@ -44,6 +44,11 @@ Mediaforce's SQLite schema.
 
 ## Runtime transaction boundaries
 
+- SQLite file URIs retain their own path escaping inside a SQLAlchemy URL.
+  Build and render the outer URL with SQLAlchemy's `URL.create` so SQLAlchemy
+  2.1's database-name decoding preserves the exact filename passed to SQLite,
+  including spaces, query delimiters, and percent signs. Regression coverage
+  opens the same file through writable, guarded, and read-only engines.
 - Writable `open_db()` calls automatically honor any active Mediaforce runtime
   lease. The lease pins one database inode, guards every migration and SQLite
   connection before SQL is issued, and rejects pathname replacement instead of

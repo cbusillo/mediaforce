@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 from alembic import command
 from sqlalchemy import create_engine
 from sqlalchemy import inspect
+from sqlalchemy import make_url
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
@@ -6034,9 +6035,11 @@ class DatabaseRuntimeTests(unittest.TestCase):
             db_path = Path(temp_dir) / "library space#?%:.sqlite3"
             writable_url = database_url(db_path)
             readonly_url = readonly_database_url(db_path)
-            for encoded_character in ("%20", "%23", "%3F", "%25", "%3A"):
-                self.assertIn(encoded_character, writable_url)
-                self.assertIn(encoded_character, readonly_url)
+            for url in (writable_url, readonly_url):
+                database_uri = make_url(url).database
+                assert database_uri is not None
+                for encoded_character in ("%20", "%23", "%3F", "%25", "%3A"):
+                    self.assertIn(encoded_character, database_uri)
 
             engine = create_engine_for_path(db_path)
             try:
