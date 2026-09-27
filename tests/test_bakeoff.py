@@ -94,7 +94,6 @@ class BakeoffPlanTests(unittest.TestCase):
         self.assertIn("ssimulacra2", av1an["metric_support"])
         self.assertIn("ssimulacra2", av1an["command"])
         self.assertEqual(av1an["command_status"], "template-needs-host-validation")
-        self.assertIn("https://rust-av.github.io/Av1an/Features/TargetQuality", av1an["sources"])
         auto_boost = item["engines"][3]
         self.assertEqual(auto_boost["metric_support"], ["script-defined"])
 

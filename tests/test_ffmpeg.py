@@ -15,7 +15,10 @@ class FfmpegCodecArgsTests(unittest.TestCase):
 
     def test_ffmpeg_hwaccel_included_when_videotoolbox_available(self) -> None:
         with patch("mediaforce.ffmpeg.local_videotoolbox_support", return_value=True):
-            self.assertEqual(ffmpeg.ffmpeg_hwaccel_input_args("h264"), ["-hwaccel", "videotoolbox"])
+            self.assertEqual(
+                ffmpeg.ffmpeg_hwaccel_input_args("h264", platform_name="darwin"),
+                ["-hwaccel", "videotoolbox"],
+            )
 
     def test_ab_av1_hwaccel_respects_support_flag(self) -> None:
         with patch("mediaforce.ffmpeg.local_videotoolbox_support", return_value=False):
