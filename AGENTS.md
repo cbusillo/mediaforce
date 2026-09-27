@@ -41,6 +41,20 @@ Only session-start facts that are easy to miss belong here.
 - The checked-in Git hook lives at `.githooks/pre-commit`; fresh clones should
   enable it with `git config core.hooksPath .githooks`
 
+## Tests
+
+- A test must fail when the product is broken and pass when someone makes an
+  intended change.
+- Do not assert a literal that is defined elsewhere (versions, toolchains, URLs,
+  hashes, config values); check agreement with the one source of truth instead.
+- Do not assert workflow or config text (`.github/`, `github.json`, IDE
+  profiles); enforce those rules where they execute (the workflow itself,
+  `actionlint`, or a helper script with its own behavior test).
+- Tests and verification code must not depend on working-tree or host state:
+  no `git ls-files`, generated IDE files, the developer's `~/.ssh`, the host
+  platform, installed tools, or real SSH hosts. Pin or stub them.
+- Keep byte-exact and hash checks on real artifacts and immutable evidence.
+
 ## See also
 
 - `README.md`: durable operator and developer overview
