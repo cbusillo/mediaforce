@@ -92,6 +92,14 @@ from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
+def _quality_toolchain_not_probed(**_kwargs: object) -> dict[str, object]:
+    return encoding_quality._unavailable_toolchain("not_probed_in_tests")
+
+
+def _remote_host_unreachable(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["ssh"], 255, "", "ssh: connect to host: Operation timed out")
+
+
 class EncodeQueueRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -836,6 +844,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert staged_row is not None
         self.assertEqual(staged_row["staging_path"], str(staging_path))
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_recover_encode_queue_sweeps_processes_for_interrupted_prefixes(self) -> None:
         source_path = self._create_source_file("episode-restart-sweep.mkv")
         staging_path = self._staging_path("episode-restart-sweep.mkv")
@@ -2994,6 +3003,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
         )
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_transient_ssh_failure_stays_in_retry_backoff_after_attempt_cap(self) -> None:
         source_path = self._create_source_file("episode-host-retry.mkv")
         staging_path = self._staging_path("episode-host-retry.mkv")
@@ -3034,6 +3044,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertIsNotNone(updated["host_cooldown_until"])
             self.assertEqual(updated["last_host"]["failure_streak"], 1)
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_same_job_repeated_host_failures_increment_last_host_failure_streak(self) -> None:
         source_path = self._create_source_file("episode-host-repeat.mkv")
         staging_path = self._staging_path("episode-host-repeat.mkv")
@@ -3071,6 +3082,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(updated["status"], "retry_backoff")
             self.assertEqual(updated["last_host"]["failure_streak"], 2)
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_same_job_repeated_host_failures_preserve_streak_across_alias_change(self) -> None:
         source_path = self._create_source_file("episode-host-repeat-alias.mkv")
         staging_path = self._staging_path("episode-host-repeat-alias.mkv")
@@ -9409,6 +9421,7 @@ raise SystemExit(0)
         self.assertEqual(saved_payloads[0]["accepted_at"], "2026-05-24T04:40:00+00:00")
         self.assertFalse(merged_advice[0]["operator_approved_size_tradeoff"])
 
+    @patch("mediaforce.web.app.quality_toolchain_identity", new=_quality_toolchain_not_probed)
     def test_run_sampled_calibration_keeps_review_directory_for_approval(self) -> None:
         source_path = self._create_source_file("episode-review.mkv")
         preview_dir = self.config.paths.review_dir / "run-123" / "item-00"
@@ -10111,6 +10124,7 @@ raise SystemExit(0)
         self.assertEqual(exc_info.exception.status_code, 400)
         self.assertEqual(exc_info.exception.detail, "Unknown sampled calibration host")
 
+    @patch("mediaforce.web.app.quality_toolchain_identity", new=_quality_toolchain_not_probed)
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
@@ -10296,6 +10310,7 @@ raise SystemExit(0)
             pinned_source_path,
         )
 
+    @patch("mediaforce.web.app.quality_toolchain_identity", new=_quality_toolchain_not_probed)
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
@@ -10396,6 +10411,7 @@ raise SystemExit(0)
             "local",
         )
 
+    @patch("mediaforce.web.app.quality_toolchain_identity", new=_quality_toolchain_not_probed)
     @patch("mediaforce.web.app.generate_compare_clips_from_review_pairs")
     @patch("mediaforce.web.app.render_source_review_clips")
     @patch("mediaforce.web.app.encode_preview_clips")
@@ -10825,6 +10841,8 @@ raise SystemExit(0)
             "repo_path": str(self.root),
         }
         with patch("mediaforce.remote._run_remote_status_probe") as status_probe_mock, patch(
+                "mediaforce.hosts.status_runtime._local_platform_name", return_value="macos"
+        ), patch(
                 "mediaforce.remote._local_tool_status_snapshot",
                 return_value={
                     "xcode_clt": True,
@@ -12087,9 +12105,18 @@ raise SystemExit(0)
         subprocess_run_mock.assert_called_once()
         run_remote_ssh_mock.assert_called_once_with(host, "true", identity_file=private_key, timeout=15)
 
+    @contextmanager
+    def _local_ssh_key_pair(self) -> Iterator[None]:
+        public_key = self.root / "id_ed25519.pub"
+        with patch("mediaforce.remote._default_public_key_path", return_value=public_key), patch(
+                "mediaforce.remote._private_key_path_for_public_key", return_value=self.root / "id_ed25519"
+        ):
+            yield
+
     def test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues(self) -> None:
         host = {"host": "cbusillo@sample-host", "label": "Sample Host"}
-        result = remote._bootstrap_remote_macos(host, "secret", issues=[])
+        with self._local_ssh_key_pair():
+            result = remote._bootstrap_remote_macos(host, "secret", issues=[])
         self.assertTrue(result.ok)
         self.assertEqual(result.message, "No elevated bootstrap steps were needed.")
 
@@ -12097,7 +12124,9 @@ raise SystemExit(0)
         host = {"host": "cbusillo@sample-host", "label": "Sample Host"}
         expected = remote.HostSetupResult(ok=True,
                                           message="Xcode Command Line Tools are already installed on the remote Mac.")
-        with patch("mediaforce.remote._request_remote_xcode_install", return_value=expected) as request_mock:
+        with self._local_ssh_key_pair(), patch(
+                "mediaforce.remote._request_remote_xcode_install", return_value=expected
+        ) as request_mock:
             result = remote._bootstrap_remote_macos(
                 host,
                 "secret",
@@ -22965,6 +22994,7 @@ raise SystemExit(0)
 
         self.assertEqual(remaining_job_ids, {"completed-shard"})
 
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_queue_folder_encode_retry_resets_stale_encoding_items_before_manifest(self) -> None:
         source_a = self._create_source_file("retry-a.mkv")
         source_b = self._create_source_file("retry-b.mkv")
