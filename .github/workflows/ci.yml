@@ -10,11 +10,61 @@ name: CI
 permissions:
   contents: read
 
+env:
+  # Pull-request time budget for the acceptance lane. Exceeding it is reported
+  # as a warning on the run, not a failure.
+  ACCEPTANCE_BUDGET_MINUTES: "10"
+
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      product: ${{ steps.scope.outputs.product }}
+    steps:
+      - name: Decide whether product checks are needed
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Pushes to main always run everything. Pull requests that change
+          # only docs/ or Markdown files (other than the packaged README.md)
+          # skip the product lanes; a job skipped by its condition satisfies
+          # required status checks.
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "product=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename')"
+          printf '%s\n' "$files"
+          product=false
+          if [ -z "$files" ]; then
+            product=true
+          fi
+          while IFS= read -r path; do
+            case "$path" in
+              "") ;;
+              README.md) product=true ;;
+              docs/* | *.md) ;;
+              *) product=true ;;
+            esac
+          done <<< "$files"
+          echo "product=${product}" >> "$GITHUB_OUTPUT"
+
   acceptance:
+    needs: changes
+    # Fail closed: run unless the change was positively classified docs-only.
+    if: ${{ !cancelled() && needs.changes.outputs.product != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Record lane start
+        run: echo "LANE_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Check out repo
         uses: actions/checkout@v6
 
@@ -67,12 +117,7 @@ jobs:
             install -y --no-install-recommends ffmpeg
 
       - name: Run backend tests
-        run: >-
-          uv run --with pytest pytest -q
-          -k "not test_bootstrap_remote_macos_returns_noop_when_no_bootstrap_issues
-          and not test_bootstrap_remote_macos_routes_xcode_issue_to_request_helper
-          and not test_remote_host_status_targets_current_machine_without_ssh_probe
-          and not test_ffmpeg_hwaccel_included_when_videotoolbox_available"
+        run: uv run --with pytest pytest -q --durations=20
 
       - name: Run CLI smoke
         run: uv run mediaforce --help
@@ -113,8 +158,21 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+      - name: Report time budget
+        if: always()
+        run: |
+          elapsed=$(( $(date +%s) - LANE_STARTED_AT ))
+          budget=$(( ACCEPTANCE_BUDGET_MINUTES * 60 ))
+          echo "Acceptance lane took ${elapsed}s (budget ${budget}s)."
+          if [ "$elapsed" -gt "$budget" ]; then
+            echo "::warning title=CI time budget exceeded::Acceptance took ${elapsed}s; budget is ${budget}s."
+          fi
+
   file-integrity-macos:
     name: file-integrity-macos
+    needs: changes
+    # Fail closed: run unless the change was positively classified docs-only.
+    if: ${{ !cancelled() && needs.changes.outputs.product != 'false' }}
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
