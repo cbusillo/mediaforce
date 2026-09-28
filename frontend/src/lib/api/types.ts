@@ -382,6 +382,8 @@ export interface ReviewReadySample {
 }
 
 export interface EncodeJobProgressTelemetry {
+	retrying_shard_count?: number;
+	unfinished_breakdown?: EncodeUnfinishedGroup[];
 	total_duration_seconds?: number;
 	remaining_duration_seconds?: number;
 	percent_complete?: number;
@@ -464,8 +466,6 @@ export interface EncodeQueueJob {
 	status: string;
 	bypass_schedule?: boolean;
 	recoverable_item_count?: number;
-	retrying_shard_count?: number;
-	unfinished_breakdown?: EncodeUnfinishedGroup[];
 	host?: Record<string, unknown>;
 	error?: string | null;
 	last_failure_kind?: string | null;

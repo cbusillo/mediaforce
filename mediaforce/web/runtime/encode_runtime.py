@@ -779,6 +779,12 @@ def aggregate_encode_parent_job(
             sorted(set(failure_indexes)),
             failure_analyses,
         )
+    # Stored inside progress because the dashboard lists parents from their saved rows, and only
+    # progress survives the save beside the real columns.
+    progress["retrying_shard_count"] = sum(
+        1 for child in children if str(child.get("status") or "") == "retry_backoff"
+    )
+    progress["unfinished_breakdown"] = _unfinished_child_breakdown(children)
     waiting_reason = None
     if not running_children:
         for child in children:
@@ -824,8 +830,6 @@ def aggregate_encode_parent_job(
         "completed_shard_count": len(completed_children),
         "shard_count": len(children),
         "recoverable_item_count": recoverable_item_count,
-        "retrying_shard_count": sum(1 for child in children if str(child.get("status") or "") == "retry_backoff"),
-        "unfinished_breakdown": _unfinished_child_breakdown(children),
     }
     return aggregated
 
