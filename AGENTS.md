@@ -2,6 +2,9 @@
 
 Only session-start facts that are easy to miss belong here.
 
+Read `DIRECTION.md` first. It sets what Mediaforce is for and where work stops,
+and it wins over any issue, plan, or doc that disagrees.
+
 ## Naming
 
 - Product/repo name: `mediaforce`
