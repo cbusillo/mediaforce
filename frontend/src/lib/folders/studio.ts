@@ -1061,7 +1061,7 @@ export function approvalReviewSignature(rows: ComparisonRow[]): string {
 export interface HeldFileCopyInput {
 	rel_path?: string | null;
 	reason?: string | null;
-	state?: 'waiting' | 'failed' | null;
+	state?: 'waiting' | 'failed' | 'unsafe' | null;
 }
 
 export interface FolderActionResponseCopyInput {
@@ -1086,25 +1086,34 @@ export function folderActionResponseCopy(
 		const passedCount = safeCount(response.validated_count);
 		const failedCount = safeCount(response.failed_count);
 		const itemCount = Math.max(safeCount(response.item_count), passedCount + failedCount);
+		const held = heldFilesCopy(response.held, 'not checked yet');
 		if (failedCount > 0) {
 			return {
-				message: `Checked ${itemCount} ${fileNoun(itemCount)}: ${passedCount} passed, ${failedCount} need attention.`,
+				message: withHeld(
+					`Checked ${itemCount} ${fileNoun(itemCount)}: ${passedCount} passed, ${failedCount} need attention.`,
+					held
+				),
 				attention: true,
 				attentionTitle: 'Check needs attention'
 			};
 		}
-		return {
-			message: `Checked ${itemCount} compressed ${fileNoun(itemCount)}. All checks passed.`,
-			attention: false
-		};
+		const checked = `Checked ${itemCount} compressed ${fileNoun(itemCount)}. All checks passed.`;
+		if (held) {
+			return {
+				message: withHeld(checked, held),
+				attention: true,
+				attentionTitle: 'Some files were not checked'
+			};
+		}
+		return { message: checked, attention: false };
 	}
 
 	const promotedCount = safeCount(response.promoted_count);
 	const replaced = `Replaced ${promotedCount} original ${fileNoun(promotedCount)} and kept ${promotedCount === 1 ? 'its backup' : 'their backups'}.`;
-	const held = heldFilesCopy(response.held);
+	const held = heldFilesCopy(response.held, 'not replaced yet');
 	if (held) {
 		return {
-			message: `${replaced} ${held}`,
+			message: withHeld(replaced, held),
 			attention: true,
 			attentionTitle: 'Some files were not replaced'
 		};
@@ -1114,19 +1123,33 @@ export function folderActionResponseCopy(
 
 const HELD_FILES_LISTED = 3;
 
-function heldFilesCopy(held: HeldFileCopyInput[] | null | undefined): string {
+function withHeld(message: string, held: string): string {
+	return held ? `${message} ${held}` : message;
+}
+
+function heldFileLabel(file: HeldFileCopyInput): string {
+	const name = String(file.rel_path).split('/').pop();
+	return file.reason ? `${name}: ${file.reason}` : String(name);
+}
+
+// A file whose original may be out of place is always named in full, ahead of the rest.
+function heldFilesCopy(held: HeldFileCopyInput[] | null | undefined, lead: string): string {
 	const files = (held ?? []).filter((file) => file.rel_path);
-	if (!files.length) return '';
-	const listed = files
-		.slice(0, HELD_FILES_LISTED)
-		.map((file) => {
-			const name = String(file.rel_path).split('/').pop();
-			return file.reason ? `${name}: ${file.reason}` : name;
-		})
-		.join('; ');
-	const more =
-		files.length > HELD_FILES_LISTED ? `; and ${files.length - HELD_FILES_LISTED} more` : '';
-	return `${files.length} ${fileNoun(files.length)} not replaced yet (${listed}${more}).`;
+	const unsafe = files.filter((file) => file.state === 'unsafe');
+	const others = files.filter((file) => file.state !== 'unsafe');
+	const sentences: string[] = [];
+	if (unsafe.length) {
+		sentences.push(
+			`${unsafe.length} ${fileNoun(unsafe.length)} ${unsafe.length === 1 ? 'needs' : 'need'} checking now (${unsafe.map(heldFileLabel).join('; ')}).`
+		);
+	}
+	if (others.length) {
+		const listed = others.slice(0, HELD_FILES_LISTED).map(heldFileLabel).join('; ');
+		const more =
+			others.length > HELD_FILES_LISTED ? `; and ${others.length - HELD_FILES_LISTED} more` : '';
+		sentences.push(`${others.length} ${fileNoun(others.length)} ${lead} (${listed}${more}).`);
+	}
+	return sentences.join(' ');
 }
 
 function safeCount(value: unknown): number {

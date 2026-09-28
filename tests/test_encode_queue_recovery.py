@@ -21476,6 +21476,32 @@ raise SystemExit(0)
         self.assertEqual(result["held"], [{"rel_path": "tv/show/a.avi", "reason": "Waiting for room", "state": "waiting"}])
         self.assertIn("Waiting for room", result["message"])
 
+    def test_promote_folder_outputs_action_always_names_a_file_whose_original_may_be_out_of_place(self) -> None:
+        staged = self.root / "staged-unsafe"
+        staged.mkdir()
+        (staged / "a.mkv").write_text("encoded")
+
+        class _ValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+                return [{"library_item_id": 1, "rel_path": "tv/show/a.avi", "staging_path": str(staged / "a.mkv")}]
+
+        class _Promote(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(self, *_args: Any, force: bool) -> execution.PromotionResult:
+                failed = [execution.HeldFile(f"tv/show/f{index}.avi", "Could not publish", waiting=False) for index in range(4)]
+                unsafe = execution.HeldFile("tv/show/last.avi", "Check this file now", waiting=False, unsafe=True)
+                return execution.PromotionResult(promoted_paths=[Path("/library/tv/show/a.mkv")], held=[*failed, unsafe])
+
+        result = folder_actions_runtime.promote_folder_outputs_action(
+            self.config,
+            "tv/show/Season 01/Show - S01E01.mkv",
+            load_folder_staged_items_fn=_ValidatedItem(),
+            promote_manifest_items_fn=_Promote(),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["unsafe_count"], 1)
+        self.assertIn("1 file needs checking now (last.avi: Check this file now)", result["message"])
+
     def test_validate_folder_outputs_action_checks_reachable_files_and_holds_unreachable_ones(self) -> None:
         staged = self.root / "staged-validate"
         staged.mkdir()

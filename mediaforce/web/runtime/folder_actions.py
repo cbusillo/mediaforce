@@ -1467,15 +1467,17 @@ def promote_folder_outputs_action(
     failed_count = sum(1 for held_file in held if not held_file.waiting)
     waiting_count = sum(int_value(entry.get("count")) for entry in waiting)
     file_label = "file" if promoted_count == 1 else "files"
+    unsafe_count = sum(1 for held_file in held if held_file.unsafe)
     message = f"Published {promoted_count} {file_label} into the library." if promoted_count else "Nothing was published."
     message += _held_files_copy(held, verb="published")
     if waiting_count:
         message += f" {waiting_count} other {'file is' if waiting_count == 1 else 'files are'} not ready yet."
     response: ActionPayload = {
-        "ok": promoted_count > 0,
+        "ok": promoted_count > 0 and not unsafe_count,
         "message": message,
         "promoted_count": promoted_count,
         "failed_count": failed_count,
+        "unsafe_count": unsafe_count,
         "waiting": waiting,
         "held": [held_file.to_payload() for held_file in held],
     }
@@ -1490,15 +1492,24 @@ HELD_FILES_LISTED = 3
 
 
 def _held_files_copy(held: list[HeldFile], *, verb: str) -> str:
-    """One plain sentence per kind of hold, naming a few files and their reasons."""
+    """One plain sentence per kind of hold, naming a few files and their reasons.
+
+    Files whose original may be out of place are always named in full, first.
+    """
     copy = ""
-    for waiting, lead in ((False, f"could not be {verb}"), (True, "will be tried again later")):
-        group = [held_file for held_file in held if held_file.waiting == waiting]
+    for state, one, many, limit in (
+            ("unsafe", "1 file needs checking now", "{count} files need checking now", None),
+            ("failed", f"1 file could not be {verb}", f"{{count}} files could not be {verb}", HELD_FILES_LISTED),
+            ("waiting", "1 file will be tried again later", "{count} files will be tried again later", HELD_FILES_LISTED),
+    ):
+        group = [held_file for held_file in held if held_file.state == state]
         if not group:
             continue
-        listed = "; ".join(f"{Path(held_file.rel_path).name}: {held_file.reason}" for held_file in group[:HELD_FILES_LISTED])
-        more = f"; and {len(group) - HELD_FILES_LISTED} more" if len(group) > HELD_FILES_LISTED else ""
-        copy += f" {len(group)} {'file' if len(group) == 1 else 'files'} {lead} ({listed}{more})."
+        shown = group if limit is None else group[:limit]
+        listed = "; ".join(f"{Path(held_file.rel_path).name}: {held_file.reason}" for held_file in shown)
+        more = f"; and {len(group) - len(shown)} more" if len(group) > len(shown) else ""
+        lead = one if len(group) == 1 else many.format(count=len(group))
+        copy += f" {lead} ({listed}{more})."
     return copy
 
 

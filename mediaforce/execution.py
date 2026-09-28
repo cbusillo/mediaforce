@@ -388,6 +388,10 @@ def validate_one_item(connection: DBClient, config: MediaforceConfig, item: dict
 
 LOGGER = logging.getLogger(__name__)
 PROMOTION_FAILED_REASON = "Mediaforce could not put it in place, so the original was left where it was"
+PROMOTION_RESTORE_FAILED_REASON = (
+    "Publishing failed and Mediaforce could not put its files back. Check this file now: "
+    "its original may be in the cleanup folder or the working folder"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,9 +399,15 @@ class HeldFile:
     rel_path: str
     reason: str
     waiting: bool
+    # The original may be out of place, so the owner must see this file whatever else is listed.
+    unsafe: bool = False
+
+    @property
+    def state(self) -> str:
+        return "unsafe" if self.unsafe else "waiting" if self.waiting else "failed"
 
     def to_payload(self) -> dict[str, Any]:
-        return {"rel_path": self.rel_path, "reason": self.reason, "state": "waiting" if self.waiting else "failed"}
+        return {"rel_path": self.rel_path, "reason": self.reason, "state": self.state}
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,11 +431,13 @@ def promote_manifest_items(
         rel_path = str(item.get("rel_path") or item.get("source_path") or "")
         try:
             promoted_paths.append(promote_one_item(connection, config, item, force=force))
+            continue
         except PromotionWaiting as exc:
             held.append(HeldFile(rel_path, str(exc), waiting=True))
         except PromotionRestoreError as exc:
             # An original may be out of place: stop here so the owner can look before anything else moves.
-            held.append(HeldFile(rel_path, str(exc), waiting=False))
+            LOGGER.error("Could not restore %s after a failed publish: %s", rel_path, exc)
+            held.append(HeldFile(rel_path, PROMOTION_RESTORE_FAILED_REASON, waiting=False, unsafe=True))
             stopped_reason = "Not tried: publishing stopped because another file could not be put back safely."
             held.extend(
                 HeldFile(str(manifest["items"][rest].get("rel_path") or ""), stopped_reason, waiting=True)
@@ -437,6 +449,8 @@ def promote_manifest_items(
         except Exception as exc:  # noqa: BLE001 - one file's failure is reported and must not stop the others.
             LOGGER.warning("Could not publish %s: %s", rel_path, exc)
             held.append(HeldFile(rel_path, PROMOTION_FAILED_REASON, waiting=False))
+        # A file refused before its own writes must not leave a transaction open for the next one.
+        connection.rollback()
     return PromotionResult(promoted_paths=promoted_paths, held=held)
 
 

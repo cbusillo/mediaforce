@@ -54,6 +54,45 @@ describe('folderActionResponseCopy', () => {
 });
 
 describe('folderActionResponseCopy for held files', () => {
+	it('does not report every check passed while files were skipped', () => {
+		expect(
+			folderActionResponseCopy('validate-outputs', {
+				item_count: 1,
+				validated_count: 1,
+				failed_count: 0,
+				held: [
+					{
+						rel_path: 'tv/Show/S01E02.mkv',
+						reason: 'Its finished file is missing',
+						state: 'failed'
+					}
+				]
+			})
+		).toEqual({
+			message:
+				'Checked 1 compressed file. All checks passed. 1 file not checked yet (S01E02.mkv: Its finished file is missing).',
+			attention: true,
+			attentionTitle: 'Some files were not checked'
+		});
+	});
+
+	it('always names a file whose original may be out of place', () => {
+		const failed = ['a', 'b', 'c', 'd'].map((name) => ({
+			rel_path: `tv/Show/${name}.mkv`,
+			reason: 'Could not publish',
+			state: 'failed' as const
+		}));
+		const copy = folderActionResponseCopy('promote-outputs', {
+			promoted_count: 1,
+			held: [
+				...failed,
+				{ rel_path: 'tv/Show/e.mkv', reason: 'Check this file now', state: 'unsafe' }
+			]
+		});
+		expect(copy.message).toContain('1 file needs checking now (e.mkv: Check this file now).');
+		expect(copy.attention).toBe(true);
+	});
+
 	it('names each file that was not replaced and why', () => {
 		expect(
 			folderActionResponseCopy('promote-outputs', {
