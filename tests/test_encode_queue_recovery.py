@@ -21216,6 +21216,107 @@ raise SystemExit(0)
             self.assertEqual(result["validated_count"], 1)
             self.assertEqual(result["busy_count"], 1)
 
+    def _write_from_another_connection(self, value: str) -> None:
+        other = sqlite3.connect(self.config.paths.db_path, timeout=1)
+        try:
+            other.execute("INSERT INTO lock_probe (value) VALUES (?)", (value,))
+            other.commit()
+        finally:
+            other.close()
+
+    @staticmethod
+    def _read_for_scope_check(connection: DBClient, _prefix: str) -> None:
+        connection.exec_driver_sql("SELECT count(*) FROM lock_probe").fetchall()
+
+    def test_validate_folder_outputs_action_records_each_file_while_other_work_writes(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            connection.exec_driver_sql("CREATE TABLE lock_probe (value TEXT)")
+
+        class _TwoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
+                return [{"library_item_id": 1}, {"library_item_id": 2}]
+
+        class _ValidateWhileOthersWrite(folder_actions_runtime.ValidateManifestItemsFn):
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    _config: MediaforceConfig,
+                    _manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+            ) -> list[folder_actions_runtime.ActionPayload]:
+                # An encode or another folder action commits while this file is being checked.
+                self_test._write_from_another_connection(f"other-{indexes[0]}")
+                connection.exec_driver_sql("INSERT INTO lock_probe (value) VALUES (?)", (f"file-{indexes[0]}",))
+                if indexes[0] == 0:
+                    raise RuntimeError("probe failed after recording")
+                connection.commit()
+                return [{"passed": True}]
+
+        self_test = self
+        result = folder_actions_runtime.validate_folder_outputs_action(
+            self.config,
+            "tv/show",
+            load_folder_staged_items_fn=_TwoStagedItems(),
+            validate_manifest_items_fn=_ValidateWhileOthersWrite(),
+            validate_scope_action=self._read_for_scope_check,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["validated_count"], result["failed_count"]), (1, 1))
+        with open_db(self.config.paths.db_path) as connection:
+            values = {row[0] for row in connection.exec_driver_sql("SELECT value FROM lock_probe")}
+        self.assertEqual(values, {"other-0", "other-1", "file-1"})
+
+    def test_promote_folder_outputs_action_publishes_while_other_work_writes(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            connection.exec_driver_sql("CREATE TABLE lock_probe (value TEXT)")
+
+        class _OneValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    _normalized_prefix: str,
+                    *,
+                    statuses: set[str],
+            ) -> list[folder_actions_runtime.FolderItem]:
+                return [{"library_item_id": 1}]
+
+        class _PromoteWhileOthersWrite(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(
+                    self,
+                    connection: DBClient,
+                    _config: MediaforceConfig,
+                    _manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> list[Path]:
+                # Moving the file into the library takes time; other work commits meanwhile.
+                self_test._write_from_another_connection("other")
+                connection.exec_driver_sql("INSERT INTO lock_probe (value) VALUES ('published')")
+                connection.commit()
+                return [Path("/library/tv/show/Season 01/Show - S01E01.mkv")]
+
+        self_test = self
+        result = folder_actions_runtime.promote_folder_outputs_action(
+            self.config,
+            "tv/show/Season 01/Show - S01E01.mkv",
+            load_folder_staged_items_fn=_OneValidatedItem(),
+            promote_manifest_items_fn=_PromoteWhileOthersWrite(),
+            validate_scope_action=self._read_for_scope_check,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["promoted_count"], 1)
+
     def test_promote_folder_outputs_action_requires_validated_items(self) -> None:
         class _NoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(

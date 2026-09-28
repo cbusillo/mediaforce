@@ -1280,6 +1280,16 @@ def _measured_recovery_policy(
     }
 
 
+def _end_scope_check_snapshot(connection: DBClient) -> None:
+    """End the scope-check read before per-file work.
+
+    Each file commits its own result. A read snapshot held across a slow file check or
+    move cannot become a write once anything else has committed, and SQLite then fails
+    that file at once with "database is locked" instead of waiting.
+    """
+    connection.commit()
+
+
 def validate_folder_outputs_action(
         config: MediaforceConfig,
         normalized_prefix: str,
@@ -1332,11 +1342,14 @@ def validate_folder_outputs_action(
         if inaccessible_response is not None:
             return inaccessible_response
         manifest: ManifestPayload = {"items": items}
+        _end_scope_check_snapshot(connection)
         results: list[ActionPayload] = []
         for index in range(len(items)):
             try:
                 result = validate_manifest_items_fn(connection, config, manifest, [index])[0]
             except Exception as exc:
+                # One file's failure must not keep its uncommitted writes, or the lock, for the rest.
+                connection.rollback()
                 result = {
                     "passed": False,
                     "error": str(exc),
@@ -1447,6 +1460,7 @@ def promote_folder_outputs_action(
         if promotion_conflict is not None:
             return promotion_conflict
         manifest: ManifestPayload = {"items": items}
+        _end_scope_check_snapshot(connection)
         promoted_paths = promote_manifest_items_fn(connection, config, manifest, list(range(len(items))), force=False)
     promoted_count = len(promoted_paths)
     target_prefix = _promotion_refresh_prefix(normalized_prefix, scope, items, promoted_paths)
