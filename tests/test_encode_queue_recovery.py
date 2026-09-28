@@ -12529,6 +12529,7 @@ raise SystemExit(0)
                     "upper_bound_bytes": 105,
                     "tolerance_percent": 5.0,
                     "accepted_under_target": False,
+                    "quality_target_met": False,
                 },
             )
             self.assertIn(
@@ -12586,6 +12587,60 @@ raise SystemExit(0)
                 {"passed": True, "message": "staged file satisfies the approved final size contract"},
                 validation["checks"],
             )
+
+    def test_validate_one_item_accepts_balanced_under_budget_only_when_quality_met(self) -> None:
+        staged_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+        self.config.raw["validation"] = {"require_size_reduction": True}
+        for quality_score, expected in ((86.4, True), (84.0, False)):
+            with self.subTest(quality_score=quality_score):
+                name = f"episode-balanced-under-{int(quality_score * 10)}.mkv"
+                source_path = self._create_source_file(name)
+                staging_path = self._staging_path(name)
+                staging_path.parent.mkdir(parents=True, exist_ok=True)
+                staging_path.write_bytes(b"x" * 90)
+                with open_db(self.config.paths.db_path) as connection:
+                    item_id = self._insert_library_item(connection, source_path, status="encoded")
+                    self._insert_staged_artifact(connection, item_id, staging_path)
+                    connection.execute(
+                        update(staged_artifacts)
+                        .where(staged_artifacts.c.library_item_id == item_id)
+                        .values(quality_score=quality_score, quality_target=85.0)
+                    )
+                    item = {
+                        "library_item_id": item_id,
+                        "source_size_bytes": 200,
+                        "duration_seconds": 60.0,
+                        "subtitle_summary": [],
+                        "compression_intent": self._compression_intent_snapshot("balanced"),
+                        "resolved_operator_intent": {
+                            "size_goal": {
+                                "target_size_bytes": 100,
+                                "final_output_tolerance_percent": 5,
+                                "final_lower_bound_bytes": 95,
+                                "final_upper_bound_bytes": 105,
+                            }
+                        },
+                    }
+                    with patch("mediaforce.execution.probe_media", return_value=staged_probe):
+                        validation = execution.validate_one_item(connection, self.config, item)
+
+                self.assertEqual(validation["passed"], expected)
+                self.assertEqual(object_dict(validation["final_size_goal"])["accepted_under_target"], expected)
 
     def test_validate_one_item_repairs_unreadable_container_duration(self) -> None:
         source_path = self._create_source_file("episode-remux-repair.mkv")
@@ -21081,7 +21136,7 @@ raise SystemExit(0)
         self.assertEqual(result["failed_count"], 1)
         self.assertIn("1 passed, 1 failed", result["message"])
 
-    def test_validate_folder_outputs_action_rejects_while_folder_encode_active(self) -> None:
+    def test_validate_folder_outputs_action_skips_only_files_an_active_encode_is_making(self) -> None:
         class _SingleStagedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
@@ -21092,17 +21147,18 @@ raise SystemExit(0)
                     statuses: set[str],
             ) -> list[folder_actions_runtime.FolderItem]:
                 self_test.assertEqual(statuses, {"encoded"})
-                return [{"library_item_id": 1}]
+                return [{"library_item_id": 1}, {"library_item_id": 2}]
 
         class _PassedValidation(folder_actions_runtime.ValidateManifestItemsFn):
             def __call__(
                     self,
                     _connection: DBClient,
                     _config: MediaforceConfig,
-                    _manifest: folder_actions_runtime.ManifestPayload,
+                    manifest: folder_actions_runtime.ManifestPayload,
                     indexes: list[int],
             ) -> list[folder_actions_runtime.ActionPayload]:
                 self_test.assertEqual(indexes, [0])
+                self_test.assertEqual([item["library_item_id"] for item in manifest["items"]], [2])
                 return [{"passed": True}]
 
         self_test = self
@@ -21120,7 +21176,7 @@ raise SystemExit(0)
                         "job_kind": "folder",
                         "parent_job_id": None,
                         "status": status,
-                        "manifest_path": str(self._write_manifest("active-validate.json", [])),
+                        "manifest_path": str(self._write_manifest("active-validate.json", [{"library_item_id": 1}])),
                         "manifest_indexes": None,
                         "item_count": 1,
                         "saved_profile_path": None,
@@ -21156,8 +21212,9 @@ raise SystemExit(0)
                 validate_manifest_items_fn=validate_manifest_items_fn,
             )
 
-            self.assertFalse(result["ok"])
-            self.assertIn(f"folder encode is {status.replace('_', ' ')}", result["message"])
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["validated_count"], 1)
+            self.assertEqual(result["busy_count"], 1)
 
     def test_promote_folder_outputs_action_requires_validated_items(self) -> None:
         class _NoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
@@ -21200,7 +21257,7 @@ raise SystemExit(0)
         self.assertFalse(result["ok"])
         self.assertIn("No validated staged files", result["message"])
 
-    def test_promote_folder_outputs_action_rejects_while_folder_encode_active(self) -> None:
+    def test_promote_folder_outputs_action_holds_files_an_active_encode_is_making(self) -> None:
         class _SingleValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
             def __call__(
                     self,
@@ -21242,7 +21299,7 @@ raise SystemExit(0)
                         "job_kind": "folder",
                         "parent_job_id": None,
                         "status": status,
-                        "manifest_path": str(self._write_manifest("active-promote.json", [])),
+                        "manifest_path": str(self._write_manifest("active-promote.json", [{"library_item_id": 1}])),
                         "manifest_indexes": None,
                         "item_count": 1,
                         "saved_profile_path": None,
@@ -21279,7 +21336,7 @@ raise SystemExit(0)
             )
 
             self.assertFalse(result["ok"])
-            self.assertIn("season_active_encode_job", {blocker["code"] for blocker in result["blockers"]})
+            self.assertEqual(result["code"], "nothing_ready_to_publish")
 
     def test_load_folder_staged_items_ignores_promoted_rows_and_filters_statuses(self) -> None:
         encoded_source = self._create_source_file("episode-encoded.mkv")

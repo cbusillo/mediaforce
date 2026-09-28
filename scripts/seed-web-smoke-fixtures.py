@@ -1586,7 +1586,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 video_codec="h264",
                 priority_score=17,
                 recommendation="priority_encode",
-                recommendation_reason="Fixture unprocessed episode blocks whole-season promotion.",
+                recommendation_reason="Fixture unprocessed episode waits without holding back the season.",
             ),
             _library_item(
                 project_root=project_root,
@@ -1597,7 +1597,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 video_codec="h264",
                 priority_score=17,
                 recommendation="already_optimized",
-                recommendation_reason="Fixture missing staged output blocks whole-season promotion.",
+                recommendation_reason="Fixture missing staged output waits without holding back the season.",
             ),
             _library_item(
                 project_root=project_root,
@@ -1608,7 +1608,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 video_codec="h264",
                 priority_score=17,
                 recommendation="already_optimized",
-                recommendation_reason="Fixture changed staged output blocks whole-season promotion.",
+                recommendation_reason="Fixture changed staged output waits without holding back the season.",
             ),
             _library_item(
                 project_root=project_root,
@@ -1619,7 +1619,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 video_codec="h264",
                 priority_score=17,
                 recommendation="already_optimized",
-                recommendation_reason="Fixture failed validation blocks whole-season promotion.",
+                recommendation_reason="Fixture failed validation waits without holding back the season.",
             ),
             _library_item(
                 project_root=project_root,
@@ -1630,7 +1630,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 video_codec="h264",
                 priority_score=17,
                 recommendation="already_optimized",
-                recommendation_reason="Fixture unreachable worker output blocks whole-season promotion.",
+                recommendation_reason="Fixture unreachable worker output waits without holding back the season.",
             ),
         ]
         rows.append(
@@ -2610,7 +2610,7 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "label": "Folder Studio partial-promotion fixture",
                 "route": "/folders/tv/Partial%20Promotion/Season%201",
                 "marker": "Partial Promotion",
-                "stageMarker": "Whole season required",
+                "stageMarker": "Some episodes are ready",
             },
             {
                 "label": "Folder Studio finished fixture",

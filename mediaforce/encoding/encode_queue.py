@@ -240,6 +240,18 @@ def load_active_encode_job_for_prefix(connection: DBClient, prefix: str) -> dict
     return _hydrate_job(row) if row is not None else None
 
 
+def load_active_encode_jobs_for_prefix(connection: DBClient, prefix: str) -> list[dict[str, Any]]:
+    """Every active job touching the prefix, including folder shards whose parent is no longer active."""
+    scope = resolve_media_scope(connection, prefix)
+    rows = connection.execute(
+        _encode_job_select()
+        .where(_prefix_overlap_filter(scope))
+        .where(encode_jobs.c.status.in_(ACTIVE_ENCODE_JOB_STATUSES))
+        .order_by(encode_jobs.c.created_at.asc(), _rowid_column().asc())
+    ).mappings().fetchall()
+    return [_hydrate_job(row) for row in rows]
+
+
 def _prefix_overlap_filter(scope: MediaScope) -> Any:
     return scope_prefix_overlap_filter(encode_jobs.c.prefix, scope)
 

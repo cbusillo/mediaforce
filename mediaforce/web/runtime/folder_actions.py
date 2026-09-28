@@ -18,7 +18,7 @@ from mediaforce.core.evidence import stable_json_hash, stable_policy_hash, stabl
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 from mediaforce.core.utils import filesystem_collision_key
 from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_child_encode_jobs, \
-    load_latest_terminal_encode_job_for_prefix
+    load_active_encode_jobs_for_prefix, load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
@@ -77,7 +77,6 @@ LoadSampleItemFn: TypeAlias = Callable[[DBClient, MediaforceConfig, str], Folder
 QueueFolderEncodeActionFn: TypeAlias = Callable[[str, str, bool], ActionPayload]
 ValidateScopeActionFn: TypeAlias = Callable[[DBClient, str], ActionPayload | None]
 
-_SEASON_GATE_ATTENTION_JOB_STATUSES = frozenset({"failed", "stopped", "needs_attention"})
 _PRODUCTION_APPROVAL_CONTRACT_SCHEMA_VERSION = 1
 _FINAL_SIZE_RECOVERY_BLOCKER_CODE = "final_size_recovery_contract_unchanged"
 _FINAL_SIZE_RECOVERY_BLOCKER_MESSAGE = (
@@ -1301,20 +1300,29 @@ def validate_folder_outputs_action(
             scope_blocker = validate_scope_action(connection, normalized_prefix)
             if scope_blocker is not None:
                 return scope_blocker
-        active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
-        encode_blocked = _validate_delivery_blocked_by_active_encode(active_encode_job)
-        if encode_blocked is not None:
-            return encode_blocked
+        active_item_ids = _delivery_active_item_ids(
+            connection,
+            normalized_prefix,
+            load_active_encode_job_for_prefix_fn,
+        )
+        if active_item_ids is None:
+            return _delivery_unreadable_active_encode_response()
         items = load_folder_staged_items_fn(
             connection,
             config,
             normalized_prefix,
             statuses={"encoded"},
         )
+        busy_count = sum(1 for item in items if int_value(item.get("library_item_id")) in active_item_ids)
+        items = [item for item in items if int_value(item.get("library_item_id")) not in active_item_ids]
         if not items:
             return {
                 "ok": False,
-                "message": "No staged encoded files are ready to validate for this folder.",
+                "message": (
+                    "The files ready to check are still being made. Check again when they finish."
+                    if busy_count
+                    else "No staged encoded files are ready to validate for this folder."
+                ),
             }
         inaccessible_response = _inaccessible_staged_item_response(
             items=items,
@@ -1340,12 +1348,15 @@ def validate_folder_outputs_action(
         message = f"Validated {len(results)} files: {passed_count} passed, {failed_count} failed."
     else:
         message = f"Validated {passed_count} files. All staged outputs passed."
+    if busy_count:
+        message += f" {busy_count} still being made will be checked when they finish."
     return {
         "ok": True,
         "message": message,
         "validated_count": passed_count,
         "failed_count": failed_count,
         "item_count": len(results),
+        "busy_count": busy_count,
     }
 
 
@@ -1371,30 +1382,59 @@ def promote_folder_outputs_action(
             if scope_blocker is not None:
                 return scope_blocker
         scope = resolve_media_scope(connection, normalized_prefix, library_types=config.library_type_map)
-        active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
-        if scope.kind not in {"tv_season", "tv_series"}:
-            encode_blocked = _validate_delivery_blocked_by_active_encode(active_encode_job)
-            if encode_blocked is not None:
-                return encode_blocked
         items = load_folder_staged_items_fn(
             connection,
             config,
             normalized_prefix,
             statuses={"validated"},
         )
-        season_gate_blocker = _tv_season_promotion_gate_blocker(
-            connection,
-            config,
-            normalized_prefix,
-            items,
-            load_calibration_state_fn=load_calibration_state_fn,
-        )
-        if season_gate_blocker is not None:
-            return season_gate_blocker
         if not items:
             return {
                 "ok": False,
                 "message": "No validated staged files are ready to promote for this folder.",
+            }
+        waiting: list[ActionPayload] = []
+        if scope.kind in {"tv_season", "tv_series"}:
+            report = staged_integrity_report_for_scope(connection, config, scope, discover=True)
+            readiness = tv_promotion_readiness_payload(
+                connection,
+                config,
+                scope,
+                report,
+                items,
+                load_calibration_state_fn=load_calibration_state_fn,
+            )
+            if readiness["blockers"]:
+                return {
+                    "ok": False,
+                    "code": "promotion_check_unavailable",
+                    "message": "Mediaforce cannot check these files safely right now, so nothing was published.",
+                    "blockers": readiness["blockers"],
+                    "promotion_readiness": readiness,
+                    "promoted_count": 0,
+                }
+            waiting = list(readiness["waiting"])
+            promotable_ids = set(readiness["promotable_item_ids"])
+            items = [item for item in items if int_value(item.get("library_item_id")) in promotable_ids]
+        else:
+            active_item_ids = _delivery_active_item_ids(
+                connection,
+                normalized_prefix,
+                load_active_encode_job_for_prefix_fn,
+            )
+            if active_item_ids is None:
+                return _delivery_unreadable_active_encode_response()
+            busy = [item for item in items if int_value(item.get("library_item_id")) in active_item_ids]
+            if busy:
+                waiting.append({"code": "season_active_encode_job", "count": len(busy), "next_action": "wait_for_encode_job"})
+            items = [item for item in items if item not in busy]
+        if not items:
+            return {
+                "ok": False,
+                "code": "nothing_ready_to_publish",
+                "message": "No finished files are ready to publish yet.",
+                "waiting": waiting,
+                "promoted_count": 0,
             }
         inaccessible_response = _inaccessible_staged_item_response(
             items=items,
@@ -1411,11 +1451,16 @@ def promote_folder_outputs_action(
     promoted_count = len(promoted_paths)
     target_prefix = _promotion_refresh_prefix(normalized_prefix, scope, items, promoted_paths)
     file_label = "file" if promoted_count == 1 else "files"
+    message = f"Promoted {promoted_count} validated {file_label} into the library."
+    waiting_count = sum(int_value(entry.get("count")) for entry in waiting)
+    if waiting_count:
+        message += f" {waiting_count} other {'file is' if waiting_count == 1 else 'files are'} not ready yet."
     return {
         "ok": True,
-        "message": f"Promoted {promoted_count} validated {file_label} into the library.",
+        "message": message,
         "promoted_count": promoted_count,
         "target_prefix": target_prefix,
+        "waiting": waiting,
     }
 
 
@@ -1442,45 +1487,6 @@ def _promotion_refresh_prefix(
     return Path(rel_path).with_suffix(promoted_paths[0].suffix).as_posix()
 
 
-def _tv_season_promotion_gate_blocker(
-        connection: DBClient,
-        config: MediaforceConfig,
-        normalized_prefix: str,
-        items: list[FolderItem],
-        *,
-        load_calibration_state_fn: LoadCalibrationStateFn | None = None,
-) -> ActionPayload | None:
-    scope = resolve_media_scope(connection, normalized_prefix, library_types=config.library_type_map)
-    if scope.kind not in {"tv_season", "tv_series"}:
-        return None
-    report = staged_integrity_report_for_scope(connection, config, scope, discover=True)
-    readiness = tv_promotion_readiness_payload(
-        connection,
-        config,
-        scope,
-        report,
-        items,
-        load_calibration_state_fn=load_calibration_state_fn,
-    )
-    if readiness["can_promote"]:
-        return None
-    blockers = list(readiness["blockers"])
-    blocker_count = len(blockers)
-    scope_label = "season" if scope.kind == "tv_season" else "show"
-    return {
-        "ok": False,
-        "code": "season_promotion_incomplete",
-        "message": (
-            f"Promotion is blocked for this TV {scope_label} by {blocker_count} unresolved "
-            f"condition{'s' if blocker_count != 1 else ''}. Resolve every season blocker before publishing any episode."
-        ),
-        "blockers": blockers,
-        "integrity": report.summary_payload(),
-        "promotion_readiness": readiness,
-        "promoted_count": 0,
-    }
-
-
 def tv_promotion_readiness_payload(
         connection: DBClient,
         config: MediaforceConfig,
@@ -1490,111 +1496,103 @@ def tv_promotion_readiness_payload(
         *,
         load_calibration_state_fn: LoadCalibrationStateFn | None = None,
 ) -> ActionPayload:
+    """Decide publishing file by file: each ready file publishes, every other file waits with its reason."""
     if scope.kind not in {"tv_season", "tv_series"}:
-        return {"applicable": False, "can_promote": True, "blockers": []}
+        return {"applicable": False, "can_promote": True, "blockers": [], "waiting": []}
+    # Blockers stop the whole scope only when Mediaforce cannot judge any file safely.
     blockers: list[ActionPayload] = []
+    if report.database_truncated:
+        blockers.append({"code": "season_integrity_database_truncated", "count": 1, "next_action": "inspect_integrity_detail"})
+    if report.discovery_truncated:
+        blockers.append({"code": "season_integrity_discovery_truncated", "count": 1, "next_action": "inspect_integrity_detail"})
+    active_item_ids = active_encode_library_item_ids(connection, scope.prefix)
+    if active_item_ids is None:
+        blockers.append({"code": "season_active_encode_unreadable", "count": 1, "next_action": "wait_for_encode_job"})
+
+    waiting: dict[str, int] = {}
+
+    def wait(code: str, count: int = 1) -> None:
+        waiting[code] = waiting.get(code, 0) + count
+
     for disposition, count in sorted(report.counts.items()):
         if count and integrity_disposition_blocks_promotion(cast(IntegrityDisposition, disposition)):
-            blockers.append({
-                "code": f"season_{'staged_integrity_' + disposition}",
-                "count": count,
-                "next_action": _season_integrity_next_action(disposition),
-            })
-    if report.database_truncated:
-        blockers.append({
-            "code": "season_integrity_database_truncated",
-            "count": 1,
-            "next_action": "inspect_integrity_detail",
-        })
-    if report.discovery_truncated:
-        blockers.append({
-            "code": "season_integrity_discovery_truncated",
-            "count": 1,
-            "next_action": "inspect_integrity_detail",
-        })
-    job_blockers = _season_encode_job_blockers(connection, scope)
-    blockers.extend(job_blockers)
-    blockers.extend(
-        _tv_scope_policy_blockers(
-            connection,
-            config,
-            scope,
-            report,
-            load_calibration_state_fn=load_calibration_state_fn,
-        )
-    )
-    conflict = _promotion_conflict_response(config, items)
-    if conflict is not None:
-        blockers.append({
-            "code": "season_destination_conflict",
-            "count": len(object_list(conflict.get("conflicts"))),
-            "next_action": "resolve_destination_conflicts",
-        })
-    return {
-        "applicable": True,
-        "can_promote": not blockers,
-        "blockers": blockers,
-    }
-
-
-def _tv_scope_policy_blockers(
-        connection: DBClient,
-        config: MediaforceConfig,
-        scope: MediaScope,
-        report: StagedIntegrityReport,
-        *,
-        load_calibration_state_fn: LoadCalibrationStateFn | None,
-) -> list[ActionPayload]:
-    ready_item_ids = {
+            wait(f"season_staged_integrity_{disposition}", count)
+    ready_ids = {
         int(record.item_id)
         for record in report.records
-        if record.item_id is not None and record.disposition in {"promotable", "tracked"}
+        if record.item_id is not None and record.disposition == "promotable"
     }
-    if not ready_item_ids:
-        return []
-    if load_calibration_state_fn is None:
-        return [{
-            "code": "season_policy_gate_unavailable",
-            "count": 1,
-            "next_action": "restore_policy_gate",
-        }]
-    accepted_policy_hash = _accepted_tv_scope_policy_hash(
-        config,
-        scope,
-        load_calibration_state_fn=load_calibration_state_fn,
-    )
-    if not accepted_policy_hash:
-        return [{
-            "code": "season_policy_approval_missing",
-            "count": len(ready_item_ids),
-            "next_action": "approve_one_coherent_policy",
-        }]
-    policy_hashes, missing_provenance_count = _staged_policy_hashes(connection, ready_item_ids)
-    blockers: list[ActionPayload] = []
-    if missing_provenance_count:
-        blockers.append({
-            "code": "season_policy_provenance_missing",
-            "count": missing_provenance_count,
-            "next_action": "recreate_output_with_policy_provenance",
-        })
-    if len(policy_hashes) > 1:
-        blockers.append({
-            "code": "season_policy_mixed",
-            "count": sum(policy_hashes.values()),
-            "next_action": "recreate_outputs_with_one_policy",
-        })
-    unapproved_count = sum(
-        count
-        for policy_hash, count in policy_hashes.items()
-        if policy_hash != accepted_policy_hash
-    )
-    if unapproved_count:
-        blockers.append({
-            "code": "season_policy_not_approved",
-            "count": unapproved_count,
-            "next_action": "approve_matching_policy_or_recreate_outputs",
-        })
-    return blockers
+    candidates = [item for item in items if int_value(item.get("library_item_id")) in ready_ids]
+    if active_item_ids:
+        active = [item for item in candidates if int_value(item.get("library_item_id")) in active_item_ids]
+        if active:
+            wait("season_active_encode_job", len(active))
+        candidates = [item for item in candidates if item not in active]
+    if load_calibration_state_fn is None and candidates:
+        blockers.append({"code": "season_policy_gate_unavailable", "count": 1, "next_action": "restore_policy_gate"})
+    if load_calibration_state_fn is not None and candidates:
+        accepted_policy_hash = _accepted_tv_scope_policy_hash(
+            config,
+            scope,
+            load_calibration_state_fn=load_calibration_state_fn,
+        )
+        policy_states = _staged_policy_states(
+            connection,
+            {int_value(item.get("library_item_id")) for item in candidates},
+            accepted_policy_hash=accepted_policy_hash,
+        )
+        approved: list[FolderItem] = []
+        for item in candidates:
+            state = policy_states.get(int_value(item.get("library_item_id")), "season_policy_provenance_missing")
+            if state is None:
+                approved.append(item)
+            else:
+                wait(state)
+        candidates = approved
+    conflicted_paths = _conflicted_rel_paths(config, candidates)
+    if conflicted_paths:
+        conflicted = [item for item in candidates if str(item.get("rel_path") or "") in conflicted_paths]
+        wait("season_destination_conflict", len(conflicted))
+        candidates = [item for item in candidates if item not in conflicted]
+    promotable_ids = sorted(int_value(item.get("library_item_id")) for item in candidates)
+    return {
+        "applicable": True,
+        "can_promote": bool(promotable_ids) and not blockers,
+        "promotable_count": len(promotable_ids),
+        "promotable_item_ids": promotable_ids,
+        "blockers": blockers,
+        "waiting": [
+            {"code": code, "count": count, "next_action": _waiting_next_action(code)}
+            for code, count in waiting.items()
+        ],
+    }
+
+
+def active_encode_library_item_ids(connection: DBClient, prefix: str) -> set[int] | None:
+    """Files an active encode may still write. None means a job's files cannot be read, so fail closed."""
+    item_ids: set[int] = set()
+    for job in load_active_encode_jobs_for_prefix(connection, prefix):
+        manifest_items = _manifest_items(job)
+        if not manifest_items:
+            return None
+        indexes = [
+            index
+            for index in object_list(job.get("manifest_indexes"))
+            if isinstance(index, int)
+        ] or list(range(len(manifest_items)))
+        item_ids.update(_manifest_library_item_ids(job, indexes))
+    return item_ids
+
+
+def _waiting_next_action(code: str) -> str:
+    if code.startswith("season_staged_integrity_"):
+        return _season_integrity_next_action(code.removeprefix("season_staged_integrity_"))
+    return {
+        "season_active_encode_job": "wait_for_encode_job",
+        "season_policy_provenance_missing": "recreate_output_with_policy_provenance",
+        "season_policy_not_approved": "approve_matching_policy_or_recreate_outputs",
+        "season_destination_conflict": "resolve_destination_conflicts",
+    }.get(code, "inspect_integrity_detail")
 
 
 def _accepted_tv_scope_policy_hash(
@@ -1614,10 +1612,17 @@ def _accepted_tv_scope_policy_hash(
     return ""
 
 
-def _staged_policy_hashes(
+def _staged_policy_states(
         connection: DBClient,
         library_item_ids: set[int],
-) -> tuple[dict[str, int], int]:
+        *,
+        accepted_policy_hash: str,
+) -> dict[int, str | None]:
+    """None when the file was made under an approved policy, otherwise the waiting code.
+
+    A file counts as approved when its recorded policy matches the current approval, or when the run
+    that made it recorded the production approval it ran under.
+    """
     rows = connection.execute(
         select(
             staged_artifacts.c.library_item_id,
@@ -1627,13 +1632,13 @@ def _staged_policy_hashes(
         .where(staged_artifacts.c.library_item_id.in_(sorted(library_item_ids)))
     ).mappings().fetchall()
     manifest_cache: dict[Path, ActionPayload | None] = {}
-    policy_hashes: dict[str, int] = {}
-    missing_provenance_count = 0
+    states: dict[int, str | None] = {}
     for row in rows:
+        item_id = int(row["library_item_id"])
         manifest_value = str(row["manifest_path"] or "").strip()
         item_index = row["item_index"]
         if not manifest_value or not isinstance(item_index, int):
-            missing_provenance_count += 1
+            states[item_id] = "season_policy_provenance_missing"
             continue
         manifest_path = Path(manifest_value)
         if manifest_path not in manifest_cache:
@@ -1644,63 +1649,27 @@ def _staged_policy_hashes(
         manifest = manifest_cache[manifest_path]
         manifest_items = object_list(object_dict(manifest).get("items"))
         if manifest is None or item_index < 0 or item_index >= len(manifest_items):
-            missing_provenance_count += 1
+            states[item_id] = "season_policy_provenance_missing"
             continue
         policy = object_dict(object_dict(manifest_items[item_index]).get("resolved_policy"))
         if not policy:
-            missing_provenance_count += 1
+            states[item_id] = "season_policy_provenance_missing"
             continue
-        policy_hash = _calibration_policy_hash({"policy": policy})
-        policy_hashes[policy_hash] = policy_hashes.get(policy_hash, 0) + 1
-    returned_item_ids = {int(row["library_item_id"]) for row in rows}
-    missing_provenance_count += len(library_item_ids - returned_item_ids)
-    return policy_hashes, missing_provenance_count
+        approved_at_run = bool(object_dict(object_dict(manifest.get("selection")).get("production_approval_contract")))
+        matches_current = bool(accepted_policy_hash) and _calibration_policy_hash({"policy": policy}) == accepted_policy_hash
+        states[item_id] = None if approved_at_run or matches_current else "season_policy_not_approved"
+    return states
 
 
-def _season_encode_job_blockers(connection: DBClient, scope: MediaScope) -> list[ActionPayload]:
-    ranked_jobs = (
-        select(
-            encode_jobs.c.prefix,
-            encode_jobs.c.status,
-            func.row_number().over(
-                partition_by=encode_jobs.c.prefix,
-                order_by=(
-                    encode_jobs.c.updated_at.desc(),
-                    encode_jobs.c.created_at.desc(),
-                    encode_jobs.c.job_id.desc(),
-                ),
-            ).label("prefix_rank"),
-        )
-        .where(
-            or_(
-                encode_jobs.c.prefix == scope.prefix,
-                scope_descendant_filter(encode_jobs.c.prefix, scope.prefix),
-            )
-        )
-        .subquery()
-    )
-    statuses = [
-        str(row[0] or "")
-        for row in connection.execute(
-            select(ranked_jobs.c.status).where(ranked_jobs.c.prefix_rank == 1)
-        ).fetchall()
-    ]
-    blockers: list[ActionPayload] = []
-    active_count = sum(status in ACTIVE_ENCODE_JOB_STATUSES for status in statuses)
-    attention_count = sum(status in _SEASON_GATE_ATTENTION_JOB_STATUSES for status in statuses)
-    if active_count:
-        blockers.append({
-            "code": "season_active_encode_job",
-            "count": active_count,
-            "next_action": "wait_for_encode_job",
-        })
-    if attention_count:
-        blockers.append({
-            "code": "season_encode_job_attention",
-            "count": attention_count,
-            "next_action": "resolve_encode_job_attention",
-        })
-    return blockers
+def _conflicted_rel_paths(config: MediaforceConfig, items: list[FolderItem]) -> set[str]:
+    conflict = _promotion_conflict_response(config, items)
+    if conflict is None:
+        return set()
+    return {
+        str(rel_path)
+        for entry in object_list(conflict.get("conflicts"))
+        for rel_path in object_list(object_dict(entry).get("rel_paths"))
+    }
 
 
 def _season_integrity_next_action(disposition: str) -> str:
@@ -1992,15 +1961,34 @@ def _movie_requeue_policy_blocker(
     return None
 
 
-def _validate_delivery_blocked_by_active_encode(active_encode_job: JobPayload | None) -> ActionPayload | None:
-    if not active_encode_job:
+def _delivery_active_item_ids(
+        connection: DBClient,
+        prefix: str,
+        load_active_encode_job_for_prefix_fn: LoadActiveEncodeJobFn,
+) -> set[int] | None:
+    """Files an active encode may still write; delivery skips only those. None fails closed."""
+    item_ids = active_encode_library_item_ids(connection, prefix)
+    if item_ids is None:
         return None
-    status = str(active_encode_job.get("status") or "queued")
-    if status not in ACTIVE_ENCODE_JOB_STATUSES:
-        return None
+    injected_job = load_active_encode_job_for_prefix_fn(connection, prefix)
+    if injected_job and str(injected_job.get("status") or "queued") in ACTIVE_ENCODE_JOB_STATUSES:
+        manifest_items = _manifest_items(injected_job)
+        if not manifest_items:
+            return None
+        indexes = [
+            index for index in object_list(injected_job.get("manifest_indexes")) if isinstance(index, int)
+        ] or list(range(len(manifest_items)))
+        item_ids.update(_manifest_library_item_ids(injected_job, indexes))
+    return item_ids
+
+
+def _delivery_unreadable_active_encode_response() -> ActionPayload:
     return {
         "ok": False,
-        "message": f"Cannot deliver outputs while folder encode is {status.replace('_', ' ')}.",
+        "message": (
+            "Mediaforce cannot tell which files the running encode is still making, "
+            "so nothing was delivered. Try again when it finishes."
+        ),
     }
 
 
