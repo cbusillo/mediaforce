@@ -2075,6 +2075,117 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             "measured_item_variance",
         )
 
+    def _quality_floor_conflict_job(
+            self,
+            connection: Any,
+            name: str,
+            *,
+            best_reachable_bytes: int,
+            compression_intent: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, Path]:
+        source_path = self._create_source_file(f"{name}.mkv")
+        staging_path = self._staging_path(f"{name}.mkv")
+        error_message = (
+            "The approved target size conflicts with the configured quality floor "
+            "(target_band_violates_quality_floor); "
+            f"target=200000000 bytes, best_reachable={best_reachable_bytes} bytes."
+        )
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        manifest_path = self._write_manifest(
+            f"manifest-{name}.json",
+            [
+                {
+                    "library_item_id": item_id,
+                    "rel_path": f"tv/show/{name}.mkv",
+                    "source_size_bytes": 1_000_000_000,
+                    "duration_seconds": 2400.0,
+                    "staging_path": str(staging_path),
+                    "compression_intent": compression_intent or self._compression_intent_snapshot(),
+                    "resolved_policy": {
+                        "video": {
+                            "quality_metric": "vmaf",
+                            "max_encoded_percent": 80,
+                            "size_goal_schema_version": 1,
+                            "size_goal_mode": "absolute",
+                            "size_goal_source": "operator",
+                            "target_size_bytes": 200_000_000,
+                            "final_output_tolerance_percent": 5.0,
+                            "sample_projection_tolerance_percent": 10.0,
+                        }
+                    },
+                }
+            ],
+        )
+        self._save_job(
+            connection,
+            job_id=f"job-{name}",
+            manifest_name=f"manifest-{name}.json",
+            host={"key": "local", "label": "Local", "mode": "local"},
+            status="running",
+            attempt_count=1,
+        )
+        job = load_encode_job(connection, f"job-{name}")
+        assert job is not None
+        web_app._transition_encode_job_failure(
+            connection,
+            self.config,
+            job,
+            failure_kind="deterministic",
+            error_message=error_message,
+        )
+        return load_encode_job(connection, f"job-{name}"), manifest_path
+
+    def test_quality_floor_conflict_retries_at_smallest_quality_safe_size(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "floor-conflict",
+                best_reachable_bytes=240_000_000,
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIn("measured policy adjustment", str(updated["waiting_reason"]))
+        item = manifest["items"][0]
+        self.assertEqual(item["resolved_policy"]["video"]["size_goal_mode"], "absolute")
+        self.assertEqual(item["resolved_policy"]["video"]["target_size_bytes"], 240_000_000)
+        self.assertEqual(item["stream_budget_ledger"]["totals"]["total_target_bytes"], 240_000_000)
+        self.assertEqual(item["compression_escalation"]["evidence"]["kind"], "measured_quality_floor_violation")
+        self.assertEqual(item["compression_escalation"]["decision"]["outcome"], "authorized")
+
+    def test_quality_floor_conflict_far_above_goal_waits_for_operator(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "floor-conflict-far",
+                best_reachable_bytes=400_000_000,
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(analysis["kind"], "quality_floor_size_conflict")
+        self.assertEqual(analysis["retry_strategy"], "needs_operator_approval")
+        self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+
+    def test_quality_floor_conflict_with_unconfirmed_goal_waits_for_operator(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "floor-conflict-unconfirmed",
+                best_reachable_bytes=240_000_000,
+                compression_intent={"schema_version": 1, "level": "legacy_unconfirmed", "source": "legacy", "confirmed": False},
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(analysis["compression_authorization"]["reason_code"], "compression_intent_unconfirmed")
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+
     def test_final_size_miss_requires_a_fresh_goal_instead_of_plain_retry(self) -> None:
         source_path = self._create_source_file("episode-final-size-miss.mkv")
         staging_path = self._staging_path("episode-final-size-miss.mkv")

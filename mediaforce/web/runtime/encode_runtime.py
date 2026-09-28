@@ -54,6 +54,7 @@ from mediaforce.tuning.compression_intent import (
     authorize_compression_change,
     compression_intent_from_item,
 )
+from mediaforce.tuning.size_goals import SizeGoalIntent, size_goal_from_policy
 from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
@@ -123,6 +124,13 @@ FINAL_SIZE_MISS_RE = re.compile(
     r"actual=(?P<actual>\d+|None), target=(?P<target>\d+|None), "
     r"lower=(?P<lower>\d+|None), upper=(?P<upper>\d+|None)\."
 )
+QUALITY_FLOOR_CONFLICT_RE = re.compile(
+    r"The approved target size conflicts with the configured quality floor "
+    r"\((?P<reason>target_band_violates_quality_floor|target_requires_crossing_quality_floor)\); "
+    r"target=(?P<target>\d+) bytes, best_reachable=(?P<best>\d+) bytes\."
+)
+# A measured quality-floor conflict may raise one item's size goal this far without an operator.
+QUALITY_FLOOR_EXCEPTION_MAX_GROWTH = 1.5
 
 
 def recover_encode_queue(
@@ -1158,6 +1166,21 @@ def _encode_failure_analysis(
             }
         )
         return _aggregate_quality_failure_analysis(indexes, [final_size_analysis])
+    floor_analysis = _quality_floor_conflict_analysis(error_message)
+    if floor_analysis is not None:
+        valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
+        if len(valid_indexes) != 1:
+            return None
+        index = valid_indexes[0]
+        item = manifest_items[index]
+        floor_analysis.update(
+            {
+                "manifest_index": index,
+                "manifest_indexes": [index],
+                "item_rel_path": str(item.get("rel_path") or item.get("source_path") or ""),
+            }
+        )
+        return {**floor_analysis, "item_analyses": [dict(floor_analysis)]}
     item_analyses: list[dict[str, Any]] = []
     for index in indexes:
         if index < 0 or index >= len(manifest_items):
@@ -1217,6 +1240,39 @@ def _final_size_failure_analysis(error_message: str) -> dict[str, Any] | None:
             "upper_bound_bytes": upper,
         },
         "summary": summary,
+    }
+
+
+def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | None:
+    """The search measured that every size inside the goal breaks the quality floor.
+
+    The intent contract lets that measurement authorize a bounded, item-local size exception, so the
+    item retries at the smallest quality-safe size instead of waiting for an operator.
+    """
+    match = QUALITY_FLOOR_CONFLICT_RE.search(error_message)
+    if match is None:
+        return None
+    target = int(match.group("target"))
+    best = int(match.group("best"))
+    if target <= 0 or best <= target:
+        return None
+    within_bound = best <= target * QUALITY_FLOOR_EXCEPTION_MAX_GROWTH
+    return {
+        "kind": "quality_floor_size_conflict",
+        "reason": match.group("reason"),
+        "retry_strategy": "auto_raise_target" if within_bound else "needs_operator_approval",
+        "auto_retry_allowed": within_bound,
+        "target_size_bytes": target,
+        "proposed_target_size_bytes": best,
+        "summary": (
+            "Every size inside the goal broke the quality floor, so this item retries at the smallest "
+            "quality-safe size as a recorded item-local exception."
+            if within_bound
+            else (
+                f"The smallest quality-safe size is more than {QUALITY_FLOOR_EXCEPTION_MAX_GROWTH:g}x the goal. "
+                "Choose a fresh size or compression goal for this item before retrying."
+            )
+        ),
     }
 
 
@@ -1311,6 +1367,8 @@ def _aggregate_quality_failure_analysis(
 def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, Any] | None) -> bool:
     if not analysis or not bool(analysis.get("auto_retry_allowed")):
         return False
+    if str(analysis.get("retry_strategy") or "") == "auto_raise_target":
+        return _apply_quality_floor_target_retry(job, analysis)
     if str(analysis.get("retry_strategy") or "") != "auto_adjust_cap":
         return False
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
@@ -1394,6 +1452,103 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
             except (TypeError, ValueError):
                 return False
             manifest["items"][index] = item
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        except OSError:
+            return False
+    return True
+
+
+def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, Any]) -> bool:
+    index = int_value(analysis.get("manifest_index"))
+    proposed_bytes = int_value(analysis.get("proposed_target_size_bytes"))
+    current_bytes = int_value(analysis.get("target_size_bytes"))
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if index < 0 or proposed_bytes <= current_bytes or not manifest_path.exists():
+        return False
+    with _locked_manifest_file(manifest_path):
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+        if index >= len(manifest_items):
+            return False
+        item = manifest_items[index]
+        policy = object_dict(item.get("resolved_policy"))
+        video_policy = dict(object_dict(policy.get("video")))
+        intent = compression_intent_from_item(item)
+        source_id = stable_source_id(item)
+        policy_hash = stable_policy_hash(policy)
+        job_id = str(job.get("id") or job.get("job_id") or "").strip() or None
+        evidence_identity = {
+            "kind": "measured_quality_floor_violation",
+            "source_id": source_id,
+            "policy_hash": policy_hash,
+            "intent_id": intent.semantic_id,
+            "job_id": job_id,
+            "reason": str(analysis.get("reason") or ""),
+            "target_size_bytes": current_bytes,
+            "proposed_target_size_bytes": proposed_bytes,
+        }
+        evidence = CompressionEvidenceRef(
+            kind="measured_quality_floor_violation",
+            evidence_id=f"ce1_{stable_json_hash(evidence_identity)[:32]}",
+            intent_id=intent.semantic_id,
+            observed_bytes=proposed_bytes,
+            source_id=source_id,
+            policy_hash=policy_hash,
+            job_id=job_id,
+        )
+        decision = authorize_compression_change(
+            intent,
+            authoritative_anchor_bytes=current_bytes,
+            candidate_bytes=proposed_bytes,
+            evidence=(evidence,),
+            source_id=source_id,
+            policy_hash=policy_hash,
+            job_id=job_id,
+        )
+        evidence_payload, decision_payload = evidence.to_payload(), decision.to_payload()
+        analysis["compression_evidence"] = evidence_payload
+        analysis["compression_authorization"] = decision_payload
+        if decision.outcome != "authorized" or decision.escalation_scope != "item":
+            analysis["auto_retry_allowed"] = False
+            analysis["retry_strategy"] = "needs_operator_approval"
+            analysis["compression_authorization_reason"] = decision.reason_code
+            analysis["summary"] = (
+                "Every size inside the goal broke the quality floor, but the saved compression goal does not "
+                "authorize a larger result automatically. Review this item before retrying."
+            )
+            return False
+        current_goal = size_goal_from_policy(video_policy)
+        exception_goal = SizeGoalIntent(
+            mode="absolute",
+            value_bytes=proposed_bytes,
+            reference_runtime_seconds=None,
+            sample_projection_tolerance_percent=current_goal.sample_projection_tolerance_percent,
+            final_output_tolerance_percent=current_goal.final_output_tolerance_percent,
+            source="quality_floor_exception",
+        )
+        runtime_seconds = float_value(item.get("duration_seconds")) or None
+        video_policy.update(exception_goal.policy_fragment(item_runtime_seconds=runtime_seconds)["video"])
+        policy["video"] = video_policy
+        item["resolved_policy"] = policy
+        item["compression_escalation"] = {
+            "schema_version": 1,
+            "scope": "item",
+            "evidence": evidence_payload,
+            "decision": decision_payload,
+        }
+        try:
+            item["stream_budget_ledger"] = resolve_stream_budget_ledger(
+                item,
+                output_container=str(item.get("output_container") or "") or None,
+                prefer_persisted=False,
+            ).to_payload()
+        except (TypeError, ValueError):
+            return False
+        manifest["items"][index] = item
         try:
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         except OSError:
