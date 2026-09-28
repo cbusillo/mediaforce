@@ -16,8 +16,13 @@ reserve on every configured storage volume involved in the operation.
 - Add the persisted requirements of already-running encode jobs before admitting
   another job on the same measured volume. Sub-threshold shards cannot each
   claim the same free bytes independently.
-- Defer promotion while another runnable encode job is active so the promotion
-  copy cannot consume bytes that active work has already reserved.
+- Defer a promotion that must copy bytes across volumes while another runnable
+  encode job is active, so that copy cannot consume bytes the active work has
+  already reserved. Same-volume promotion is a rename that needs no free bytes,
+  so it proceeds while encodes run.
+- Promotion handles each file on its own. A file waiting on free space or an
+  active encode, a destination conflict, an unreachable staged output, or a
+  failed move is reported with its reason, and the other files still publish.
 - Missing reserve inputs, a missing mount, a failed local probe, or a failed
   remote probe is a waiting blocker. Mediaforce does not dispatch, delete,
   archive, or promote files in that case.

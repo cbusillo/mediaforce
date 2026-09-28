@@ -18,6 +18,7 @@ from mediaforce.library.staged_integrity import (
     integrity_disposition_blocks_promotion,
     staged_integrity_report,
 )
+from mediaforce.execution import PromotionResult
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
 
 
@@ -269,7 +270,7 @@ class StagedIntegrityTests(unittest.TestCase):
             stage = self._write_stage("tv/Show/Season 1/One.mkv", b"ready")
             self._insert_artifact(connection, valid_id, stage, passed=True, manifest_path=manifest_path, item_index=0)
 
-        promoted = Mock(return_value=[Path("one")])
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
@@ -304,7 +305,7 @@ class StagedIntegrityTests(unittest.TestCase):
                 manifest_path=active_manifest,
             )
 
-        promoted = Mock(return_value=[Path("one")])
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
@@ -334,7 +335,7 @@ class StagedIntegrityTests(unittest.TestCase):
                 updated_at="2026-08-14T11:00:00+00:00",
             )
 
-        promoted = Mock(return_value=[Path("unused")])
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("unused")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
@@ -356,7 +357,7 @@ class StagedIntegrityTests(unittest.TestCase):
             self._insert_artifact(connection, first_id, first_stage, passed=True)
             self._insert_artifact(connection, second_id, second_stage, passed=True)
 
-        promoted = Mock(return_value=[Path("one"), Path("two")])
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one"), Path("two")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
@@ -399,7 +400,7 @@ class StagedIntegrityTests(unittest.TestCase):
                     item_index=index,
                 )
 
-        promoted = Mock(return_value=[Path("one"), Path("three")])
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one"), Path("three")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
@@ -452,7 +453,7 @@ class StagedIntegrityTests(unittest.TestCase):
                 item_index=1,
             )
 
-        promoted = Mock(return_value=[Path("one"), Path("two")])
+        promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("one"), Path("two")], held=[]))
         result = promote_folder_outputs_action(
             self.config,
             "tv/Show/Season 1",
@@ -481,7 +482,7 @@ class StagedIntegrityTests(unittest.TestCase):
             self._insert_artifact(connection, other_id, other_stage, passed=True)
 
         for item_prefix, item_stage in (("movies/Film.mkv", movie_stage), ("other/Loose.mkv", other_stage)):
-            promoted = Mock(return_value=[Path("promoted")])
+            promoted = Mock(return_value=PromotionResult(promoted_paths=[Path("promoted")], held=[]))
             result = promote_folder_outputs_action(
                 self.config,
                 item_prefix,

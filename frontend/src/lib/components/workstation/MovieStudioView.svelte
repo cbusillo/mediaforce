@@ -21,6 +21,7 @@
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import {
 		folderActionResponseCopy,
+		type HeldFileCopyInput,
 		noteAfterPrepareAgain,
 		noteAfterPreview,
 		noteAfterProposalHydration,
@@ -591,6 +592,7 @@
 				failed_count?: number | null;
 				item_count?: number | null;
 				promoted_count?: number | null;
+				held?: HeldFileCopyInput[] | null;
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/${endpoint}`, {});
 			if (!response.ok) throw new Error(response.message || 'The movie action could not run.');
 			const result = folderActionResponseCopy(endpoint, response);

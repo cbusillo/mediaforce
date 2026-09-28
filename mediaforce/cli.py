@@ -15,7 +15,7 @@ from mediaforce.core.config import (
 )
 from mediaforce.core.db import DBClient, open_db, open_readonly_db
 from mediaforce.core.db_tables import run_manifests as run_manifests_table
-from mediaforce.execution import describe_item_plan, encode_manifest_items, promote_manifest_items, \
+from mediaforce.execution import HeldFile, describe_item_plan, encode_manifest_items, promote_manifest_items, \
     validate_manifest_items
 from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 from mediaforce.library.folder_profiles import inspect_prefix
@@ -491,6 +491,9 @@ def _run_locked_command(
             validation_results = validate_manifest_items(connection, config, manifest, indexes)
             for idx, validation_result in zip(indexes, validation_results, strict=True):
                 status = "passed" if validation_result["passed"] else "failed"
+                if "error" in validation_result:
+                    print(f"item {idx}: validation {status}: {validation_result['error']}")
+                    continue
                 print(
                     f"item {idx}: validation {status} "
                     f"source={_format_size(validation_result['source_size_bytes'])} "
@@ -506,19 +509,19 @@ def _run_locked_command(
             manifest_path = _resolve_manifest_path(connection, args.manifest)
             manifest = _load_manifest(manifest_path)
             indexes = _resolve_indexes(manifest, args)
-            paths = promote_manifest_items(connection, config, manifest, indexes, force=args.force)
-            for path in paths:
+            result = promote_manifest_items(connection, config, manifest, indexes, force=args.force)
+            for path in result.promoted_paths:
                 print(f"promoted {path}")
-            return 0
+            return _report_held_files(result.held)
 
         if args.command == "approve":
             manifest_path = _resolve_manifest_path(connection, args.manifest)
             manifest = _load_manifest(manifest_path)
             indexes = _resolve_approve_indexes(manifest, args)
-            paths = promote_manifest_items(connection, config, manifest, indexes, force=args.force)
-            for path in paths:
+            result = promote_manifest_items(connection, config, manifest, indexes, force=args.force)
+            for path in result.promoted_paths:
                 print(f"approved {path}")
-            return 0
+            return _report_held_files(result.held)
 
         if args.command == "compare":
             manifest_path = _resolve_manifest_path(connection, args.manifest)
@@ -799,6 +802,12 @@ def _resolve_manifest_path(connection: DBClient, manifest_path: Path | None) -> 
     if row is None:
         raise FileNotFoundError("No run manifest found. Start with mediaforce campaign or plan.")
     return Path(str(row["output_path"]))
+
+
+def _report_held_files(held: list[HeldFile]) -> int:
+    for held_file in held:
+        print(f"{'waiting' if held_file.waiting else 'not published'} {held_file.rel_path}: {held_file.reason}")
+    return 1 if any(not held_file.waiting for held_file in held) else 0
 
 
 def _resolve_indexes(manifest: dict[str, Any], args: argparse.Namespace) -> list[int]:

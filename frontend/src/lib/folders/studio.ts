@@ -1058,11 +1058,18 @@ export function approvalReviewSignature(rows: ComparisonRow[]): string {
 		.join('|');
 }
 
+export interface HeldFileCopyInput {
+	rel_path?: string | null;
+	reason?: string | null;
+	state?: 'waiting' | 'failed' | null;
+}
+
 export interface FolderActionResponseCopyInput {
 	validated_count?: number | null;
 	failed_count?: number | null;
 	item_count?: number | null;
 	promoted_count?: number | null;
+	held?: HeldFileCopyInput[] | null;
 }
 
 export interface FolderActionResponseCopy {
@@ -1093,10 +1100,33 @@ export function folderActionResponseCopy(
 	}
 
 	const promotedCount = safeCount(response.promoted_count);
-	return {
-		message: `Replaced ${promotedCount} original ${fileNoun(promotedCount)} and kept ${promotedCount === 1 ? 'its backup' : 'their backups'}.`,
-		attention: false
-	};
+	const replaced = `Replaced ${promotedCount} original ${fileNoun(promotedCount)} and kept ${promotedCount === 1 ? 'its backup' : 'their backups'}.`;
+	const held = heldFilesCopy(response.held);
+	if (held) {
+		return {
+			message: `${replaced} ${held}`,
+			attention: true,
+			attentionTitle: 'Some files were not replaced'
+		};
+	}
+	return { message: replaced, attention: false };
+}
+
+const HELD_FILES_LISTED = 3;
+
+function heldFilesCopy(held: HeldFileCopyInput[] | null | undefined): string {
+	const files = (held ?? []).filter((file) => file.rel_path);
+	if (!files.length) return '';
+	const listed = files
+		.slice(0, HELD_FILES_LISTED)
+		.map((file) => {
+			const name = String(file.rel_path).split('/').pop();
+			return file.reason ? `${name}: ${file.reason}` : name;
+		})
+		.join('; ');
+	const more =
+		files.length > HELD_FILES_LISTED ? `; and ${files.length - HELD_FILES_LISTED} more` : '';
+	return `${files.length} ${fileNoun(files.length)} not replaced yet (${listed}${more}).`;
 }
 
 function safeCount(value: unknown): number {

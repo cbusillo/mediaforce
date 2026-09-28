@@ -55,7 +55,7 @@ from mediaforce.encoding import quality as encoding_quality
 from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
-from mediaforce.encoding.free_space import VolumeCapacity
+from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity
 from mediaforce.encoding.cadence import analyze_cadence
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
@@ -13056,12 +13056,12 @@ raise SystemExit(0)
             self.assertEqual(staged_row["promoted_path"], str(destination_path))
             self.assertEqual(staged_row["archived_source_path"], str(archived_source))
 
-    def test_promote_one_item_waits_for_other_active_encode_reserves(self) -> None:
-        source_path = self._create_source_file("episode-promotion-reserve.mkv")
-        staging_path = self._staging_path("episode-promotion-reserve.mkv")
+    def _promotion_with_other_active_encode(self, name: str) -> tuple[Path, Path, dict[str, Any]]:
+        self.config.raw["media"]["output_container"] = "mp4"
+        source_path = self._create_source_file(f"{name}.mkv")
+        staging_path = self._staging_path(f"{name}.mkv")
         staging_path.parent.mkdir(parents=True, exist_ok=True)
         staging_path.write_text("encoded")
-
         with open_db(self.config.paths.db_path) as connection:
             item_id = self._insert_library_item(connection, source_path, status="validated")
             connection.execute(
@@ -13081,22 +13081,98 @@ raise SystemExit(0)
                 status="running",
                 attempt_count=1,
             )
+        item = {
+            "library_item_id": item_id,
+            "source_path": str(source_path),
+            "rel_path": f"tv/show/{name}.mkv",
+            "media_root": "tv",
+        }
+        return source_path, staging_path, item
 
-            with self.assertRaisesRegex(RuntimeError, "active encode work"):
-                execution.promote_one_item(
-                    connection,
-                    self.config,
-                    {
-                        "library_item_id": item_id,
-                        "source_path": str(source_path),
-                        "rel_path": "tv/show/episode-promotion-reserve.mkv",
-                        "media_root": "tv",
-                    },
-                    force=False,
-                )
+    def test_promote_one_item_publishes_same_volume_renames_while_another_encode_runs(self) -> None:
+        source_path, staging_path, item = self._promotion_with_other_active_encode("episode-same-volume")
+
+        promoted_probe = ProbeSummary(
+            duration_seconds=60.0,
+            video_codec="av1",
+            video_bitrate=900000,
+            width=1920,
+            height=1080,
+            pix_fmt="yuv420p10le",
+            audio_track_count=1,
+            subtitle_track_count=0,
+            english_audio_count=1,
+            english_subtitle_count=0,
+            default_audio_language="eng",
+            default_subtitle_language=None,
+            audio_summary_json="[]",
+            subtitle_summary_json="[]",
+        )
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.execution.probe_media", return_value=promoted_probe
+        ), patch("mediaforce.execution.file_fingerprint", return_value="promoted-fingerprint"):
+            destination_path = execution.promote_one_item(connection, self.config, item, force=False)
+
+        self.assertTrue(destination_path.exists())
+        self.assertFalse(staging_path.exists())
+
+    def test_promote_one_item_waits_for_an_active_encode_when_it_must_copy_across_volumes(self) -> None:
+        source_path, staging_path, item = self._promotion_with_other_active_encode("episode-cross-volume")
+
+        with open_db(self.config.paths.db_path) as connection, self.assertRaisesRegex(
+                staging_runtime.PromotionWaiting, "running encode"
+        ):
+            staging_runtime.promote_one_item(
+                connection,
+                self.config,
+                item,
+                force=False,
+                probe_media=Mock(),
+                file_fingerprint=Mock(),
+                timestamp=web_app._now_iso,
+                record_event=Mock(),
+                reserve_preflight=lambda *_args, **_kwargs: ReservePreflight(True, None, {"library-volume": 1024}),
+            )
 
         self.assertTrue(source_path.exists())
         self.assertTrue(staging_path.exists())
+
+    def test_promote_manifest_items_tries_every_file_and_holds_only_the_ones_that_fail(self) -> None:
+        manifest = {"items": [{"rel_path": f"tv/show/e{index}.mkv"} for index in range(4)]}
+        outcomes = [
+            RuntimeError("Probe failed"),
+            staging_runtime.PromotionWaiting("Waiting for room"),
+            FileExistsError("Destination already exists: /x"),
+            Path("/library/tv/show/e3.mkv"),
+        ]
+
+        def fake_promote(_connection: Any, _config: Any, item: dict[str, Any], *, force: bool) -> Path:
+            outcome = outcomes[int(item["rel_path"][-5])]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        with patch("mediaforce.execution.promote_one_item", side_effect=fake_promote):
+            result = execution.promote_manifest_items(Mock(), self.config, manifest, [0, 1, 2, 3], force=False)
+
+        self.assertEqual(result.promoted_paths, [Path("/library/tv/show/e3.mkv")])
+        self.assertEqual(
+            [held.to_payload()["state"] for held in result.held],
+            ["failed", "waiting", "failed"],
+        )
+        self.assertEqual([held.rel_path for held in result.held], [f"tv/show/e{index}.mkv" for index in range(3)])
+
+    def test_promote_manifest_items_stops_after_a_file_that_could_not_be_put_back(self) -> None:
+        manifest = {"items": [{"rel_path": f"tv/show/e{index}.mkv"} for index in range(3)]}
+        promote = Mock(side_effect=[staging_runtime.PromotionRestoreError("could not restore"), Path("/x")])
+
+        with patch("mediaforce.execution.promote_one_item", promote):
+            result = execution.promote_manifest_items(Mock(), self.config, manifest, [0, 1, 2], force=False)
+
+        self.assertEqual(promote.call_count, 1)
+        self.assertEqual(result.promoted_paths, [])
+        self.assertEqual([held.waiting for held in result.held], [False, True, True])
 
     def test_promote_one_item_restores_files_when_probe_fails(self) -> None:
         source_path = self._create_source_file("episode-promote-probe-failure.mkv")
@@ -21298,12 +21374,12 @@ raise SystemExit(0)
                     indexes: list[int],
                     *,
                     force: bool,
-            ) -> list[Path]:
+            ) -> execution.PromotionResult:
                 # Moving the file into the library takes time; other work commits meanwhile.
                 self_test._write_from_another_connection("other")
                 connection.exec_driver_sql("INSERT INTO lock_probe (value) VALUES ('published')")
                 connection.commit()
-                return [Path("/library/tv/show/Season 01/Show - S01E01.mkv")]
+                return execution.PromotionResult(promoted_paths=[Path("/library/tv/show/Season 01/Show - S01E01.mkv")], held=[])
 
         self_test = self
         result = folder_actions_runtime.promote_folder_outputs_action(
@@ -21316,6 +21392,134 @@ raise SystemExit(0)
 
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["promoted_count"], 1)
+
+    def test_promote_folder_outputs_action_holds_only_unreachable_and_conflicting_files(self) -> None:
+        folder = self.root / "library" / "Show"
+        folder.mkdir(parents=True)
+        staged = self.root / "staged"
+        staged.mkdir()
+        items: list[folder_actions_runtime.FolderItem] = []
+        for name in ("ready", "remote", "conflict"):
+            staging_path = staged / f"{name}.mkv"
+            if name != "remote":
+                staging_path.write_text("encoded")
+            items.append({
+                "library_item_id": len(items) + 1,
+                "source_path": str(folder / f"{name}.avi"),
+                "rel_path": f"tv/show/{name}.avi",
+                "staging_path": str(staging_path),
+                "staging_host_label": "M2 MBP" if name == "remote" else "",
+            })
+        (folder / "conflict.mkv").write_text("someone else's file")
+        self.config.raw["media"]["output_container"] = "mkv"
+        promoted_rel_paths: list[str] = []
+
+        class _ValidatedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+                return items
+
+        class _Promote(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+                    *,
+                    force: bool,
+            ) -> execution.PromotionResult:
+                promoted_rel_paths.extend(str(manifest["items"][index]["rel_path"]) for index in indexes)
+                return execution.PromotionResult(promoted_paths=[folder / "ready.mkv"], held=[])
+
+        result = folder_actions_runtime.promote_folder_outputs_action(
+            self.config,
+            "tv/show/Season 01/Show - S01E01.mkv",
+            load_folder_staged_items_fn=_ValidatedItems(),
+            promote_manifest_items_fn=_Promote(),
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(promoted_rel_paths, ["tv/show/ready.avi"])
+        self.assertEqual(result["promoted_count"], 1)
+        self.assertEqual(result["failed_count"], 1)
+        self.assertEqual(
+            {(held["rel_path"], held["state"]) for held in result["held"]},
+            {("tv/show/remote.avi", "waiting"), ("tv/show/conflict.avi", "failed")},
+        )
+        self.assertIn("M2 MBP", result["message"])
+
+    def test_promote_folder_outputs_action_reports_files_the_promotion_held(self) -> None:
+        staged = self.root / "staged-held"
+        staged.mkdir()
+        (staged / "a.mkv").write_text("encoded")
+
+        class _ValidatedItem(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+                return [{"library_item_id": 1, "rel_path": "tv/show/a.avi", "staging_path": str(staged / "a.mkv")}]
+
+        class _Promote(folder_actions_runtime.PromoteManifestItemsFn):
+            def __call__(self, *_args: Any, force: bool) -> execution.PromotionResult:
+                return execution.PromotionResult(
+                    promoted_paths=[],
+                    held=[execution.HeldFile("tv/show/a.avi", "Waiting for room", waiting=True)],
+                )
+
+        result = folder_actions_runtime.promote_folder_outputs_action(
+            self.config,
+            "tv/show/Season 01/Show - S01E01.mkv",
+            load_folder_staged_items_fn=_ValidatedItem(),
+            promote_manifest_items_fn=_Promote(),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "nothing_published")
+        self.assertEqual(result["held"], [{"rel_path": "tv/show/a.avi", "reason": "Waiting for room", "state": "waiting"}])
+        self.assertIn("Waiting for room", result["message"])
+
+    def test_validate_folder_outputs_action_checks_reachable_files_and_holds_unreachable_ones(self) -> None:
+        staged = self.root / "staged-validate"
+        staged.mkdir()
+        (staged / "here.mkv").write_text("encoded")
+        checked: list[int] = []
+
+        class _EncodedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
+            def __call__(self, *_args: Any, statuses: set[str]) -> list[folder_actions_runtime.FolderItem]:
+                return [
+                    {"library_item_id": 1, "rel_path": "tv/show/here.avi", "staging_path": str(staged / "here.mkv")},
+                    {
+                        "library_item_id": 2,
+                        "rel_path": "tv/show/away.avi",
+                        "staging_path": str(staged / "away.mkv"),
+                        "staging_host_label": "M2 MBP",
+                    },
+                ]
+
+        class _Validate(folder_actions_runtime.ValidateManifestItemsFn):
+            def __call__(
+                    self,
+                    _connection: DBClient,
+                    _config: MediaforceConfig,
+                    manifest: folder_actions_runtime.ManifestPayload,
+                    indexes: list[int],
+            ) -> list[folder_actions_runtime.ActionPayload]:
+                checked.extend(int(manifest["items"][index]["library_item_id"]) for index in indexes)
+                return [{"passed": True}]
+
+        result = folder_actions_runtime.validate_folder_outputs_action(
+            self.config,
+            "tv/show",
+            load_folder_staged_items_fn=_EncodedItems(),
+            validate_manifest_items_fn=_Validate(),
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(checked, [1])
+        self.assertEqual(result["validated_count"], 1)
+        self.assertEqual(result["held"], [{
+            "rel_path": "tv/show/away.avi",
+            "reason": "Its finished file is on M2 MBP, which cannot be reached now",
+            "state": "waiting",
+        }])
 
     def test_promote_folder_outputs_action_requires_validated_items(self) -> None:
         class _NoStagedItems(folder_actions_runtime.LoadFolderStagedItemsFn):
@@ -21339,10 +21543,10 @@ raise SystemExit(0)
                     indexes: list[int],
                     *,
                     force: bool,
-            ) -> list[Path]:
+            ) -> execution.PromotionResult:
                 self_test.assertEqual(indexes, [])
                 self_test.assertFalse(force)
-                return []
+                return execution.PromotionResult(promoted_paths=[], held=[])
 
         self_test = self
         load_folder_staged_items_fn = _NoStagedItems()
@@ -21380,10 +21584,10 @@ raise SystemExit(0)
                     indexes: list[int],
                     *,
                     force: bool,
-            ) -> list[Path]:
+            ) -> execution.PromotionResult:
                 self_test.assertEqual(indexes, [0])
                 self_test.assertFalse(force)
-                return []
+                return execution.PromotionResult(promoted_paths=[], held=[])
 
         self_test = self
         load_folder_staged_items_fn = _SingleValidatedItem()
@@ -21546,13 +21750,13 @@ raise SystemExit(0)
                     indexes: list[int],
                     *,
                     force: bool,
-            ) -> list[Path]:
+            ) -> execution.PromotionResult:
                 self_test.assertFalse(force)
                 promoted_item_ids.extend(
                     int(manifest["items"][index]["library_item_id"])
                     for index in indexes
                 )
-                return [self_test.root / "promoted" / "Foo.mkv"]
+                return execution.PromotionResult(promoted_paths=[self_test.root / "promoted" / "Foo.mkv"], held=[])
 
         self_test = self
         with patch(

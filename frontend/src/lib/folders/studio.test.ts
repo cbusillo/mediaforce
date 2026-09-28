@@ -53,6 +53,28 @@ describe('folderActionResponseCopy', () => {
 	});
 });
 
+describe('folderActionResponseCopy for held files', () => {
+	it('names each file that was not replaced and why', () => {
+		expect(
+			folderActionResponseCopy('promote-outputs', {
+				promoted_count: 1,
+				held: [
+					{
+						rel_path: 'tv/Show/Season 1/S01E02.mkv',
+						reason: 'Its finished file is on M2 MBP, which cannot be reached now',
+						state: 'waiting'
+					}
+				]
+			})
+		).toEqual({
+			message:
+				'Replaced 1 original file and kept its backup. 1 file not replaced yet (S01E02.mkv: Its finished file is on M2 MBP, which cannot be reached now).',
+			attention: true,
+			attentionTitle: 'Some files were not replaced'
+		});
+	});
+});
+
 describe('proposalRecoveryView', () => {
 	it('keeps assistant retry bounded to the stored request and worker', () => {
 		const proposal = {
