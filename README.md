@@ -344,12 +344,15 @@ Promote everything from the latest manifest after approval:
 uv run mediaforce promote --all
 ```
 
-TV promotion is fail-closed at the selected season or show scope: every
-in-scope episode must already be promoted or have a locally available,
-unchanged, validated staged output made with one coherent approved policy.
-Active or attention-needed encode jobs, integrity findings, policy drift, and
-destination conflicts block replacement of the entire selected TV scope.
-Movie and exact-file scopes remain item-granular.
+Promotion is decided file by file, for TV seasons and shows as for movies and
+exact files. An episode publishes when its staged output is locally available,
+unchanged, validated, made under an approved policy (the current approval or
+the approval its run recorded), not being written by an active encode, and not
+in conflict with an existing library file. Every other episode waits and is
+reported with its reason; it never holds back the rest. Promotion stops for the
+whole scope only when Mediaforce cannot judge files safely: an incomplete
+integrity report, an unavailable policy check, or an active encode whose files
+cannot be read.
 
 Generate side-by-side approval clips from the source and staged outputs:
 

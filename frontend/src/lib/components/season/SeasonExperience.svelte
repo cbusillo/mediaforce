@@ -2888,19 +2888,25 @@
 		{:else if humanState.key === 'ready_to_finish'}
 			<section class="ready-room ready-room--finish">
 				<div class="ready-symbol" aria-hidden="true"><span>✓</span></div>
-				<p class="eyebrow">Every check passed</p>
+				<p class="eyebrow">
+					{promotionIntegrity.unresolvedCount > 0
+						? 'Some episodes are ready'
+						: 'Every check passed'}
+				</p>
 				<h1>
 					{promotionIntegrity.readyCount === 1
 						? 'Ready to replace the original episode.'
 						: 'Ready to replace the original episodes.'}
 				</h1>
 				<p class="lede">
-					{isExactItemScope ? 'This episode is accounted for.' : 'Every episode is accounted for.'}
-					{promotionIntegrity.readyCount === 0
-						? 'No checked episodes still need replacement.'
-						: promotionIntegrity.readyCount === 1
-							? 'Replacing installs the checked episode.'
-							: `Replacing installs all ${promotionIntegrity.readyCount} checked episodes together.`}
+					{promotionIntegrity.unresolvedCount > 0
+						? `${promotionIntegrity.unresolvedCount} other ${promotionIntegrity.unresolvedCount === 1 ? 'episode is' : 'episodes are'} not ready yet. They stay as they are and don't hold these back.`
+						: isExactItemScope
+							? 'This episode is accounted for.'
+							: 'Every episode is accounted for.'}
+					{promotionIntegrity.readyCount === 1
+						? 'Replacing installs the checked episode.'
+						: `Replacing installs the ${promotionIntegrity.readyCount} checked episodes.`}
 					{promotionIntegrity.readyCount === 1
 						? 'The current original moves to the cleanup folder so it can be recovered later.'
 						: 'The current originals move to the cleanup folder so they can be recovered later.'}
@@ -2917,15 +2923,11 @@
 		{:else if humanState.key === 'finish_blocked'}
 			<section class="ready-room ready-room--blocked">
 				<div class="ready-symbol" aria-hidden="true"><span>!</span></div>
-				<p class="eyebrow">
-					{isExactItemScope ? 'Whole episode required' : 'Whole season required'}
-				</p>
+				<p class="eyebrow">Nothing ready to replace yet</p>
 				<h1>{humanState.label}.</h1>
 				<p class="lede">
-					{humanState.detail} Mediaforce will not replace {isExactItemScope
-						? 'a partial episode'
-						: 'a partial season'} or adopt an untracked file. No originals move to the cleanup folder
-					while this check is blocked.
+					{humanState.detail} Mediaforce never adopts an untracked file. No originals move to the cleanup
+					folder until an episode is ready.
 				</p>
 				{#if promotionIntegrity.available}
 					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />

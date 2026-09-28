@@ -68,7 +68,7 @@ export interface SeasonPromotionIntegrity {
 const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAction: string }> = {
 	promotable: {
 		label: 'Ready to replace',
-		nextAction: 'Replace the original episodes when every other file is also ready.'
+		nextAction: 'Ready to replace now.'
 	},
 	tracked: {
 		label: 'Already in the library',
@@ -76,7 +76,7 @@ const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAc
 	},
 	unvalidated: {
 		label: 'Needs a check',
-		nextAction: 'Check the compressed files before replacing any original.'
+		nextAction: 'Check this file. It can be replaced once it passes.'
 	},
 	validation_failed: {
 		label: 'Check failed',
@@ -84,7 +84,7 @@ const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAc
 	},
 	missing: {
 		label: 'Compressed file missing',
-		nextAction: 'Compress this episode again before replacing the originals.'
+		nextAction: 'Compress this episode again.'
 	},
 	drifted: {
 		label: 'Changed after checking',
@@ -100,11 +100,11 @@ const INTEGRITY_COPY: Record<StagedIntegrityDisposition, { label: string; nextAc
 	},
 	remote_only_or_unreachable: {
 		label: 'File unavailable on the computer',
-		nextAction: 'Restore access to the computer before replacing the originals.'
+		nextAction: 'Restore access to the computer that has this file.'
 	},
 	not_started: {
 		label: 'Not compressed yet',
-		nextAction: 'Compress the remaining episode before replacing the originals.'
+		nextAction: 'It will be compressed later. Nothing else waits for it.'
 	},
 	retained: {
 		label: 'Held aside for review',
@@ -133,13 +133,13 @@ const PROMOTION_BLOCKER_COPY: Record<string, { label: string; nextAction: string
 		label: 'Settings history missing',
 		nextAction: 'Make the affected episodes again so their exact settings are recorded.'
 	},
-	season_policy_mixed: {
-		label: 'Mixed season settings',
-		nextAction: 'Make the affected episodes with one coherent approved setup.'
-	},
 	season_policy_not_approved: {
 		label: 'Output does not match approval',
 		nextAction: 'Approve matching settings or make the affected episodes again.'
+	},
+	season_active_encode_unreadable: {
+		label: 'Compression progress unknown',
+		nextAction: 'Wait for the current compression job to finish, then check again.'
 	},
 	season_policy_gate_unavailable: {
 		label: 'Approval check unavailable',
@@ -183,7 +183,9 @@ export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPro
 		integrity.records !== undefined &&
 		integrity.next_offset == null
 	);
-	const readyCount = integrity.counts.promotable ?? 0;
+	// Publishing is decided file by file; the server's count already leaves out files that must wait.
+	const readyCount =
+		integrity.promotion_readiness?.promotable_count ?? integrity.counts.promotable ?? 0;
 	const alreadyPlacedCount = integrity.counts.tracked ?? 0;
 	const exactItemScope = integrity.scope?.match === 'exact_item';
 	const totalCount = Object.values(integrity.counts).reduce(
@@ -200,7 +202,10 @@ export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPro
 			nextAction: copy?.nextAction ?? 'Inspect the season inventory before finishing.'
 		};
 	});
-	for (const blocker of integrity.promotion_readiness?.blockers ?? []) {
+	for (const blocker of [
+		...(integrity.promotion_readiness?.blockers ?? []),
+		...(integrity.promotion_readiness?.waiting ?? [])
+	]) {
 		if (blocker.code.startsWith('season_staged_integrity_')) continue;
 		const copy = PROMOTION_BLOCKER_COPY[blocker.code];
 		blockers.push({
@@ -223,14 +228,14 @@ export function seasonPromotionIntegrity(status: FolderStatusPayload): SeasonPro
 		available: integrity.discovery.requested,
 		canFinish:
 			reportComplete &&
-			integrity.blocker_count === 0 &&
+			readyCount > 0 &&
 			(exactItemScope || Boolean(integrity.promotion_readiness?.applicable)) &&
 			Boolean(integrity.promotion_readiness?.can_promote),
 		error: integrity.load_error ?? '',
 		reportComplete,
 		readyCount,
 		alreadyPlacedCount,
-		unresolvedCount: integrity.blocker_count,
+		unresolvedCount: blockers.reduce((total, blocker) => total + blocker.count, 0),
 		totalCount,
 		blockers,
 		records
