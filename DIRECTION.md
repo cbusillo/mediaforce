@@ -30,8 +30,9 @@ An agent asks the owner before:
 - changing a computer's system settings beyond Mediaforce's own files
 - anything the overall direction already reserves
 
-Inside the app the same rule holds: a problem with one episode stays with
-that episode, and the rest of the work continues. Measured evidence is
+Inside the app the same rule holds. The unit of work is one file, an
+episode or a movie: it is encoded, checked, and published on its own, and
+nothing else waits for it. A problem with one file stays with that file. Measured evidence is
 handled automatically within stated limits, temporary failures retry, an
 unknown failure retries before it asks, and a screen shows every reason
 work is waiting, not only the first. Only a real judgment call reaches the
@@ -41,29 +42,35 @@ Everything else is ordinary engineering and needs no ceremony.
 
 ## Journey
 
-The owner approves a show once from a sample, in plain words, on a screen
-they understand. Mediaforce encodes every eligible episode, handles each
-episode's problems itself, and brings back only the calls that are the
-owner's, in plain words. The journey fails when one episode stops or hides
-the rest, or when the owner cannot tell what is happening without asking.
+The owner decides once, in plain words, how each kind of content should
+look. Mediaforce applies that across the library in the background,
+measures every file, publishes each one that passes, and asks only when a
+show measurably does not fit. The owner's recurring act is approving
+cleanup of rollback copies. The journey fails when one file stops or hides
+the rest, when most shows still need their own approval, or when the owner
+cannot tell what is happening without asking.
 Whatever blocks that journey is the next piece of work.
 
 ## Retired
 
 - holding a whole show or folder for one episode's problem
+- publishing a season or show all at once
+- approving every show separately as the normal path
 - internal terms (CRF, VMAF, ledger, cadence, shard, manifest) as the
   owner's words on a screen
 - the "semi-automated, review everything" stance in the README
 
 ## Milestones
 
-- `Sample Approval Decision Flow` proves approving a sample starts the
-  exact authorized encode with no further setup; ends if approval still
-  needs a second manual step.
-- `Unattended show production` proves an approved show finishes every
-  eligible episode, with each per-episode problem handled or listed in
-  plain words while the rest continue; ends if a run still needs the owner
-  to rescue episodes that measured evidence could have handled.
+- `Unattended show production` proves an approved show finishes and
+  publishes every eligible episode one at a time, with each per-episode
+  problem handled or listed in plain words while the rest continue; ends if
+  a run still needs the owner to rescue episodes that measured evidence
+  could have handled.
+- `One approval covers many shows` proves one decision about a kind of
+  content converts shows Mediaforce never sampled for the owner, asking
+  only when a show measurably does not fit; ends if most shows still need
+  their own sample approval.
 - `Plain and beautiful Mediaforce` proves the owner can say what every
   screen means and what is theirs to do, without jargon, and likes using
   it; ends if a redesign pass leaves the owner still decoding terms.
