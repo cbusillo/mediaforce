@@ -613,6 +613,14 @@ export function encodeJobProgress(job: EncodeQueueJob): string {
 	return [percent, item].filter((part) => part && part !== '—').join(' · ') || percent;
 }
 
+export function encodeUnfinishedBreakdownCopy(job: EncodeQueueJob): string {
+	const groups = (job.unfinished_breakdown ?? []).filter((group) => group.count > 0);
+	const total = groups.reduce((sum, group) => sum + group.count, 0);
+	if (total <= 1) return '';
+	const parts = groups.map((group) => `${group.count} ${group.label}`);
+	return `${total} unfinished: ${parts.join(' · ')}`;
+}
+
 function encodeJobRawDetail(job: EncodeQueueJob): string {
 	return (
 		(activeJobStatus(job.status) ? '' : job.error) ||
@@ -906,7 +914,7 @@ export function buildOpsBlockers(
 					key: `needs-attention:${job.job_id}`,
 					tone: 'wait',
 					title: `${encodeJobLabel(job)} needs review`,
-					detail: operatorErrorCopy(encodeJobRawDetail(job)),
+					detail: encodeUnfinishedBreakdownCopy(job) || operatorErrorCopy(encodeJobRawDetail(job)),
 					href: job.prefix ? folderRoutePath(job.prefix) : undefined,
 					linkLabel: job.prefix ? 'Review item' : undefined
 				});

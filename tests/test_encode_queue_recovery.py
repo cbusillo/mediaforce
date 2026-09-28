@@ -20100,6 +20100,107 @@ raise SystemExit(0)
         self.assertEqual(aggregated["progress"]["progress_state"], "quality_search")
         self.assertEqual(aggregated["progress"]["phase_label"], "Searching quality")
 
+    def test_aggregate_encode_parent_job_groups_every_unfinished_child_by_reason(self) -> None:
+        children = [
+            ("completed", None, None),
+            ("needs_attention", "The approved target size conflicts with the configured quality floor "
+             "(target_band_violates_quality_floor); target=200 bytes, best_reachable=240 bytes.", None),
+            ("needs_attention", "The approved target size conflicts with the configured quality floor "
+             "(target_requires_crossing_quality_floor); target=200 bytes, best_reachable=260 bytes.", None),
+            ("needs_attention", "(sqlite3.OperationalError) database is locked", None),
+            ("stopped", "Encode queue job was stopped and cleaned up.", None),
+            ("retry_backoff", "M2 needs a signed-in macOS desktop session.", "host_unavailable"),
+        ]
+        manifest_path = self._write_manifest(
+            "manifest-parent-breakdown.json",
+            [
+                {"library_item_id": index + 1, "duration_seconds": 60.0, "source_size_bytes": 1000}
+                for index in range(len(children))
+            ],
+        )
+        now = web_app._now_iso()
+        base = {
+            "prefix": "tv/show",
+            "manifest_path": str(manifest_path),
+            "item_count": 1,
+            "saved_profile_path": None,
+            "last_host": {},
+            "notes": "",
+            "bypass_schedule": False,
+            "attempt_count": 1,
+            "process_pid": None,
+            "leased_at": None,
+            "lease_expires_at": None,
+            "heartbeat_at": None,
+            "worker_id": None,
+            "retry_not_before": None,
+            "waiting_reason": None,
+            "terminal_reason": None,
+            "last_failure_at": None,
+            "host_cooldown_until": None,
+            "created_at": now,
+            "started_at": now,
+            "finished_at": None,
+            "updated_at": now,
+        }
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(
+                connection,
+                {
+                    **base,
+                    "job_id": "folder-breakdown",
+                    "job_kind": "folder",
+                    "parent_job_id": None,
+                    "status": "needs_attention",
+                    "manifest_indexes": None,
+                    "item_count": len(children),
+                    "host": {},
+                    "error": None,
+                    "last_failure_kind": None,
+                },
+            )
+            for index, (status, error, failure_kind) in enumerate(children):
+                save_encode_job(
+                    connection,
+                    {
+                        **base,
+                        "job_id": f"breakdown-shard-{index}",
+                        "job_kind": "shard",
+                        "parent_job_id": "folder-breakdown",
+                        "status": status,
+                        "manifest_indexes": [index],
+                        "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
+                        "error": error,
+                        "last_failure_kind": failure_kind or ("deterministic" if error else None),
+                        "progress": {"current_item_rel_path": f"tv/show/episode-{index}.mkv"},
+                    },
+                )
+            parent = load_encode_job(connection, "folder-breakdown")
+            assert parent is not None
+            aggregated = encode_runtime.aggregate_encode_parent_job(
+                connection,
+                parent,
+                web_app._encode_queue_runtime_deps(),
+            )
+
+        breakdown = {group["reason"]: group for group in aggregated["unfinished_breakdown"]}
+        self.assertEqual(
+            {reason: group["count"] for reason, group in breakdown.items()},
+            {
+                "quality_floor_size_conflict": 2,
+                "controller_database_busy": 1,
+                "stopped": 1,
+                "retrying": 1,
+            },
+        )
+        self.assertEqual(
+            breakdown["quality_floor_size_conflict"]["items"],
+            ["tv/show/episode-1.mkv", "tv/show/episode-2.mkv"],
+        )
+        self.assertEqual(aggregated["unfinished_breakdown"][0]["reason"], "quality_floor_size_conflict")
+        self.assertEqual(aggregated["retrying_shard_count"], 1)
+
     def test_aggregate_encode_parent_job_stays_running_while_other_shards_need_attention(self) -> None:
         manifest_path = self._write_manifest(
             "manifest-parent-mixed-shards.json",

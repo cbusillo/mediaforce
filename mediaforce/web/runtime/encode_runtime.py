@@ -824,8 +824,68 @@ def aggregate_encode_parent_job(
         "completed_shard_count": len(completed_children),
         "shard_count": len(children),
         "recoverable_item_count": recoverable_item_count,
+        "retrying_shard_count": sum(1 for child in children if str(child.get("status") or "") == "retry_backoff"),
+        "unfinished_breakdown": _unfinished_child_breakdown(children),
     }
     return aggregated
+
+
+_UNFINISHED_REASON_LABELS = {
+    "retrying": "still retrying",
+    "stopped": "stopped",
+    "quality_floor_size_conflict": "size goal below quality floor",
+    "final_size_target_miss": "outside size limit",
+    "controller_database_busy": "controller database busy",
+    "storage_io": "storage error",
+    "host_unavailable": "computer unavailable",
+    "ssh_transport": "connection failed",
+    "needs_review": "need review",
+}
+_UNFINISHED_BREAKDOWN_ITEM_LIMIT = 5
+
+
+def _unfinished_child_reason(child: Mapping[str, Any]) -> str:
+    status = str(child.get("status") or "")
+    if status == "retry_backoff":
+        return "retrying"
+    if status == "stopped":
+        return "stopped"
+    analysis_kind = str(object_dict(object_dict(child.get("progress")).get("failure_analysis")).get("kind") or "")
+    if analysis_kind in _UNFINISHED_REASON_LABELS:
+        return analysis_kind
+    error = str(child.get("error") or "")
+    # Children recorded before these failures had their own kinds still carry the original message.
+    if QUALITY_FLOOR_CONFLICT_RE.search(error):
+        return "quality_floor_size_conflict"
+    if FINAL_SIZE_MISS_RE.search(error):
+        return "final_size_target_miss"
+    if is_database_busy_failure(error):
+        return "controller_database_busy"
+    failure_kind = str(child.get("last_failure_kind") or "")
+    return failure_kind if failure_kind in _UNFINISHED_REASON_LABELS else "needs_review"
+
+
+def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group every child that has not finished by why, so one early failure does not hide the rest."""
+    groups: dict[str, dict[str, Any]] = {}
+    for child in children:
+        if str(child.get("status") or "") not in {"needs_attention", "failed", "stopped", "retry_backoff"}:
+            continue
+        reason = _unfinished_child_reason(child)
+        group = groups.setdefault(
+            reason,
+            {"reason": reason, "label": _UNFINISHED_REASON_LABELS[reason], "count": 0, "items": []},
+        )
+        group["count"] += 1
+        progress = object_dict(child.get("progress"))
+        rel_path = str(
+            object_dict(progress.get("failure_analysis")).get("item_rel_path")
+            or progress.get("current_item_rel_path")
+            or ""
+        ).strip()
+        if rel_path and len(group["items"]) < _UNFINISHED_BREAKDOWN_ITEM_LIMIT:
+            group["items"].append(rel_path)
+    return sorted(groups.values(), key=lambda group: (-int(group["count"]), str(group["reason"])))
 
 
 def encode_job_manifest_totals(
