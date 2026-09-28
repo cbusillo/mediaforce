@@ -143,6 +143,12 @@ current-run evidence. The resulting evidence and authorization decision are
 stored on the affected manifest item, and the stream budget ledger is rebuilt
 from that item-local policy.
 
+When the target-size search proves that every size inside the goal breaks the
+quality floor, that measurement is `measured_quality_floor_violation` evidence.
+The item retries with an absolute item-local goal at the smallest quality-safe
+size, up to 1.5x the original goal. A larger gap, or an unconfirmed intent,
+waits for the operator.
+
 Operator-approved measured recovery also writes only exact file overrides. The
 folder calibration policy and sibling items remain unchanged. Its saved
 recovery record carries the source, policy, intent, job, evidence, and decision

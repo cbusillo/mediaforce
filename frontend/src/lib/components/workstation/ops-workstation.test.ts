@@ -438,6 +438,39 @@ describe('Ops workstation mapping', () => {
 		});
 	});
 
+	it('lists every unfinished reason instead of only the first failure', () => {
+		const dashboard = dashboardFixture();
+		dashboard.encode_queue.recent = [];
+		dashboard.encode_queue.needs_attention = [
+			{
+				job_id: 'big-brother',
+				prefix: 'tv/Big Brother (US)',
+				status: 'needs_attention',
+				error:
+					'Final output size missed the approved target band: status=over_target, actual=2, target=1, lower=1, upper=1.',
+				unfinished_breakdown: [
+					{
+						reason: 'quality_floor_size_conflict',
+						label: 'size goal below quality floor',
+						count: 4,
+						items: []
+					},
+					{ reason: 'stopped', label: 'stopped', count: 4, items: [] },
+					{ reason: 'retrying', label: 'still retrying', count: 2, items: [] }
+				]
+			}
+		];
+		dashboard.encode_queue.needs_attention_count = 1;
+
+		const blocker = buildOpsBlockers(dashboard, hostsFixture(), null).find(
+			(item) => item.key === 'needs-attention:big-brother'
+		);
+
+		expect(blocker?.detail).toBe(
+			'10 unfinished: 4 size goal below quality floor · 4 stopped · 2 still retrying'
+		);
+	});
+
 	it('keeps terminal recent jobs visible when the explicit attention list is empty', () => {
 		const dashboard = dashboardFixture();
 		dashboard.encode_queue.needs_attention = [];

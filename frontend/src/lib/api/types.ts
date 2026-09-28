@@ -447,6 +447,13 @@ export interface EncodeFailureAnalysis {
 	item_analyses?: EncodeFailureAnalysis[];
 }
 
+export interface EncodeUnfinishedGroup {
+	reason: string;
+	label: string;
+	count: number;
+	items: string[];
+}
+
 export interface EncodeQueueJob {
 	job_id: string;
 	prefix: string;
@@ -457,6 +464,8 @@ export interface EncodeQueueJob {
 	status: string;
 	bypass_schedule?: boolean;
 	recoverable_item_count?: number;
+	retrying_shard_count?: number;
+	unfinished_breakdown?: EncodeUnfinishedGroup[];
 	host?: Record<string, unknown>;
 	error?: string | null;
 	last_failure_kind?: string | null;

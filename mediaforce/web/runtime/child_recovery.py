@@ -21,7 +21,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, is_database_busy_failure
 from mediaforce.core.db_tables import (
     encode_jobs,
     item_events,
@@ -443,7 +443,7 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if failure_kind == "unreadable_output":
         # The encode removed its own header-only output and used up its automatic retries.
         return "unreadable_output"
-    if failure_kind in {"storage_io", "stale_lease", "worker_restart"}:
+    if failure_kind in {"storage_io", "stale_lease", "worker_restart", "controller_database_busy"}:
         # The share or the controller failed and the automatic retries ran out; nothing judged the item.
         return failure_kind
     if failure_kind != "deterministic":
@@ -452,6 +452,9 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if is_storage_io_failure(error):
         # Recorded before storage errors had their own failure kind.
         return "storage_io"
+    if is_database_busy_failure(error):
+        # Recorded before controller lock contention had its own failure kind.
+        return "controller_database_busy"
     if is_vmaf_model_load_failure(error):
         # Recorded before this failure was classified as the host's: the computer could not load
         # a VMAF model, which judged nothing about the item.

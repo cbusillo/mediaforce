@@ -304,6 +304,21 @@ class ChildRecoveryTests(unittest.TestCase):
             preview = self._preview(connection, ["child-0", "child-1", "child-2"])
             self.assertEqual(preview["child_ids"], ["child-0", "child-1", "child-2"])
 
+    def test_controller_database_lock_failures_recover(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(
+                connection,
+                count=2,
+                failure_kinds=["deterministic", "controller_database_busy"],
+                errors=[
+                    "(sqlite3.OperationalError) database is locked\n[SQL: INSERT INTO encode_jobs (job_id) VALUES (?)]",
+                    "(sqlite3.OperationalError) database is locked",
+                ],
+                parent_status="needs_attention",
+            )
+            preview = self._preview(connection, ["child-0", "child-1"])
+            self.assertEqual(preview["child_ids"], ["child-0", "child-1"])
+
     def test_header_only_output_is_named_and_handed_to_retry_cleanup(self) -> None:
         staged = self.root / "staging" / "Show/Season 01/Episode 001.mkv"
         probe_error = f"Command '['/opt/homebrew/bin/ffprobe', '{staged}']' returned non-zero exit status 1."

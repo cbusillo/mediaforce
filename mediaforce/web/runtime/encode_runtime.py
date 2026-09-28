@@ -25,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
@@ -54,6 +54,7 @@ from mediaforce.tuning.compression_intent import (
     authorize_compression_change,
     compression_intent_from_item,
 )
+from mediaforce.tuning.size_goals import SizeGoalIntent, size_goal_from_policy
 from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
@@ -123,6 +124,13 @@ FINAL_SIZE_MISS_RE = re.compile(
     r"actual=(?P<actual>\d+|None), target=(?P<target>\d+|None), "
     r"lower=(?P<lower>\d+|None), upper=(?P<upper>\d+|None)\."
 )
+QUALITY_FLOOR_CONFLICT_RE = re.compile(
+    r"The approved target size conflicts with the configured quality floor "
+    r"\((?P<reason>target_band_violates_quality_floor|target_requires_crossing_quality_floor)\); "
+    r"target=(?P<target>\d+) bytes, best_reachable=(?P<best>\d+) bytes\."
+)
+# A measured quality-floor conflict may raise one item's size goal this far without an operator.
+QUALITY_FLOOR_EXCEPTION_MAX_GROWTH = 1.5
 
 
 def recover_encode_queue(
@@ -816,8 +824,68 @@ def aggregate_encode_parent_job(
         "completed_shard_count": len(completed_children),
         "shard_count": len(children),
         "recoverable_item_count": recoverable_item_count,
+        "retrying_shard_count": sum(1 for child in children if str(child.get("status") or "") == "retry_backoff"),
+        "unfinished_breakdown": _unfinished_child_breakdown(children),
     }
     return aggregated
+
+
+_UNFINISHED_REASON_LABELS = {
+    "retrying": "still retrying",
+    "stopped": "stopped",
+    "quality_floor_size_conflict": "size goal below quality floor",
+    "final_size_target_miss": "outside size limit",
+    "controller_database_busy": "controller database busy",
+    "storage_io": "storage error",
+    "host_unavailable": "computer unavailable",
+    "ssh_transport": "connection failed",
+    "needs_review": "need review",
+}
+_UNFINISHED_BREAKDOWN_ITEM_LIMIT = 5
+
+
+def _unfinished_child_reason(child: Mapping[str, Any]) -> str:
+    status = str(child.get("status") or "")
+    if status == "retry_backoff":
+        return "retrying"
+    if status == "stopped":
+        return "stopped"
+    analysis_kind = str(object_dict(object_dict(child.get("progress")).get("failure_analysis")).get("kind") or "")
+    if analysis_kind in _UNFINISHED_REASON_LABELS:
+        return analysis_kind
+    error = str(child.get("error") or "")
+    # Children recorded before these failures had their own kinds still carry the original message.
+    if QUALITY_FLOOR_CONFLICT_RE.search(error):
+        return "quality_floor_size_conflict"
+    if FINAL_SIZE_MISS_RE.search(error):
+        return "final_size_target_miss"
+    if is_database_busy_failure(error):
+        return "controller_database_busy"
+    failure_kind = str(child.get("last_failure_kind") or "")
+    return failure_kind if failure_kind in _UNFINISHED_REASON_LABELS else "needs_review"
+
+
+def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group every child that has not finished by why, so one early failure does not hide the rest."""
+    groups: dict[str, dict[str, Any]] = {}
+    for child in children:
+        if str(child.get("status") or "") not in {"needs_attention", "failed", "stopped", "retry_backoff"}:
+            continue
+        reason = _unfinished_child_reason(child)
+        group = groups.setdefault(
+            reason,
+            {"reason": reason, "label": _UNFINISHED_REASON_LABELS[reason], "count": 0, "items": []},
+        )
+        group["count"] += 1
+        progress = object_dict(child.get("progress"))
+        rel_path = str(
+            object_dict(progress.get("failure_analysis")).get("item_rel_path")
+            or progress.get("current_item_rel_path")
+            or ""
+        ).strip()
+        if rel_path and len(group["items"]) < _UNFINISHED_BREAKDOWN_ITEM_LIMIT:
+            group["items"].append(rel_path)
+    return sorted(groups.values(), key=lambda group: (-int(group["count"]), str(group["reason"])))
 
 
 def encode_job_manifest_totals(
@@ -1158,6 +1226,21 @@ def _encode_failure_analysis(
             }
         )
         return _aggregate_quality_failure_analysis(indexes, [final_size_analysis])
+    floor_analysis = _quality_floor_conflict_analysis(error_message)
+    if floor_analysis is not None:
+        valid_indexes = [index for index in indexes if 0 <= index < len(manifest_items)]
+        if len(valid_indexes) != 1:
+            return None
+        index = valid_indexes[0]
+        item = manifest_items[index]
+        floor_analysis.update(
+            {
+                "manifest_index": index,
+                "manifest_indexes": [index],
+                "item_rel_path": str(item.get("rel_path") or item.get("source_path") or ""),
+            }
+        )
+        return {**floor_analysis, "item_analyses": [dict(floor_analysis)]}
     item_analyses: list[dict[str, Any]] = []
     for index in indexes:
         if index < 0 or index >= len(manifest_items):
@@ -1217,6 +1300,39 @@ def _final_size_failure_analysis(error_message: str) -> dict[str, Any] | None:
             "upper_bound_bytes": upper,
         },
         "summary": summary,
+    }
+
+
+def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | None:
+    """The search measured that every size inside the goal breaks the quality floor.
+
+    The intent contract lets that measurement authorize a bounded, item-local size exception, so the
+    item retries at the smallest quality-safe size instead of waiting for an operator.
+    """
+    match = QUALITY_FLOOR_CONFLICT_RE.search(error_message)
+    if match is None:
+        return None
+    target = int(match.group("target"))
+    best = int(match.group("best"))
+    if target <= 0 or best <= target:
+        return None
+    within_bound = best <= target * QUALITY_FLOOR_EXCEPTION_MAX_GROWTH
+    return {
+        "kind": "quality_floor_size_conflict",
+        "reason": match.group("reason"),
+        "retry_strategy": "auto_raise_target" if within_bound else "needs_operator_approval",
+        "auto_retry_allowed": within_bound,
+        "target_size_bytes": target,
+        "proposed_target_size_bytes": best,
+        "summary": (
+            "Every size inside the goal broke the quality floor, so this item retries at the smallest "
+            "quality-safe size as a recorded item-local exception."
+            if within_bound
+            else (
+                f"The smallest quality-safe size is more than {QUALITY_FLOOR_EXCEPTION_MAX_GROWTH:g}x the goal. "
+                "Choose a fresh size or compression goal for this item before retrying."
+            )
+        ),
     }
 
 
@@ -1311,6 +1427,8 @@ def _aggregate_quality_failure_analysis(
 def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, Any] | None) -> bool:
     if not analysis or not bool(analysis.get("auto_retry_allowed")):
         return False
+    if str(analysis.get("retry_strategy") or "") == "auto_raise_target":
+        return _apply_quality_floor_target_retry(job, analysis)
     if str(analysis.get("retry_strategy") or "") != "auto_adjust_cap":
         return False
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
@@ -1394,6 +1512,103 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
             except (TypeError, ValueError):
                 return False
             manifest["items"][index] = item
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        except OSError:
+            return False
+    return True
+
+
+def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, Any]) -> bool:
+    index = int_value(analysis.get("manifest_index"))
+    proposed_bytes = int_value(analysis.get("proposed_target_size_bytes"))
+    current_bytes = int_value(analysis.get("target_size_bytes"))
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if index < 0 or proposed_bytes <= current_bytes or not manifest_path.exists():
+        return False
+    with _locked_manifest_file(manifest_path):
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        manifest_items = [object_dict(item) for item in object_list(manifest.get("items"))]
+        if index >= len(manifest_items):
+            return False
+        item = manifest_items[index]
+        policy = object_dict(item.get("resolved_policy"))
+        video_policy = dict(object_dict(policy.get("video")))
+        intent = compression_intent_from_item(item)
+        source_id = stable_source_id(item)
+        policy_hash = stable_policy_hash(policy)
+        job_id = str(job.get("id") or job.get("job_id") or "").strip() or None
+        evidence_identity = {
+            "kind": "measured_quality_floor_violation",
+            "source_id": source_id,
+            "policy_hash": policy_hash,
+            "intent_id": intent.semantic_id,
+            "job_id": job_id,
+            "reason": str(analysis.get("reason") or ""),
+            "target_size_bytes": current_bytes,
+            "proposed_target_size_bytes": proposed_bytes,
+        }
+        evidence = CompressionEvidenceRef(
+            kind="measured_quality_floor_violation",
+            evidence_id=f"ce1_{stable_json_hash(evidence_identity)[:32]}",
+            intent_id=intent.semantic_id,
+            observed_bytes=proposed_bytes,
+            source_id=source_id,
+            policy_hash=policy_hash,
+            job_id=job_id,
+        )
+        decision = authorize_compression_change(
+            intent,
+            authoritative_anchor_bytes=current_bytes,
+            candidate_bytes=proposed_bytes,
+            evidence=(evidence,),
+            source_id=source_id,
+            policy_hash=policy_hash,
+            job_id=job_id,
+        )
+        evidence_payload, decision_payload = evidence.to_payload(), decision.to_payload()
+        analysis["compression_evidence"] = evidence_payload
+        analysis["compression_authorization"] = decision_payload
+        if decision.outcome != "authorized" or decision.escalation_scope != "item":
+            analysis["auto_retry_allowed"] = False
+            analysis["retry_strategy"] = "needs_operator_approval"
+            analysis["compression_authorization_reason"] = decision.reason_code
+            analysis["summary"] = (
+                "Every size inside the goal broke the quality floor, but the saved compression goal does not "
+                "authorize a larger result automatically. Review this item before retrying."
+            )
+            return False
+        current_goal = size_goal_from_policy(video_policy)
+        exception_goal = SizeGoalIntent(
+            mode="absolute",
+            value_bytes=proposed_bytes,
+            reference_runtime_seconds=None,
+            sample_projection_tolerance_percent=current_goal.sample_projection_tolerance_percent,
+            final_output_tolerance_percent=current_goal.final_output_tolerance_percent,
+            source="quality_floor_exception",
+        )
+        runtime_seconds = float_value(item.get("duration_seconds")) or None
+        video_policy.update(exception_goal.policy_fragment(item_runtime_seconds=runtime_seconds)["video"])
+        policy["video"] = video_policy
+        item["resolved_policy"] = policy
+        item["compression_escalation"] = {
+            "schema_version": 1,
+            "scope": "item",
+            "evidence": evidence_payload,
+            "decision": decision_payload,
+        }
+        try:
+            item["stream_budget_ledger"] = resolve_stream_budget_ledger(
+                item,
+                output_container=str(item.get("output_container") or "") or None,
+                prefer_persisted=False,
+            ).to_payload()
+        except (TypeError, ValueError):
+            return False
+        manifest["items"][index] = item
         try:
             manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         except OSError:
@@ -3064,6 +3279,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "unreadable_output",
         "host_scratch",
         "storage_io",
+        "controller_database_busy",
     }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
@@ -3095,6 +3311,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
         "storage_io": "media storage read or write error",
+        "controller_database_busy": "controller database contention",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
 
@@ -3286,6 +3503,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "host_configuration"
     if is_storage_io_failure(message):
         return "storage_io"
+    if is_database_busy_failure(message):
+        return "controller_database_busy"
     if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
     if _encode_failure_is_quality_policy_failure(message):

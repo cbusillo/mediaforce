@@ -32,6 +32,17 @@ DatabaseCustodyProvider = Callable[
 ]
 
 _DATABASE_IDENTITY_PROVIDER: DatabaseIdentityProvider | None = None
+
+DATABASE_BUSY_FAILURE_MARKERS = (
+    "database is locked",
+    "database is busy",
+)
+
+
+def is_database_busy_failure(message: str) -> bool:
+    """Another controller connection held the write lock past the busy timeout; the work itself was not judged."""
+    lowered = message.lower()
+    return any(marker in lowered for marker in DATABASE_BUSY_FAILURE_MARKERS)
 _DATABASE_CUSTODY_PROVIDER: DatabaseCustodyProvider | None = None
 
 
