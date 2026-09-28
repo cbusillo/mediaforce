@@ -186,8 +186,10 @@ function promotionStatus({
 			next_offset: null,
 			promotion_readiness: {
 				applicable: true,
-				can_promote: blockerCount === 0 && !databaseTruncated && !discoveryTruncated,
-				blockers: []
+				can_promote: !databaseTruncated && !discoveryTruncated,
+				promotable_count: blockerCount > 0 ? 6 : 7,
+				blockers: [],
+				waiting: []
 			}
 		}
 	};
@@ -1538,12 +1540,12 @@ describe('season experience translation', () => {
 		).toMatchObject({ key: 'finish_blocked', label: 'Checking the season' });
 	});
 
-	it('explains exact season blockers and keeps finish unavailable', () => {
+	it('lets ready episodes finish while explaining the ones still waiting', () => {
 		const integrity = seasonPromotionIntegrity(promotionStatus({ blockerCount: 2 }));
 
 		expect(integrity).toMatchObject({
 			available: true,
-			canFinish: false,
+			canFinish: true,
 			readyCount: 6,
 			alreadyPlacedCount: 1,
 			unresolvedCount: 2,
@@ -1554,7 +1556,7 @@ describe('season experience translation', () => {
 				code: 'staged_integrity_not_started',
 				count: 2,
 				label: 'Not compressed yet',
-				nextAction: 'Compress the remaining episode before replacing the originals.'
+				nextAction: 'It will be compressed later. Nothing else waits for it.'
 			}
 		]);
 		expect(
@@ -1562,10 +1564,20 @@ describe('season experience translation', () => {
 				folder({ workflow_state: workflowState('promote') }),
 				promotionStatus({ blockerCount: 2 })
 			)
-		).toMatchObject({ key: 'finish_blocked', label: 'Season not ready' });
+		).toMatchObject({ key: 'ready_to_finish' });
 	});
 
-	it('enables whole-season finishing only for a complete unblocked inventory', () => {
+	it('keeps finish unavailable when no file is ready yet', () => {
+		const nothingReady = promotionStatus({ blockerCount: 2 });
+		nothingReady.staged_integrity!.promotion_readiness!.promotable_count = 0;
+
+		expect(seasonPromotionIntegrity(nothingReady)).toMatchObject({
+			canFinish: false,
+			readyCount: 0
+		});
+	});
+
+	it('enables finishing for a complete inventory with ready files', () => {
 		const integrity = seasonPromotionIntegrity(promotionStatus());
 
 		expect(integrity).toMatchObject({
@@ -1614,28 +1626,30 @@ describe('season experience translation', () => {
 		});
 	});
 
-	it('blocks finishing when staged episodes do not share the approved settings', () => {
+	it('explains files made under settings that were never approved without blocking the rest', () => {
 		const mixedPolicyStatus = promotionStatus();
 		mixedPolicyStatus.staged_integrity!.promotion_readiness = {
 			applicable: true,
-			can_promote: false,
-			blockers: [
+			can_promote: true,
+			promotable_count: 5,
+			blockers: [],
+			waiting: [
 				{
-					code: 'season_policy_mixed',
-					count: 8,
-					next_action: 'recreate_outputs_with_one_policy'
+					code: 'season_policy_not_approved',
+					count: 2,
+					next_action: 'approve_matching_policy_or_recreate_outputs'
 				}
 			]
 		};
 
 		const integrity = seasonPromotionIntegrity(mixedPolicyStatus);
 
-		expect(integrity).toMatchObject({ canFinish: false, unresolvedCount: 0 });
+		expect(integrity).toMatchObject({ canFinish: true, readyCount: 5 });
 		expect(integrity.blockers).toContainEqual({
-			code: 'season_policy_mixed',
-			count: 8,
-			label: 'Mixed season settings',
-			nextAction: 'Make the affected episodes with one coherent approved setup.'
+			code: 'season_policy_not_approved',
+			count: 2,
+			label: 'Output does not match approval',
+			nextAction: 'Approve matching settings or make the affected episodes again.'
 		});
 	});
 
