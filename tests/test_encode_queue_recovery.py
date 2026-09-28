@@ -2775,6 +2775,18 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 self.assertEqual(kind, "storage_io")
                 self.assertTrue(encode_runtime._encode_failure_is_retryable(kind, message, job["host"]))
 
+    def test_controller_database_lock_errors_are_retryable(self) -> None:
+        job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
+        message = (
+            "(sqlite3.OperationalError) database is locked\n"
+            "[SQL: INSERT INTO staged_artifacts (library_item_id, manifest_run_id) VALUES (?, ?)]"
+        )
+
+        kind = encode_runtime._classify_encode_failure(RuntimeError(message), job)
+
+        self.assertEqual(kind, "controller_database_busy")
+        self.assertTrue(encode_runtime._encode_failure_is_retryable(kind, message, job["host"]))
+
     def test_quality_temp_setup_timeout_is_ssh_transport_for_remote_host(self) -> None:
         job = {
             "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},

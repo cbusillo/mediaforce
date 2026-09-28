@@ -25,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.web.runtime.controller_storage_recovery import controller_storage_admission_issue
 from mediaforce.hosts.mount_runtime import finder_mount_roots_for_paths
-from mediaforce.core.db import DBClient, open_db
+from mediaforce.core.db import DBClient, is_database_busy_failure, open_db
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_items
@@ -3064,6 +3064,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "unreadable_output",
         "host_scratch",
         "storage_io",
+        "controller_database_busy",
     }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
@@ -3095,6 +3096,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
         "storage_io": "media storage read or write error",
+        "controller_database_busy": "controller database contention",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
 
@@ -3286,6 +3288,8 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "host_configuration"
     if is_storage_io_failure(message):
         return "storage_io"
+    if is_database_busy_failure(message):
+        return "controller_database_busy"
     if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
         return "deterministic"
     if _encode_failure_is_quality_policy_failure(message):
