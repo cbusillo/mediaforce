@@ -20176,15 +20176,15 @@ raise SystemExit(0)
                         "progress": {"current_item_rel_path": f"tv/show/episode-{index}.mkv"},
                     },
                 )
-            parent = load_encode_job(connection, "folder-breakdown")
-            assert parent is not None
-            aggregated = encode_runtime.aggregate_encode_parent_job(
-                connection,
-                parent,
-                web_app._encode_queue_runtime_deps(),
-            )
+            child = load_encode_job(connection, "breakdown-shard-5")
+            assert child is not None
+            encode_runtime.sync_encode_job_parent(connection, child, web_app._encode_queue_runtime_deps())
+            # The dashboard lists the parent from its saved row, so read it back the same way.
+            stored = load_encode_job(connection, "folder-breakdown")
+            assert stored is not None
+            progress = object_dict(stored.get("progress"))
 
-        breakdown = {group["reason"]: group for group in aggregated["unfinished_breakdown"]}
+        breakdown = {group["reason"]: group for group in progress["unfinished_breakdown"]}
         self.assertEqual(
             {reason: group["count"] for reason, group in breakdown.items()},
             {
@@ -20198,8 +20198,8 @@ raise SystemExit(0)
             breakdown["quality_floor_size_conflict"]["items"],
             ["tv/show/episode-1.mkv", "tv/show/episode-2.mkv"],
         )
-        self.assertEqual(aggregated["unfinished_breakdown"][0]["reason"], "quality_floor_size_conflict")
-        self.assertEqual(aggregated["retrying_shard_count"], 1)
+        self.assertEqual(progress["unfinished_breakdown"][0]["reason"], "quality_floor_size_conflict")
+        self.assertEqual(progress["retrying_shard_count"], 1)
 
     def test_aggregate_encode_parent_job_stays_running_while_other_shards_need_attention(self) -> None:
         manifest_path = self._write_manifest(

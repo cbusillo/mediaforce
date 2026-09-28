@@ -614,7 +614,7 @@ export function encodeJobProgress(job: EncodeQueueJob): string {
 }
 
 export function encodeUnfinishedBreakdownCopy(job: EncodeQueueJob): string {
-	const groups = (job.unfinished_breakdown ?? []).filter((group) => group.count > 0);
+	const groups = (job.progress?.unfinished_breakdown ?? []).filter((group) => group.count > 0);
 	const total = groups.reduce((sum, group) => sum + group.count, 0);
 	if (total <= 1) return '';
 	const parts = groups.map((group) => `${group.count} ${group.label}`);

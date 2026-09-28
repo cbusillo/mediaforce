@@ -448,16 +448,18 @@ describe('Ops workstation mapping', () => {
 				status: 'needs_attention',
 				error:
 					'Final output size missed the approved target band: status=over_target, actual=2, target=1, lower=1, upper=1.',
-				unfinished_breakdown: [
-					{
-						reason: 'quality_floor_size_conflict',
-						label: 'size goal below quality floor',
-						count: 4,
-						items: []
-					},
-					{ reason: 'stopped', label: 'stopped', count: 4, items: [] },
-					{ reason: 'retrying', label: 'still retrying', count: 2, items: [] }
-				]
+				progress: {
+					unfinished_breakdown: [
+						{
+							reason: 'quality_floor_size_conflict',
+							label: 'size goal below quality floor',
+							count: 4,
+							items: []
+						},
+						{ reason: 'stopped', label: 'stopped', count: 4, items: [] },
+						{ reason: 'retrying', label: 'still retrying', count: 2, items: [] }
+					]
+				}
 			}
 		];
 		dashboard.encode_queue.needs_attention_count = 1;
