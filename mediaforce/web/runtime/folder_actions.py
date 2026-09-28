@@ -21,6 +21,7 @@ from mediaforce.encoding.encode_queue import ACTIVE_ENCODE_JOB_STATUSES, list_ch
     load_active_encode_jobs_for_prefix, load_latest_terminal_encode_job_for_prefix
 from mediaforce.encoding.free_space import encode_reserve_preflight
 from mediaforce.encoding.staging import partial_output_path
+from mediaforce.execution import HeldFile, PromotionResult
 from mediaforce.library.media_scopes import MediaScope, is_tv_season_prefix, path_matches_scope, resolve_media_scope, \
     scope_descendant_filter, scope_rel_path_filter
 from mediaforce.library.movie_workflow import classify_movie_path, movie_item_included
@@ -330,7 +331,7 @@ class PromoteManifestItemsFn(Protocol):
             indexes: list[int],
             *,
             force: bool,
-    ) -> list[Path]:
+    ) -> PromotionResult:
         ...
 
 
@@ -1334,13 +1335,14 @@ def validate_folder_outputs_action(
                     else "No staged encoded files are ready to validate for this folder."
                 ),
             }
-        inaccessible_response = _inaccessible_staged_item_response(
-            items=items,
-            action="validate",
-            zero_count_key="validated_count",
-        )
-        if inaccessible_response is not None:
-            return inaccessible_response
+        ready_items = items
+        items, held = _hold_unreachable_staged_items(ready_items)
+        if not items:
+            return _inaccessible_staged_item_response(
+                items=ready_items,
+                action="validate",
+                zero_count_key="validated_count",
+            ) or {"ok": False, "message": "No staged encoded files are ready to validate for this folder."}
         manifest: ManifestPayload = {"items": items}
         _end_scope_check_snapshot(connection)
         results: list[ActionPayload] = []
@@ -1363,6 +1365,7 @@ def validate_folder_outputs_action(
         message = f"Validated {passed_count} files. All staged outputs passed."
     if busy_count:
         message += f" {busy_count} still being made will be checked when they finish."
+    message += _held_files_copy(held, verb="checked")
     return {
         "ok": True,
         "message": message,
@@ -1370,6 +1373,7 @@ def validate_folder_outputs_action(
         "failed_count": failed_count,
         "item_count": len(results),
         "busy_count": busy_count,
+        "held": [held_file.to_payload() for held_file in held],
     }
 
 
@@ -1449,33 +1453,103 @@ def promote_folder_outputs_action(
                 "waiting": waiting,
                 "promoted_count": 0,
             }
-        inaccessible_response = _inaccessible_staged_item_response(
-            items=items,
-            action="promote",
-            zero_count_key="promoted_count",
-        )
-        if inaccessible_response is not None:
-            return inaccessible_response
-        promotion_conflict = _promotion_conflict_response(config, items)
-        if promotion_conflict is not None:
-            return promotion_conflict
-        manifest: ManifestPayload = {"items": items}
-        _end_scope_check_snapshot(connection)
-        promoted_paths = promote_manifest_items_fn(connection, config, manifest, list(range(len(items))), force=False)
+        items, held = _hold_unreachable_staged_items(items)
+        items, conflict_held = _hold_conflicting_destinations(config, items)
+        held.extend(conflict_held)
+        promoted_paths: list[Path] = []
+        if items:
+            manifest: ManifestPayload = {"items": items}
+            _end_scope_check_snapshot(connection)
+            result = promote_manifest_items_fn(connection, config, manifest, list(range(len(items))), force=False)
+            promoted_paths = result.promoted_paths
+            held.extend(result.held)
     promoted_count = len(promoted_paths)
-    target_prefix = _promotion_refresh_prefix(normalized_prefix, scope, items, promoted_paths)
-    file_label = "file" if promoted_count == 1 else "files"
-    message = f"Promoted {promoted_count} validated {file_label} into the library."
+    failed_count = sum(1 for held_file in held if not held_file.waiting)
     waiting_count = sum(int_value(entry.get("count")) for entry in waiting)
+    file_label = "file" if promoted_count == 1 else "files"
+    unsafe_count = sum(1 for held_file in held if held_file.unsafe)
+    message = f"Published {promoted_count} {file_label} into the library." if promoted_count else "Nothing was published."
+    message += _held_files_copy(held, verb="published")
     if waiting_count:
         message += f" {waiting_count} other {'file is' if waiting_count == 1 else 'files are'} not ready yet."
-    return {
-        "ok": True,
+    response: ActionPayload = {
+        "ok": promoted_count > 0 and not unsafe_count,
         "message": message,
         "promoted_count": promoted_count,
-        "target_prefix": target_prefix,
+        "failed_count": failed_count,
+        "unsafe_count": unsafe_count,
         "waiting": waiting,
+        "held": [held_file.to_payload() for held_file in held],
     }
+    if promoted_count:
+        response["target_prefix"] = _promotion_refresh_prefix(normalized_prefix, scope, items, promoted_paths)
+    else:
+        response["code"] = "nothing_published"
+    return response
+
+
+HELD_FILES_LISTED = 3
+
+
+def _held_files_copy(held: list[HeldFile], *, verb: str) -> str:
+    """One plain sentence per kind of hold, naming a few files and their reasons.
+
+    Files whose original may be out of place are always named in full, first.
+    """
+    copy = ""
+    for state, one, many, limit in (
+            ("unsafe", "1 file needs checking now", "{count} files need checking now", None),
+            ("failed", f"1 file could not be {verb}", f"{{count}} files could not be {verb}", HELD_FILES_LISTED),
+            ("waiting", "1 file will be tried again later", "{count} files will be tried again later", HELD_FILES_LISTED),
+    ):
+        group = [held_file for held_file in held if held_file.state == state]
+        if not group:
+            continue
+        shown = group if limit is None else group[:limit]
+        listed = "; ".join(f"{Path(held_file.rel_path).name}: {held_file.reason}" for held_file in shown)
+        more = f"; and {len(group) - len(shown)} more" if len(group) > len(shown) else ""
+        lead = one if len(group) == 1 else many.format(count=len(group))
+        copy += f" {lead} ({listed}{more})."
+    return copy
+
+
+def _hold_unreachable_staged_items(items: list[FolderItem]) -> tuple[list[FolderItem], list[HeldFile]]:
+    """Keep files whose finished output is reachable; hold only the others."""
+    reachable: list[FolderItem] = []
+    held: list[HeldFile] = []
+    for item in items:
+        if Path(str(item.get("staging_path") or "")).exists():
+            reachable.append(item)
+            continue
+        rel_path = str(item.get("rel_path") or item.get("source_path") or "")
+        host = str(item.get("staging_host_label") or item.get("staging_host_key") or "").strip()
+        if host:
+            held.append(HeldFile(rel_path, f"Its finished file is on {host}, which cannot be reached now", waiting=True))
+        else:
+            held.append(HeldFile(rel_path, "Its finished file is missing", waiting=False))
+    return reachable, held
+
+
+def _hold_conflicting_destinations(
+        config: MediaforceConfig,
+        items: list[FolderItem],
+) -> tuple[list[FolderItem], list[HeldFile]]:
+    """Keep files with a clear library destination; hold only the files in a conflict."""
+    conflict = _promotion_conflict_response(config, items)
+    if conflict is None:
+        return items, []
+    reasons: dict[str, str] = {}
+    for entry in object_list(conflict.get("conflicts")):
+        entry = object_dict(entry)
+        reason = (
+            "Another file in this folder would land in the same place"
+            if entry.get("kind") == "duplicate_destination"
+            else "A different file is already at its place in the library"
+        )
+        for rel_path in object_list(entry.get("rel_paths")):
+            reasons.setdefault(str(rel_path), reason)
+    clear = [item for item in items if str(item.get("rel_path") or item.get("source_path")) not in reasons]
+    return clear, [HeldFile(rel_path, reason, waiting=False) for rel_path, reason in reasons.items()]
 
 
 def _promotion_refresh_prefix(

@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,9 +26,9 @@ from mediaforce.encoding.quality_search import QualitySearchPlan, \
 from mediaforce.encoding.runner import run_encode_command as _run_encode_command_impl, \
     run_streamed_remote_encode_command as _run_streamed_remote_encode_command_impl, \
     run_tracked_process as _run_tracked_process_impl
-from mediaforce.encoding.staging import finalize_output_path as _finalize_output_path_impl, \
-    probe_packet_end_seconds, promote_one_item as promote_one_item_impl, remux_container_metadata, \
-    validate_one_item as validate_one_item_impl
+from mediaforce.encoding.staging import PromotionRestoreError, PromotionWaiting, \
+    finalize_output_path as _finalize_output_path_impl, probe_packet_end_seconds, \
+    promote_one_item as promote_one_item_impl, remux_container_metadata, validate_one_item as validate_one_item_impl
 from mediaforce.encoding.streams import ProductionStreamPlan, _audio_codec as _audio_codec_impl, _check as _check_impl, \
     _format_crf as _format_crf_impl, _opus_bitrate as _opus_bitrate_impl, \
     _opus_layout_filter as _opus_layout_filter_impl, _parse_bitrate_text as _parse_bitrate_text_impl, \
@@ -360,7 +361,12 @@ def validate_manifest_items(
     results = []
     for index in indexes:
         item = manifest["items"][index]
-        result = validate_one_item(connection, config, item)
+        try:
+            result = validate_one_item(connection, config, item)
+        except Exception as exc:  # noqa: BLE001 - one file's failure is reported and must not stop the others.
+            # Drop this file's uncommitted writes so they, and the write lock, do not carry into the next file.
+            connection.rollback()
+            result = {"passed": False, "error": str(exc) or type(exc).__name__}
         results.append(result)
     return results
 
@@ -380,18 +386,72 @@ def validate_one_item(connection: DBClient, config: MediaforceConfig, item: dict
     )
 
 
+LOGGER = logging.getLogger(__name__)
+PROMOTION_FAILED_REASON = "Mediaforce could not put it in place, so the original was left where it was"
+PROMOTION_RESTORE_FAILED_REASON = (
+    "Publishing failed and Mediaforce could not put its files back. Check this file now: "
+    "its original may be in the cleanup folder or the working folder"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class HeldFile:
+    rel_path: str
+    reason: str
+    waiting: bool
+    # The original may be out of place, so the owner must see this file whatever else is listed.
+    unsafe: bool = False
+
+    @property
+    def state(self) -> str:
+        return "unsafe" if self.unsafe else "waiting" if self.waiting else "failed"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"rel_path": self.rel_path, "reason": self.reason, "state": self.state}
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionResult:
+    promoted_paths: list[Path]
+    held: list[HeldFile]
+
+
 def promote_manifest_items(
         connection: DBClient,
         config: MediaforceConfig,
         manifest: dict[str, Any],
         indexes: list[int],
         force: bool,
-) -> list[Path]:
-    promoted_paths = []
-    for index in indexes:
+) -> PromotionResult:
+    """Try every file; one file that cannot be published is held with its reason and the rest continue."""
+    promoted_paths: list[Path] = []
+    held: list[HeldFile] = []
+    for position, index in enumerate(indexes):
         item = manifest["items"][index]
-        promoted_paths.append(promote_one_item(connection, config, item, force=force))
-    return promoted_paths
+        rel_path = str(item.get("rel_path") or item.get("source_path") or "")
+        try:
+            promoted_paths.append(promote_one_item(connection, config, item, force=force))
+            continue
+        except PromotionWaiting as exc:
+            held.append(HeldFile(rel_path, str(exc), waiting=True))
+        except PromotionRestoreError as exc:
+            # An original may be out of place: stop here so the owner can look before anything else moves.
+            LOGGER.error("Could not restore %s after a failed publish: %s", rel_path, exc)
+            held.append(HeldFile(rel_path, PROMOTION_RESTORE_FAILED_REASON, waiting=False, unsafe=True))
+            stopped_reason = "Not tried: publishing stopped because another file could not be put back safely."
+            held.extend(
+                HeldFile(str(manifest["items"][rest].get("rel_path") or ""), stopped_reason, waiting=True)
+                for rest in indexes[position + 1:]
+            )
+            break
+        except FileExistsError:
+            held.append(HeldFile(rel_path, "A different file is already at its place in the library.", waiting=False))
+        except Exception as exc:  # noqa: BLE001 - one file's failure is reported and must not stop the others.
+            LOGGER.warning("Could not publish %s: %s", rel_path, exc)
+            held.append(HeldFile(rel_path, PROMOTION_FAILED_REASON, waiting=False))
+        # A file refused before its own writes must not leave a transaction open for the next one.
+        connection.rollback()
+    return PromotionResult(promoted_paths=promoted_paths, held=held)
 
 
 def promote_one_item(connection: DBClient, config: MediaforceConfig, item: dict[str, Any], *,

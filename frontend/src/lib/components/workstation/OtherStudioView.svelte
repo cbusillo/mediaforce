@@ -11,7 +11,7 @@
 		OtherMember
 	} from '$lib/api/types';
 	import { folderRoutePath, folderRoutePrefix } from '$lib/folder-display';
-	import { folderActionResponseCopy } from '$lib/folders/studio';
+	import { folderActionResponseCopy, type HeldFileCopyInput } from '$lib/folders/studio';
 	import { formatFileSize } from '$lib/format';
 	import { operatorStateCopy, safeOperatorErrorCopy } from '$lib/operator-copy';
 	import { reviewAvailability } from '$lib/review/availability';
@@ -375,6 +375,7 @@
 				failed_count?: number | null;
 				item_count?: number | null;
 				promoted_count?: number | null;
+				held?: HeldFileCopyInput[] | null;
 			}>(`/api/folders/${folderRoutePrefix(folder.prefix)}/${action}`, {
 				scope_membership_token: scopeMembershipToken()
 			});

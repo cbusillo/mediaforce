@@ -7,6 +7,7 @@ from unittest.mock import patch
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_items
+from mediaforce.execution import PromotionResult
 from mediaforce.library.candidate_selection import project_candidates, workflow_eligibility
 from mediaforce.library.other_library import load_other_library_payload, load_other_scope_payload, \
     other_group_scope_for_rel_path, other_scope_action_blocker
@@ -244,7 +245,7 @@ class OtherWorkflowTests(unittest.TestCase):
             config,
             "other/Delivery",
             load_folder_staged_items_fn=lambda *_args, **_kwargs: [item],
-            promote_manifest_items_fn=lambda *_args, **_kwargs: [source_path.with_suffix(".mkv")],
+            promote_manifest_items_fn=lambda *_args, **_kwargs: PromotionResult([source_path.with_suffix(".mkv")], []),
         )
 
         self.assertEqual(validated["validated_count"], 1)
@@ -297,7 +298,7 @@ class OtherWorkflowTests(unittest.TestCase):
             config,
             "other/Collection",
             load_folder_staged_items_fn=lambda *_args, **_kwargs: [],
-            promote_manifest_items_fn=lambda *_args, **_kwargs: [],
+            promote_manifest_items_fn=lambda *_args, **_kwargs: PromotionResult([], []),
             validate_scope_action=validate_scope,
         )
 
