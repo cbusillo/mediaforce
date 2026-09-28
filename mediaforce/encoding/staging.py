@@ -236,9 +236,17 @@ def validate_one_item(
     final_upper_bound_bytes = int_value(resolved_size_goal.get("final_upper_bound_bytes"))
     if final_lower_bound_bytes > 0 and final_upper_bound_bytes >= final_lower_bound_bytes:
         compression_intent = compression_intent_from_item(item)
-        accepted_under_target = (
-            staged_size_bytes < final_lower_bound_bytes
-            and compression_intent.accepts_under_target_result
+        quality_score = float_value(row.get("quality_score"))
+        quality_target = float_value(row.get("quality_target"))
+        quality_target_met = quality_score > 0 and quality_target > 0 and quality_score >= quality_target
+        # A size goal is a budget: coming in under it is fine once measured quality met its target.
+        accepted_under_target = staged_size_bytes < final_lower_bound_bytes and (
+            compression_intent.accepts_under_target_result
+            or (
+                not compression_intent.requires_confirmation
+                and compression_intent.level == "balanced"
+                and quality_target_met
+            )
         )
         validation["final_size_goal"] = {
             "target_size_bytes": int_value(resolved_size_goal.get("target_size_bytes")) or None,
@@ -246,6 +254,7 @@ def validate_one_item(
             "upper_bound_bytes": final_upper_bound_bytes,
             "tolerance_percent": float_value(resolved_size_goal.get("final_output_tolerance_percent")) or None,
             "accepted_under_target": accepted_under_target,
+            "quality_target_met": quality_target_met,
         }
         check(
             validation,

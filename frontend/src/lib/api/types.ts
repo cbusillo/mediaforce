@@ -1737,7 +1737,9 @@ export interface StagedIntegrityPayload {
 	promotion_readiness?: {
 		applicable: boolean;
 		can_promote: boolean;
+		promotable_count?: number;
 		blockers: StagedIntegrityBlocker[];
+		waiting?: StagedIntegrityBlocker[];
 	};
 }
 

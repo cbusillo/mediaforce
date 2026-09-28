@@ -28,13 +28,13 @@
 			<strong>{integrity.alreadyPlacedCount}</strong>
 		</div>
 		<div>
-			<span>File blockers</span>
+			<span>Not ready yet</span>
 			<strong>{integrity.unresolvedCount}</strong>
 		</div>
 	</div>
 
 	{#if integrity.blockers.length > 0}
-		<div class="integrity-blockers" aria-label="Season blockers" role="group">
+		<div class="integrity-blockers" aria-label="Files not ready yet" role="group">
 			{#each integrity.blockers as blocker, index (`${blocker.code}-${index}`)}
 				<div class="integrity-blocker">
 					<strong>{blocker.count} × {blocker.label}</strong>
@@ -145,6 +145,17 @@
 
 	.integrity-blocker:last-child {
 		border-bottom: 0;
+	}
+	/* Beside ready files these reasons are information, not an error. */
+	.integrity-panel:not(.integrity-panel--blocked) .integrity-blockers {
+		border-color: var(--mf-line-muted);
+	}
+	.integrity-panel:not(.integrity-panel--blocked) .integrity-blocker {
+		background: var(--mf-bg-strip);
+		border-bottom-color: var(--mf-line-muted);
+	}
+	.integrity-panel:not(.integrity-panel--blocked) .integrity-blocker strong {
+		color: var(--mf-wait-fg);
 	}
 
 	.integrity-blocker strong {
