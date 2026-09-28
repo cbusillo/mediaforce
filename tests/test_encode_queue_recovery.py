@@ -2001,6 +2001,73 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             self.assertEqual(updated["status"], "needs_attention")
             self.assertEqual(updated["terminal_reason"], "deterministic")
 
+    def test_unrecognised_encoder_log_is_unknown_but_measured_failures_stay_certain(self) -> None:
+        job = {"host": {"key": "local", "label": "Local", "mode": "local"}}
+        raw_log = "[ERROR ab_av1] encode exited: signal 9\nsvt-av1: out of range sequence header"
+
+        self.assertEqual(encode_runtime._classify_encode_failure(quality.QualitySearchError(raw_log), job), "unknown")
+        self.assertEqual(
+            encode_runtime._classify_encode_failure(
+                quality.QualitySearchError("crf 51 VMAF 86.93 (16%)\nError: Failed to find a suitable crf"), job
+            ),
+            "deterministic",
+        )
+        self.assertEqual(
+            encode_runtime._classify_encode_failure(
+                RuntimeError(
+                    "Final output size missed the approved target band: status=over_target, "
+                    "actual=9, target=5, lower=4, upper=6."
+                ),
+                job,
+            ),
+            "deterministic",
+        )
+
+    def _job_failing_with(self, job_id: str, *, attempt_count: int) -> dict[str, Any]:
+        source_path = self._create_source_file(f"{job_id}.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                f"{job_id}.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{job_id}.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id=job_id,
+                manifest_name=f"{job_id}.json",
+                host={"key": "local", "label": "Local", "mode": "local"},
+                status="running",
+                attempt_count=attempt_count,
+            )
+            job = load_encode_job(connection, job_id)
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="unknown",
+                error_message="[ERROR ab_av1] encode exited: signal 9",
+            )
+            updated = load_encode_job(connection, job_id)
+            assert updated is not None
+            return updated
+
+    def test_unknown_failure_retries_with_a_plain_message_and_keeps_the_raw_log(self) -> None:
+        updated = self._job_failing_with("job-unknown-first", attempt_count=1)
+
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertEqual(updated["error"], encode_runtime.UNKNOWN_ENCODE_FAILURE_MESSAGE)
+        self.assertIn("does not recognise", updated["waiting_reason"])
+        self.assertEqual(updated["progress"]["failure_detail"], "[ERROR ab_av1] encode exited: signal 9")
+
+    def test_unknown_failure_reaches_the_owner_only_after_its_retries(self) -> None:
+        updated = self._job_failing_with("job-unknown-last", attempt_count=web_app.ENCODE_JOB_MAX_ATTEMPTS)
+
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
+        self.assertEqual(updated["error"], encode_runtime.UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE)
+        self.assertEqual(updated["progress"]["failure_detail"], "[ERROR ab_av1] encode exited: signal 9")
+
     def test_quality_policy_near_miss_raises_size_cap_and_retries(self) -> None:
         source_path = self._create_source_file("episode-near-miss.mkv")
         staging_path = self._staging_path("episode-near-miss.mkv")
@@ -2906,13 +2973,13 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "ssh_transport")
 
-    def test_quality_temp_setup_plain_failure_stays_deterministic(self) -> None:
+    def test_quality_temp_setup_plain_failure_retries_as_unknown(self) -> None:
         job = {
             "host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"},
         }
         exc = quality.QualityTempSetupError("No writable quality temp root available")
 
-        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "unknown")
 
     def test_quality_search_failure_message_is_deterministic_before_ssh_retry(self) -> None:
         job = {
@@ -3066,7 +3133,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         }
         exc = RuntimeError("[Errno 60] Operation timed out: '/Volumes/media'")
 
-        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
+        self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "unknown")
 
     def test_mount_recovery_failure_preserves_host_retry_classification(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}

@@ -118,6 +118,14 @@ class EncodeQueueRuntimeDeps:
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
 SCHEDULE_CLOSE_ERROR_MESSAGE = "Encode host schedule window closed."
+UNKNOWN_ENCODE_FAILURE_MESSAGE = (
+    "The encode stopped with an error Mediaforce does not recognise. It will be tried again."
+)
+UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE = (
+    "The encode kept stopping with an error Mediaforce does not recognise, so it needs you. "
+    "The error details are saved with this job."
+)
+UNKNOWN_FAILURE_DETAIL_MAX_CHARS = 4000
 FINAL_SIZE_MISS_RE = re.compile(
     r"Final output size missed the approved target band: "
     r"status=(?P<status>[a-z_]+), "
@@ -1113,6 +1121,9 @@ def transition_encode_job_failure(
         error_message,
         assigned_host,
     )
+    # An unrecognised error is often a raw tool log: the owner sees a plain summary, and the
+    # raw text stays on the job for diagnosis.
+    owner_error = UNKNOWN_ENCODE_FAILURE_MESSAGE if failure_kind == "unknown" else error_message
     job.update(
         {
             "process_pid": None,
@@ -1123,7 +1134,7 @@ def transition_encode_job_failure(
             "schedule_close_deadline_at": None,
             "last_failure_kind": failure_kind,
             "last_failure_at": now_iso,
-            "error": error_message,
+            "error": owner_error,
             "last_host": _encode_failure_last_host_payload(
                 assigned_host,
                 previous_last_host=previous_last_host,
@@ -1158,6 +1169,7 @@ def transition_encode_job_failure(
             }
         )
         _attach_failure_analysis_to_progress(job, failure_analysis)
+        _attach_unknown_failure_detail(job, failure_kind, error_message)
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
         connection.commit()
@@ -1172,6 +1184,8 @@ def transition_encode_job_failure(
         return
 
     terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
+    if failure_kind == "unknown":
+        job["error"] = UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE
     job.update(
         {
             "status": "needs_attention",
@@ -1184,9 +1198,18 @@ def transition_encode_job_failure(
         }
     )
     _attach_failure_analysis_to_progress(job, failure_analysis)
+    _attach_unknown_failure_detail(job, failure_kind, error_message)
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
     connection.commit()
+
+
+def _attach_unknown_failure_detail(job: dict[str, Any], failure_kind: str, error_message: str) -> None:
+    if failure_kind != "unknown":
+        return
+    progress = object_dict(job.get("progress"))
+    progress["failure_detail"] = error_message[-UNKNOWN_FAILURE_DETAIL_MAX_CHARS:]
+    job["progress"] = progress
 
 
 def _encode_failure_analysis(
@@ -3284,6 +3307,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "host_scratch",
         "storage_io",
         "controller_database_busy",
+        "unknown",
     }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
@@ -3316,6 +3340,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_scratch": "scratch folder problem on the computer",
         "storage_io": "media storage read or write error",
         "controller_database_busy": "controller database contention",
+        "unknown": "an error Mediaforce does not recognise",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
 
@@ -3509,15 +3534,34 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "storage_io"
     if is_database_busy_failure(message):
         return "controller_database_busy"
-    if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
-        return "deterministic"
-    if _encode_failure_is_quality_policy_failure(message):
+    if _encode_failure_has_measured_evidence(str(exc)):
         return "deterministic"
     if _encode_failure_is_ssh_transport(message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:
         return "deterministic"
-    return "deterministic"
+    if _encode_failure_holds_output_for_review(str(exc)):
+        return "deterministic"
+    # Nothing recognised it, so it has not been shown to be certain: retry before asking the owner.
+    return "unknown"
+
+
+def _encode_failure_holds_output_for_review(error_message: str) -> bool:
+    """A finished output ffprobe cannot read is kept for repair; a retry would delete it."""
+    return (
+        error_message.startswith("Command '[")
+        and "ffprobe" in error_message
+        and "returned non-zero exit status" in error_message
+    )
+
+
+def _encode_failure_has_measured_evidence(error_message: str) -> bool:
+    """The failure carries a measured result that the failure analysis can act on."""
+    return (
+        _encode_failure_is_quality_policy_failure(error_message.lower())
+        or FINAL_SIZE_MISS_RE.search(error_message) is not None
+        or QUALITY_FLOOR_CONFLICT_RE.search(error_message) is not None
+    )
 
 
 def _encode_failure_is_quality_policy_failure(message: str) -> bool:

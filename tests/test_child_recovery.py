@@ -195,7 +195,7 @@ class ChildRecoveryTests(unittest.TestCase):
             self._reset_database()
 
     def test_ineligible_failure_kinds_and_statuses_are_rejected_deterministically(self) -> None:
-        cases = (("failed", "unknown"), ("failed", "deterministic_search_failure"), ("completed", "host_configuration"))
+        cases = (("failed", "containment_unproven"), ("failed", "deterministic_search_failure"), ("completed", "host_configuration"))
         for status, failure_kind in cases:
             with self.subTest(status=status, failure_kind=failure_kind), open_db(self.config.paths.db_path) as connection:
                 self._seed(connection, count=1, statuses=[status], failure_kinds=[failure_kind])
