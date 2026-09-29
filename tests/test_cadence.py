@@ -9,7 +9,10 @@ from mediaforce.core.evidence import build_evidence_envelope
 from mediaforce.encoding.cadence import (
     CADENCE_EVIDENCE_KIND,
     CadenceResolutionError,
+    accept_cadence_as_is,
     analyze_cadence,
+    cadence_as_is_eligible,
+    cadence_decision_is_stale,
     cadence_filter,
     cadence_manifest_payload,
     classify_cadence,
@@ -330,6 +333,41 @@ class CadenceTests(unittest.TestCase):
             (mostly_undetermined["classification"], mostly_undetermined["status"]),
             ("unknown", "blocked"),
         )
+
+    def test_owner_can_accept_a_fully_measured_ambiguous_file_as_is(self) -> None:
+        summary = self._measured_summary(progressive_frames=150, undetermined_frames=51)
+        self.assertEqual(summary["decision"]["classification"], "unknown")
+
+        accepted = accept_cadence_as_is(summary, source_fingerprint="fingerprint-1", accepted_at="2026-09-29T17:00:00+00:00")
+        envelope, decision = cadence_manifest_payload(accepted, source_id="src1", source_fingerprint="fingerprint-1")
+
+        self.assertEqual((accepted["decision"]["status"], accepted["decision"]["transform"]), ("resolved", "none"))
+        self.assertFalse(cadence_decision_is_stale(accepted))
+        self.assertTrue(decision["owner_accepted_as_is"])
+        self.assertIsNone(cadence_filter(decision, envelope, source_fingerprint="fingerprint-1"))
+
+    def test_as_is_acceptance_does_not_carry_over_to_a_different_source(self) -> None:
+        summary = self._measured_summary(progressive_frames=150, undetermined_frames=51)
+        accepted = accept_cadence_as_is(summary, source_fingerprint="fingerprint-1", accepted_at="2026-09-29T17:00:00+00:00")
+
+        envelope, decision = cadence_manifest_payload(accepted, source_id="src1", source_fingerprint="fingerprint-2")
+
+        self.assertEqual(decision["status"], "blocked")
+        with self.assertRaisesRegex(CadenceResolutionError, "unresolved"):
+            cadence_filter(decision, envelope, source_fingerprint="fingerprint-2")
+
+    def test_as_is_is_offered_only_for_fully_measured_files_that_barely_look_interlaced(self) -> None:
+        ambiguous = self._measured_summary(progressive_frames=150, undetermined_frames=51)
+        partly_interlaced = self._measured_summary(progressive_frames=140, tff_frames=6, undetermined_frames=55)
+        partly_measured = self._measured_summary(progressive_frames=150, undetermined_frames=51, measured_ranges=2)
+        mixed = self._measured_summary(progressive_frames=100, tff_frames=101)
+
+        self.assertTrue(cadence_as_is_eligible(ambiguous))
+        self.assertFalse(cadence_as_is_eligible(partly_interlaced))
+        self.assertFalse(cadence_as_is_eligible(partly_measured))
+        self.assertFalse(cadence_as_is_eligible(mixed))
+        with self.assertRaises(ValueError):
+            accept_cadence_as_is(partly_interlaced, source_fingerprint="fingerprint-1", accepted_at="2026-09-29T17:00:00+00:00")
 
     def test_transform_compiler_rejects_unresolved_or_mismatched_plans(self) -> None:
         tff, tff_evidence = self._backed_decision(tff_frames=190, progressive_frames=10)
@@ -653,6 +691,34 @@ class CadenceTests(unittest.TestCase):
             )
 
         run_search.assert_not_called()
+
+    @staticmethod
+    def _measured_summary(
+            *,
+            progressive_frames: int,
+            undetermined_frames: int = 0,
+            tff_frames: int = 0,
+            measured_ranges: int = 3,
+    ) -> dict[str, object]:
+        """analyze_cadence over three ranges that each report the given idet counts."""
+        stderr = (
+            f"Repeated Fields: Neither: {progressive_frames + tff_frames + undetermined_frames} Top: 0 Bottom: 0\n"
+            f"Multi frame detection: TFF: {tff_frames} BFF: 0 Progressive: {progressive_frames} "
+            f"Undetermined: {undetermined_frames}\n"
+        )
+        results = [
+            {"status": "measured" if index < measured_ranges else "timeout", "stderr": stderr}
+            for index in range(3)
+        ]
+        with patch("mediaforce.encoding.cadence.ffmpeg_binary", return_value="ffmpeg"), patch(
+            "mediaforce.encoding.cadence._ffmpeg_version",
+            return_value="ffmpeg version test",
+        ), patch("mediaforce.encoding.cadence._run_idet_range", side_effect=results):
+            return analyze_cadence(
+                Path("/tmp/ambiguous.mkv"),
+                video_stream={"field_order": "unknown", "avg_frame_rate": "24000/1001"},
+                duration_seconds=1000.0,
+            )
 
     @staticmethod
     def _analysis(**overrides: int) -> dict[str, int]:

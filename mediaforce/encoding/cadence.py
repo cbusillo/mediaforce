@@ -9,7 +9,8 @@ import subprocess
 from typing import Any, Literal, Mapping
 
 from mediaforce.core.binaries import ffmpeg_binary
-from mediaforce.core.evidence import build_evidence_envelope, evidence_envelope_valid, stable_policy_hash
+from mediaforce.core.evidence import build_evidence_envelope, evidence_envelope_valid, stable_json_hash, \
+    stable_policy_hash
 from mediaforce.core.process_control import ManagedProcessController, run_command
 from mediaforce.core.type_defs import float_value, int_value, object_dict, object_list
 
@@ -21,6 +22,10 @@ DEFAULT_IDET_MAX_FRAMES = 600
 DEFAULT_IDET_RANGE_COUNT = 3
 MIN_IDET_FRAMES = 120
 MIN_DETERMINED_FRAME_SHARE = 0.80
+# The owner may accept an ambiguous file as-is only when nearly none of its measured frames look interlaced.
+AS_IS_MAX_INTERLACED_SHARE = 0.02
+_AS_IS_DECISION = "encode_as_is"
+_ANY_SOURCE = object()
 
 CadenceClass = Literal["progressive", "tff", "bff", "telecine", "mixed", "unknown"]
 CadenceTransform = Literal["none", "bwdif_tff", "bwdif_bff", "fieldmatch_decimate"]
@@ -323,11 +328,7 @@ def cadence_manifest_payload(
             "Cadence evidence uses an unsupported analyzer version; refresh cadence analysis before encoding.",
         )
     else:
-        decision = classify_cadence(
-            probe=probe,
-            analysis=analysis,
-            coverage=_analysis_coverage(analysis),
-        )
+        decision = _classify_summary(summary_payload, source_fingerprint=source_fingerprint)
     tool_version = str(tool.get("version") or CADENCE_TOOL_VERSION)
     ffmpeg_version = str(tool.get("ffmpeg_version") or "").strip()
     if ffmpeg_version:
@@ -369,14 +370,67 @@ def cadence_manifest_payload(
 
 def reclassify_cadence_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
     payload = copy.deepcopy(object_dict(summary))
-    probe = object_dict(payload.get("probe"))
+    payload["decision"] = _classify_summary(payload, source_fingerprint=_ANY_SOURCE)
+    return payload
+
+
+def cadence_as_is_eligible(summary: Mapping[str, Any]) -> bool:
+    """A fully measured file the classifier cannot place, with nearly no interlaced-looking frames."""
+    payload = object_dict(summary)
     analysis = object_dict(payload.get("analysis"))
-    payload["decision"] = classify_cadence(
-        probe=probe,
+    decision = classify_cadence(
+        probe=object_dict(payload.get("probe")),
         analysis=analysis,
         coverage=_analysis_coverage(analysis),
     )
-    return payload
+    sampled_frames = int_value(analysis.get("sampled_frames"))
+    interlaced_frames = int_value(analysis.get("tff_frames")) + int_value(analysis.get("bff_frames"))
+    return (
+        decision["classification"] == "unknown"
+        and cadence_measurement_complete(analysis)
+        and sampled_frames > 0
+        and interlaced_frames / sampled_frames <= AS_IS_MAX_INTERLACED_SHARE
+    )
+
+
+def accept_cadence_as_is(
+        summary: Mapping[str, Any],
+        *,
+        source_fingerprint: str,
+        accepted_at: str,
+) -> dict[str, Any]:
+    """Record the owner's choice to encode this measured file as-is, bound to its source and measurement."""
+    if not cadence_as_is_eligible(summary) or not source_fingerprint:
+        raise ValueError("Only a fully measured ambiguous file with a known source can be accepted as-is.")
+    payload = copy.deepcopy(object_dict(summary))
+    payload["owner_acceptance"] = {
+        "decision": _AS_IS_DECISION,
+        "source_fingerprint": source_fingerprint,
+        "analysis_sha256": stable_json_hash(object_dict(payload.get("analysis"))),
+        "accepted_at": accepted_at,
+    }
+    return reclassify_cadence_summary(payload)
+
+
+def _classify_summary(summary: Mapping[str, Any], *, source_fingerprint: object) -> dict[str, Any]:
+    probe = object_dict(summary.get("probe"))
+    analysis = object_dict(summary.get("analysis"))
+    decision = classify_cadence(probe=probe, analysis=analysis, coverage=_analysis_coverage(analysis))
+    acceptance = object_dict(summary.get("owner_acceptance"))
+    if (
+            decision["classification"] == "unknown"
+            and acceptance.get("decision") == _AS_IS_DECISION
+            and acceptance.get("analysis_sha256") == stable_json_hash(analysis)
+            and (source_fingerprint is _ANY_SOURCE or acceptance.get("source_fingerprint") == source_fingerprint)
+            and cadence_as_is_eligible(summary)
+    ):
+        decision.update({
+            "status": "resolved",
+            "transform": "none",
+            "owner_accepted_as_is": True,
+            "rationale": "The owner chose to encode this file as-is, without deinterlacing or pulldown removal.",
+        })
+    return decision
 
 
 def cadence_decision_is_stale(summary: Mapping[str, Any]) -> bool:
@@ -426,6 +480,7 @@ def cadence_filter(
             "high_risk",
             "transform",
             "rationale",
+            "owner_accepted_as_is",
     ):
         if recorded_decision.get(key) != payload.get(key):
             raise CadenceResolutionError("Cadence decision does not match its versioned media evidence.")
@@ -433,6 +488,8 @@ def cadence_filter(
     transform = str(payload.get("transform") or "")
     status = str(payload.get("status") or "blocked")
     expected = EXPECTED_TRANSFORMS.get(classification)  # type: ignore[arg-type]
+    if classification == "unknown" and payload.get("owner_accepted_as_is") is True:
+        expected = "none"
     if status != "resolved" or expected is None:
         rationale = str(payload.get("rationale") or "Cadence evidence is missing or inconclusive.")
         raise CadenceResolutionError(f"Cadence is unresolved: {rationale}")
