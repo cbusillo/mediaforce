@@ -14,7 +14,7 @@ from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.type_defs import int_value, object_dict
 from mediaforce.core.utils import timestamp
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, CADENCE_SCHEMA_VERSION, CADENCE_TOOL_NAME, \
-    CADENCE_TOOL_VERSION, cadence_policy_snapshot
+    CADENCE_TOOL_VERSION, cadence_decision_is_stale, cadence_measurement_complete, cadence_policy_snapshot
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, MEDIA_FINGERPRINT_SCHEMA_VERSION, \
     MEDIA_FINGERPRINT_TOOL_NAME, MEDIA_FINGERPRINT_TOOL_VERSION, media_fingerprint_policy_snapshot
 
@@ -179,9 +179,10 @@ def project_evidence_state(
     )
     state = base_state
     reason = base_reason
-    if base_state == EVIDENCE_STATE_CURRENT and same_summary:
+    if base_state in {EVIDENCE_STATE_CURRENT, EVIDENCE_STATE_CLASSIFICATION_REQUIRED} and same_summary:
         current_source_fingerprint = _optional_text(source_fingerprint)
         if bound_source_fingerprint != current_source_fingerprint:
+            # A changed source needs new measurements, which outranks re-reading the old ones.
             state = EVIDENCE_STATE_ANALYSIS_REQUIRED
             reason = EVIDENCE_REASON_SOURCE_CHANGED
         elif bound_policy_hash != policy_hash:
@@ -497,7 +498,13 @@ def _canonical_state(
         return parsed, EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_REASON_TOOL_CHANGED
     if not _measurements_are_usable(spec.evidence_kind, parsed, analysis, decision):
         return parsed, EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_REASON_UNKNOWN
+    if spec.evidence_kind == CADENCE_EVIDENCE_KIND and cadence_decision_is_stale(parsed):
+        # The classifier changed since this decision was stored; re-deriving it needs no new measurement.
+        return parsed, EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_REASON_POLICY_CHANGED
     if _decision_is_unknown(spec.evidence_kind, decision):
+        if spec.evidence_kind == CADENCE_EVIDENCE_KIND and cadence_measurement_complete(analysis):
+            # Fully measured but ambiguous: measuring again gives the same answer, so it is a decision.
+            return parsed, EVIDENCE_STATE_CURRENT, None
         return parsed, EVIDENCE_STATE_ANALYSIS_REQUIRED, EVIDENCE_REASON_UNKNOWN
     return parsed, EVIDENCE_STATE_CURRENT, None
 

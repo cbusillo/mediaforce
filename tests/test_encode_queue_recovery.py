@@ -58,7 +58,7 @@ from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
 from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
@@ -22237,6 +22237,32 @@ raise SystemExit(0)
             evidence_work={},
         )
 
+    @staticmethod
+    def _measured_mixed_cadence(summary: dict[str, Any]) -> dict[str, Any]:
+        """A fully measured cadence summary that the classifier itself blocks as mixed."""
+        measured = copy.deepcopy(summary)
+        measured["probe"]["idet_required"] = True
+        measured["analysis"].update({
+            "progressive_frames": 300,
+            "tff_frames": 303,
+            "bff_frames": 0,
+            "undetermined_frames": 0,
+            "sampled_frames": 603,
+            "measured_range_count": 3,
+            "coverage": 1.0,
+            "ranges": [
+                {
+                    "start_seconds": float(start),
+                    "end_seconds": float(start) + 8.0,
+                    "frame_limit": 201,
+                    "sampled_frames": 201,
+                    "status": "measured",
+                }
+                for start in (10, 20, 30)
+            ],
+        })
+        return reclassify_cadence_summary(measured)
+
     def _complete_queue_config(self) -> MediaforceConfig:
         with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
@@ -22298,10 +22324,7 @@ raise SystemExit(0)
             blocked_summary = json.loads(str(connection.execute(
                 select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["Episode 1.mkv"])
             ).scalar_one()))
-            blocked_summary["decision"].update({
-                "status": "blocked",
-                "rationale": "Fixture cadence requires operator review.",
-            })
+            blocked_summary = self._measured_mixed_cadence(blocked_summary)
             connection.execute(
                 update(library_items)
                 .where(library_items.c.id == item_ids["Episode 2.mkv"])
@@ -22562,10 +22585,7 @@ raise SystemExit(0)
                 )
             ).scalar_one()
             blocked_summary = json.loads(str(safe_summary_json))
-            blocked_summary["decision"].update({
-                "status": "blocked",
-                "rationale": "Fixture cadence requires operator review.",
-            })
+            blocked_summary = self._measured_mixed_cadence(blocked_summary)
             connection.execute(
                 update(library_items)
                 .where(library_items.c.id == item_ids["tv/show/Season 1/Episode 2.mkv"])
@@ -22717,10 +22737,7 @@ raise SystemExit(0)
             blocked_summary = json.loads(str(connection.execute(
                 select(library_items.c.cadence_summary_json).where(library_items.c.id == older_item_id)
             ).scalar_one()))
-            blocked_summary["decision"].update({
-                "status": "blocked",
-                "rationale": "Fixture cadence requires operator review.",
-            })
+            blocked_summary = self._measured_mixed_cadence(blocked_summary)
             connection.execute(
                 update(library_items)
                 .where(library_items.c.id == older_item_id)
@@ -23531,7 +23548,7 @@ raise SystemExit(0)
             blocked_summary = json.loads(str(connection.execute(
                 select(library_items.c.cadence_summary_json).where(library_items.c.id == blocked_item)
             ).scalar_one()))
-            blocked_summary["decision"].update({"status": "blocked", "rationale": "Fixture cadence needs review."})
+            blocked_summary = self._measured_mixed_cadence(blocked_summary)
             connection.execute(
                 update(library_items)
                 .where(library_items.c.id == blocked_item)
