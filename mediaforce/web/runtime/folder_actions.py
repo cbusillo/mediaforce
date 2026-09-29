@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast, Protocol, TypeAlias
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, or_, select, update
 
 from mediaforce.core.config import MediaforceConfig, load_config, with_folder_policy_override
 from mediaforce.core.db import DBClient, open_db
@@ -42,8 +42,8 @@ from mediaforce.tuning.compression_intent import CompressionEvidenceRef, authori
 from mediaforce.tuning.content_intent_observations import record_visual_content_intent_observation
 from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
-from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_evidence_blocker, \
-    cadence_queue_partition, cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
+    cadence_safety_partition, older_season_cadence_payload
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
@@ -1700,8 +1700,8 @@ def tv_promotion_readiness_payload(
 
     waiting: dict[str, int] = {}
 
-    def wait(code: str, count: int = 1) -> None:
-        waiting[code] = waiting.get(code, 0) + count
+    def wait(code: str, amount: int = 1) -> None:
+        waiting[code] = waiting.get(code, 0) + amount
 
     for disposition, count in sorted(report.counts.items()):
         if count and integrity_disposition_blocks_promotion(cast(IntegrityDisposition, disposition)):

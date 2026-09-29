@@ -122,7 +122,10 @@ budget, extrapolates outside measured candidates, or alters targets, CRF bounds,
 sample cadence, source caps, or quality floors.
 
 A terminal final-size miss also blocks every production queue entrypoint from
-reusing the same reviewed contract. Queue admission records the approved sample
+reusing the same reviewed contract for the items that missed. When the failure
+analysis names those items, a requeue leaves out only them, keeps their
+artifacts, and queues their siblings; when it cannot place a miss on an item,
+the whole requeue fails closed. Queue admission records the approved sample
 identity and a normalized operator-intent contract covering size, compression,
 quality, resolution, and retained streams. Recovery requires both a new
 representative sample and a changed operator-intent contract; a new approval
