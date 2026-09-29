@@ -31,13 +31,12 @@ failure. It never accepts unvalidated text as an executable policy.
 | Review-artifact critique | `gpt-5.6-terra` | `gpt-5.6-sol`    | Receives only bounded review artifacts and supplied metadata.                                            |
 
 Routes live under `[advisor.routes]` in `config/defaults.toml`. A local config
-may replace model identifiers or the Codex Lab command without changing code:
+may replace model identifiers or the Codex command without changing code:
 
 ```toml
 [advisor]
-command = "codex-lab"
+command = "codex"
 telemetry_max_records = 5000
-# auth_profile = "mediaforce"
 
 [advisor.routes.operator_note_parse]
 models = ["gpt-5.6-luna", "gpt-5.6-terra"]
@@ -52,11 +51,12 @@ Optional `[advisor.model_pricing.<model>]` entries may provide
 usage but does not invent a monetary estimate.
 
 The web app resolves this configuration at startup; restart `mediaforce-web`
-after changing command, authentication, route, or pricing settings.
+after changing command, route, or pricing settings. Authentication comes from
+the service user's Codex home (`CODEX_HOME`, default `~/.codex`).
 
-## Codex Lab boundary
+## Codex boundary
 
-The adapter runs `codex-lab exec` with an ephemeral session, ignored user
+The adapter runs stock `codex exec` with an ephemeral session, ignored user
 configuration and rules, a read-only empty temporary work directory, JSONL
 events, and an output schema for structured tasks. The prompt is sent on stdin.
 
@@ -64,7 +64,7 @@ Review images are copied into the temporary work directory with generic names.
 The original machine-local path is never placed in the command. Mediaforce
 accepts a result only when all of these conditions hold:
 
-- Codex Lab exits successfully
+- Codex exits successfully
 - a terminal `turn.completed` event is present
 - no tool-use item was emitted
 - the final agent message is present
@@ -74,19 +74,20 @@ Raw non-event output, incomplete turns, tool use, malformed JSON, timeouts, and
 provider failures are rejected. Only provider/model response failures can move
 to the next configured model. Missing local images, unsupported image formats,
 an unavailable command, and local transport failures stop immediately because
-another model cannot repair them. A timeout terminates the complete Codex Lab
+another model cannot repair them. A timeout terminates the complete Codex
 process group so shell shims or provider children cannot continue in the
 background.
 
-`cbusillo/codex-lab#319` tracks a future lightweight structured-request command.
-When that command lands, Mediaforce should replace only this adapter and verify
-the token and latency improvement; routing policy and advisor contracts should
-not change.
+The adapter targeted the Codex Lab fork until 2026-09-26, when its planned
+`structuredRequest/*` side channel (`cbusillo/codex-lab#319`) was retired. A
+lower-overhead transport would replace only this adapter; routing policy and
+advisor contracts would not change. See the stock baseline below for why one is
+not currently pursued.
 
 ## App-server benchmark
 
 The repository includes a non-production benchmark for evaluating an already
-running Codex Lab app server before requesting another upstream transport:
+running Codex app server before requesting another upstream transport:
 
 ```bash
 uv run --with websockets python scripts/benchmark_advisor_app_server.py \
@@ -95,7 +96,7 @@ uv run --with websockets python scripts/benchmark_advisor_app_server.py \
 ```
 
 The default run sends the same synthetic seed-policy prompt and strict schema
-through the current `codex-lab exec` adapter and `ws://127.0.0.1:4766`. It uses
+through the current `codex exec` adapter and `ws://127.0.0.1:4766`. It uses
 an ephemeral read-only app-server thread, disables turn environments and client
 dynamic tools, rejects approval requests, and records latency, token usage,
 MCP startup status counts, tool attempts, schema/evaluation checks, and durable
@@ -128,9 +129,9 @@ text, model output, raw frames, audio, image paths, or machine-local media paths
 The bounded JSONL file is written under the configured web-state directory as
 `advisor-routing.jsonl` and defaults to the most recent 5,000 attempts.
 
-Codex Lab runs with `--ephemeral`, so Mediaforce does not request local session
+Codex runs with `--ephemeral`, so Mediaforce does not request local session
 persistence. Provider-side request retention is outside Mediaforce and follows
-the policy of the configured Codex Lab authentication/provider account.
+the policy of the configured Codex authentication/provider account.
 
 ## Evaluation gate
 
@@ -165,17 +166,38 @@ does not retain prompts, operator notes, model responses, or generated images.
 
 ## Activated evaluation
 
-The recommended suite was last verified at `2026-07-12T03:52:19Z` using Codex
-Lab and the checked-in routes. All 11 cases passed, including both deterministic
-cases, and no case required fallback.
+The recommended suite was last verified at `2026-09-29T14:07:59Z` using stock
+`codex-cli 0.159.0` and the checked-in routes. All 11 cases passed, including
+both deterministic cases, and no case required fallback.
 
 | Primary model   | Cases | Observed latency | Input tokens | Output tokens |
 | --------------- | ----: | ---------------: | -----------: | ------------: |
-| `gpt-5.6-luna`  |     2 |      12.4–13.3 s |       28,446 |           323 |
-| `gpt-5.6-terra` |     5 |      13.4–30.3 s |       85,351 |         2,963 |
-| `gpt-5.6-sol`   |     2 |      18.1–23.8 s |       31,965 |         1,008 |
+| `gpt-5.6-luna`  |     2 |        6.4–9.0 s |       31,252 |           376 |
+| `gpt-5.6-terra` |     5 |       7.4–16.3 s |       93,526 |         2,370 |
+| `gpt-5.6-sol`   |     2 |       8.5–14.5 s |       35,638 |           880 |
 
 No model pricing was configured, so the report correctly left estimated USD
-cost unset. The roughly 14,000–18,000 input tokens per model-backed case include
-the full Codex Lab exec harness. This validates the current adapter while also
-supporting the lightweight side-channel work tracked in `codex-lab#319`.
+cost unset.
+
+### Stock `exec` baseline
+
+This replaces the Codex Lab measurements from PR #488 as the reference.
+
+- Fixed cost: a trivial structured request takes about 5 s end to end and about
+  14,800 input tokens. That is the Codex exec harness, before any Mediaforce
+  prompt. Model-backed cases use 15,600–19,500 input tokens in total, so the
+  harness is most of each request. The Lab build measured about 14,000–18,000.
+- Seed policy: `terra-seed-size-first` took 11.9–13.7 s across the suite and
+  repeated benchmark runs, and `terra-seed-content-evidence` took 16.3 s. The
+  seed-policy attempt budget is 75 s plus 30 s of process grace, so the budget
+  stays unchanged. The two exhausted 105 s attempts on 2026-07-13 were on the
+  Lab build.
+- Retention: isolated `--transport exec` benchmark runs showed no session,
+  index, or history change in the Codex home. The benchmark measures the whole
+  Codex home, so any other Codex session on the machine during a run shows up
+  as a false artifact delta.
+
+A lower-overhead route is not worth pursuing now. Latency is well inside the
+budget, and the advisor runs a few dozen times a month. Revisit it if pricing
+is configured and the fixed harness tokens become a real cost, or if advisor
+volume grows.

@@ -127,7 +127,7 @@ refresh_interval_hours = 24
 require_size_reduction = true
 
 [advisor]
-command = "codex-lab"
+command = "codex"
 telemetry_max_records = 5000
 
 [advisor.routes.operator_note_parse]

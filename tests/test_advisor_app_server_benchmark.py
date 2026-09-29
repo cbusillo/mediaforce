@@ -343,7 +343,7 @@ def test_run_benchmark_compares_injected_transports_without_live_models(
 
     report = run_benchmark(
         project_root=tmp_path,
-        codex_home=tmp_path / ".codex-lab",
+        codex_home=tmp_path / ".codex",
         exec_runner=exec_runner,
         app_server_runner=app_server_runner,
     )
@@ -373,7 +373,7 @@ def test_exec_only_run_keeps_independent_artifact_measurement(tmp_path: Path) ->
     report = run_benchmark(
         project_root=tmp_path,
         transport="exec",
-        codex_home=tmp_path / ".codex-lab",
+        codex_home=tmp_path / ".codex",
         exec_runner=exec_runner,
     )
 

@@ -299,7 +299,7 @@ def recommended_eval_cases() -> tuple[AdvisorEvalCase, ...]:
 def run_recommended_evals(
         *,
         project_root: Path,
-        command: str = "codex-lab",
+        command: str = "codex",
         model_override: str | None = None,
         case_ids: set[str] | None = None,
 ) -> dict[str, Any]:
@@ -614,7 +614,7 @@ def _png_chunk(kind: bytes, payload: bytes) -> bytes:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the media-safe Mediaforce advisor evaluation suite.")
     parser.add_argument("--project-root", type=Path, default=Path.cwd())
-    parser.add_argument("--command", default="codex-lab")
+    parser.add_argument("--command", default="codex")
     parser.add_argument("--model", dest="model_override")
     parser.add_argument("--case", action="append", dest="case_ids")
     parser.add_argument("--output", type=Path)

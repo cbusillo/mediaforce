@@ -18,7 +18,7 @@ from mediaforce.advising.telemetry import append_advisor_telemetry, estimated_co
 
 
 _FALLBACK_STATUSES = ASSISTANT_RETRYABLE_FAILURE_CODES
-_CODEX_LAB_SKILL_TRUNCATION_NOTICE_PREFIX = "Skill descriptions were shortened to fit the skills context budget."
+_CODEX_SKILL_TRUNCATION_NOTICE_PREFIX = "Skill descriptions were shortened to fit the skills context budget."
 
 
 @dataclass(slots=True)
@@ -32,7 +32,7 @@ class StructuredLLMFailure:
 
 
 @dataclass(slots=True)
-class _CodexLabAttempt:
+class _CodexAttempt:
     status: str
     text: str
     payload: dict[str, Any] | None
@@ -41,7 +41,7 @@ class _CodexLabAttempt:
     usage: dict[str, int]
 
 
-def run_codex_lab_process(
+def run_codex_process(
         cmd: list[str],
         *,
         input: str,
@@ -51,7 +51,7 @@ def run_codex_lab_process(
         cwd: Path,
 ) -> subprocess.CompletedProcess[str]:
     if not capture_output or not text:
-        raise ValueError("Codex Lab execution requires captured text output.")
+        raise ValueError("Codex execution requires captured text output.")
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -127,7 +127,7 @@ def run_structured_llm_request(
     resolved_images = [str(Path(path).expanduser().resolve()) for path in images or []]
     route = resolved_routing.route_for(task)
     for route_index, model in enumerate(route.models):
-        attempt = run_codex_lab_attempt(
+        attempt = run_codex_attempt(
             project_root=project_root,
             developer=developer,
             message=message,
@@ -135,7 +135,6 @@ def run_structured_llm_request(
             schema=schema,
             max_seconds=max_seconds,
             command=resolved_routing.command,
-            auth_profile=resolved_routing.auth_profile,
             model=model,
             subprocess_run=subprocess_run,
             try_load_json=try_load_json,
@@ -194,7 +193,7 @@ def run_multimodal_tune_request(
     )
 
 
-def run_codex_lab_attempt(
+def run_codex_attempt(
         *,
         project_root: Path,
         developer: str,
@@ -203,11 +202,10 @@ def run_codex_lab_attempt(
         schema: dict[str, Any] | None,
         max_seconds: int,
         command: str,
-        auth_profile: str | None,
         model: str,
         subprocess_run: Callable[..., Any],
         try_load_json: Callable[[str], Any],
-) -> _CodexLabAttempt:
+) -> _CodexAttempt:
     del project_root
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="mediaforce-advisor-") as temp_dir:
@@ -227,8 +225,6 @@ def run_codex_lab_attempt(
             "-C",
             str(work_dir),
         ]
-        if auth_profile:
-            cmd.extend(["--auth-profile", auth_profile])
         if schema is not None:
             schema_path = work_dir / "response-schema.json"
             schema_path.write_text(json.dumps(schema, separators=(",", ":"), sort_keys=True))
@@ -252,7 +248,7 @@ def run_codex_lab_attempt(
             shutil.copyfile(source_image, copied_image)
             cmd.extend(["--image", str(copied_image)])
         cmd.extend(["--color", "never"])
-        cmd.extend(["-c", f"developer_instructions={json.dumps(codex_lab_developer_instruction(developer))}"])
+        cmd.extend(["-c", f"developer_instructions={json.dumps(codex_developer_instruction(developer))}"])
         cmd.append("-")
         try:
             result = subprocess_run(
@@ -267,33 +263,33 @@ def run_codex_lab_attempt(
             return _attempt_result(
                 started,
                 status="timeout",
-                diagnostic=f"Codex Lab timed out after {exc.timeout}s.",
+                diagnostic=f"Codex timed out after {exc.timeout}s.",
             )
         except FileNotFoundError:
             return _attempt_result(
                 started,
                 status="command_unavailable",
-                diagnostic="The configured Codex Lab command was unavailable.",
+                diagnostic="The configured Codex command was unavailable.",
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return _attempt_result(
                 started,
                 status="transport_error",
-                diagnostic=f"Codex Lab transport failed with {exc.__class__.__name__}.",
+                diagnostic=f"Codex transport failed with {exc.__class__.__name__}.",
             )
     stdout = str(result.stdout or "").strip()
     if result.returncode != 0:
         return _attempt_result(
             started,
             status="provider_error",
-            diagnostic=f"Codex Lab returned exit code {result.returncode}.",
+            diagnostic=f"Codex returned exit code {result.returncode}.",
         )
-    final_text, usage, tool_used, completed = _codex_lab_output(stdout)
+    final_text, usage, tool_used, completed = _codex_output(stdout)
     if not completed:
         return _attempt_result(
             started,
             status="incomplete_turn",
-            diagnostic="Codex Lab ended without a terminal turn.completed event.",
+            diagnostic="Codex ended without a terminal turn.completed event.",
             usage=usage,
         )
     if tool_used:
@@ -307,7 +303,7 @@ def run_codex_lab_attempt(
         return _attempt_result(
             started,
             status="empty_response",
-            diagnostic="Codex Lab returned no final agent message.",
+            diagnostic="Codex returned no final agent message.",
             usage=usage,
         )
     if schema is None:
@@ -317,7 +313,7 @@ def run_codex_lab_attempt(
         return _attempt_result(
             started,
             status="invalid_structured_output",
-            diagnostic=f"Codex Lab returned {len(final_text)} bytes that did not parse as the requested object.",
+            diagnostic=f"Codex returned {len(final_text)} bytes that did not parse as the requested object.",
             usage=usage,
         )
     return _attempt_result(started, status="success", text=final_text, payload=parsed, usage=usage)
@@ -331,8 +327,8 @@ def _attempt_result(
         payload: dict[str, Any] | None = None,
         diagnostic: Any = "",
         usage: Mapping[str, Any] | None = None,
-) -> _CodexLabAttempt:
-    return _CodexLabAttempt(
+) -> _CodexAttempt:
+    return _CodexAttempt(
         status=status,
         text=text,
         payload=payload,
@@ -347,14 +343,14 @@ def _attempt_result(
     )
 
 
-def codex_lab_developer_instruction(developer: str) -> str:
+def codex_developer_instruction(developer: str) -> str:
     return (
         "Do not use tools, inspect files, or infer facts outside the supplied user content. "
         f"{developer.strip()}"
     )
 
 
-def _codex_lab_output(raw: str) -> tuple[str, dict[str, int], bool, bool]:
+def _codex_output(raw: str) -> tuple[str, dict[str, int], bool, bool]:
     final_text = ""
     usage: dict[str, int] = {}
     parsed_event = False
@@ -377,7 +373,7 @@ def _codex_lab_output(raw: str) -> tuple[str, dict[str, int], bool, bool]:
                 final_text = str(item.get("text") or "").strip()
             elif item_type == "error":
                 message = str(item.get("message") or "")
-                if not message.startswith(_CODEX_LAB_SKILL_TRUNCATION_NOTICE_PREFIX):
+                if not message.startswith(_CODEX_SKILL_TRUNCATION_NOTICE_PREFIX):
                     tool_used = True
             elif item_type != "reasoning":
                 tool_used = True
@@ -403,7 +399,7 @@ def _record_attempt(
         model: str,
         route_index: int,
         fallback_reason: str | None,
-        attempt: _CodexLabAttempt,
+        attempt: _CodexAttempt,
         input_characters: int,
         image_count: int,
         evidence_references: list[str],

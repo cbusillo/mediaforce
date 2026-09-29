@@ -18,8 +18,8 @@ from mediaforce.advising.routing import (
 )
 from mediaforce.advising.runtime import (
     StructuredLLMFailure,
-    _codex_lab_output,
-    run_codex_lab_process,
+    _codex_output,
+    run_codex_process,
     run_structured_llm_request,
 )
 from mediaforce.advising.telemetry import append_advisor_telemetry, estimated_cost_usd
@@ -63,8 +63,7 @@ class AdvisorRoutingTests(unittest.TestCase):
         config = MediaforceConfig(
             raw={
                 "advisor": {
-                    "command": "custom-codex-lab",
-                    "auth_profile": "mediaforce",
+                    "command": "custom-codex",
                     "telemetry_max_records": 250,
                     "routes": {
                         "operator_note_parse": {"models": ["test-luna", "test-terra", "test-terra"]},
@@ -83,8 +82,7 @@ class AdvisorRoutingTests(unittest.TestCase):
 
         routing = advisor_routing_from_config(config)
 
-        self.assertEqual(routing.command, "custom-codex-lab")
-        self.assertEqual(routing.auth_profile, "mediaforce")
+        self.assertEqual(routing.command, "custom-codex")
         self.assertEqual(routing.telemetry_max_records, 250)
         self.assertEqual(
             routing.route_for(AdvisorTask.OPERATOR_NOTE_PARSE).models,
@@ -131,7 +129,7 @@ class AdvisorRoutingTests(unittest.TestCase):
 
         from unittest.mock import patch
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_operator_note_parse(
                 project_root=self.root,
                 payload={
@@ -203,7 +201,7 @@ class AdvisorRoutingTests(unittest.TestCase):
         def fake_run(*_args: Any, **_kwargs: Any) -> object:
             nonlocal run_calls
             run_calls += 1
-            raise FileNotFoundError("/Users/alice/bin/codex-lab")
+            raise FileNotFoundError("/Users/alice/bin/codex")
 
         result = run_structured_llm_request(
             project_root=self.root,
@@ -304,13 +302,13 @@ class AdvisorRoutingTests(unittest.TestCase):
         self.assertEqual(self._telemetry(telemetry_path)[0]["image_count"], 1)
 
     def test_jsonl_parser_rejects_raw_or_incomplete_output_and_tool_use(self) -> None:
-        self.assertEqual(_codex_lab_output('{"ok":true}'), ("", {}, False, False))
-        text, usage, tool_used, completed = _codex_lab_output(_jsonl("{}", completed=False))
+        self.assertEqual(_codex_output('{"ok":true}'), ("", {}, False, False))
+        text, usage, tool_used, completed = _codex_output(_jsonl("{}", completed=False))
         self.assertEqual(text, "{}")
         self.assertEqual(usage, {})
         self.assertFalse(tool_used)
         self.assertFalse(completed)
-        _text, _usage, tool_used, completed = _codex_lab_output(
+        _text, _usage, tool_used, completed = _codex_output(
             _jsonl("", item_type="command_execution")
         )
         self.assertTrue(tool_used)
@@ -336,11 +334,16 @@ class AdvisorRoutingTests(unittest.TestCase):
             },
             {
                 "type": "turn.completed",
-                "usage": {"input_tokens": 120, "cached_input_tokens": 20, "output_tokens": 30},
+                "usage": {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 20,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 30,
+                },
             },
         ]
 
-        text, usage, tool_used, completed = _codex_lab_output(
+        text, usage, tool_used, completed = _codex_output(
             "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
         )
 
@@ -358,7 +361,7 @@ class AdvisorRoutingTests(unittest.TestCase):
             {"type": "turn.completed", "usage": {}},
         ]
 
-        text, usage, tool_used, completed = _codex_lab_output(
+        text, usage, tool_used, completed = _codex_output(
             "\n".join(json.dumps(event, separators=(",", ":")) for event in events)
         )
 
@@ -370,7 +373,7 @@ class AdvisorRoutingTests(unittest.TestCase):
     def test_process_timeout_terminates_spawned_process_group(self) -> None:
         started = time.monotonic()
         with self.assertRaises(subprocess.TimeoutExpired) as raised:
-            run_codex_lab_process(
+            run_codex_process(
                 ["sh", "-c", "sleep 30 & echo $!; wait"],
                 input="",
                 capture_output=True,

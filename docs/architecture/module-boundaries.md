@@ -435,7 +435,7 @@ Guidance:
 - `routing.py`
   - typed task routes, defaults, config resolution, and optional model pricing
 - `runtime.py`
-  - isolated Codex Lab execution, JSONL validation, and bounded fallback
+  - isolated Codex execution, JSONL validation, and bounded fallback
 - `telemetry.py`
   - bounded privacy-safe attempt telemetry and optional cost calculation
 - `evals.py`

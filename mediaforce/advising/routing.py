@@ -39,7 +39,6 @@ class AdvisorRoute:
 class AdvisorRouting:
     command: str
     routes: Mapping[AdvisorTask, AdvisorRoute]
-    auth_profile: str | None = None
     telemetry_path: Path | None = None
     telemetry_max_records: int = 5000
     model_pricing: Mapping[str, AdvisorModelPricing] | None = None
@@ -56,7 +55,7 @@ class AdvisorRouting:
 
 def default_advisor_routing(*, telemetry_path: Path | None = None) -> AdvisorRouting:
     return AdvisorRouting(
-        command="codex-lab",
+        command="codex",
         routes={
             task: AdvisorRoute(task=task, models=models)
             for task, models in DEFAULT_ADVISOR_MODELS.items()
@@ -67,7 +66,7 @@ def default_advisor_routing(*, telemetry_path: Path | None = None) -> AdvisorRou
 
 def advisor_routing_from_config(config: MediaforceConfig) -> AdvisorRouting:
     raw = object_dict(config.raw.get("advisor"))
-    command = str(raw.get("command") or "codex-lab").strip() or "codex-lab"
+    command = str(raw.get("command") or "codex").strip() or "codex"
     route_payloads = object_dict(raw.get("routes"))
     routes: dict[AdvisorTask, AdvisorRoute] = {}
     for task, default_models in DEFAULT_ADVISOR_MODELS.items():
@@ -78,7 +77,6 @@ def advisor_routing_from_config(config: MediaforceConfig) -> AdvisorRouting:
     return AdvisorRouting(
         command=command,
         routes=routes,
-        auth_profile=str(raw.get("auth_profile") or "").strip() or None,
         telemetry_path=config.paths.web_state_dir / "advisor-routing.jsonl",
         telemetry_max_records=telemetry_max_records,
         model_pricing=_model_pricing(raw.get("model_pricing")),
@@ -88,8 +86,7 @@ def advisor_routing_from_config(config: MediaforceConfig) -> AdvisorRouting:
 def advisor_routing_for_models(
         task_models: Mapping[AdvisorTask, tuple[str, ...]],
         *,
-        command: str = "codex-lab",
-        auth_profile: str | None = None,
+        command: str = "codex",
         telemetry_path: Path | None = None,
         model_pricing: Mapping[str, AdvisorModelPricing] | None = None,
 ) -> AdvisorRouting:
@@ -100,7 +97,6 @@ def advisor_routing_for_models(
     return AdvisorRouting(
         command=command,
         routes=routes,
-        auth_profile=auth_profile,
         telemetry_path=telemetry_path,
         model_pricing=model_pricing,
     )
