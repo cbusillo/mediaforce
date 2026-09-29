@@ -1843,6 +1843,19 @@ export function approvalGuardFromMessage(
 	return null;
 }
 
+/** A working season still says so when some of its files already need the owner. */
+function libraryCompressingState(card: FolderCard): HumanSeasonState {
+	const needsYou = text(card.review_badge_label).toLowerCase().includes('attention');
+	return {
+		key: 'making_season',
+		label: needsYou ? 'Compressing · needs you' : 'Compressing the season',
+		detail:
+			(needsYou && text(card.review_badge_detail)) ||
+			'The smaller episodes are being compressed now.',
+		tone: 'active'
+	};
+}
+
 export function librarySeasonState(
 	card: FolderCard,
 	dashboard: DashboardSummaryPayload
@@ -1852,12 +1865,7 @@ export function librarySeasonState(
 	if (
 		[...encodeJobs.running, ...encodeJobs.queued].some((job) => matchesPrefix(job, card.prefix))
 	) {
-		return {
-			key: 'making_season',
-			label: 'Compressing the season',
-			detail: 'The smaller episodes are being compressed now.',
-			tone: 'active'
-		};
+		return libraryCompressingState(card);
 	}
 	if (sampleJobs.running.some((job) => matchesPrefix(job, card.prefix) && isRunningJob(job))) {
 		return {
@@ -1945,12 +1953,7 @@ export function librarySeasonState(
 		};
 	}
 	if (card.workflow_state?.primary_lane === 'processing') {
-		return {
-			key: 'making_season',
-			label: 'Compressing the season',
-			detail: 'The smaller episodes are being compressed now.',
-			tone: 'active'
-		};
+		return libraryCompressingState(card);
 	}
 	if (card.workflow_state?.primary_lane === 'mixed') {
 		return {
@@ -2021,6 +2024,14 @@ export function encodeWaitingReasons(job: EncodeQueueJob | null | undefined): Wa
 		waiting: groups.filter((group) => !needsOwner(group)),
 		fileCount: groups.reduce((sum, group) => sum + group.count, 0)
 	};
+}
+
+/** Names the job a reason list belongs to when it is not the page's own scope. */
+export function waitingScopeName(jobPrefix: string): string {
+	const identity = seasonIdentity(jobPrefix);
+	return identity.showPrefix === jobPrefix.replace(/\/+$/, '')
+		? `all of ${identity.show}`
+		: `${identity.show} ${identity.season}`;
 }
 
 export function detailSeasonState(

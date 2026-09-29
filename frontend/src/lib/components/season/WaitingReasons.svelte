@@ -1,11 +1,12 @@
 <script lang="ts">
 	import type { WaitingReasons } from '$lib/season/experience';
 
-	let { reasons }: { reasons: WaitingReasons } = $props();
+	let { reasons, scope = '' }: { reasons: WaitingReasons; scope?: string } = $props();
 </script>
 
 {#if reasons.needsYou.length || reasons.waiting.length}
 	<div class="waiting-reasons">
+		{#if scope}<p class="waiting-reasons__scope">For {scope}</p>{/if}
 		{#if reasons.needsYou.length}
 			<section class="waiting-reasons__group waiting-reasons__group--owner">
 				<h2>Needs you</h2>
@@ -36,6 +37,13 @@
 		gap: 12px 32px;
 		margin-top: 22px;
 		max-width: 620px;
+	}
+
+	.waiting-reasons__scope {
+		color: var(--muted);
+		flex-basis: 100%;
+		font-size: 12px;
+		margin: 0;
 	}
 
 	.waiting-reasons__group {

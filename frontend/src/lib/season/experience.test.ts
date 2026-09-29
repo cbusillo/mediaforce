@@ -17,6 +17,7 @@ import type {
 } from '$lib/api/types';
 import {
 	activeSeasonCards,
+	waitingScopeName,
 	encodeWaitingReasons,
 	approvalGuardFromMessage,
 	calibrationActivityStatusLabel,
@@ -1250,6 +1251,21 @@ describe('season experience translation', () => {
 			label: 'Sample waiting',
 			detail: 'The last attempt stopped. Mediaforce will retry this sample shortly.',
 			tone: 'attention'
+		});
+	});
+
+	it('keeps a working season working while naming the files that need the owner', () => {
+		const working = {
+			...card,
+			workflow_state: { ...card.workflow_state, primary_lane: 'processing' },
+			review_badge_label: 'Needs attention',
+			review_badge_detail: '1 storage error · 4 waiting for a scheduled time'
+		} as FolderCard;
+
+		expect(librarySeasonState(working, dashboard)).toMatchObject({
+			key: 'making_season',
+			label: 'Compressing · needs you',
+			detail: '1 storage error · 4 waiting for a scheduled time'
 		});
 	});
 
@@ -2757,6 +2773,11 @@ describe('encodeWaitingReasons', () => {
 
 		expect(reasons.needsYou.map((group) => group.reason)).toEqual(['stopped']);
 		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
+	});
+
+	it('names the scope a borrowed reason list covers', () => {
+		expect(waitingScopeName('tv/Show')).toBe('all of Show');
+		expect(waitingScopeName('tv/Show/Season 2')).toBe('Show Season 2');
 	});
 
 	it('is empty without an encode job', () => {
