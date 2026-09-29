@@ -635,14 +635,20 @@ def queue_folder_encode_action(
                         "Make and approve a revised test before starting the season."
                     ),
                 )
-        active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix)
+        active_encode_job = load_active_encode_job_for_prefix_fn(connection, normalized_prefix) or (
+            None if joining_held_files else _stopped_folder_with_active_children(connection, normalized_prefix)
+        )
         if active_encode_job is not None:
             active_prefix = str(active_encode_job.get("prefix") or normalized_prefix).strip().strip("/")
             if active_prefix == normalized_prefix:
                 recovery_plan = _folder_recovery_plan(connection, active_encode_job)
                 recovery_left_out: list[LeftOutFile] = []
                 if recovery_plan is not None:
-                    recovery_plan, recovery_left_out = _partition_active_recovery_plan(
+                    recovery_plan, recovery_left_out = _hold_final_size_misses_for_a_fresh_plan(
+                        active_encode_job, recovery_plan, production_approval_contract,
+                    )
+                if recovery_plan is not None:
+                    recovery_plan, partition_left_out = _partition_active_recovery_plan(
                         connection,
                         preflight_config,
                         normalized_prefix,
@@ -650,8 +656,11 @@ def queue_folder_encode_action(
                         active_encode_job,
                         recovery_plan,
                     )
+                    recovery_left_out.extend(partition_left_out)
                     if recovery_plan is None:
                         return nothing_queued_response(recovery_left_out)
+                elif recovery_left_out:
+                    return nothing_queued_response(recovery_left_out)
                 recovered = _recover_active_folder_encode_job(
                     connection,
                     active_encode_job,
@@ -675,6 +684,23 @@ def queue_folder_encode_action(
                 "code": "encode_already_active",
                 "message": f"A folder encode is already {active_status} for {active_prefix}.",
             }
+        if not joining_held_files:
+            still_active = [
+                job
+                for job in load_active_encode_jobs_for_prefix(connection, normalized_prefix)
+                if str(job.get("prefix") or "").strip().strip("/") == normalized_prefix
+            ]
+            if still_active:
+                # Planning the folder again would encode these files twice; they finish or are reclaimed first.
+                count = sum(len(object_list(job.get("manifest_indexes"))) or 1 for job in still_active)
+                return {
+                    "ok": False,
+                    "code": "encode_already_active",
+                    "message": (
+                        f"{count} {'file is' if count == 1 else 'files are'} still queued or being made for "
+                        f"{normalized_prefix}. Try again when they finish."
+                    ),
+                }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
         terminal_job_needs_requeue = not joining_held_files and bool(
             latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {
@@ -2199,6 +2225,60 @@ def _partition_active_recovery_plan(
     if not kept_children or not kept_indexes:
         return None, left_out
     return (kept_children, kept_indexes), left_out
+
+
+def _stopped_folder_with_active_children(connection: DBClient, prefix: str) -> JobPayload | None:
+    """A folder that reads as stopped while some of its files are still queued, retrying or running.
+
+    Re-queueing such a folder must recover its ended files in place: rebuilding it would delete the
+    queued work and clean up files that are still being made.
+    """
+    latest = load_latest_terminal_encode_job_for_prefix(connection, prefix)
+    if latest is None or str(latest.get("job_kind") or "") != "folder":
+        return None
+    children = list_child_encode_jobs(connection, str(latest.get("job_id") or ""))
+    if not any(str(child.get("status") or "") in ACTIVE_ENCODE_JOB_STATUSES for child in children):
+        return None
+    return latest
+
+
+def _hold_final_size_misses_for_a_fresh_plan(
+        folder_job: JobPayload,
+        recovery_plan: tuple[list[JobPayload], list[int]],
+        current_approval_contract: ActionPayload | None,
+) -> tuple[tuple[list[JobPayload], list[int]] | None, list[LeftOutFile]]:
+    """Leave out files that missed their final size; recovering in place would reuse the same goal.
+
+    They are re-planned with a fresh goal once the rest of the folder has finished.
+    """
+    children, _indexes = recovery_plan
+    manifest_items = _manifest_items(folder_job)
+    kept: list[JobPayload] = []
+    left_out: list[LeftOutFile] = []
+    for child in children:
+        if _final_size_requeue_contract_blocker(child, current_approval_contract) is None:
+            kept.append(child)
+            continue
+        for index in object_list(child.get("manifest_indexes")):
+            if not isinstance(index, int) or not 0 <= index < len(manifest_items):
+                continue
+            item = manifest_items[index]
+            left_out.append(LeftOutFile(
+                int(item.get("library_item_id") or 0),
+                str(item.get("rel_path") or ""),
+                _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
+                "Missed its approved final size. It is planned again with a fresh goal once the rest of "
+                "this folder has finished.",
+            ))
+    kept_indexes = sorted({
+        index
+        for child in kept
+        for index in object_list(child.get("manifest_indexes"))
+        if isinstance(index, int)
+    })
+    if not kept or not kept_indexes:
+        return None, left_out
+    return (kept, kept_indexes), left_out
 
 
 def _folder_recovery_plan(
