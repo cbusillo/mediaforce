@@ -2,13 +2,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from sqlalchemy import delete, insert, select, update
 
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, unavailable_cadence_summary
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary, \
+    unavailable_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND, unavailable_media_fingerprint_summary
 from mediaforce.library.evidence_state import EVIDENCE_REASON_MALFORMED, EVIDENCE_REASON_MISSING, \
     EVIDENCE_REASON_POLICY_CHANGED, EVIDENCE_REASON_RETRY_REQUIRED, EVIDENCE_REASON_SCHEMA_CHANGED, \
@@ -239,6 +241,59 @@ class EvidenceStateProjectionTests(unittest.TestCase):
                     .where(library_item_evidence_state.c.library_item_id == second_id)
                 ).fetchall()
                 self.assertEqual(remaining, [])
+
+    def test_stored_unknown_that_the_current_classifier_clears_needs_only_reclassification(self) -> None:
+        # Recorded before idet's undetermined warm-up frames stopped counting against progressive.
+        summary = self._measured_cadence(progressive=514, undetermined=89)
+        summary["decision"] = unavailable_cadence_summary("classified by an older rule")["decision"]
+        summary["decision"]["coverage"] = 1.0
+
+        projection = project_evidence_state(CADENCE_EVIDENCE_KIND, json.dumps(summary), source_fingerprint="c-1")
+
+        self.assertEqual(projection.state, EVIDENCE_STATE_CLASSIFICATION_REQUIRED)
+        self.assertEqual(projection.reason, EVIDENCE_REASON_POLICY_CHANGED)
+
+    def test_fully_measured_ambiguous_cadence_is_a_decision_not_more_analysis(self) -> None:
+        summary = self._measured_cadence(progressive=300, undetermined=303)
+
+        projection = project_evidence_state(CADENCE_EVIDENCE_KIND, json.dumps(summary), source_fingerprint="c-1")
+
+        self.assertEqual(summary["decision"]["classification"], "unknown")
+        self.assertEqual(projection.state, EVIDENCE_STATE_CURRENT)
+        self.assertEqual(projection.decision_status, "blocked")
+
+    def test_partly_measured_ambiguous_cadence_still_needs_analysis(self) -> None:
+        summary = self._measured_cadence(progressive=300, undetermined=303, measured_ranges=2)
+
+        projection = project_evidence_state(CADENCE_EVIDENCE_KIND, json.dumps(summary), source_fingerprint="c-1")
+
+        self.assertEqual(projection.state, EVIDENCE_STATE_ANALYSIS_REQUIRED)
+        self.assertEqual(projection.reason, EVIDENCE_REASON_UNKNOWN)
+
+    @classmethod
+    def _measured_cadence(cls, *, progressive: int, undetermined: int, measured_ranges: int = 3) -> dict[str, Any]:
+        """A summary whose decision is the current classifier's own reading of three sampled ranges."""
+        summary = json.loads(cls._cadence_summary())
+        summary["probe"]["idet_required"] = True
+        summary["analysis"].update({
+            "progressive_frames": progressive,
+            "tff_frames": 0,
+            "bff_frames": 0,
+            "undetermined_frames": undetermined,
+            "sampled_frames": progressive + undetermined,
+            "measured_range_count": measured_ranges,
+            "ranges": [
+                {
+                    "start_seconds": float(start),
+                    "end_seconds": float(start) + 8.0,
+                    "frame_limit": 201,
+                    "sampled_frames": 201,
+                    "status": "measured" if index < measured_ranges else "timed_out",
+                }
+                for index, start in enumerate((10, 20, 30))
+            ],
+        })
+        return reclassify_cadence_summary(summary)
 
     @staticmethod
     def _cadence_summary() -> str:

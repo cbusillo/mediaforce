@@ -244,6 +244,7 @@ def _library_item(
                 "decision": {
                     "status": "resolved",
                     "classification": "progressive",
+                    "transform": "none",
                 },
             },
             sort_keys=True,

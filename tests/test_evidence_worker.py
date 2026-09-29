@@ -16,7 +16,8 @@ from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
-from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence, reclassify_cadence_summary, \
+    unavailable_cadence_summary
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
 from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_evidence_work, \
     evidence_queue_summary, mark_evidence_attempt_started, pause_evidence_queue, recover_evidence_queue, \
@@ -665,6 +666,45 @@ class EvidenceWorkerTests(unittest.TestCase):
         self.assertEqual(refreshed[CADENCE_EVIDENCE_KIND]["state"], EVIDENCE_STATE_CURRENT)
         self.assertEqual(summary["status"], "completed")
 
+    def test_stale_unknown_cadence_clears_by_reclassification_without_media_analysis(self) -> None:
+        stale = json.loads(self._cadence_summary_json())
+        stale["probe"]["idet_required"] = True
+        stale["analysis"].update({
+            "progressive_frames": 514,
+            "undetermined_frames": 89,
+            "sampled_frames": 603,
+            "measured_range_count": 3,
+            "ranges": [
+                {"start_seconds": float(start), "end_seconds": float(start) + 8.0, "frame_limit": 201,
+                 "sampled_frames": 201, "status": "measured"}
+                for start in (10, 20, 30)
+            ],
+        })
+        # Stored by the classifier before idet's undetermined warm-up frames stopped counting against progressive.
+        stale["decision"] = {**unavailable_cadence_summary("older rule")["decision"], "coverage": 1.0}
+        item_id, _path = self._insert_item(1, cadence_summary_json=json.dumps(stale), media_fingerprint_json=None)
+        with open_db(self.config.paths.db_path) as connection:
+            held = cadence_queue_partition(
+                connection,
+                self.config,
+                "tv/show",
+                library_item_ids=[item_id],
+                work_reason="encode_safety",
+            )
+        analyze_mock = Mock(side_effect=AssertionError("unexpected media analysis"))
+
+        processed = process_evidence_queue_once(
+            config_path=self.config.paths.config_path,
+            deps=self._deps(analyze_mock),
+        )
+
+        with open_db(self.config.paths.db_path) as connection:
+            cleared = cadence_safety_partition(connection, library_item_ids=[item_id], synchronize=False)
+        self.assertEqual(held.analysis_queued_item_ids, frozenset({item_id}))
+        self.assertTrue(processed)
+        analyze_mock.assert_not_called()
+        self.assertEqual(cleared.cleared_item_ids, frozenset({item_id}))
+
     def test_concurrently_resolved_evidence_skips_media_analysis(self) -> None:
         item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
         with open_db(self.config.paths.db_path) as connection:
@@ -1071,10 +1111,29 @@ class EvidenceWorkerTests(unittest.TestCase):
 
     @classmethod
     def _blocked_cadence_summary_json(cls) -> str:
-        payload = json.loads(cls._cadence_summary_json())
-        payload["decision"]["status"] = "blocked"
-        payload["decision"]["reason"] = "fixture cadence requires operator review"
-        return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+        """A fully measured cadence summary that the classifier itself blocks as mixed."""
+        measured = json.loads(cls._cadence_summary_json())
+        measured["probe"]["idet_required"] = True
+        measured["analysis"].update({
+            "progressive_frames": 300,
+            "tff_frames": 303,
+            "bff_frames": 0,
+            "undetermined_frames": 0,
+            "sampled_frames": 603,
+            "measured_range_count": 3,
+            "coverage": 1.0,
+            "ranges": [
+                {
+                    "start_seconds": float(start),
+                    "end_seconds": float(start) + 8.0,
+                    "frame_limit": 201,
+                    "sampled_frames": 201,
+                    "status": "measured",
+                }
+                for start in (10, 20, 30)
+            ],
+        })
+        return json.dumps(reclassify_cadence_summary(measured), separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _fingerprint_summary_json() -> str:

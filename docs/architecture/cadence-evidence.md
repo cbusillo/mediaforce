@@ -57,9 +57,19 @@ Only those IDs can become filter graphs. Raw policy or model-generated filter
 strings are never accepted.
 
 Mixed, unknown, low-coverage, and low-confidence results block sample search,
-bakeoff, and production before ffmpeg starts. The operator-visible error asks
-for refreshed cadence analysis or more evidence; the LLM cannot choose a
-cadence transform.
+bakeoff, and production before ffmpeg starts. The LLM cannot choose a cadence
+transform.
+
+The evidence state separates two kinds of `unknown`. When some sampled range
+could not be measured, or too few frames were read, the file still needs
+analysis. When every sampled range was measured and the result is still
+ambiguous, measuring again gives the same answer, so the file is current evidence
+with a blocked decision: a judgment for the owner, not more analysis.
+
+A stored decision is also compared with what the current classifier makes of the
+stored measurements. When they differ, because the classifier changed after the
+file was measured, the file needs only reclassification. The evidence worker
+re-derives the decision from the stored counts without running ffmpeg again.
 Sampling, preview clips, bakeoff plans, and production all call the same filter
 compiler, so the reviewed transform cannot drift before the final encode.
 

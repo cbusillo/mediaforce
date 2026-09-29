@@ -379,6 +379,18 @@ def reclassify_cadence_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def cadence_decision_is_stale(summary: Mapping[str, Any]) -> bool:
+    """Whether the stored decision differs from what the current classifier makes of the stored measurements."""
+    stored = object_dict(object_dict(summary).get("decision"))
+    current = object_dict(reclassify_cadence_summary(summary).get("decision"))
+    return any(stored.get(key) != current.get(key) for key in ("classification", "status", "transform"))
+
+
+def cadence_measurement_complete(analysis: Mapping[str, Any]) -> bool:
+    """Every sampled range was measured and enough frames were read, so measuring again adds nothing."""
+    return _analysis_coverage(analysis) >= 1.0
+
+
 def cadence_filter(
         decision: Mapping[str, Any] | None,
         evidence: Mapping[str, Any] | None,
