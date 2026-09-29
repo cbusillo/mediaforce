@@ -689,10 +689,71 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         self.assertIsNotNone(job["retry_not_before"])
-        self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
+        self.assertIn("to remove an unfinished file it left", str(job["waiting_reason"]))
         self.assertIsNone(job["terminal_reason"])
         assert staged_row is not None
         self.assertEqual(staged_row["staging_path"], str(staging_path))
+
+    def test_cleanup_that_cannot_reach_its_host_backs_off_and_names_the_host(self) -> None:
+        source_path = self._create_source_file("episode-offline-cleanup.mkv")
+        staging_path = self.root / "remote-staging" / "tv" / "show" / "episode-offline-cleanup.mkv"
+
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._insert_staged_artifact(connection, item_id, staging_path)
+            manifest_path = self._write_manifest(
+                "manifest-offline-cleanup.json",
+                [{"library_item_id": item_id, "staging_path": str(staging_path)}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-offline-cleanup",
+                manifest_name=manifest_path.name,
+                host={"key": "m2", "label": "M2 MBP", "mode": "ssh", "media_access": "mounted"},
+                status="retry_backoff",
+                attempt_count=1,
+                retry_not_before="2000-01-01T00:00:00+00:00",
+                waiting_reason="retrying",
+            )
+
+            delays: list[float] = []
+            for _ in range(6):
+                with patch(
+                        "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                        side_effect=OSError("ssh: connect to host m2 port 22: Host is down"),
+                ), patch(
+                    "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
+                    return_value=0,
+                ):
+                    before = datetime.now(tz=UTC)
+                    web_app._reconcile_encode_jobs(connection, self.config)
+                job = load_encode_job(connection, "job-offline-cleanup")
+                assert job is not None
+                delays.append((datetime.fromisoformat(str(job["retry_not_before"])) - before).total_seconds())
+                job["retry_not_before"] = "2000-01-01T00:00:00+00:00"
+                save_encode_job(connection, job)
+
+        self.assertEqual(job["status"], "retry_backoff")
+        self.assertIn("M2 MBP", str(job["waiting_reason"]))
+        base = web_app.ENCODE_JOB_RETRY_BASE_DELAY_SECONDS
+        cap = web_app.ENCODE_JOB_RETRY_MAX_DELAY_SECONDS
+        expected = [min(base * 2 ** step, cap) for step in range(6)]
+        for delay, want in zip(delays, expected, strict=True):
+            self.assertAlmostEqual(delay, want, delta=5)
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.runtime.encode_runtime.run_remote_command",
+                return_value=subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout="", stderr=""),
+        ), patch(
+            "mediaforce.web.runtime.encode_runtime.clear_stale_encoding_items_when_idle",
+            return_value=0,
+        ):
+            web_app._reconcile_encode_jobs(connection, self.config)
+            cleaned = load_encode_job(connection, "job-offline-cleanup")
+
+        assert cleaned is not None
+        self.assertEqual(cleaned["status"], "queued")
+        self.assertNotIn("cleanup_deferrals", cleaned["progress"])
 
     def test_retry_backoff_terminalizes_local_cleanup_failure(self) -> None:
         source_path = self._create_source_file("episode-local-cleanup.mkv")
@@ -787,7 +848,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         assert job is not None
         self.assertEqual(job["status"], "retry_backoff")
         self.assertIsNotNone(job["retry_not_before"])
-        self.assertIn("waiting to clean interrupted output before retry", str(job["waiting_reason"]))
+        self.assertIn("to remove an unfinished file it left", str(job["waiting_reason"]))
         self.assertIsNone(job["terminal_reason"])
         assert staged_row is not None
         self.assertEqual(staged_row["staging_path"], str(staging_path))
@@ -3118,7 +3179,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertIsNotNone(still_waiting)
         assert still_waiting is not None
         self.assertEqual(still_waiting["status"], "retry_backoff")
-        self.assertIn("waiting to clean interrupted output", str(still_waiting["waiting_reason"]))
+        self.assertIn("to remove an unfinished file it left", str(still_waiting["waiting_reason"]))
         self.assertIsNotNone(still_waiting["retry_not_before"])
         assert still_waiting_item_status is not None
         self.assertEqual(still_waiting_item_status["status"], "planned")

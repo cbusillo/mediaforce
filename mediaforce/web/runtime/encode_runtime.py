@@ -266,15 +266,22 @@ def reconcile_encode_jobs(
             )
             continue
         if cleanup_outcome.outcome is _EncodeRetryArtifactCleanupOutcome.CLEANUP_DEFERRED:
-            retry_delay = _encode_job_retry_delay_seconds(
-                min(int_value(payload.get("attempt_count")), deps.encode_job_max_attempts),
-                deps,
-            )
+            # The computer that holds the unfinished file cannot be reached. Each miss doubles the
+            # wait, up to the retry cap, so an offline computer is not asked every minute forever.
+            progress = object_dict(payload.get("progress"))
+            deferrals = int_value(progress.get("cleanup_deferrals")) + 1
+            progress["cleanup_deferrals"] = deferrals
+            retry_delay = _encode_job_retry_delay_seconds(deferrals, deps)
             retry_not_before = (now + timedelta(seconds=retry_delay)).isoformat(timespec="seconds")
+            host_label = str(object_dict(payload.get("host")).get("label") or "the computer that made it").strip()
             payload.update(
                 {
+                    "progress": progress,
                     "retry_not_before": retry_not_before,
-                    "waiting_reason": f"waiting to clean interrupted output before retry at {retry_not_before}",
+                    "waiting_reason": (
+                        f"Waiting to reach {host_label} to remove an unfinished file it left; "
+                        f"next try at {retry_not_before}"
+                    ),
                     "updated_at": deps.now_iso(),
                 }
             )
@@ -294,9 +301,13 @@ def reconcile_encode_jobs(
                 ),
             )
             continue
+        progress = object_dict(payload.get("progress"))
+        # The cleanup got through, so a later outage starts its backoff from the beginning.
+        progress.pop("cleanup_deferrals", None)
         payload.update(
             {
                 "status": "queued",
+                "progress": progress,
                 "retry_not_before": None,
                 "waiting_reason": None,
                 "updated_at": deps.now_iso(),
