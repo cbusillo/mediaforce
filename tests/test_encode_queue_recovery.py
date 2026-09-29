@@ -24058,6 +24058,83 @@ raise SystemExit(0)
         self.assertIn("1 file is still queued or being made", result["message"])
         self.assertEqual(remaining, {"older-folder", "leftover-part", "newer-folder"})
 
+    def test_requeue_refuses_a_season_while_a_show_wide_encode_still_has_its_parts_queued(self) -> None:
+        source = self._create_source_file("Season 1/show-wide.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source, status="planned")
+            manifest_path = self._write_manifest(
+                "manifest-show-wide.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("Season 1/show-wide.mkv"))}],
+            )
+            now = "2026-09-29T12:00:00+00:00"
+            for job_id, job_kind, status, parent in (
+                    ("show-folder", "folder", "needs_attention", None),
+                    ("show-part", "shard", "queued", "show-folder"),
+            ):
+                save_encode_job(connection, {
+                    "job_id": job_id, "prefix": "tv/show", "job_kind": job_kind, "parent_job_id": parent,
+                    "status": status, "manifest_path": str(manifest_path),
+                    "manifest_indexes": [0] if job_kind == "shard" else None, "item_count": 1,
+                    "saved_profile_path": None, "host": {}, "last_host": {}, "notes": "", "bypass_schedule": False,
+                    "attempt_count": 1, "process_pid": None, "error": None, "leased_at": None,
+                    "lease_expires_at": None, "heartbeat_at": None, "worker_id": None, "retry_not_before": None,
+                    "waiting_reason": None, "terminal_reason": None, "last_failure_kind": None,
+                    "last_failure_at": None, "host_cooldown_until": None, "created_at": now, "started_at": None,
+                    "finished_at": None, "updated_at": now,
+                })
+
+        result = folder_actions_runtime.queue_folder_encode_action(
+            self.config,
+            "tv/show/Season 1",
+            "",
+            False,
+            now_iso=web_app._now_iso,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+            save_encode_job=save_encode_job,
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            part = load_encode_job(connection, "show-part")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "encode_already_active")
+        self.assertIsNotNone(part)
+
+    def test_in_place_recovery_holds_files_whose_settings_changed_or_that_missed_their_size(self) -> None:
+        intent = {"size_goal": {"value_mb": 200.0}}
+        saved = {"schema_version": 1, "sample_job_id": "old", "policy_hash": "policy", "operator_intent": intent}
+        manifest_path = self._write_manifest(
+            "manifest-hold-fresh-plan.json",
+            [{"library_item_id": 11, "rel_path": "tv/show/a.mkv"}, {"library_item_id": 12, "rel_path": "tv/show/b.mkv"}],
+        )
+        manifest = json.loads(manifest_path.read_text())
+        manifest["selection"] = {"production_approval_contract": saved}
+        manifest_path.write_text(json.dumps(manifest))
+        folder = {"job_kind": "folder", "manifest_path": str(manifest_path)}
+        transport = {"job_id": "a", "manifest_indexes": [0], "progress": {}}
+        missed = {"job_id": "b", "manifest_indexes": [1], "progress": {"failure_analysis": {"kind": "final_size_target_miss"}}}
+        plan = ([transport, missed], [0, 1])
+
+        same_settings = folder_actions_runtime._hold_files_that_need_a_fresh_plan(
+            folder, plan, {**saved, "sample_job_id": "newer"},
+        )
+        changed_goal = folder_actions_runtime._hold_files_that_need_a_fresh_plan(
+            folder, plan, {**saved, "operator_intent": {"size_goal": {"value_mb": 300.0}}},
+        )
+
+        self.assertEqual(same_settings[0], ([transport], [0]))
+        self.assertEqual([file.code for file in same_settings[1]], ["final_size_recovery_contract_unchanged"])
+        self.assertIsNone(changed_goal[0])
+        self.assertEqual(
+            sorted(file.code for file in changed_goal[1]),
+            ["final_size_recovery_contract_unchanged", "settings_changed_since_queued"],
+        )
+
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
         source_b = self._create_source_file("recover-active-b.mkv")

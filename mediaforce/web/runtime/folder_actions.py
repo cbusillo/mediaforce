@@ -644,7 +644,7 @@ def queue_folder_encode_action(
                 recovery_plan = _folder_recovery_plan(connection, active_encode_job)
                 recovery_left_out: list[LeftOutFile] = []
                 if recovery_plan is not None:
-                    recovery_plan, recovery_left_out = _hold_final_size_misses_for_a_fresh_plan(
+                    recovery_plan, recovery_left_out = _hold_files_that_need_a_fresh_plan(
                         active_encode_job, recovery_plan, production_approval_contract,
                     )
                 if recovery_plan is not None:
@@ -685,11 +685,8 @@ def queue_folder_encode_action(
                 "message": f"A folder encode is already {active_status} for {active_prefix}.",
             }
         if not joining_held_files:
-            still_active = [
-                job
-                for job in load_active_encode_jobs_for_prefix(connection, normalized_prefix)
-                if str(job.get("prefix") or "").strip().strip("/") == normalized_prefix
-            ]
+            # Any active work overlapping this folder, including a show-wide encode's parts for one season.
+            still_active = load_active_encode_jobs_for_prefix(connection, normalized_prefix)
             if still_active:
                 # Planning the folder again would encode these files twice; they finish or are reclaimed first.
                 count = sum(len(object_list(job.get("manifest_indexes"))) or 1 for job in still_active)
@@ -2242,23 +2239,42 @@ def _stopped_folder_with_active_children(connection: DBClient, prefix: str) -> J
     return latest
 
 
-def _hold_final_size_misses_for_a_fresh_plan(
+def _hold_files_that_need_a_fresh_plan(
         folder_job: JobPayload,
         recovery_plan: tuple[list[JobPayload], list[int]],
         current_approval_contract: ActionPayload | None,
 ) -> tuple[tuple[list[JobPayload], list[int]] | None, list[LeftOutFile]]:
-    """Leave out files that missed their final size; recovering in place would reuse the same goal.
+    """Leave out ended files that recovering in place would encode with the wrong settings.
 
-    They are re-planned with a fresh goal once the rest of the folder has finished.
+    In-place recovery reuses the folder's saved plan. A file that missed its final size would repeat
+    the same goal, and every file would ignore settings approved since the folder was queued. Those
+    files are planned again with the current approval once the rest of the folder has finished.
     """
     children, _indexes = recovery_plan
+    saved_contract = object_dict(object_dict(_folder_manifest(folder_job).get("selection")).get(
+        "production_approval_contract"
+    ))
+    settings_changed = bool(saved_contract and current_approval_contract) and any(
+        saved_contract.get(key) != object_dict(current_approval_contract).get(key)
+        for key in ("policy_hash", "operator_intent")
+    )
     manifest_items = _manifest_items(folder_job)
     kept: list[JobPayload] = []
     left_out: list[LeftOutFile] = []
     for child in children:
-        if _final_size_requeue_contract_blocker(child, current_approval_contract) is None:
+        missed_size = str(
+            object_dict(object_dict(child.get("progress")).get("failure_analysis")).get("kind") or ""
+        ) == "final_size_target_miss"
+        if not settings_changed and not missed_size:
             kept.append(child)
             continue
+        detail = (
+            "Missed its approved final size. It is planned again with a fresh goal once the rest of this "
+            "folder has finished."
+            if missed_size
+            else "Settings changed since this folder was queued. It is planned again with the new settings "
+            "once the rest of this folder has finished."
+        )
         for index in object_list(child.get("manifest_indexes")):
             if not isinstance(index, int) or not 0 <= index < len(manifest_items):
                 continue
@@ -2266,9 +2282,8 @@ def _hold_final_size_misses_for_a_fresh_plan(
             left_out.append(LeftOutFile(
                 int(item.get("library_item_id") or 0),
                 str(item.get("rel_path") or ""),
-                _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
-                "Missed its approved final size. It is planned again with a fresh goal once the rest of "
-                "this folder has finished.",
+                _FINAL_SIZE_RECOVERY_BLOCKER_CODE if missed_size else "settings_changed_since_queued",
+                detail,
             ))
     kept_indexes = sorted({
         index
@@ -2279,6 +2294,16 @@ def _hold_final_size_misses_for_a_fresh_plan(
     if not kept or not kept_indexes:
         return None, left_out
     return (kept, kept_indexes), left_out
+
+
+def _folder_manifest(job: JobPayload) -> ActionPayload:
+    manifest_path = Path(str(job.get("manifest_path") or "").strip())
+    if not str(manifest_path):
+        return {}
+    try:
+        return object_dict(json.loads(manifest_path.read_text()))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _folder_recovery_plan(
@@ -2302,14 +2327,7 @@ def _folder_recovery_plan(
 
 
 def _manifest_items(job: JobPayload) -> list[ActionPayload]:
-    manifest_path = Path(str(job.get("manifest_path") or "").strip())
-    if not str(manifest_path):
-        return []
-    try:
-        manifest = object_dict(json.loads(manifest_path.read_text()))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return [object_dict(item) for item in object_list(manifest.get("items"))]
+    return [object_dict(item) for item in object_list(_folder_manifest(job).get("items"))]
 
 
 def _manifest_library_item_ids(job: JobPayload, manifest_indexes: list[int]) -> list[int]:
