@@ -459,7 +459,10 @@ export interface EncodeFailureAnalysis {
 export interface EncodeUnfinishedGroup {
 	reason: string;
 	label: string;
+	/** Files, not queue parts. */
 	count: number;
+	/** True when the owner has to act; absent on rows saved before it was recorded. */
+	needs_owner?: boolean;
 	items: string[];
 }
 

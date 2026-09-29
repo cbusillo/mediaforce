@@ -5,6 +5,7 @@ import type {
 	DashboardScanJob,
 	DashboardSummaryPayload,
 	EncodeQueueJob,
+	EncodeUnfinishedGroup,
 	FolderCard,
 	FolderPayload,
 	FolderStatusPayload,
@@ -1999,6 +2000,26 @@ export function librarySeasonState(
 		label: 'Needs sample',
 		detail: 'Choose a size, then compare one sample first.',
 		tone: 'quiet'
+	};
+}
+
+export interface WaitingReasons {
+	needsYou: EncodeUnfinishedGroup[];
+	waiting: EncodeUnfinishedGroup[];
+	fileCount: number;
+}
+
+/** Every reason a folder's files are not finished, split into what needs the owner and what is only waiting. */
+export function encodeWaitingReasons(job: EncodeQueueJob | null | undefined): WaitingReasons {
+	const groups = (job?.progress?.unfinished_breakdown ?? []).filter(
+		(group) => group.count > 0 && group.label.trim()
+	);
+	const needsOwner = (group: EncodeUnfinishedGroup) =>
+		group.needs_owner ?? !(group.reason === 'retrying' || group.reason.startsWith('waiting'));
+	return {
+		needsYou: groups.filter(needsOwner),
+		waiting: groups.filter((group) => !needsOwner(group)),
+		fileCount: groups.reduce((sum, group) => sum + group.count, 0)
 	};
 }
 

@@ -6,6 +6,7 @@
 	import { ApiError, apiDownloadHref, postJson } from '$lib/api/client';
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
+	import WaitingReasons from '$lib/components/season/WaitingReasons.svelte';
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
 	import type {
@@ -41,6 +42,7 @@
 		compressionIntentContract,
 		currentOperatorIntent,
 		detailSeasonState,
+		encodeWaitingReasons,
 		episodeLabel,
 		exactItemFilename,
 		exactReviewSizeFacts,
@@ -252,6 +254,7 @@
 					: 'Compress the season'
 	);
 	const humanState = $derived(detailSeasonState(folder, status));
+	const waitingReasons = $derived(encodeWaitingReasons(folder.encode_job));
 	const promotionIntegrity = $derived(seasonPromotionIntegrity(status));
 	const episodeOptions = $derived(seasonEpisodeOptions(status));
 	const selectedEpisode = $derived(
@@ -2891,6 +2894,7 @@
 						<span>{isExactItemScope ? 'episode finished' : 'episodes finished'}</span>
 						{#if encodeProgress.eta}<small>{encodeProgress.eta}</small>{/if}
 					</div>
+					<WaitingReasons reasons={waitingReasons} />
 				</div>
 				<div
 					class="progress-ring"
@@ -3076,6 +3080,9 @@
 				</p>
 				<h1>{targetConstraint?.title || `${humanState.label}.`}</h1>
 				<p class="lede">{targetConstraint?.detail || plainFailureMessage(folder, status)}</p>
+				{#if waitingReasons.fileCount > 1}
+					<WaitingReasons reasons={waitingReasons} />
+				{/if}
 				<div class="help-safety">
 					{#if targetConstraint}
 						<strong>No quality rule was silently relaxed.</strong>

@@ -17,6 +17,7 @@ import type {
 } from '$lib/api/types';
 import {
 	activeSeasonCards,
+	encodeWaitingReasons,
 	approvalGuardFromMessage,
 	calibrationActivityStatusLabel,
 	calibrationEtaSummary,
@@ -2707,5 +2708,58 @@ describe('approvalStartPlan', () => {
 				olderSeasons: null
 			})
 		).toBeNull();
+	});
+});
+
+describe('encodeWaitingReasons', () => {
+	const job = (groups: NonNullable<EncodeQueueJob['progress']>['unfinished_breakdown']) =>
+		({ job_id: 'folder', progress: { unfinished_breakdown: groups } }) as EncodeQueueJob;
+
+	it('keeps every reason, split into what needs the owner and what is only waiting', () => {
+		const reasons = encodeWaitingReasons(
+			job([
+				{
+					reason: 'final_size_target_miss',
+					label: 'outside size limit',
+					count: 1,
+					needs_owner: true,
+					items: []
+				},
+				{ reason: 'storage_io', label: 'storage error', count: 2, needs_owner: true, items: [] },
+				{
+					reason: 'waiting_schedule',
+					label: 'waiting for a scheduled time',
+					count: 20,
+					needs_owner: false,
+					items: []
+				},
+				{ reason: 'retrying', label: 'still retrying', count: 0, needs_owner: false, items: [] }
+			])
+		);
+
+		expect(reasons.needsYou.map((group) => `${group.count} ${group.label}`)).toEqual([
+			'1 outside size limit',
+			'2 storage error'
+		]);
+		expect(reasons.waiting.map((group) => `${group.count} ${group.label}`)).toEqual([
+			'20 waiting for a scheduled time'
+		]);
+		expect(reasons.fileCount).toBe(23);
+	});
+
+	it('treats rows saved before the owner flag by their reason', () => {
+		const reasons = encodeWaitingReasons(
+			job([
+				{ reason: 'stopped', label: 'stopped', count: 1, items: [] },
+				{ reason: 'retrying', label: 'still retrying', count: 1, items: [] }
+			])
+		);
+
+		expect(reasons.needsYou.map((group) => group.reason)).toEqual(['stopped']);
+		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
+	});
+
+	it('is empty without an encode job', () => {
+		expect(encodeWaitingReasons(null)).toEqual({ needsYou: [], waiting: [], fileCount: 0 });
 	});
 });
