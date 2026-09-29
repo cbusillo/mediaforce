@@ -43,7 +43,9 @@ from mediaforce.tuning.content_intent_observations import record_visual_content_
 from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_evidence_blocker, \
-    cadence_safety_partition, older_season_cadence_payload
+    cadence_queue_partition, cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
+    left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
 from mediaforce.web.runtime.folder_tuning_helpers import (
     allows_measured_size_quality_tradeoff,
@@ -237,9 +239,29 @@ def _folder_encode_queue_message(
         cadence_partition: CadenceSafetyPartition | None,
         *,
         queued_item_count: int,
+        left_out: list[LeftOutFile],
 ) -> str:
+    older_season_message = _older_season_queue_message(
+        older_season_selection,
+        cadence_partition,
+        queued_item_count=queued_item_count,
+    )
+    if not left_out:
+        return older_season_message or "Queued the eligible folder encode."
+    left_out_message = f"Left {len(left_out)} out: {left_out_summary(left_out)}."
+    if older_season_message:
+        return f"{older_season_message} {left_out_message}"
+    return f"Queued {queued_item_count} {'file' if queued_item_count == 1 else 'files'}. {left_out_message}"
+
+
+def _older_season_queue_message(
+        older_season_selection: OlderSeasonOverrideSelection | None,
+        cadence_partition: CadenceSafetyPartition | None,
+        *,
+        queued_item_count: int,
+) -> str | None:
     if older_season_selection is None:
-        return "Queued the eligible folder encode."
+        return None
     blocked_count = len(cadence_partition.blocked_item_ids) if cadence_partition is not None else 0
     evidence_required_count = (
         len(cadence_partition.evidence_required_item_ids)
@@ -496,6 +518,7 @@ def queue_folder_encode_action(
                 detail="Choose and confirm a compression goal before queueing production.",
             )
         preflight_config = with_folder_policy_override(config, normalized_prefix, calibration_policy)
+        left_out: list[LeftOutFile] = []
         target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
         if target_size_blocker is not None:
             return {
@@ -822,7 +845,7 @@ def queue_folder_encode_action(
                 "excluded_item_count": len(older_season_cadence_partition.excluded_item_ids),
                 "excluded_library_item_ids": sorted(older_season_cadence_partition.excluded_item_ids),
             }
-        cadence_blocker = cadence_evidence_blocker(
+        cadence_partition = cadence_queue_partition(
             connection,
             preflight_config,
             normalized_prefix,
@@ -830,12 +853,13 @@ def queue_folder_encode_action(
                 int(item.get("library_item_id") or 0)
                 for item in manifest["items"]
             ],
-            decision_label="queueing production",
             work_reason="encode_safety",
             synchronize=older_season_cadence_partition is None,
         )
-        if cadence_blocker is not None:
-            return cadence_blocker
+        left_out.extend(cadence_left_out_files(cadence_partition, manifest_rel_paths(manifest)))
+        drop_manifest_items(manifest, {file.library_item_id for file in left_out})
+        if not manifest["items"]:
+            return nothing_queued_response(left_out, evidence_work=cadence_partition.evidence_work)
         reserve = reserve_preflight(preflight_config, manifest["items"])
         if not reserve.allowed:
             return {
@@ -910,8 +934,10 @@ def queue_folder_encode_action(
             older_season_selection,
             older_season_cadence_partition,
             queued_item_count=int(queue_job["item_count"]),
+            left_out=left_out,
         ),
         "job": queue_job,
+        "left_out": left_out_payload(left_out),
         "policy_holds_overridden": bool(
             override_policy_holds
             or (
