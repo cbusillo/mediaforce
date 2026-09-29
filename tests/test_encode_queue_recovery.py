@@ -22216,6 +22216,7 @@ raise SystemExit(0)
     ) -> folder_actions_runtime.ActionPayload:
         calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
         calibration["draft_hash"] = "approved-draft"
+        kwargs.setdefault("prepare_terminal_encode_job_for_requeue_fn", lambda *_args, **_kwargs: None)
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             return folder_actions_runtime.queue_folder_encode_action(
                 queue_config,
@@ -22230,7 +22231,6 @@ raise SystemExit(0)
                 upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
-                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
                 save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
                 **kwargs,
             )
@@ -22293,6 +22293,107 @@ raise SystemExit(0)
                 )
             ).scalar_one()
         self.assertEqual(work_status, "queued")
+
+    def test_queue_folder_leaves_out_only_the_file_that_missed_final_size(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            manifest_path = self._write_manifest(
+                "manifest-final-size-partition.json",
+                [
+                    {"library_item_id": item_ids["Episode 1.mkv"], "rel_path": "tv/show/Season 1/Episode 1.mkv"},
+                    {"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"},
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="terminal-final-size-partition",
+                manifest_name=manifest_path.name,
+                host={},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "terminal-final-size-partition")
+                .values(
+                    prefix="tv/show/Season 1",
+                    progress_json=json.dumps({
+                        "failure_analysis": {
+                            "kind": "final_size_target_miss",
+                            "retry_strategy": "fresh_goal_required",
+                            "manifest_indexes": [0, 1],
+                            "item_analyses": [
+                                {"kind": "final_size_target_miss", "manifest_index": 0, "manifest_indexes": [0]},
+                                {"kind": "quality_policy_failure", "manifest_index": 1, "manifest_indexes": [1]},
+                            ],
+                        }
+                    }),
+                )
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
+        result = self._queue_show_folder(
+            queue_config,
+            saved_jobs,
+            prepare_terminal_encode_job_for_requeue_fn=lambda _connection, job: prepared.append(dict(job)),
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            self._queued_manifest_item_ids(saved_jobs),
+            sorted([item_ids["Episode 2.mkv"], item_ids["Episode 3.mkv"]]),
+        )
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
+            [(item_ids["Episode 1.mkv"], "final_size_recovery_contract_unchanged")],
+        )
+        self.assertEqual([job["manifest_indexes"] for job in prepared], [[1]])
+
+    def test_quality_risk_refusal_names_every_blocking_reason(self) -> None:
+        reason = folder_actions_runtime._quality_risk_blocking_reason({
+            "deterministic_gates": {
+                "blocked": True,
+                "blocking_reasons": [
+                    "The resolved stream budget leaves no positive video budget.",
+                    "The target-size search trace uses stale cadence evidence.",
+                ],
+            },
+        })
+
+        self.assertIn("no positive video budget", str(reason))
+        self.assertIn("stale cadence evidence", str(reason))
+
+    def test_queue_folder_leaves_out_file_with_untraceable_target_and_queues_the_rest(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            real_manifest = folder_actions_runtime.create_folder_manifest(
+                connection,
+                queue_config,
+                prefix="tv/show/Season 1",
+                manual_override_prefix="tv/show/Season 1",
+                prepare_only=True,
+            )[0]
+        blocked_item = next(
+            item for item in real_manifest["items"] if item["library_item_id"] == item_ids["Episode 1.mkv"]
+        )
+        blocked_item["target_size_provenance"] = {
+            **object_dict(blocked_item.get("target_size_provenance")),
+            "blocker": {"code": "target_provenance_unverified", "message": "Fixture target cannot be traced."},
+        }
+
+        saved_jobs: list[dict[str, Any]] = []
+        with patch.object(folder_actions_runtime, "create_folder_manifest", return_value=(real_manifest, None)):
+            result = self._queue_show_folder(queue_config, saved_jobs)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 2.mkv"]])
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"], entry["reason"]) for entry in result["left_out"]],
+            [(item_ids["Episode 1.mkv"], "target_size_provenance", "Fixture target cannot be traced.")],
+        )
 
     def test_queue_older_seasons_queues_only_cadence_cleared_items(self) -> None:
         with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:

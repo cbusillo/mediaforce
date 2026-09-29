@@ -32,7 +32,8 @@ from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest, write_manifest
 from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection, encode_candidate_decisions, \
     older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
-    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
+    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, scope_target_size_partition, \
+    workflow_eligibility
 from mediaforce.tuning.production_lineage import attach_target_lineage
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
@@ -220,6 +221,35 @@ def _final_size_requeue_contract_blocker(
     }
 
 
+def _final_size_miss_item_ids_by_index(job: JobPayload | None) -> dict[int, int]:
+    """Library items that missed final size, by manifest index; empty when any miss cannot be placed."""
+    job_payload = object_dict(job)
+    failure_analysis = object_dict(object_dict(job_payload.get("progress")).get("failure_analysis"))
+    analyses = [object_dict(item) for item in object_list(failure_analysis.get("item_analyses"))]
+    if not analyses:
+        analyses = [failure_analysis]
+    miss_indexes: set[int] = set()
+    for analysis in analyses:
+        if str(analysis.get("kind") or "") != "final_size_target_miss":
+            continue
+        if "manifest_index" in analysis:
+            indexes = [int_value(analysis.get("manifest_index"))]
+        else:
+            # A shard that missed as a whole cannot say which of its files missed; leave all of them out.
+            indexes = [index for index in object_list(analysis.get("manifest_indexes")) if isinstance(index, int)]
+        if not indexes or any(index < 0 for index in indexes):
+            return {}
+        miss_indexes.update(indexes)
+    items = _manifest_items(job_payload)
+    item_ids: dict[int, int] = {}
+    for index in sorted(miss_indexes):
+        item_id = int(items[index].get("library_item_id") or 0) if index < len(items) else 0
+        if item_id <= 0:
+            return {}
+        item_ids[index] = item_id
+    return item_ids
+
+
 def _normalized_number(value: Any) -> float | None:
     if value in {None, ""}:
         return None
@@ -294,26 +324,14 @@ def _target_size_left_out(
         prefix: str,
 ) -> tuple[list[LeftOutFile], ActionPayload | None]:
     """Files whose size goal cannot fit stay out; the folder is refused only when no file is left to try."""
-    decisions = [
-        decision
-        for decision in encode_candidate_decisions(connection, config, prefixes=[prefix])
-        if decision.workflow_lane == "encode"
-    ]
-    blocked = sorted(
-        (
-            (str(decision.row.get("rel_path") or ""), decision.item_id, decision.target_size_blocker)
-            for decision in decisions
-            if decision.target_size_blocker is not None
-        ),
-        key=lambda entry: entry[0],
-    )
+    blocked, any_left = scope_target_size_partition(connection, config, prefix)
     left_out = [
-        LeftOutFile(item_id, rel_path, "target_size_infeasible", blocker.message)
-        for rel_path, item_id, blocker in blocked
+        LeftOutFile(file.item_id, file.rel_path, "target_size_infeasible", file.blocker.message)
+        for file in blocked
     ]
-    if not blocked or len(blocked) < len(decisions):
+    if not blocked or any_left:
         return left_out, None
-    first = blocked[0][2]
+    first = blocked[0].blocker
     messages = list(dict.fromkeys(file.reason for file in left_out))
     return left_out, {
         "ok": False,
@@ -763,21 +781,29 @@ def queue_folder_encode_action(
         finally:
             if preview_transaction is not None:
                 preview_transaction.rollback()
-        target_provenance_blocker = next(
-            (
-                object_dict(object_dict(item.get("target_size_provenance")).get("blocker"))
-                for item in manifest["items"]
-                if object_dict(object_dict(item.get("target_size_provenance")).get("blocker"))
-            ),
-            None,
-        )
-        if target_provenance_blocker is not None:
+        provenance_blocked = [
+            (item, blocker)
+            for item in manifest["items"]
+            if (blocker := object_dict(object_dict(item.get("target_size_provenance")).get("blocker")))
+        ]
+        if provenance_blocked and len(provenance_blocked) == len(manifest["items"]):
+            first_blocker = provenance_blocked[0][1]
+            messages = list(dict.fromkeys(str(blocker["message"]) for _item, blocker in provenance_blocked))
             return {
                 "ok": False,
-                "code": target_provenance_blocker["code"],
-                "message": target_provenance_blocker["message"],
-                "target_size_provenance_blocker": target_provenance_blocker,
+                "code": first_blocker["code"],
+                "message": " ".join(messages),
+                "target_size_provenance_blocker": first_blocker,
             }
+        left_out.extend(
+            LeftOutFile(
+                int(item.get("library_item_id") or 0),
+                str(item.get("rel_path") or ""),
+                "target_size_provenance",
+                str(blocker["message"]),
+            )
+            for item, blocker in provenance_blocked
+        )
         if not manifest["items"]:
             if left_out:
                 return nothing_queued_response(left_out)
@@ -828,8 +854,27 @@ def queue_folder_encode_action(
             latest_encode_job,
             production_approval_contract,
         )
+        final_size_miss_indexes: dict[int, int] = {}
         if final_size_requeue_blocker is not None:
-            return final_size_requeue_blocker
+            final_size_miss_indexes = _final_size_miss_item_ids_by_index(latest_encode_job)
+            if not final_size_miss_indexes:
+                return final_size_requeue_blocker
+            rel_paths = {
+                int(item.get("library_item_id") or 0): str(item.get("rel_path") or "")
+                for item in _manifest_items(object_dict(latest_encode_job))
+            }
+            left_out.extend(
+                LeftOutFile(
+                    item_id,
+                    rel_paths.get(item_id, ""),
+                    _FINAL_SIZE_RECOVERY_BLOCKER_CODE,
+                    (
+                        "Missed its approved final size under the same reviewed settings. "
+                        "Approve a fresh test with a changed goal before retrying it."
+                    ),
+                )
+                for item_id in sorted(set(final_size_miss_indexes.values()))
+            )
         if production_approval_contract is not None:
             selection = object_dict(manifest.get("selection"))
             selection["production_approval_contract"] = production_approval_contract
@@ -862,6 +907,7 @@ def queue_folder_encode_action(
                 "excluded_item_count": len(older_season_cadence_partition.excluded_item_ids),
                 "excluded_library_item_ids": sorted(older_season_cadence_partition.excluded_item_ids),
             }
+        drop_manifest_items(manifest, {file.library_item_id for file in left_out})
         cadence_partition = cadence_queue_partition(
             connection,
             preflight_config,
@@ -889,7 +935,7 @@ def queue_folder_encode_action(
             _prepare_terminal_job_except(
                 connection,
                 latest_encode_job,
-                set(retry_outside_policy),
+                set(retry_outside_policy) | set(final_size_miss_indexes),
                 prepare_terminal_encode_job_for_requeue_fn,
             )
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
@@ -2629,7 +2675,9 @@ def _quality_risk_blocking_reason(contract: ActionPayload) -> str | None:
         for reason in object_list(gates.get("blocking_reasons"))
         if str(reason).strip()
     ]
-    return blocking_reasons[0] if blocking_reasons else "Measured review facts still block this action."
+    if not blocking_reasons:
+        return "Measured review facts still block this action."
+    return " ".join(dict.fromkeys(blocking_reasons))
 
 
 def _failed_target_size_job_blocking_reason(

@@ -1247,6 +1247,34 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertTrue(any("Target size exceeds the 80% source cap" in str(call) for call in print_line.call_args_list))
         write_manifest.assert_not_called()
 
+    def test_cli_plan_leaves_out_infeasible_target_and_plans_the_rest(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(
+                connection,
+                "films/Small Target/Feature.mkv",
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+            feasible_id = self._insert_item(
+                connection,
+                "films/Larger Target/Feature.mkv",
+                size_bytes=800_000_000,
+                duration_seconds=5_520.0,
+            )
+
+        with patch("mediaforce.cli.load_config", return_value=config), patch(
+            "mediaforce.cli.purge_transient_artifacts"
+        ), patch("mediaforce.cli._write_manifest") as write_manifest, patch("builtins.print") as print_line:
+            exit_code = cli_main(["--config", str(config.paths.config_path), "plan", "--prefix", "films"])
+
+        self.assertEqual(exit_code, 0)
+        planned_manifest = write_manifest.call_args.args[2]
+        self.assertEqual([item["library_item_id"] for item in planned_manifest["items"]], [feasible_id])
+        self.assertTrue(any(
+            "Left out films/Small Target/Feature.mkv" in str(call) for call in print_line.call_args_list
+        ))
+
     def test_cli_holds_runtime_lock_before_cleanup(self) -> None:
         lock_held = False
 

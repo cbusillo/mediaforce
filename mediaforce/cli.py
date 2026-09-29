@@ -19,7 +19,7 @@ from mediaforce.execution import HeldFile, describe_item_plan, encode_manifest_i
     validate_manifest_items
 from mediaforce.encoding.bakeoff import DEFAULT_BAKEOFF_ENGINES, build_bakeoff_plan, write_bakeoff_plan
 from mediaforce.library.folder_profiles import inspect_prefix
-from mediaforce.library.candidate_selection import scope_target_size_blocker
+from mediaforce.library.candidate_selection import scope_target_size_blocker, scope_target_size_partition
 from mediaforce.library.evidence_acquisition import load_fingerprint_acquisition_items, \
     replay_representative_dimensions
 from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EvidenceQueueConflict, \
@@ -363,6 +363,7 @@ def _run_locked_command(
             if blocker is not None:
                 print(f"Plan blocked: {blocker}")
                 return 2
+            _print_target_size_left_out(connection, config, args.prefix)
             rows = _select_encode_candidates(
                 connection,
                 config,
@@ -767,6 +768,7 @@ def _create_campaign_manifest(
     blocker = scope_target_size_blocker(connection, config, prefix)
     if blocker is not None:
         raise TargetSizePreflightBlocked(blocker.message)
+    _print_target_size_left_out(connection, config, [prefix])
     rows = _select_encode_candidates(
         connection,
         config,
@@ -789,6 +791,17 @@ def _target_size_blocker_for_prefixes(
         if blocker is not None:
             return blocker.message
     return None
+
+
+def _print_target_size_left_out(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefixes: list[str],
+) -> None:
+    for prefix in prefixes:
+        blocked, _any_left = scope_target_size_partition(connection, config, prefix)
+        for file in blocked:
+            print(f"Left out {file.rel_path}: {file.blocker.message}")
 
 
 def _resolve_manifest_path(connection: DBClient, manifest_path: Path | None) -> Path:

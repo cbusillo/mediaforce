@@ -626,20 +626,45 @@ def restrict_older_season_override_selection(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class TargetSizeBlockedFile:
+    item_id: int
+    rel_path: str
+    blocker: StreamBudgetProjectionBlocker
+
+
+def scope_target_size_partition(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[list[TargetSizeBlockedFile], bool]:
+    """Encode candidates whose size goal cannot fit, by path, and whether any candidate is left to try."""
+    decisions = [
+        decision
+        for decision in encode_candidate_decisions(connection, config, prefixes=[prefix])
+        if decision.workflow_lane == "encode"
+    ]
+    blocked = sorted(
+        (
+            TargetSizeBlockedFile(decision.item_id, str(decision.row.get("rel_path") or ""), decision.target_size_blocker)
+            for decision in decisions
+            if decision.target_size_blocker is not None
+        ),
+        key=lambda file: file.rel_path,
+    )
+    return blocked, len(blocked) < len(decisions)
+
+
 def scope_target_size_blocker(
         connection: DBClient,
         config: MediaforceConfig,
         prefix: str,
 ) -> StreamBudgetProjectionBlocker | None:
-    blocked = [
-        decision
-        for decision in encode_candidate_decisions(connection, config, prefixes=[prefix])
-        if decision.target_size_blocker is not None
-    ]
-    if not blocked:
+    """The first size-goal blocker, only when it leaves no candidate in the scope to try."""
+    blocked, any_left = scope_target_size_partition(connection, config, prefix)
+    if not blocked or any_left:
         return None
-    blocked.sort(key=lambda decision: str(decision.row.get("rel_path") or ""))
-    return blocked[0].target_size_blocker
+    return blocked[0].blocker
 
 
 def workflow_eligibility(decisions: list[CandidateDecision]) -> dict[int, EncodeEligibility]:
