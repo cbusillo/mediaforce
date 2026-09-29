@@ -543,33 +543,39 @@ def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> d
 
 def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:
     return list(connection.execute(
-        select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.error, encode_jobs.c.progress_json)
+        select(
+            encode_jobs.c.prefix,
+            encode_jobs.c.job_kind,
+            encode_jobs.c.status,
+            encode_jobs.c.error,
+            encode_jobs.c.progress_json,
+        )
         .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
-        # A folder summarizes its parts; a part that just finished must not hide its folder's state.
-        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
     ).mappings().fetchall())
 
 
 def _encode_job_workflow_state(overlapping_rows: list[DBRow]) -> tuple[WorkflowLane, str] | None:
-    """The newest overlapping encode job's lane, naming every reason its files are not finished."""
-    active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
+    """The scope's encode lane, naming every reason its files are not finished.
+
+    Any active job, including a folder's queued or running part, keeps the scope working. Whether
+    work needs the owner comes from the newest folder or single job, which summarizes its parts; a
+    part that just finished must not hide it.
+    """
+    display_rows = [row for row in overlapping_rows if row["job_kind"] in DISPLAY_ENCODE_JOB_KINDS]
+    active = next(
+        (row for rows in (display_rows, overlapping_rows) for row in rows if row["status"] in PROCESSING_JOB_STATUSES),
+        None,
+    )
+    latest = display_rows[0] if display_rows else None
+    groups = unfinished_breakdown_groups(latest["progress_json"]) if latest is not None else []
     if active is not None:
         detail = f"Encode job is {active['status']} for {active['prefix']}."
-        owner_groups = [group for group in unfinished_breakdown_groups(active["progress_json"]) if group.get("needs_owner")]
+        owner_groups = [group for group in groups if group.get("needs_owner")]
         if owner_groups:
             detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
         return "processing", detail
-    latest = overlapping_rows[0] if overlapping_rows else None
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
-        groups = unfinished_breakdown_groups(latest["progress_json"])
-        owner_groups = [group for group in groups if group.get("needs_owner")]
-        if owner_groups and len(owner_groups) < len(groups):
-            # Its other files are still queued or retrying, so the folder is still working.
-            return (
-                "processing",
-                f"Encode work continues for {latest['prefix']}. Needs you: {unfinished_breakdown_summary(owner_groups)}.",
-            )
         error = unfinished_breakdown_summary(groups) or str(latest["error"] or "Encode job needs operator attention.")
         return "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
     return None

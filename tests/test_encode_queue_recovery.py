@@ -20651,7 +20651,7 @@ raise SystemExit(0)
             queued_left_state,
             (
                 "processing",
-                "Encode work continues for tv/show. Needs you: 1 outside size limit · "
+                "Encode job is queued for tv/show. Needs you: 1 outside size limit · "
                 "1 longer than every work window · 1 storage error.",
             ),
         )
@@ -20659,6 +20659,35 @@ raise SystemExit(0)
         self.assertEqual(
             ended_state,
             ("attention", "Encode job is needs_attention for tv/show: 1 outside size limit · 1 storage error"),
+        )
+
+    def test_unfinished_breakdown_separates_waits_that_need_the_owner(self) -> None:
+        waits = [
+            "Waiting for free-space reserve on /Volumes/Media: needs 40 GB free, 12 GB available.",
+            "Waiting for the active large encode job to release its free-space reserve.",
+            "Waiting for a measurable free-space reserve: cannot measure /Volumes/Media. Mount or repair it.",
+            "Waiting for complete free-space reserve inputs. Rebuild the production plan or rescan the folder.",
+            "Controller storage: Unexpected volume at /Volumes/Media. Reconnect storage with Finder or Prepare; "
+            "readiness checks continue.",
+            "Mediaforce cannot access /Volumes/Media/staging on this computer. Mount the storage to continue.",
+            "Encode host is warming up.",
+        ]
+        children = [
+            {"status": "queued", "waiting_reason": reason, "manifest_indexes": [index]}
+            for index, reason in enumerate(waits)
+        ]
+
+        breakdown = encode_runtime._unfinished_child_breakdown(children)
+
+        self.assertEqual(
+            [(group["label"], group["count"], group["needs_owner"]) for group in breakdown],
+            [
+                ("storage to reconnect", 2, True),
+                ("needs its plan rebuilt", 1, True),
+                ("storage to mount or repair", 1, True),
+                ("waiting for free space", 2, False),
+                ("Encode host is warming up.", 1, False),
+            ],
         )
 
     def test_aggregate_encode_parent_job_stays_running_while_other_shards_need_attention(self) -> None:

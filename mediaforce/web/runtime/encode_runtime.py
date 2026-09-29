@@ -888,40 +888,40 @@ _UNFINISHED_REASON_LABELS = {
     "ssh_transport": "connection failed",
     "needs_review": "need review",
 }
-# Queued files wait for the scheduler; group its sentences under short plain labels. A reason
-# that matches none of these keeps its own words so no distinct reason is folded into another.
-_WAITING_REASON_PATTERNS = (
-    ("waiting_schedule", "waiting for a scheduled time", ("schedule window", "window with enough time")),
-    ("waiting_free_space", "waiting for free space", ("free-space reserve",)),
-    ("waiting_storage", "waiting for storage", ("cannot access", "mount the storage", "mount or repair")),
-    ("waiting_cooldown", "waiting for a computer to recover", ("cooldown",)),
-    ("waiting_computer", "waiting for a free computer", ("host capacity", "available encode host", "host allowed")),
-    ("waiting_cleanup", "waiting to clean up a failed attempt", ("header-only output", "unfinished file it left")),
+# Queued files wait for the scheduler; group its sentences under short plain labels, first match
+# wins. Some waits only end when the owner acts, so they count as needing the owner. A reason that
+# matches none of these keeps its own words so no distinct reason is folded into another.
+_WAITING_REASON_PATTERNS: tuple[tuple[str, str, bool, tuple[str, ...]], ...] = (
+    ("schedule_too_short", "longer than every work window", True, (HOST_WINDOW_IMPOSSIBLE_MARKER,)),
+    ("plan_rebuild", "needs its plan rebuilt", True, ("reserve inputs",)),
+    ("storage_repair", "storage to mount or repair", True, ("cannot measure", "mount or repair")),
+    ("storage_reconnect", "storage to reconnect", True, ("reconnect storage", "mount the storage")),
+    ("waiting_free_space", "waiting for free space", False, ("free-space reserve",)),
+    ("waiting_schedule", "waiting for a scheduled time", False, ("schedule window", "window with enough time")),
+    ("waiting_cooldown", "waiting for a computer to recover", False, ("cooldown",)),
+    ("waiting_computer", "waiting for a free computer", False, ("host capacity", "available encode host", "host allowed")),
+    ("waiting_cleanup", "waiting to clean up a failed attempt", False, ("header-only output", "unfinished file it left")),
 )
 _OWNER_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _UNFINISHED_BREAKDOWN_ITEM_LIMIT = 5
 
 
-def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str]:
+def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
+    """The child's reason key, its plain label, and whether only the owner can end it."""
     status = str(child.get("status") or "")
     if status == "queued":
         waiting_reason = " ".join(str(child.get("waiting_reason") or "").split())
         if not waiting_reason:
-            return "waiting_turn", "waiting for their turn"
+            return "waiting_turn", "waiting for their turn", False
         lowered = waiting_reason.lower()
-        if HOST_WINDOW_IMPOSSIBLE_MARKER in lowered:
-            return "schedule_too_short", "longer than every work window"
-        for reason, label, needles in _WAITING_REASON_PATTERNS:
+        for reason, label, needs_owner, needles in _WAITING_REASON_PATTERNS:
             if any(needle in lowered for needle in needles):
-                return reason, label
-        return f"waiting:{waiting_reason}", waiting_reason
+                return reason, label, needs_owner
+        return f"waiting:{waiting_reason}", waiting_reason, False
     if status == "retry_backoff":
-        reason = "retrying"
-    elif status == "stopped":
-        reason = "stopped"
-    else:
-        reason = _attention_child_reason(child)
-    return reason, _UNFINISHED_REASON_LABELS[reason]
+        return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
+    reason = "stopped" if status == "stopped" else _attention_child_reason(child)
+    return reason, _UNFINISHED_REASON_LABELS[reason], True
 
 
 def _attention_child_reason(child: Mapping[str, Any]) -> str:
@@ -950,17 +950,10 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         status = str(child.get("status") or "")
         if status not in _OWNER_CHILD_STATUSES | {"retry_backoff", "queued"}:
             continue
-        reason, label = _unfinished_child_reason(child)
+        reason, label, needs_owner = _unfinished_child_reason(child)
         group = groups.setdefault(
             reason,
-            {
-                "reason": reason,
-                "label": label,
-                "count": 0,
-                # No schedule fits a file longer than every work window; only the owner can change that.
-                "needs_owner": status in _OWNER_CHILD_STATUSES or reason == "schedule_too_short",
-                "items": [],
-            },
+            {"reason": reason, "label": label, "count": 0, "needs_owner": needs_owner, "items": []},
         )
         indexes = child.get("manifest_indexes")
         group["count"] += len(indexes) if isinstance(indexes, list) and indexes else max(
