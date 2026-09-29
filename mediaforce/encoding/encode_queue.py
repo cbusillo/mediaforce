@@ -13,7 +13,7 @@ from mediaforce.core.db import DBClient
 from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import encode_queue_state
-from mediaforce.core.type_defs import int_value
+from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.library.media_scopes import MediaScope, resolve_media_scope, scope_prefix_overlap_filter
 
 DEFAULT_QUEUE_NAME = "heavy"
@@ -54,6 +54,27 @@ _PERSISTED_ENCODE_HOST_KEYS = (
     "videotoolbox_available",
 )
 _ENCODE_JOB_HOST_REPAIR_LENGTH_THRESHOLD = 65_536
+
+
+
+
+def unfinished_breakdown_groups(progress: Any) -> list[dict[str, Any]]:
+    """A folder's unfinished files grouped by reason, from its progress mapping or stored progress JSON."""
+    if isinstance(progress, str):
+        try:
+            progress = json.loads(progress)
+        except json.JSONDecodeError:
+            return []
+    return [
+        group
+        for group in (object_dict(value) for value in object_list(object_dict(progress).get("unfinished_breakdown")))
+        if int_value(group.get("count")) > 0 and str(group.get("label") or "").strip()
+    ]
+
+
+def unfinished_breakdown_summary(groups: list[dict[str, Any]]) -> str:
+    """Every unfinished reason with its file count, in the breakdown's order (the owner's first)."""
+    return " · ".join(f"{int_value(group['count'])} {str(group['label']).strip()}" for group in groups)
 
 
 def ensure_queue_state(connection: DBClient, *, queue_name: str = DEFAULT_QUEUE_NAME, updated_at: str) -> None:

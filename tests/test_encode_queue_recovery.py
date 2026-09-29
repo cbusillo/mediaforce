@@ -66,6 +66,7 @@ from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_pref
     save_encode_job, save_queue_state, summarize_encode_queue
 from mediaforce.encoding.quality import QualitySearchResult, SampleEncodeResult
 from mediaforce.library.folder_profiles import inspect_prefix
+from mediaforce.library.media_scopes import media_scope_from_prefix
 from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.hosts import status_runtime as host_status_runtime
 from mediaforce.hosts.types import VMAF_MODEL_MISSING_ISSUE, is_vmaf_model_load_failure
@@ -3490,6 +3491,31 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             waiting_reason,
             f"Mediaforce cannot access {self.config.staging_root} on this computer. Mount the storage to continue.",
         )
+
+    def test_host_selection_names_every_storage_problem_not_only_the_first(self) -> None:
+        def host(key: str) -> dict[str, Any]:
+            return {
+                "key": key, "host": key, "label": key.title(), "mode": "ssh", "media_access": "mounted",
+                "priority": 90, "capabilities": ["encode_queue"], "available": True, "probe_available": True,
+                "active_encode_count": 0, "max_parallel_encodes": 1, "queue_active": True,
+            }
+
+        issues = {
+            "remote-a": "Remote A cannot reach its storage.",
+            "remote-b": "Remote B cannot reach its storage.",
+            "remote-c": "Remote A cannot reach its storage.",
+        }
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows",
+                return_value=[host("remote-a"), host("remote-b"), host("remote-c")],
+        ), patch(
+            "mediaforce.web.runtime.encode_runtime.controller_storage_admission_issue",
+            side_effect=lambda _config, candidate: issues[candidate["key"]],
+        ):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, {})
+
+        self.assertIsNone(host_payload)
+        self.assertEqual(waiting_reason, "Remote A cannot reach its storage. Remote B cannot reach its storage.")
 
     def test_host_selection_resumes_after_controller_recovery_without_requeue(self) -> None:
         host = {
@@ -20516,6 +20542,95 @@ raise SystemExit(0)
         )
         self.assertEqual(progress["unfinished_breakdown"][0]["reason"], "quality_floor_size_conflict")
         self.assertEqual(progress["retrying_shard_count"], 1)
+
+    def test_folder_with_work_left_reads_as_working_and_lists_every_waiting_reason(self) -> None:
+        children = [
+            ("needs_attention", {"failure_analysis": {"kind": "final_size_target_miss"}}, "deterministic", None),
+            ("needs_attention", {}, "storage_io", None),
+            ("queued", {}, None, "waiting for a host schedule window"),
+            ("queued", {}, None, "Waiting for a host schedule window."),
+            ("completed", {}, None, None),
+        ]
+        manifest_path = self._write_manifest(
+            "manifest-parent-waiting-reasons.json",
+            [
+                {"library_item_id": index + 1, "duration_seconds": 60.0, "source_size_bytes": 1000}
+                for index in range(len(children))
+            ],
+        )
+        now = web_app._now_iso()
+        base = {
+            "prefix": "tv/show", "manifest_path": str(manifest_path), "item_count": 1, "saved_profile_path": None,
+            "last_host": {}, "notes": "", "bypass_schedule": False, "attempt_count": 1, "process_pid": None,
+            "leased_at": None, "lease_expires_at": None, "heartbeat_at": None, "worker_id": None,
+            "retry_not_before": None, "terminal_reason": None, "last_failure_at": None,
+            "host_cooldown_until": None, "created_at": now, "started_at": now, "finished_at": None,
+            "updated_at": now, "host": {},
+        }
+        scope = media_scope_from_prefix("tv/show", match="descendants")
+
+        with open_db(self.config.paths.db_path) as connection:
+            save_encode_job(connection, {
+                **base, "job_id": "folder-waiting", "job_kind": "folder", "parent_job_id": None,
+                "status": "queued", "manifest_indexes": None, "item_count": len(children), "error": None,
+                "last_failure_kind": None, "waiting_reason": None,
+            })
+            for index, (status, progress, failure_kind, waiting_reason) in enumerate(children):
+                save_encode_job(connection, {
+                    **base, "job_id": f"waiting-shard-{index}", "job_kind": "shard",
+                    "parent_job_id": "folder-waiting", "status": status, "manifest_indexes": [index],
+                    "error": "failed" if failure_kind else None, "last_failure_kind": failure_kind,
+                    "waiting_reason": waiting_reason, "progress": progress,
+                })
+
+            def resync() -> dict[str, Any]:
+                child = load_encode_job(connection, "waiting-shard-0")
+                assert child is not None
+                encode_runtime.sync_encode_job_parent(connection, child, web_app._encode_queue_runtime_deps())
+                stored = load_encode_job(connection, "folder-waiting")
+                assert stored is not None
+                return stored
+
+            working = resync()
+            badge = web_app._folder_needs_attention_badges(connection).get("tv/show")
+            working_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+
+            for index in (2, 3):
+                shard = load_encode_job(connection, f"waiting-shard-{index}")
+                assert shard is not None
+                save_encode_job(connection, {**shard, "status": "completed", "waiting_reason": None})
+            ended = resync()
+            ended_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+
+        self.assertEqual(working["status"], "queued")
+        self.assertEqual(
+            [
+                (group["label"], group["count"], group["needs_owner"])
+                for group in object_dict(working["progress"])["unfinished_breakdown"]
+            ],
+            [
+                ("outside size limit", 1, True),
+                ("storage error", 1, True),
+                ("waiting for a scheduled time", 2, False),
+            ],
+        )
+        self.assertEqual(
+            badge,
+            {
+                "label": "Needs attention",
+                "tone": "warning",
+                "detail": "1 outside size limit · 1 storage error · 2 waiting for a scheduled time",
+            },
+        )
+        self.assertEqual(
+            working_state,
+            ("processing", "Encode job is queued for tv/show. Needs you: 1 outside size limit · 1 storage error."),
+        )
+        self.assertEqual(ended["status"], "needs_attention")
+        self.assertEqual(
+            ended_state,
+            ("attention", "Encode job is needs_attention for tv/show: 1 outside size limit · 1 storage error"),
+        )
 
     def test_aggregate_encode_parent_job_stays_running_while_other_shards_need_attention(self) -> None:
         manifest_path = self._write_manifest(

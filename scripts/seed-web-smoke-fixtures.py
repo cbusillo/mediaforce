@@ -2288,6 +2288,17 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     "total_item_count": 1,
                     "current_item_rel_path": "tv/Encoding Show/Season 1/Episode 01.mkv",
                     "progress_state": "encoding",
+                    # A season still working while some of its files already need the owner.
+                    "unfinished_breakdown": [
+                        {"reason": "final_size_target_miss", "label": "outside size limit", "count": 1,
+                         "needs_owner": True, "items": ["tv/Encoding Show/Season 1/Episode 04.mkv"]},
+                        {"reason": "storage_io", "label": "storage error", "count": 1,
+                         "needs_owner": True, "items": ["tv/Encoding Show/Season 1/Episode 06.mkv"]},
+                        {"reason": "waiting_schedule", "label": "waiting for a scheduled time", "count": 5,
+                         "needs_owner": False, "items": []},
+                        {"reason": "retrying", "label": "still retrying", "count": 1,
+                         "needs_owner": False, "items": []},
+                    ],
                 },
             ),
             _encode_job(
@@ -2302,7 +2313,13 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     "failure_analysis": {
                         "kind": "quality_threshold",
                         "summary": "Fixture encode missed the requested quality target.",
-                    }
+                    },
+                    "unfinished_breakdown": [
+                        {"reason": "needs_review", "label": "need review", "count": 2,
+                         "needs_owner": True, "items": []},
+                        {"reason": "stopped", "label": "stopped", "count": 1,
+                         "needs_owner": True, "items": []},
+                    ],
                 },
             ),
             _encode_job(

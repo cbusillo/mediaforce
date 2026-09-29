@@ -665,14 +665,16 @@ def aggregate_encode_parent_job(
     stopped_children = [child for child in children if str(child.get("status") or "") == "stopped"]
     failed_children = [child for child in children if str(child.get("status") or "") == "failed"]
 
+    # A folder with work still to run reads as working; the files that need the owner are counted
+    # in the unfinished breakdown rather than turning the whole folder into a stopped one.
     if running_children:
         status = "running"
-    elif attention_children:
-        status = "needs_attention"
     elif any(str(child.get("status") or "") == "retry_backoff" for child in children):
         status = "retry_backoff"
     elif queued_children:
         status = "queued"
+    elif attention_children:
+        status = "needs_attention"
     elif len(completed_children) == len(children):
         status = "completed"
     elif stopped_children:
@@ -888,15 +890,41 @@ _UNFINISHED_REASON_LABELS = {
     "ssh_transport": "connection failed",
     "needs_review": "need review",
 }
+# Queued files wait for the scheduler; group its sentences under short plain labels. A reason
+# that matches none of these keeps its own words so no distinct reason is folded into another.
+_WAITING_REASON_PATTERNS = (
+    ("waiting_schedule", "waiting for a scheduled time", ("schedule window", "window with enough time")),
+    ("waiting_free_space", "waiting for free space", ("free-space reserve",)),
+    ("waiting_storage", "waiting for storage", ("cannot access", "mount the storage", "mount or repair")),
+    ("waiting_cooldown", "waiting for a computer to recover", ("cooldown",)),
+    ("waiting_computer", "waiting for a free computer", ("host capacity", "available encode host", "host allowed")),
+    ("waiting_cleanup", "waiting to clean up a failed attempt", ("header-only output", "unfinished file it left")),
+)
+_OWNER_CHILD_STATUSES = frozenset({"needs_attention", "failed", "stopped"})
 _UNFINISHED_BREAKDOWN_ITEM_LIMIT = 5
 
 
-def _unfinished_child_reason(child: Mapping[str, Any]) -> str:
+def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str]:
     status = str(child.get("status") or "")
+    if status == "queued":
+        waiting_reason = " ".join(str(child.get("waiting_reason") or "").split())
+        if not waiting_reason:
+            return "waiting_turn", "waiting for their turn"
+        lowered = waiting_reason.lower()
+        for reason, label, needles in _WAITING_REASON_PATTERNS:
+            if any(needle in lowered for needle in needles):
+                return reason, label
+        return f"waiting:{waiting_reason}", waiting_reason
     if status == "retry_backoff":
-        return "retrying"
-    if status == "stopped":
-        return "stopped"
+        reason = "retrying"
+    elif status == "stopped":
+        reason = "stopped"
+    else:
+        reason = _attention_child_reason(child)
+    return reason, _UNFINISHED_REASON_LABELS[reason]
+
+
+def _attention_child_reason(child: Mapping[str, Any]) -> str:
     analysis_kind = str(object_dict(object_dict(child.get("progress")).get("failure_analysis")).get("kind") or "")
     if analysis_kind in _UNFINISHED_REASON_LABELS:
         return analysis_kind
@@ -913,17 +941,30 @@ def _unfinished_child_reason(child: Mapping[str, Any]) -> str:
 
 
 def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group every child that has not finished by why, so one early failure does not hide the rest."""
+    """Group every file that is not running or finished by why, so one reason never hides the rest.
+
+    Counts are files, not queue parts. Groups that need the owner come first.
+    """
     groups: dict[str, dict[str, Any]] = {}
     for child in children:
-        if str(child.get("status") or "") not in {"needs_attention", "failed", "stopped", "retry_backoff"}:
+        status = str(child.get("status") or "")
+        if status not in _OWNER_CHILD_STATUSES | {"retry_backoff", "queued"}:
             continue
-        reason = _unfinished_child_reason(child)
+        reason, label = _unfinished_child_reason(child)
         group = groups.setdefault(
             reason,
-            {"reason": reason, "label": _UNFINISHED_REASON_LABELS[reason], "count": 0, "items": []},
+            {
+                "reason": reason,
+                "label": label,
+                "count": 0,
+                "needs_owner": status in _OWNER_CHILD_STATUSES,
+                "items": [],
+            },
         )
-        group["count"] += 1
+        indexes = child.get("manifest_indexes")
+        group["count"] += len(indexes) if isinstance(indexes, list) and indexes else max(
+            int_value(child.get("item_count")), 1,
+        )
         progress = object_dict(child.get("progress"))
         rel_path = str(
             object_dict(progress.get("failure_analysis")).get("item_rel_path")
@@ -932,7 +973,10 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         ).strip()
         if rel_path and len(group["items"]) < _UNFINISHED_BREAKDOWN_ITEM_LIMIT:
             group["items"].append(rel_path)
-    return sorted(groups.values(), key=lambda group: (-int(group["count"]), str(group["reason"])))
+    return sorted(
+        groups.values(),
+        key=lambda group: (not group["needs_owner"], -int(group["count"]), str(group["reason"])),
+    )
 
 
 def encode_job_manifest_totals(
@@ -1919,7 +1963,8 @@ def select_encode_host(
     active_hosts = [host for host in active_host_candidates if _storage_ready(host)]
     startable_hosts = [host for host in startable_host_candidates if _storage_ready(host)]
     if not active_hosts and not startable_hosts and storage_issues:
-        return None, storage_issues[0]
+        # Computers can use different storage; name each distinct problem, not only the first.
+        return None, " ".join(dict.fromkeys(storage_issues))
 
     if globally_blocked_hosts is None:
         globally_blocked_hosts = _globally_backed_off_encode_hosts(connection, deps, now=current_time)

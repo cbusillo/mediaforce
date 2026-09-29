@@ -9,6 +9,8 @@ from mediaforce.core.db import DBRow
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import staged_artifacts
+from mediaforce.encoding.encode_queue import DISPLAY_ENCODE_JOB_KINDS, unfinished_breakdown_groups, \
+    unfinished_breakdown_summary
 from mediaforce.library.media_scopes import MediaScope, media_scope_from_prefix, normalize_scope_prefix, \
     path_matches_scope, resolve_media_scope, resolve_media_scopes, scope_rel_path_filter, scopes_overlap
 
@@ -522,43 +524,45 @@ def _mixed_next_action(prefix: str, lane: WorkflowLane) -> WorkflowNextAction:
 
 
 def _load_encode_job_state(connection: DBClient, scope: MediaScope) -> tuple[WorkflowLane, str] | None:
-    rows = connection.execute(
-        select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.error)
-        .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
-        .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
-    ).mappings().fetchall()
-    overlapping_rows = [row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))]
-    active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
-    if active is not None:
-        return "processing", f"Encode job is {active['status']} for {active['prefix']}."
-    latest = overlapping_rows[0] if overlapping_rows else None
-    if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
-        error = str(latest["error"] or "Encode job needs operator attention.")
-        return "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
-    return None
+    rows = _workflow_encode_job_rows(connection)
+    return _encode_job_workflow_state([row for row in rows if scopes_overlap(scope, str(row["prefix"] or ""))])
 
 
 def _load_encode_job_states(connection: DBClient, scopes: list[MediaScope]) -> dict[str, tuple[WorkflowLane, str] | None]:
-    rows = connection.execute(
-        select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.error)
-        .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
-        .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
-    ).mappings().fetchall()
     scoped_rows = [
         (row, media_scope_from_prefix(str(row["prefix"] or ""), match="descendants"))
-        for row in rows
+        for row in _workflow_encode_job_rows(connection)
     ]
-    result: dict[str, tuple[WorkflowLane, str] | None] = {}
-    for scope in scopes:
-        overlapping_rows = [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)]
-        active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
-        if active is not None:
-            result[scope.prefix] = "processing", f"Encode job is {active['status']} for {active['prefix']}."
-            continue
-        latest = overlapping_rows[0] if overlapping_rows else None
-        if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
-            error = str(latest["error"] or "Encode job needs operator attention.")
-            result[scope.prefix] = "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
-            continue
-        result[scope.prefix] = None
-    return result
+    return {
+        scope.prefix: _encode_job_workflow_state(
+            [row for row, job_scope in scoped_rows if scopes_overlap(scope, job_scope)]
+        )
+        for scope in scopes
+    }
+
+
+def _workflow_encode_job_rows(connection: DBClient) -> list[DBRow]:
+    return list(connection.execute(
+        select(encode_jobs.c.prefix, encode_jobs.c.status, encode_jobs.c.error, encode_jobs.c.progress_json)
+        .where(encode_jobs.c.status.in_(JOB_STATUSES_FOR_WORKFLOW))
+        # A folder summarizes its parts; a part that just finished must not hide its folder's state.
+        .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
+        .order_by(encode_jobs.c.updated_at.desc(), encode_jobs.c.created_at.desc())
+    ).mappings().fetchall())
+
+
+def _encode_job_workflow_state(overlapping_rows: list[DBRow]) -> tuple[WorkflowLane, str] | None:
+    """The newest overlapping encode job's lane, naming every reason its files are not finished."""
+    active = next((row for row in overlapping_rows if row["status"] in PROCESSING_JOB_STATUSES), None)
+    if active is not None:
+        detail = f"Encode job is {active['status']} for {active['prefix']}."
+        owner_groups = [group for group in unfinished_breakdown_groups(active["progress_json"]) if group.get("needs_owner")]
+        if owner_groups:
+            detail = f"{detail} Needs you: {unfinished_breakdown_summary(owner_groups)}."
+        return "processing", detail
+    latest = overlapping_rows[0] if overlapping_rows else None
+    if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
+        reasons = unfinished_breakdown_summary(unfinished_breakdown_groups(latest["progress_json"]))
+        error = reasons or str(latest["error"] or "Encode job needs operator attention.")
+        return "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
+    return None
