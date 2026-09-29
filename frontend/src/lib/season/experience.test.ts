@@ -17,6 +17,8 @@ import type {
 } from '$lib/api/types';
 import {
 	activeSeasonCards,
+	waitingScopeName,
+	encodeWaitingReasons,
 	approvalGuardFromMessage,
 	calibrationActivityStatusLabel,
 	calibrationEtaSummary,
@@ -1249,6 +1251,21 @@ describe('season experience translation', () => {
 			label: 'Sample waiting',
 			detail: 'The last attempt stopped. Mediaforce will retry this sample shortly.',
 			tone: 'attention'
+		});
+	});
+
+	it('keeps a working season working while naming the files that need the owner', () => {
+		const working = {
+			...card,
+			workflow_state: { ...card.workflow_state, primary_lane: 'processing' },
+			review_badge_label: 'Needs attention',
+			review_badge_detail: '1 storage error · 4 waiting for a scheduled time'
+		} as FolderCard;
+
+		expect(librarySeasonState(working, dashboard)).toMatchObject({
+			key: 'making_season',
+			label: 'Compressing · needs you',
+			detail: '1 storage error · 4 waiting for a scheduled time'
 		});
 	});
 
@@ -2707,5 +2724,63 @@ describe('approvalStartPlan', () => {
 				olderSeasons: null
 			})
 		).toBeNull();
+	});
+});
+
+describe('encodeWaitingReasons', () => {
+	const job = (groups: NonNullable<EncodeQueueJob['progress']>['unfinished_breakdown']) =>
+		({ job_id: 'folder', progress: { unfinished_breakdown: groups } }) as EncodeQueueJob;
+
+	it('keeps every reason, split into what needs the owner and what is only waiting', () => {
+		const reasons = encodeWaitingReasons(
+			job([
+				{
+					reason: 'final_size_target_miss',
+					label: 'outside size limit',
+					count: 1,
+					needs_owner: true,
+					items: []
+				},
+				{ reason: 'storage_io', label: 'storage error', count: 2, needs_owner: true, items: [] },
+				{
+					reason: 'waiting_schedule',
+					label: 'waiting for a scheduled time',
+					count: 20,
+					needs_owner: false,
+					items: []
+				},
+				{ reason: 'retrying', label: 'still retrying', count: 0, needs_owner: false, items: [] }
+			])
+		);
+
+		expect(reasons.needsYou.map((group) => `${group.count} ${group.label}`)).toEqual([
+			'1 outside size limit',
+			'2 storage error'
+		]);
+		expect(reasons.waiting.map((group) => `${group.count} ${group.label}`)).toEqual([
+			'20 waiting for a scheduled time'
+		]);
+		expect(reasons.fileCount).toBe(23);
+	});
+
+	it('treats rows saved before the owner flag by their reason', () => {
+		const reasons = encodeWaitingReasons(
+			job([
+				{ reason: 'stopped', label: 'stopped', count: 1, items: [] },
+				{ reason: 'retrying', label: 'still retrying', count: 1, items: [] }
+			])
+		);
+
+		expect(reasons.needsYou.map((group) => group.reason)).toEqual(['stopped']);
+		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
+	});
+
+	it('names the scope a borrowed reason list covers', () => {
+		expect(waitingScopeName('tv/Show')).toBe('all of Show');
+		expect(waitingScopeName('tv/Show/Season 2')).toBe('Show Season 2');
+	});
+
+	it('is empty without an encode job', () => {
+		expect(encodeWaitingReasons(null)).toEqual({ needsYou: [], waiting: [], fileCount: 0 });
 	});
 });

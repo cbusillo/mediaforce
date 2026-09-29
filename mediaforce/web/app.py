@@ -59,7 +59,8 @@ from mediaforce.encoding.encode_queue import DEFAULT_SCHEDULER_POLICY, DISPLAY_E
     clear_terminal_encode_jobs_for_prefix, \
     ensure_queue_state, load_active_encode_job_for_prefix, load_latest_encode_job, \
     repair_persisted_encode_job_hosts, \
-    queue_position as encode_queue_position, save_encode_job, summarize_encode_queue
+    queue_position as encode_queue_position, save_encode_job, summarize_encode_queue, \
+    unfinished_breakdown_groups, unfinished_breakdown_summary
 from mediaforce.execution import (
     build_svt_params,
     describe_item_plan,
@@ -3147,6 +3148,7 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
             encode_jobs.c.status,
             encode_jobs.c.error,
             encode_jobs.c.waiting_reason,
+            encode_jobs.c.progress_json,
         )
         .where(encode_jobs.c.job_kind.in_(DISPLAY_ENCODE_JOB_KINDS))
         .order_by(encode_jobs.c.prefix.asc(), encode_jobs.c.created_at.desc(), literal_column("rowid").desc())
@@ -3158,12 +3160,17 @@ def _folder_needs_attention_badges(connection: DBClient) -> dict[str, dict[str, 
         if not prefix or prefix in seen_prefixes:
             continue
         seen_prefixes.add(prefix)
-        if str(row["status"] or "") != "needs_attention":
+        groups = unfinished_breakdown_groups(row["progress_json"])
+        # A folder still working keeps its badge when some of its files already need the owner.
+        if str(row["status"] or "") != "needs_attention" and not any(group.get("needs_owner") for group in groups):
             continue
         badges[prefix] = {
             "label": "Needs attention",
             "tone": "warning",
-            "detail": _folder_badge_failure_detail(row["error"], row["waiting_reason"]),
+            "detail": (
+                unfinished_breakdown_summary(groups)
+                or _folder_badge_failure_detail(row["error"], row["waiting_reason"])
+            ),
         }
     return badges
 
