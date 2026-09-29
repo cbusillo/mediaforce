@@ -2254,9 +2254,11 @@ def _hold_files_that_need_a_fresh_plan(
     saved_contract = object_dict(object_dict(_folder_manifest(folder_job).get("selection")).get(
         "production_approval_contract"
     ))
-    settings_changed = bool(saved_contract and current_approval_contract) and any(
-        saved_contract.get(key) != object_dict(current_approval_contract).get(key)
-        for key in ("policy_hash", "operator_intent")
+    current_contract = object_dict(current_approval_contract)
+    # A folder queued before approvals were recorded cannot prove it matches a current approval.
+    settings_changed = bool(current_contract) and (
+        not saved_contract
+        or any(saved_contract.get(key) != current_contract.get(key) for key in ("policy_hash", "operator_intent"))
     )
     manifest_items = _manifest_items(folder_job)
     kept: list[JobPayload] = []

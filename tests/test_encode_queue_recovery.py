@@ -24129,6 +24129,14 @@ raise SystemExit(0)
 
         self.assertEqual(same_settings[0], ([transport], [0]))
         self.assertEqual([file.code for file in same_settings[1]], ["final_size_recovery_contract_unchanged"])
+        legacy_folder = folder_actions_runtime._hold_files_that_need_a_fresh_plan(
+            {"job_kind": "folder", "manifest_path": str(self._write_manifest(
+                "manifest-hold-legacy.json", [{"library_item_id": 11}, {"library_item_id": 12}],
+            ))},
+            plan,
+            saved,
+        )
+        self.assertIsNone(legacy_folder[0])
         self.assertIsNone(changed_goal[0])
         self.assertEqual(
             sorted(file.code for file in changed_goal[1]),
