@@ -19,11 +19,11 @@ from mediaforce.advising.evals import (
     score_advisor_eval_case,
 )
 from mediaforce.advising.privacy import redact_sensitive_text
-from mediaforce.advising.routing import AdvisorTask, default_advisor_routing
+from mediaforce.advising.routing import AdvisorTask
 from mediaforce.advising.runtime import (
-    codex_lab_developer_instruction,
-    run_codex_lab_process,
-    run_codex_lab_attempt,
+    codex_developer_instruction,
+    run_codex_process,
+    run_codex_attempt,
 )
 
 
@@ -350,11 +350,11 @@ def _server_request_response(method: str, params: object) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Compare Mediaforce's current Codex Lab exec adapter with an existing app-server daemon."
+        description="Compare Mediaforce's current Codex exec adapter with an existing app-server daemon."
     )
     parser.add_argument("--case", default=DEFAULT_CASE_ID)
     parser.add_argument("--model")
-    parser.add_argument("--command", default="codex-lab")
+    parser.add_argument("--command", default="codex")
     parser.add_argument(
         "--app-server-url",
         default=os.environ.get("CODEX_APP_SERVER_URL", DEFAULT_APP_SERVER_URL),
@@ -387,12 +387,12 @@ def run_benchmark(
     project_root: Path,
     case_id: str = DEFAULT_CASE_ID,
     model_override: str | None = None,
-    command: str = "codex-lab",
+    command: str = "codex",
     app_server_url: str = DEFAULT_APP_SERVER_URL,
     transport: str = "both",
     codex_home: Path | None = None,
     exec_runner: Callable[
-        [StructuredRequestSpec, str, str, str | None, Path, Path], TransportRun
+        [StructuredRequestSpec, str, str, Path, Path], TransportRun
     ]
     | None = None,
     app_server_runner: Callable[[StructuredRequestSpec, str, str, Path], TransportRun]
@@ -405,10 +405,9 @@ def run_benchmark(
     if model is None:
         raise ValueError(f"Evaluation case {case_id!r} does not define a model.")
     spec = capture_seed_request(project_root=project_root, case=case)
-    routing = default_advisor_routing()
     resolved_codex_home = (
         codex_home
-        or Path(os.environ.get("CODEX_LAB_HOME", "~/.codex-lab")).expanduser()
+        or Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser()
     )
     results: list[BenchmarkResult] = []
 
@@ -438,7 +437,6 @@ def run_benchmark(
                     spec,
                     model,
                     command,
-                    routing.auth_profile,
                     project_root,
                     resolved_codex_home,
                 ),
@@ -500,7 +498,7 @@ def _measure_transport(
             _check(
                 "artifacts:no_persisted_session",
                 not artifact_delta.persisted_session_changed,
-                "Codex Lab session or history artifacts changed during the request",
+                "Codex session or history artifacts changed during the request",
             )
         )
     if transport == "app-server":
@@ -552,12 +550,11 @@ def _run_exec_transport(
     spec: StructuredRequestSpec,
     model: str,
     command: str,
-    auth_profile: str | None,
     project_root: Path,
     codex_home: Path,
 ) -> TransportRun:
     artifact_before = _artifact_snapshot(codex_home)
-    attempt = run_codex_lab_attempt(
+    attempt = run_codex_attempt(
         project_root=project_root,
         developer=spec.developer,
         message=spec.message,
@@ -565,9 +562,8 @@ def _run_exec_transport(
         schema=spec.schema,
         max_seconds=spec.max_seconds,
         command=command,
-        auth_profile=auth_profile,
         model=model,
-        subprocess_run=run_codex_lab_process,
+        subprocess_run=run_codex_process,
         try_load_json=_try_load_json,
     )
     return TransportRun(
@@ -670,7 +666,7 @@ def run_app_server_transport(
                             "the network, or perform side effects. Return only the JSON object required by the "
                             "supplied schema."
                         ),
-                        "developerInstructions": codex_lab_developer_instruction(
+                        "developerInstructions": codex_developer_instruction(
                             spec.developer
                         ),
                         "ephemeral": True,

@@ -30,7 +30,7 @@ from mediaforce.advising.prompts import \
     build_tune_prompt as _build_tune_prompt_impl, build_operator_note_parse_prompt as _build_operator_note_parse_prompt_impl
 from mediaforce.advising.privacy import advisor_evidence_references
 from mediaforce.advising.runtime import StructuredLLMFailure, \
-    run_codex_lab_process as _run_codex_lab_process_impl, \
+    run_codex_process as _run_codex_process_impl, \
     run_multimodal_tune_request as _run_multimodal_tune_request_impl, \
     run_structured_llm_request as _run_structured_llm_request_impl
 from mediaforce.advising.routing import AdvisorRouting, AdvisorTask
@@ -839,7 +839,7 @@ def _run_structured_llm_request(
         prompt_version=prompt_version,
         routing=routing,
         evidence_references=evidence_references or [],
-        subprocess_run=_run_codex_lab_process_impl,
+        subprocess_run=_run_codex_process_impl,
         try_load_json=_try_load_json,
     )
 
@@ -868,7 +868,7 @@ def _run_multimodal_tune_request(
         prompt_version=prompt_version,
         routing=routing,
         evidence_references=evidence_references or [],
-        subprocess_run=_run_codex_lab_process_impl,
+        subprocess_run=_run_codex_process_impl,
         try_load_json=_try_load_json,
     )
 

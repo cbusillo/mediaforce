@@ -180,7 +180,7 @@ def _absolute_size_fragment(
     return {"video": video}
 
 
-def _codex_lab_jsonl(final_text: str) -> str:
+def _codex_jsonl(final_text: str) -> str:
     events = [
         {"type": "thread.started", "thread_id": "test-thread"},
         {
@@ -418,14 +418,14 @@ class TuningRuntimeTests(unittest.TestCase):
         def fake_run(cmd: list[str], **kwargs: object) -> object:
             self.assertIsInstance(kwargs, dict)
             commands.append(cmd)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(response_body), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(response_body), "stderr": ""})()
 
         return commands, fake_run
 
     def _assert_structured_subprocess_call(self, commands: list[list[str]]) -> None:
         self.assertTrue(commands)
         command = commands[0]
-        self.assertEqual(command[:3], ["codex-lab", "exec", "--ephemeral"])
+        self.assertEqual(command[:3], ["codex", "exec", "--ephemeral"])
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
         self.assertIn("--output-schema", command)
@@ -535,7 +535,7 @@ class TuningRuntimeTests(unittest.TestCase):
             )
         )
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             parsed = request_operator_note_parse(
                 project_root=self.root,
                 payload={"operator_note": "Can you target 300MB per episode?"},
@@ -1240,9 +1240,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(kwargs, dict)
             commands.append(cmd)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2754,7 +2754,7 @@ class TuningRuntimeTests(unittest.TestCase):
                         "policy": {"video": {"target_vmaf": 88.5, "max_crf": 41}},
                     }
                 )
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(response_body), "stderr": ""})()
+                return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(response_body), "stderr": ""})()
             return type(
                 "Result",
                 (),
@@ -2771,7 +2771,7 @@ class TuningRuntimeTests(unittest.TestCase):
                 },
             )()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2814,9 +2814,9 @@ class TuningRuntimeTests(unittest.TestCase):
                     "evidence_checked": ["multimodal_review_pack.artifacts[0]"],
                 }
             )
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(response_body), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(response_body), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_review_artifact_critique(
                 project_root=self.root,
                 payload={
@@ -2857,9 +2857,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "fail",
@@ -2926,9 +2926,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -2987,9 +2987,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -3069,7 +3069,7 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
         initial_fail_self_check = {
             "status": "fail",
@@ -3081,7 +3081,7 @@ class TuningRuntimeTests(unittest.TestCase):
             },
         }
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[initial_fail_self_check, None],
         ):
@@ -3141,9 +3141,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -3246,9 +3246,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3318,9 +3318,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3390,9 +3390,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3467,9 +3467,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3535,9 +3535,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -3589,9 +3589,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value=None,
         ):
@@ -3654,9 +3654,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -3729,9 +3729,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3794,9 +3794,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3857,9 +3857,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3920,9 +3920,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "pass",
@@ -3983,9 +3983,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -4077,9 +4077,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -4131,9 +4131,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             side_effect=[
                 {
@@ -4229,9 +4229,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -4289,9 +4289,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_note_tuning(
                 project_root=self.root,
                 payload={
@@ -4326,7 +4326,7 @@ class TuningRuntimeTests(unittest.TestCase):
         self.assertEqual(response.proposed_policy["video"]["max_encoded_percent"], 8)
 
     def test_request_run_verdict_uses_deterministic_evidence(self) -> None:
-        with patch("mediaforce.advisor._run_codex_lab_process_impl") as subprocess_run:
+        with patch("mediaforce.advisor._run_codex_process_impl") as subprocess_run:
             response = request_run_verdict(
                 project_root=self.root,
                 payload={
@@ -4359,7 +4359,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -4389,7 +4389,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -4432,7 +4432,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -4471,7 +4471,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
         commands, fake_run = self._capture_subprocess_commands(response_body)
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -4522,7 +4522,7 @@ class TuningRuntimeTests(unittest.TestCase):
             timeout = kwargs.get("timeout")
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=float(timeout or 0), stderr="model timed out")
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run):
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run):
             response = request_seed_policy(
                 project_root=self.root,
                 payload={
@@ -4532,7 +4532,7 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
         self.assertFalse(response.ok)
-        self.assertIn("attempt 1: timeout: Codex Lab timed out", response.raw)
+        self.assertIn("attempt 1: timeout: Codex timed out", response.raw)
         self.assertNotIn("model timed out", response.raw)
         self.assertEqual(response.request_disposition, "unavailable")
         self.assertEqual(response.failure_kind, "assistant_unavailable")
@@ -7328,9 +7328,9 @@ class TuningRuntimeTests(unittest.TestCase):
             self.assertIsInstance(cmd, list)
             self.assertIsInstance(kwargs, dict)
             stdout = responses.pop(0)
-            return type("Result", (), {"returncode": 0, "stdout": _codex_lab_jsonl(stdout), "stderr": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": _codex_jsonl(stdout), "stderr": ""})()
 
-        with patch("mediaforce.advisor._run_codex_lab_process_impl", side_effect=fake_run), patch(
+        with patch("mediaforce.advisor._run_codex_process_impl", side_effect=fake_run), patch(
             "mediaforce.advisor._run_tune_self_check",
             return_value={
                 "status": "fail",
