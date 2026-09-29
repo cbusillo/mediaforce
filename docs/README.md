@@ -42,7 +42,7 @@ Use this directory for guidance that should not live in `AGENTS.md`.
   recommendations, compatibility, confidence, and measured fallback
 - `docs/architecture/quality-search-memory.md`: read-only accepted-outcome
   cohorts, signature invalidation, robust CRF summaries, and authority limits
-- `docs/architecture/advisor-routing.md`: evaluated task routing, Codex Lab
+- `docs/architecture/advisor-routing.md`: evaluated task routing, Codex
   execution, deterministic bypasses, privacy-safe telemetry, and eval operation
 - `docs/architecture/library-lifecycle-policy.md`: current-season protection,
   acquisition guards, Plex/TMDB metadata, age ranking, and manifest provenance
