@@ -1,5 +1,8 @@
 """Fail-closed preview/apply support for terminal folder children.
 
+Each selected child is judged on its own: an ineligible child is listed in the preview's
+``skipped`` entries with its reason and the rest are still recovered.
+
 This module deliberately contains no cleanup, media probing/hashing, or transport
 work.  The caller supplies the approval and candidate-policy gates.  A header-only
 output that the encoder itself failed to probe is named in the preview and handed
@@ -57,6 +60,8 @@ class RecoveryPreview:
     manifest_indexes: tuple[int, ...]
     token: str
     items: tuple[dict[str, Any], ...]
+    requested_child_ids: tuple[str, ...] = ()
+    skipped: tuple[dict[str, str], ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -64,9 +69,11 @@ class RecoveryPreview:
             "manifest_path": self.manifest_path,
             "manifest_sha256": self.manifest_sha256,
             "child_ids": list(self.child_ids),
+            "requested_child_ids": list(self.requested_child_ids),
             "manifest_indexes": list(self.manifest_indexes),
             "token": self.token,
             "items": [dict(item) for item in self.items],
+            "skipped": [dict(item) for item in self.skipped],
         }
 
 
@@ -190,6 +197,7 @@ def apply_child_recovery(
             "parent_job_id": parent_job_id,
             "child_ids": list(preview.child_ids),
             "manifest_indexes": list(preview.manifest_indexes),
+            "skipped": [dict(item) for item in preview.skipped],
             "token": preview.token,
         }
     except Exception:
@@ -236,46 +244,8 @@ def _build_preview(
             status_code=400,
             detail="A requested recovery child does not belong to the parent.",
         )
-    eligible = [
-        child
-        for child in children
-        if str(child.get("job_id")) in requested_ids
-        if str(child.get("status") or "") in ELIGIBLE_CHILD_STATUSES
-        and _recoverable_failure_class(child) is not None
-    ]
-    if not eligible:
-        raise HTTPException(
-            status_code=409,
-            detail="No selected child has a recoverable failure.",
-        )
-    if {str(child.get("job_id")) for child in eligible} != requested_ids:
-        raise HTTPException(
-            status_code=409,
-            detail="One or more selected children are not eligible for recovery.",
-        )
-    ownership_fields = (
-        "process_pid",
-        "worker_id",
-        "leased_at",
-        "lease_expires_at",
-        "heartbeat_at",
-    )
-    if any(
-        child.get("job_kind") != "shard" or any(child.get(key) is not None for key in ownership_fields)
-        for child in eligible
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Selected children must be inactive, unleased shards.",
-        )
+    selected = [child for child in children if str(child.get("job_id")) in requested_ids]
     manifest_path = str(parent_job.get("manifest_path") or "").strip()
-    if any(str(child.get("manifest_path") or "").strip() != manifest_path for child in eligible):
-        raise HTTPException(
-            status_code=409,
-            detail="Child manifest paths do not match the folder parent.",
-        )
-    if any(str(child.get("prefix") or "") != str(parent_job.get("prefix") or "") for child in eligible):
-        raise HTTPException(status_code=409, detail="Child prefixes do not match the folder parent.")
     try:
         manifest_bytes = Path(manifest_path).read_bytes()
         manifest = object_dict(json.loads(manifest_bytes))
@@ -289,87 +259,88 @@ def _build_preview(
         or len(set(manifest_ids)) != len(manifest_ids)
     ):
         raise HTTPException(status_code=409, detail="The manifest must identify unique source items.")
-    indexes_by_child: dict[str, list[int]] = {}
-    all_indexes: list[int] = []
-    for child in eligible:
-        child_id = str(child["job_id"])
-        raw = child.get("manifest_indexes")
-        if not isinstance(raw, list) or not raw:
-            raise HTTPException(
-                status_code=409,
-                detail="A recoverable child has no explicit manifest indexes.",
-            )
-        indexes: list[int] = []
-        for value in raw:
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= len(items):
-                raise HTTPException(
-                    status_code=409,
-                    detail="A recoverable child has invalid manifest indexes.",
-                )
-            indexes.append(value)
-        if len(set(indexes)) != len(indexes):
-            raise HTTPException(
-                status_code=409,
-                detail="A recoverable child has duplicate manifest indexes.",
-            )
-        if _recoverable_failure_class(child) == "unreadable_staged_output" and not any(
-            str(items[index].get("staging_path") or "").strip() in str(child.get("error") or "")
-            for index in indexes
-            if str(items[index].get("staging_path") or "").strip()
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="A probe failure does not name the child's own staged output.",
-            )
-        indexes_by_child[child_id] = indexes
-        all_indexes.extend(indexes)
-    active_or_completed = [
-        child
-        for child in children
-        if str(child.get("status") or "") in {"queued", "retry_backoff", "running", "completed"}
-    ]
-    for child in active_or_completed:
-        sibling_raw = child.get("manifest_indexes")
-        if (
-            not isinstance(sibling_raw, list)
-            or not sibling_raw
-            or any(
-                isinstance(value, bool) or not isinstance(value, int) or value < 0 or value >= len(items)
-                for value in sibling_raw
-            )
-            or len(set(sibling_raw)) != len(sibling_raw)
-        ):
+    owned_indexes: set[int] = set()
+    for sibling in children:
+        if str(sibling.get("status") or "") not in {"queued", "retry_backoff", "running", "completed"}:
+            continue
+        if _valid_indexes(sibling.get("manifest_indexes"), len(items)) is None:
             raise HTTPException(
                 status_code=409,
                 detail="An active or completed sibling has invalid manifest indexes.",
             )
-        if any(index in all_indexes for index in _strict_indexes(child)):
-            raise HTTPException(
-                status_code=409,
-                detail="A manifest item is already owned by an active or completed child.",
+        owned_indexes.update(_strict_indexes(sibling))
+    current_approval = approval_contract(parent_job, manifest)
+    if not isinstance(current_approval, Mapping) or not current_approval:
+        raise HTTPException(status_code=409, detail="The current production approval contract changed.")
+    saved_approval = object_dict(manifest.get("selection")).get("production_approval_contract")
+
+    # Each selected child is judged on its own: an ineligible child is skipped with its reason
+    # and never holds back the others.
+    skipped: dict[str, str] = {}
+    indexes_by_child: dict[str, list[int]] = {}
+    for child in selected:
+        try:
+            indexes_by_child[str(child["job_id"])] = _child_indexes(
+                child, parent_job, items, owned_indexes, current_approval, saved_approval,
             )
-    if len(set(all_indexes)) != len(all_indexes):
+        except HTTPException as exc:
+            skipped[str(child["job_id"])] = str(exc.detail)
+    claims: dict[int, list[str]] = {}
+    for child_id, indexes in indexes_by_child.items():
+        for index in indexes:
+            claims.setdefault(index, []).append(child_id)
+    for claimants in claims.values():
+        if len(claimants) > 1:
+            for child_id in claimants:
+                skipped.setdefault(child_id, "Another selected child claims the same file.")
+    rows_by_child: dict[str, list[dict[str, Any]]] = {}
+    for child in selected:
+        child_id = str(child["job_id"])
+        if child_id in skipped:
+            continue
+        indexes = indexes_by_child[child_id]
+        stub_tolerant = indexes if _recoverable_failure_class(child) == "unreadable_staged_output" else ()
+        try:
+            rows_by_child[child_id] = _validate_sources(
+                connection, config, items, indexes, stub_tolerant_indexes=stub_tolerant,
+            )
+        except HTTPException as exc:
+            skipped[child_id] = str(exc.detail)
+    candidate_indexes = sorted(index for child_id in rows_by_child for index in indexes_by_child[child_id])
+    eligible_result: Mapping[str, Any] = {}
+    if candidate_indexes:
+        eligible_result = candidate_eligibility(connection, parent_job, [items[index] for index in candidate_indexes])
+        if not isinstance(eligible_result, Mapping) or not eligible_result:
+            raise HTTPException(status_code=409, detail="Current candidate policy blocks recovery.")
+        item_evidence = object_dict(eligible_result.get("items"))
+        for child_id in list(rows_by_child):
+            reason = next(
+                (
+                    str(blocked)
+                    for index in indexes_by_child[child_id]
+                    if (blocked := object_dict(item_evidence.get(str(items[index]["library_item_id"]))).get("blocked_reason"))
+                ),
+                None,
+            )
+            if reason:
+                skipped[child_id] = reason
+                del rows_by_child[child_id]
+    eligible = [child for child in selected if str(child["job_id"]) in rows_by_child]
+    skipped_payload = tuple(
+        {"job_id": str(child["job_id"]), "reason": skipped[str(child["job_id"])]}
+        for child in selected
+        if str(child["job_id"]) in skipped
+    )
+    if not eligible:
         raise HTTPException(
             status_code=409,
-            detail="Manifest indexes are claimed by multiple recoverable children.",
+            detail="No selected child can be retried. "
+            + " ".join(f"{skip['job_id']}: {skip['reason']}" for skip in skipped_payload),
         )
-    _validate_approval(
-        approval_contract(parent_job, manifest),
-        object_dict(object_dict(manifest).get("selection")).get("production_approval_contract"),
-    )
-    stub_tolerant_indexes = {
-        index
-        for child in eligible
-        if _recoverable_failure_class(child) == "unreadable_staged_output"
-        for index in indexes_by_child[str(child["job_id"])]
-    }
-    item_rows = _validate_sources(
-        connection, config, items, sorted(all_indexes), stub_tolerant_indexes=stub_tolerant_indexes,
-    )
-    eligible_result = candidate_eligibility(connection, parent_job, [items[index] for index in sorted(all_indexes)])
-    if not isinstance(eligible_result, Mapping) or not eligible_result:
-        raise HTTPException(status_code=409, detail="Current candidate policy blocks recovery.")
+    all_indexes = sorted(index for child in eligible for index in indexes_by_child[str(child["job_id"])])
+    item_rows = [row for child in eligible for row in rows_by_child[str(child["job_id"])]]
     topology = {
+        "approval": dict(current_approval),
         "candidate_evidence": dict(eligible_result),
         "config": config.raw,
         "parent": {
@@ -383,7 +354,7 @@ def _build_preview(
         "children": [
             (
                 child
-                if str(child["job_id"]) in indexes_by_child
+                if str(child["job_id"]) in rows_by_child
                 else {
                     "job_id": child["job_id"],
                     "prefix": child.get("prefix"),
@@ -393,6 +364,7 @@ def _build_preview(
             )
             for child in children
         ],
+        "skipped": list(skipped_payload),
         "sources": [
             {
                 "id": int(row["id"]),
@@ -426,9 +398,79 @@ def _build_preview(
         manifest_path,
         hashlib.sha256(manifest_bytes).hexdigest(),
         tuple(str(c["job_id"]) for c in eligible),
-        tuple(sorted(all_indexes)),
+        tuple(all_indexes),
         token,
         public_items,
+        tuple(str(value) for value in child_ids),
+        skipped_payload,
+    )
+
+
+def _child_indexes(
+    child: Mapping[str, Any],
+    parent_job: Mapping[str, Any],
+    items: list[dict[str, Any]],
+    owned_indexes: Collection[int],
+    current_approval: Mapping[str, Any],
+    saved_approval: Any,
+) -> list[int]:
+    """Return the manifest indexes of one recoverable child, or raise a 409 naming why it is not."""
+    if str(child.get("status") or "") not in ELIGIBLE_CHILD_STATUSES or _recoverable_failure_class(child) is None:
+        raise HTTPException(status_code=409, detail="Its failure is not one that recovery can retry.")
+    ownership_fields = ("process_pid", "worker_id", "leased_at", "lease_expires_at", "heartbeat_at")
+    if child.get("job_kind") != "shard" or any(child.get(key) is not None for key in ownership_fields):
+        raise HTTPException(status_code=409, detail="It is still held by a worker or is not part of a folder batch.")
+    if str(child.get("manifest_path") or "").strip() != str(parent_job.get("manifest_path") or "").strip():
+        raise HTTPException(status_code=409, detail="Child manifest paths do not match the folder parent.")
+    if str(child.get("prefix") or "") != str(parent_job.get("prefix") or ""):
+        raise HTTPException(status_code=409, detail="Child prefixes do not match the folder parent.")
+    indexes = _valid_indexes(child.get("manifest_indexes"), len(items))
+    if indexes is None:
+        raise HTTPException(status_code=409, detail="A recoverable child has invalid manifest indexes.")
+    if _recoverable_failure_class(child) == "unreadable_staged_output" and not any(
+        str(items[index].get("staging_path") or "").strip() in str(child.get("error") or "")
+        for index in indexes
+        if str(items[index].get("staging_path") or "").strip()
+    ):
+        raise HTTPException(status_code=409, detail="A probe failure does not name the child's own staged output.")
+    if any(index in owned_indexes for index in indexes):
+        raise HTTPException(status_code=409, detail="A manifest item is already owned by an active or completed child.")
+    if not _approval_covers(current_approval, saved_approval, [items[index] for index in indexes]):
+        raise HTTPException(status_code=409, detail="The current approval no longer covers its settings.")
+    return indexes
+
+
+def _valid_indexes(raw: Any, item_count: int) -> list[int] | None:
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < item_count for value in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        return None
+    return list(raw)
+
+
+def _approval_covers(current: Mapping[str, Any], saved: Any, child_items: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the current approval still covers the settings this child's files were queued with.
+
+    A newer sample approval with the same policy and operator intent covers them; a changed
+    policy or a change to the intent a file was resolved under does not.
+    """
+    if not isinstance(saved, Mapping) or not saved:
+        return False
+    if dict(current) == dict(saved):
+        return True
+    per_item_fields = {"sample_job_id", "operator_intent", "operator_intent_hash"}
+    if any(current.get(key) != saved.get(key) for key in (set(current) | set(saved)) - per_item_fields):
+        return False
+    current_intent = object_dict(current.get("operator_intent"))
+    if not current_intent:
+        return False
+    return all(
+        (object_dict(object_dict(item.get("resolved_operator_intent")).get("request")) or object_dict(saved.get("operator_intent")))
+        == current_intent
+        for item in child_items
     )
 
 
@@ -576,17 +618,6 @@ def _under_root(path: Path, root: Path) -> bool:
         return True
     except (OSError, RuntimeError, ValueError):
         return False
-
-
-def _validate_approval(current: Mapping[str, Any] | None, saved: Mapping[str, Any] | None) -> None:
-    if (
-        not isinstance(current, Mapping)
-        or not isinstance(saved, Mapping)
-        or not current
-        or not saved
-        or dict(current) != dict(saved)
-    ):
-        raise HTTPException(status_code=409, detail="The current production approval contract changed.")
 
 
 def _strict_indexes(job: Mapping[str, Any]) -> list[int]:

@@ -2802,12 +2802,12 @@ def _parse_state_timestamp(value: Any) -> datetime | None:
 def child_recovery_approval(
         config: MediaforceConfig,
         parent: JobPayload,
-        manifest: ActionPayload,
         *,
         load_calibration_state: LoadCalibrationStateFn,
         review_gate: ReviewGateFn,
         load_advice_state: LoadAdviceStateFn,
 ) -> ActionPayload:
+    """The show's current production approval; recovery judges per child whether it covers that child."""
     prefix = str(parent["prefix"])
     blocker = production_action_blocker(config, prefix)
     if blocker is not None:
@@ -2817,11 +2817,8 @@ def child_recovery_approval(
     if not gate.get("can_confirm_full"):
         raise HTTPException(status_code=409, detail=str(gate.get("message") or "Current approval is required."))
     current = _production_approval_contract(calibration)
-    recorded = _valid_production_approval_contract(
-        object_dict(manifest.get("selection")).get("production_approval_contract")
-    )
-    if current is None or recorded is None or current != recorded:
-        raise HTTPException(status_code=409, detail="The manifest no longer matches the current production approval.")
+    if current is None:
+        raise HTTPException(status_code=409, detail="Current approval is required.")
     advice = object_dict(load_advice_state(config, prefix))
     risk = build_quality_risk_contract(
         prefix=prefix,
@@ -2857,10 +2854,13 @@ def child_recovery_candidate_evidence(
         connection, config, prefixes=[prefix], manual_override_prefixes=overrides,
     )
     selected = {decision.item_id: decision for decision in decisions if decision.item_id in item_ids}
-    if set(selected) != item_ids or any(not decision.eligible for decision in selected.values()):
-        raise HTTPException(status_code=409, detail="Current source, lifecycle or production policy blocks recovery.")
+    blocked: dict[int, str] = {}
     for item in items:
-        decision = selected[int(item["library_item_id"])]
+        item_id = int(item["library_item_id"])
+        decision = selected.get(item_id)
+        if decision is None or not decision.eligible:
+            blocked[item_id] = "Its current source, season hold or show settings keep it out of production."
+            continue
         if not decision.override_applied:
             continue
         original = object_dict(item.get("selection_provenance"))
@@ -2874,16 +2874,19 @@ def child_recovery_candidate_evidence(
                 current_codes != original_codes
                 or decision.is_current_season != original.get("is_current_season")
         ):
-            raise HTTPException(status_code=409, detail="The original lifecycle override no longer covers current holds.")
-    cadence = cadence_safety_partition(connection, library_item_ids=sorted(item_ids), synchronize=False)
-    if cadence.cleared_item_ids != item_ids:
-        raise HTTPException(status_code=409, detail="Current cadence evidence is required for every recovery item.")
+            blocked[item_id] = "The original lifecycle override no longer covers its current holds."
+    cadence = cadence_safety_partition(connection, library_item_ids=sorted(item_ids - set(blocked)), synchronize=False)
+    for item_id in cadence.blocked_item_ids:
+        blocked[item_id] = "Its motion pattern needs a decision before it can be encoded."
+    for item_id in cadence.evidence_required_item_ids:
+        blocked[item_id] = "Its motion pattern needs to be measured first."
     return {
         "items": {
             str(item_id): {
-                "eligible": selected[item_id].eligible,
-                "override_applied": selected[item_id].override_applied,
-                "hold_codes": [reason.code for reason in selected[item_id].hold_reasons],
+                "eligible": item_id in selected and selected[item_id].eligible,
+                "override_applied": item_id in selected and selected[item_id].override_applied,
+                "hold_codes": [reason.code for reason in selected[item_id].hold_reasons] if item_id in selected else [],
+                "blocked_reason": blocked.get(item_id),
             }
             for item_id in sorted(item_ids)
         },

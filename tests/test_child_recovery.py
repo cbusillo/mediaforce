@@ -13,6 +13,7 @@ from sqlalchemy import select
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import DBClient, open_db, reset_engine_cache
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
+from mediaforce.core.evidence import stable_json_hash
 from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
 from mediaforce.web.runtime.child_recovery import (
     DATABASE_IDENTITY_ERROR,
@@ -89,6 +90,89 @@ class ChildRecoveryTests(unittest.TestCase):
             details = [json.loads(str(event["details_json"])) for event in events]
             self.assertEqual([detail["previous_attempt_count"] for detail in details], [3, 5])
             self.assertTrue(all(detail["previous_failure_kind"] == "host_configuration" for detail in details))
+
+    def test_one_ineligible_child_does_not_block_the_rest(self) -> None:
+        def unrecoverable_failure(connection: DBClient) -> None:
+            connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "child-1").values(
+                last_failure_kind="containment_unproven",
+            ))
+
+        def changed_source(_connection: DBClient) -> None:
+            source = Path(self._manifest()["items"][1]["source_path"])
+            stat = source.stat()
+            os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+
+        def existing_output(_connection: DBClient) -> None:
+            output = Path(self._manifest()["items"][1]["staging_path"])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_bytes(b"finished elsewhere")
+
+        def still_owned(connection: DBClient) -> None:
+            connection.execute(encode_jobs.update().where(encode_jobs.c.job_id == "child-1").values(worker_id="w-1"))
+
+        for label, make_ineligible in (
+                ("failure kind", unrecoverable_failure),
+                ("source changed", changed_source),
+                ("output exists", existing_output),
+                ("still owned", still_owned),
+        ):
+            with self.subTest(label), open_db(self.config.paths.db_path) as connection:
+                self._seed(connection, count=3)
+                make_ineligible(connection)
+                preview = self._preview(connection, ["child-0", "child-1", "child-2"])
+                connection.commit()
+
+                self.assertEqual(preview["child_ids"], ["child-0", "child-2"])
+                self.assertEqual([skip["job_id"] for skip in preview["skipped"]], ["child-1"])
+                self.assertTrue(preview["skipped"][0]["reason"].strip())
+                self._apply(connection, preview["requested_child_ids"], preview["token"])
+                statuses = {job_id: row["status"] for job_id, row in self._raw_jobs(connection).items()}
+                self.assertEqual(
+                    [statuses[child] for child in ("child-0", "child-1", "child-2")],
+                    ["queued", "needs_attention", "queued"],
+                )
+            self._reset_database()
+
+    def test_candidate_blocker_skips_only_the_blocked_child(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._seed(connection, count=2)
+
+            def one_blocked(_connection: DBClient, _parent: dict[str, Any], items: list[dict[str, Any]]) -> Mapping[str, Any]:
+                return {"items": {
+                    str(item["library_item_id"]): {
+                        "blocked_reason": "It needs a motion check first." if item["library_item_id"] == item_ids[1] else None,
+                    }
+                    for item in items
+                }}
+
+            preview = self._preview(connection, ["child-0", "child-1"], candidate_fn=one_blocked)
+
+            self.assertEqual(preview["child_ids"], ["child-0"])
+            self.assertEqual(preview["skipped"], [{"job_id": "child-1", "reason": "It needs a motion check first."}])
+
+    def test_approval_drift_is_judged_per_child(self) -> None:
+        intent = {"size_goal": {"value_mb": 200.0}}
+        changed_intent = {"size_goal": {"value_mb": 150.0}}
+        saved = {
+            "schema_version": 1, "sample_job_id": "old-sample", "policy_hash": "policy",
+            "operator_intent_hash": f"sha256:{stable_json_hash(intent)}", "operator_intent": intent,
+        }
+        current = {**saved, "sample_job_id": "new-sample"}
+        with open_db(self.config.paths.db_path) as connection:
+            self._seed(connection, count=2)
+            manifest = self._manifest()
+            manifest["selection"]["production_approval_contract"] = saved
+            manifest["items"][0]["resolved_operator_intent"] = {"request": intent}
+            manifest["items"][1]["resolved_operator_intent"] = {"request": changed_intent}
+            self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            preview = self._preview(connection, ["child-0", "child-1"], approval=current)
+            self.assertEqual(preview["child_ids"], ["child-0"])
+            self.assertEqual([skip["job_id"] for skip in preview["skipped"]], ["child-1"])
+
+            self._assert_http(
+                409, lambda: self._preview(connection, ["child-0", "child-1"], approval={**current, "policy_hash": "new"}),
+            )
 
     def test_apply_is_all_or_nothing_when_parent_sync_fails(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
@@ -261,7 +345,7 @@ class ChildRecoveryTests(unittest.TestCase):
                 self.assertEqual(self._job(connection, "child-0")["status"], "needs_attention")
             self._reset_database()
 
-    def test_candidate_blocker_rejects_the_whole_selected_set(self) -> None:
+    def test_candidate_authority_failure_rejects_the_request(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
             self._seed(connection, count=2)
 

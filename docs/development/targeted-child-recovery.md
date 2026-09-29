@@ -43,17 +43,31 @@ controller, using its normal trusted operator access:
 {"parent_job_id":"<folder job>","child_ids":["<exact failed child>"]}
 ```
 
-Inspect the returned child IDs, manifest indexes and source items. POST the
-same IDs and returned `token` to
-`/api/encode-queue/recover-children/apply` only when that exact selection is
+Inspect the returned child IDs, manifest indexes, source items and `skipped`
+entries. POST the returned `requested_child_ids` (the IDs sent to preview,
+not only the eligible `child_ids`) and `token` to
+`/api/encode-queue/recover-children/apply` only when that result is
 intended. Start with one child and observe its admission before expanding.
 Both requests require JSON and reject cross-origin browser requests. They do not run the application's unrelated periodic artifact cleanup.
 
-Both phases reject missing/duplicate IDs, invalid or overlapping manifest
-indexes, failures outside the recoverable classes, completed, stopped or failed
-parents, active ownership, changed approval or source,
-current policy/cadence blockers, and any recorded or visible final/partial output
-other than the header-only case above.
+Each selected child is judged on its own. A child is skipped, and listed in
+`skipped` with a plain reason, for a failure outside the recoverable classes,
+active ownership, invalid manifest indexes, an item already owned by an active
+or completed sibling or claimed by another selected child, a changed source,
+any recorded or visible final/partial output other than the header-only case
+above, a current policy or motion-pattern blocker on one of its items, or an
+approval that no longer covers its settings. The remaining children are still
+recovered; apply requeues only them.
+
+Approval is judged per child. The show must still be approved now. A newer
+sample approval with the same policy and operator intent covers a child; a
+changed policy, or an intent that differs from the one a child's files were
+resolved under, does not.
+
+The whole request is rejected for missing, duplicate or foreign IDs, a
+completed, stopped or failed parent, an unreadable manifest, an active or
+completed sibling with invalid indexes, no current show approval, or when no
+selected child is eligible.
 Storage must be visible to the controller; inaccessible paths are a blocker,
 not proof of absence. No media decode, content hash, deletion, promotion or
 output adoption occurs in either phase; removal of a named header-only output
@@ -61,7 +75,7 @@ happens later in the queue's retry cleanup. Source checks use existing fingerpri
 size/modification time; they are not a new full-content verification.
 
 Apply repeats all checks under one database transaction and rejects a stale
-preview with HTTP 409 without changing any selected child. Ordinary progress
+preview with HTTP 409 without changing any selected child. Skipped children are part of the token, so a change in their eligibility also stales the preview. Ordinary progress
 updates from unrelated running siblings do not invalidate a preview. The
 transaction appends `targeted_child_recovery` item events and synchronizes the
 parent summary. A repeated apply must use a fresh preview; a queued child is
