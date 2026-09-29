@@ -27,6 +27,7 @@ from mediaforce.core.db_tables import (
     staged_artifacts,
 )
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
+from mediaforce.encoding.cadence import reclassify_cadence_summary
 from mediaforce.library.evidence_queue import start_evidence_work
 from mediaforce.library.evidence_state import rebuild_library_item_evidence_states
 from mediaforce.library.planner import build_manifest_item
@@ -178,6 +179,26 @@ def _write_checked_movie_preview(path: Path) -> None:
         capture_output=True,
         check=True,
     )
+
+
+def _ambiguous_cadence_summary_json(base_json: str, *, tff_frames: int) -> str:
+    """Three fully measured ranges the classifier cannot place; tff_frames above 2% makes it partly interlaced."""
+    summary = json.loads(base_json)
+    summary["probe"]["idet_required"] = True
+    summary["analysis"].update(
+        {
+            "progressive_frames": 450 - tff_frames,
+            "tff_frames": tff_frames,
+            "undetermined_frames": 153,
+            "sampled_frames": 603,
+            "coverage": 1.0,
+            "ranges": [
+                {"start_seconds": float(start), "frame_limit": 201, "sampled_frames": 201, "status": "measured"}
+                for start in (60, 1200, 2400)
+            ],
+        }
+    )
+    return json.dumps(reclassify_cadence_summary(summary), sort_keys=True)
 
 
 def _library_item(
@@ -1349,6 +1370,21 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation_reason="Fixture approved current season requires an explicit lifecycle override.",
                 age_days=5,
             ),
+            *(
+                _library_item(
+                    project_root=project_root,
+                    media_root="tv",
+                    rel_path=f"tv/Unclear Motion/Season 1/Episode {index:02d}.mkv",
+                    size_bytes=4 * 1024**3,
+                    status="discovered",
+                    video_codec="h264",
+                    priority_score=60,
+                    recommendation="priority_encode",
+                    recommendation_reason="Fixture episode whose motion pattern stays ambiguous after full measurement.",
+                    age_days=400,
+                )
+                for index in (1, 2)
+            ),
             _library_item(
                 project_root=project_root,
                 media_root="movies",
@@ -1683,6 +1719,14 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 row["media_fingerprint_json"] = None
             elif row["rel_path"] == "movies/Editions Showcase/Feature - Director Cut.mkv":
                 row["media_fingerprint_json"] = None
+            elif row["rel_path"] == "tv/Unclear Motion/Season 1/Episode 01.mkv":
+                row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
+                    str(row["cadence_summary_json"]), tff_frames=0
+                )
+            elif row["rel_path"] == "tv/Unclear Motion/Season 1/Episode 02.mkv":
+                row["cadence_summary_json"] = _ambiguous_cadence_summary_json(
+                    str(row["cadence_summary_json"]), tff_frames=30
+                )
         inserted_ids: list[int] = []
         for row in rows:
             result = connection.execute(library_items.insert().values(**row))
@@ -2546,6 +2590,12 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 "route": "/folders/tv/Protected%20Ready/Season%202",
                 "marker": "Protected Ready",
                 "stageMarker": "This season is ready, but protected",
+            },
+            {
+                "label": "Folder Studio unclear motion decision fixture",
+                "route": "/folders/tv/Unclear%20Motion",
+                "marker": "Unclear Motion",
+                "stageMarker": "episode has an unclear motion pattern",
             },
             {
                 "label": "Folder Studio older-season override fixture",

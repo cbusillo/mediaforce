@@ -36,6 +36,7 @@ class AmbiguousMotionFiles:
             return None
         return {
             "eligible_count": len(self.eligible),
+            "eligible_files": [str(row["rel_path"]) for row in self.eligible],
             "partly_interlaced_count": len(self.partly_interlaced),
             "partly_interlaced_files": [str(row["rel_path"]) for row in self.partly_interlaced],
         }
@@ -120,14 +121,15 @@ def accept_ambiguous_motion_action(
     accepted_count = len(files.eligible)
     left_count = len(files.partly_interlaced)
     message = (
-        f"Encoding {accepted_count} {'file' if accepted_count == 1 else 'files'} with an unclear motion pattern "
-        "as-is. They join production once nothing else is encoding in the show."
+        f"Encoding {accepted_count} {'episode' if accepted_count == 1 else 'episodes'} with an unclear motion "
+        f"pattern as-is. {'It joins' if accepted_count == 1 else 'They join'} production once nothing else is "
+        "encoding in the show."
         if accepted_count
         else "No files were waiting for this decision."
     )
     if left_count:
         message += (
-            f" {left_count} {'file looks' if left_count == 1 else 'files look'} partly interlaced, "
+            f" {left_count} {'episode looks' if left_count == 1 else 'episodes look'} partly interlaced, "
             f"so {'it stays' if left_count == 1 else 'they stay'} original and listed on the show page."
         )
     return {

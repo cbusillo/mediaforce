@@ -22615,6 +22615,7 @@ raise SystemExit(0)
             offered,
             {
                 "eligible_count": 1,
+                "eligible_files": ["tv/show/Season 1/Episode 2.mkv"],
                 "partly_interlaced_count": 1,
                 "partly_interlaced_files": ["tv/show/Season 1/Episode 3.mkv"],
             },
