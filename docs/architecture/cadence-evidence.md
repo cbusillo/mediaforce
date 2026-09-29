@@ -69,7 +69,14 @@ current, resolved cadence evidence enter production; measured blockers and items
 that still need cadence evidence remain original, get their analysis queued, and
 are named one by one in the action's `left_out` list with a plain reason. The
 action is refused only when no selected item is cleared, so one file's cadence
-problem never holds its siblings. Sample actions keep their hard blocker because
+problem never holds its siblings. Each held item also gets a row in
+`production_holds` naming the scope, the queue mode (folder, season override,
+or older seasons) and the approval it was held under. The web app's
+`held-files-worker` queues held items whose evidence has since cleared as a
+separate run under that same approval once no encode is active for the scope,
+without clearing or retrying the scope's earlier jobs. If the approval changed,
+or the queue refuses the files outright, nothing is queued and the hold keeps
+that status so the files stay listed. Sample actions keep their hard blocker because
 they select exactly one item.
 
 New manifests built from catalog rows without cadence evidence remain blocked

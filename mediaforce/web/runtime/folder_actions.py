@@ -1,7 +1,7 @@
 import hashlib
 import json
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime
 import uuid
@@ -44,6 +44,7 @@ from mediaforce.tuning.calibration_jobs import resolve_pending_review_job
 from mediaforce.tuning.size_goals import operator_intent_from_policy
 from mediaforce.web.runtime.decision_evidence import CadenceSafetyPartition, cadence_queue_partition, \
     cadence_safety_partition, older_season_cadence_payload
+from mediaforce.web.runtime.production_holds import approval_identity, queue_mode, record_holds, release_holds
 from mediaforce.web.runtime.left_out_files import LeftOutFile, cadence_left_out_files, drop_manifest_items, \
     left_out_payload, left_out_summary, manifest_rel_paths, nothing_queued_response
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
@@ -120,6 +121,11 @@ def _production_approval_contract(calibration: ActionPayload) -> ActionPayload |
         "operator_intent_hash": f"sha256:{stable_json_hash(request)}",
         "operator_intent": request,
     }
+
+
+def production_approval_identity(calibration: ActionPayload) -> str:
+    """The approval a production run is queued under, as recorded on the files it holds back."""
+    return approval_identity(calibration, _production_approval_contract(calibration))
 
 
 def _valid_production_approval_contract(payload: Mapping[str, Any] | None) -> ActionPayload | None:
@@ -489,7 +495,13 @@ def queue_folder_encode_action(
         load_latest_failed_target_size_job_state: LoadJobStateFn | None = None,
         validate_scope_action: ValidateScopeActionFn | None = None,
         reserve_preflight: Callable[..., Any] = encode_reserve_preflight,
+        only_library_item_ids: Collection[int] | None = None,
 ) -> ActionPayload:
+    """Queue the folder's eligible files, leaving out each file with a problem and saying why.
+
+    With only_library_item_ids, queue just those files as a separate run under the current approval,
+    leaving the folder's earlier jobs and their failures untouched; held files join production this way.
+    """
     production_blocker = production_action_blocker(config, normalized_prefix)
     if production_blocker is not None:
         return production_blocker
@@ -547,6 +559,13 @@ def queue_folder_encode_action(
         calibration_payload = object_dict(calibration)
         calibration_policy = object_dict(calibration_payload.get("policy"))
         production_approval_contract = _production_approval_contract(calibration_payload)
+        hold_mode = queue_mode(
+            override_policy_holds=override_policy_holds,
+            override_older_seasons=override_older_seasons,
+        )
+        hold_approval = production_approval_identity(calibration_payload)
+        joining_held_files = only_library_item_ids is not None
+        only_item_ids = frozenset(int(item_id) for item_id in only_library_item_ids or ())
         calibration_video = object_dict(calibration_policy.get("video"))
         calibration_intent = operator_intent_from_policy(
             calibration_video,
@@ -657,7 +676,7 @@ def queue_folder_encode_action(
                 "message": f"A folder encode is already {active_status} for {active_prefix}.",
             }
         latest_encode_job = load_latest_terminal_encode_job_for_prefix(connection, normalized_prefix)
-        terminal_job_needs_requeue = bool(
+        terminal_job_needs_requeue = not joining_held_files and bool(
             latest_encode_job is not None and str(latest_encode_job.get("status") or "") in {
             "needs_attention",
             "failed",
@@ -732,10 +751,32 @@ def queue_folder_encode_action(
                 work_reason="encode_safety",
                 synchronize=False,
             )
+            record_holds(
+                connection,
+                prefix=normalized_prefix,
+                mode=hold_mode,
+                approval=hold_approval,
+                files=[
+                    *(
+                        LeftOutFile(item_id, "", "cadence_unresolved", "")
+                        for item_id in older_season_cadence_partition.blocked_item_ids
+                    ),
+                    *(
+                        LeftOutFile(item_id, "", "cadence_analysis_required", "")
+                        for item_id in older_season_cadence_partition.evidence_required_item_ids
+                    ),
+                ],
+                now_iso=now_iso(),
+            )
+            older_season_included_ids = (
+                older_season_cadence_partition.cleared_item_ids & only_item_ids
+                if joining_held_files
+                else older_season_cadence_partition.cleared_item_ids
+            )
             older_season_selection = restrict_older_season_override_selection(
                 older_season_decisions,
                 older_season_selection,
-                included_item_ids=older_season_cadence_partition.cleared_item_ids,
+                included_item_ids=older_season_included_ids,
             )
             if not older_season_selection.available:
                 blocked_count = len(older_season_cadence_partition.blocked_item_ids)
@@ -765,7 +806,9 @@ def queue_folder_encode_action(
                     "next_action_label": "Open Activity",
                 }
             manifest_kwargs["older_season_override"] = older_season_selection
-            manifest_kwargs["include_library_item_ids"] = older_season_cadence_partition.cleared_item_ids
+            manifest_kwargs["include_library_item_ids"] = older_season_included_ids
+        if joining_held_files and older_season_selection is None:
+            manifest_kwargs["include_library_item_ids"] = only_item_ids
         preview_transaction = None
         if terminal_job_needs_requeue:
             stale_rows = _stale_prefix_encoding_rows_for_requeue(
@@ -897,7 +940,7 @@ def queue_folder_encode_action(
             }
             if (
                     len(manifest["items"]) != older_season_selection.candidate_count
-                    or manifest_item_ids != older_season_cadence_partition.cleared_item_ids
+                    or manifest_item_ids != older_season_included_ids
             ):
                 raise HTTPException(
                     status_code=409,
@@ -931,6 +974,14 @@ def queue_folder_encode_action(
         )
         left_out.extend(cadence_left_out_files(cadence_partition, manifest_rel_paths(manifest)))
         drop_manifest_items(manifest, {file.library_item_id for file in left_out})
+        record_holds(
+            connection,
+            prefix=normalized_prefix,
+            mode=hold_mode,
+            approval=hold_approval,
+            files=left_out,
+            now_iso=now_iso(),
+        )
         if not manifest["items"]:
             return nothing_queued_response(left_out, evidence_work=cadence_partition.evidence_work)
         reserve = reserve_preflight(preflight_config, manifest["items"])
@@ -958,7 +1009,8 @@ def queue_folder_encode_action(
         refreshed_config = load_config(config.paths.config_path)
         if manifest_path is None:
             manifest_path = write_manifest(connection, refreshed_config, manifest)
-        clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix)
+        if not joining_held_files:
+            clear_terminal_encode_jobs_for_prefix_fn(connection, normalized_prefix)
         created_at = now_iso()
         parent_job_id = uuid.uuid4().hex[:12]
         queue_job: JobPayload = {
@@ -994,6 +1046,7 @@ def queue_folder_encode_action(
             "updated_at": created_at,
         }
         save_encode_job(connection, queue_job)
+        release_holds(connection, [int(item.get("library_item_id") or 0) for item in manifest["items"]])
         for shard_indexes in _build_manifest_shards(refreshed_config, manifest):
             save_encode_job(
                 connection,
