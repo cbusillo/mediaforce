@@ -48,14 +48,23 @@ from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupEr
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
-from mediaforce.encoding.staging import UnreadableEncodeOutputError, partial_output_path, safe_unlink
+from mediaforce.encoding.cadence import CadenceResolutionError
+from mediaforce.encoding.free_space import ReserveInputError
+from mediaforce.encoding.staging import StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, \
+    safe_unlink
+from mediaforce.encoding.streams import StreamPlanIdentityError
+from mediaforce.tuning.av1_cold_start import AV1ColdStartContractError
+from mediaforce.tuning.content_intent_observations import ContentIntentObservationConflictError
+from mediaforce.tuning.quality_observations import QualityObservationConflictError
+from mediaforce.tuning.target_size_search import FinalSizeMissError, TargetSizeSearchError
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
     authorize_compression_change,
     compression_intent_from_item,
 )
 from mediaforce.tuning.size_goals import SizeGoalIntent, size_goal_from_policy
-from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
+from mediaforce.tuning.stream_budget import StreamBudgetIdentityError, StreamBudgetInfeasibleError, \
+    resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
     SCHEDULE_CLOSE_WAITING_REASON
@@ -118,6 +127,29 @@ class EncodeQueueRuntimeDeps:
 
 ENCODE_HOST_BACKUP_FAILURE_THRESHOLD = 2
 SCHEDULE_CLOSE_ERROR_MESSAGE = "Encode host schedule window closed."
+UNKNOWN_ENCODE_FAILURE_MESSAGE = (
+    "The encode stopped with an error Mediaforce does not recognise. It will be tried again."
+)
+UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE = (
+    "The encode kept stopping with an error Mediaforce does not recognise, so it needs you. "
+    "The error details are saved with this job."
+)
+UNKNOWN_FAILURE_DETAIL_MAX_CHARS = 4000
+# Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
+# output kept for review (a retry's cleanup would delete it).
+CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
+    AV1ColdStartContractError,
+    CadenceResolutionError,
+    ContentIntentObservationConflictError,
+    FinalSizeMissError,
+    QualityObservationConflictError,
+    ReserveInputError,
+    StagedOutputHeldForReviewError,
+    StreamBudgetIdentityError,
+    StreamBudgetInfeasibleError,
+    StreamPlanIdentityError,
+    TargetSizeSearchError,
+)
 FINAL_SIZE_MISS_RE = re.compile(
     r"Final output size missed the approved target band: "
     r"status=(?P<status>[a-z_]+), "
@@ -1113,6 +1145,9 @@ def transition_encode_job_failure(
         error_message,
         assigned_host,
     )
+    # An unrecognised error is often a raw tool log: the owner sees a plain summary, and the
+    # raw text stays on the job for diagnosis.
+    owner_error = UNKNOWN_ENCODE_FAILURE_MESSAGE if failure_kind == "unknown" else error_message
     job.update(
         {
             "process_pid": None,
@@ -1123,7 +1158,7 @@ def transition_encode_job_failure(
             "schedule_close_deadline_at": None,
             "last_failure_kind": failure_kind,
             "last_failure_at": now_iso,
-            "error": error_message,
+            "error": owner_error,
             "last_host": _encode_failure_last_host_payload(
                 assigned_host,
                 previous_last_host=previous_last_host,
@@ -1158,6 +1193,7 @@ def transition_encode_job_failure(
             }
         )
         _attach_failure_analysis_to_progress(job, failure_analysis)
+        _attach_unknown_failure_detail(job, failure_kind, error_message)
         save_encode_job(connection, job)
         sync_encode_job_parent(connection, job, deps)
         connection.commit()
@@ -1172,6 +1208,8 @@ def transition_encode_job_failure(
         return
 
     terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
+    if failure_kind == "unknown":
+        job["error"] = UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE
     job.update(
         {
             "status": "needs_attention",
@@ -1184,9 +1222,18 @@ def transition_encode_job_failure(
         }
     )
     _attach_failure_analysis_to_progress(job, failure_analysis)
+    _attach_unknown_failure_detail(job, failure_kind, error_message)
     save_encode_job(connection, job)
     sync_encode_job_parent(connection, job, deps)
     connection.commit()
+
+
+def _attach_unknown_failure_detail(job: dict[str, Any], failure_kind: str, error_message: str) -> None:
+    if failure_kind != "unknown":
+        return
+    progress = object_dict(job.get("progress"))
+    progress["failure_detail"] = error_message[-UNKNOWN_FAILURE_DETAIL_MAX_CHARS:]
+    job["progress"] = progress
 
 
 def _encode_failure_analysis(
@@ -3284,6 +3331,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "host_scratch",
         "storage_io",
         "controller_database_busy",
+        "unknown",
     }:
         return True
     if failure_kind in {"stopped", "deterministic"}:
@@ -3316,6 +3364,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_scratch": "scratch folder problem on the computer",
         "storage_io": "media storage read or write error",
         "controller_database_busy": "controller database contention",
+        "unknown": "an error Mediaforce does not recognise",
     }.get(failure_kind, "retryable failure")
     return f"retrying after {reason} at {retry_not_before}"
 
@@ -3509,15 +3558,23 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "storage_io"
     if is_database_busy_failure(message):
         return "controller_database_busy"
-    if isinstance(exc, (QualitySearchError, QualityTempCleanupError, QualityTempSetupError)):
-        return "deterministic"
-    if _encode_failure_is_quality_policy_failure(message):
+    if isinstance(exc, CERTAIN_ENCODE_FAILURES) or _encode_failure_has_measured_evidence(str(exc)):
         return "deterministic"
     if _encode_failure_is_ssh_transport(message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:
         return "deterministic"
-    return "deterministic"
+    # Nothing recognised it, so it has not been shown to be certain: retry before asking the owner.
+    return "unknown"
+
+
+def _encode_failure_has_measured_evidence(error_message: str) -> bool:
+    """The failure carries a measured result that the failure analysis can act on."""
+    return (
+        _encode_failure_is_quality_policy_failure(error_message.lower())
+        or FINAL_SIZE_MISS_RE.search(error_message) is not None
+        or QUALITY_FLOOR_CONFLICT_RE.search(error_message) is not None
+    )
 
 
 def _encode_failure_is_quality_policy_failure(message: str) -> bool:

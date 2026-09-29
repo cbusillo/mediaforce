@@ -45,6 +45,10 @@ class UnreadableEncodeOutputError(RuntimeError):
     """The encoder reported success but its staged output cannot be probed."""
 
 
+class StagedOutputHeldForReviewError(RuntimeError):
+    """A finished output that could not be probed is kept on disk because it may be repairable."""
+
+
 class PromotionWaiting(RuntimeError):
     """A temporary condition holds this file back; nothing moved and it can be published later."""
 

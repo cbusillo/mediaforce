@@ -446,6 +446,9 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if failure_kind in {"storage_io", "stale_lease", "worker_restart", "controller_database_busy"}:
         # The share or the controller failed and the automatic retries ran out; nothing judged the item.
         return failure_kind
+    if failure_kind == "unknown":
+        # An unrecognised error used up its automatic retries; nothing showed it was certain to fail again.
+        return failure_kind
     if failure_kind != "deterministic":
         return None
     error = str(child.get("error") or "")

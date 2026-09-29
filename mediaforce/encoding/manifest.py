@@ -26,6 +26,7 @@ from mediaforce.encoding.quality_search import QualitySearchPlan
 from mediaforce.encoding.staged_host import staged_job_for_host
 from mediaforce.encoding.staging import (
     HEADER_ONLY_OUTPUT_MAX_BYTES,
+    StagedOutputHeldForReviewError,
     UnreadableEncodeOutputError,
     partial_output_path,
     safe_unlink,
@@ -1093,7 +1094,8 @@ def encode_one_item(
         staged_probe = probe_media(staging_path)
     except Exception as exc:
         if staged_stat.st_size > HEADER_ONLY_OUTPUT_MAX_BYTES:
-            raise
+            # Keep the probe's own message: recovery recognises an unreadable output by it.
+            raise StagedOutputHeldForReviewError(str(exc)) from exc
         # A stream host can exit cleanly after writing only a container header. Nothing is
         # recorded for the item yet, so drop the stub and let the queue retry the encode.
         # A larger unreadable output may be repairable and stays held for review.
