@@ -15,7 +15,6 @@ from mediaforce.cli import main as cli_main
 from mediaforce.core.config import ConfigPaths, MediaforceConfig
 from mediaforce.core.db import open_db, reset_engine_cache
 from mediaforce.core.db_tables import library_item_evidence_state, library_items
-from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.utils import content_version_fingerprint, file_fingerprint
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
 from mediaforce.encoding.fingerprint import MEDIA_FINGERPRINT_EVIDENCE_KIND
@@ -25,7 +24,9 @@ from mediaforce.library.evidence_queue import cancel_evidence_queue, claim_next_
 from mediaforce.library.evidence_state import EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, \
     load_library_item_evidence_states, rebuild_library_item_evidence_states, sync_library_item_evidence_state
 from mediaforce.library.evidence_worker import EvidenceWorkerDeps, process_evidence_queue_once
-from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_safety_partition
+from mediaforce.web.runtime.decision_evidence import cadence_evidence_blocker, cadence_queue_partition, \
+    cadence_safety_partition
+from mediaforce.web.runtime.operator_work import start_ready_evidence_work
 
 
 class EvidenceWorkerTests(unittest.TestCase):
@@ -208,6 +209,67 @@ class EvidenceWorkerTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_production_cadence_checks_start_without_pressing_start(self) -> None:
+        item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+
+        with open_db(self.config.paths.db_path) as connection:
+            partition = cadence_queue_partition(
+                connection,
+                self.config,
+                "tv/show",
+                library_item_ids=[item_id],
+                work_reason="encode_safety",
+            )
+            summary = evidence_queue_summary(connection)
+
+        self.assertEqual(partition.analysis_queued_item_ids, frozenset({item_id}))
+        self.assertFalse(summary["is_paused"])
+        self.assertEqual(summary["status"], "queued")
+
+    def test_operator_decision_checks_still_start_paused(self) -> None:
+        item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+
+        with open_db(self.config.paths.db_path) as connection:
+            for item in connection.execute(select(library_items)).mappings().fetchall():
+                sync_library_item_evidence_state(connection, item, CADENCE_EVIDENCE_KIND)
+            queue_decision_evidence_work(
+                connection,
+                self.config,
+                "tv/show",
+                library_item_ids=[item_id],
+                evidence_kind=CADENCE_EVIDENCE_KIND,
+                work_reason="sample_safety",
+            )
+            summary = evidence_queue_summary(connection)
+
+        self.assertTrue(summary["is_paused"])
+
+    def test_ready_evidence_work_starts_the_runner_only_when_runnable(self) -> None:
+        item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)
+        runner = Mock(active=False)
+        runner.start.return_value = True
+
+        self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
+        with open_db(self.config.paths.db_path) as connection:
+            cadence_queue_partition(
+                connection,
+                self.config,
+                "tv/show",
+                library_item_ids=[item_id],
+                work_reason="encode_safety",
+            )
+        self.assertTrue(start_ready_evidence_work(self.config.paths.db_path, runner))
+        runner.start.assert_called_once_with(max_work_items=1)
+
+        runner.reset_mock()
+        runner.active = True
+        self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
+        runner.active = False
+        with open_db(self.config.paths.db_path) as connection:
+            pause_evidence_queue(connection)
+        self.assertFalse(start_ready_evidence_work(self.config.paths.db_path, runner))
+        runner.start.assert_not_called()
 
     def test_cadence_decision_blocker_queues_only_missing_safety_evidence(self) -> None:
         first_item_id, _path = self._insert_item(1, cadence_summary_json=None, media_fingerprint_json=None)

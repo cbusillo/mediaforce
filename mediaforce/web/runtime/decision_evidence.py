@@ -235,6 +235,7 @@ def _queue_cadence_evidence_work(
         library_item_ids: Sequence[int],
         *,
         work_reason: str,
+        start_new_batch: bool = False,
 ) -> list[dict[str, Any]]:
     scope_prefix = str(prefix or "").strip().strip("/")
     queue_groups: list[tuple[str, list[int]]]
@@ -257,6 +258,7 @@ def _queue_cadence_evidence_work(
             evidence_kind=CADENCE_EVIDENCE_KIND,
             work_reason=work_reason,
             manage_transaction=False,
+            start_new_batch=start_new_batch,
         )
         for group_prefix, group_item_ids in queue_groups
     ]
@@ -320,6 +322,7 @@ def cadence_queue_partition(
             select(library_items).where(library_items.c.id.in_(evidence_ids))
         ).mappings().fetchall()
         try:
+            # Production is waiting on these checks, so they run without anyone pressing Start.
             preparations = _queue_cadence_evidence_work(
                 connection,
                 config,
@@ -327,6 +330,7 @@ def cadence_queue_partition(
                 items,
                 evidence_ids,
                 work_reason=work_reason,
+                start_new_batch=True,
             )
         except EvidenceQueueConflict as exc:
             unavailable_reason = str(exc)
