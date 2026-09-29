@@ -22628,6 +22628,26 @@ raise SystemExit(0)
         self.assertTrue(joined_manifest["items"][0]["cadence_decision"]["owner_accepted_as_is"])
         self.assertEqual(set(self._hold_rows()), {item_ids["Episode 3.mkv"]})
 
+    def test_show_offers_the_as_is_decision_before_stored_evidence_is_refreshed(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv")
+            base = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["Episode 1.mkv"])
+            ).scalar_one()))
+            ambiguous = self._measured_cadence(base, progressive=450, undetermined=153)
+            # The evidence-state rows are only refreshed when something re-projects them; the show must not wait.
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 1.mkv"])
+                .values(cadence_summary_json=json.dumps(ambiguous, separators=(",", ":")))
+            )
+            offered = ambiguous_motion_runtime.ambiguous_motion_files(
+                connection, "tv/show", library_types=queue_config.library_type_map,
+            ).to_payload()
+
+        self.assertEqual(offered and offered["eligible_count"], 1)
+
     def test_ambiguous_motion_is_decided_once_per_show_not_per_season(self) -> None:
         queue_config = self._complete_queue_config()
         with open_db(self.config.paths.db_path) as connection:
