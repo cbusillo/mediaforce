@@ -17354,7 +17354,7 @@ raise SystemExit(0)
         ) as start_storage, patch(
                 "mediaforce.web.app._start_catalog_refresh_worker",
                 return_value=catalog_handle,
-        ) as start_catalog:
+        ) as start_catalog, patch("mediaforce.web.app._start_evidence_autostart_worker") as start_autostart:
             runtime = web_app._start_background_workers(self.config)
 
         self.assertIsNotNone(runtime)
@@ -17362,9 +17362,27 @@ raise SystemExit(0)
         self.assertIs(runtime.lease, lease)
         self.assertEqual(runtime.handles, (storage_handle, calibration_handle, encode_handle, catalog_handle))
         start_catalog.assert_called_once_with(self.config)
+        start_autostart.assert_not_called()
         start_storage.assert_called_once_with(self.config)
         start_calibration.assert_called_once_with(self.config)
         start_encode.assert_called_once_with(self.config)
+
+    def test_start_background_workers_starts_evidence_autostart_with_the_app_runner(self) -> None:
+        runner = Mock()
+        autostart_handle = Mock()
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=Mock()), patch(
+                "mediaforce.web.app._start_calibration_queue_worker",
+        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._start_controller_storage_worker",
+        ), patch("mediaforce.web.app._start_catalog_refresh_worker"), patch(
+                "mediaforce.web.app._start_evidence_autostart_worker",
+                return_value=autostart_handle,
+        ) as start_autostart:
+            runtime = web_app._start_background_workers(self.config, evidence_runner=runner)
+
+        assert runtime is not None
+        self.assertIs(runtime.handles[-1], autostart_handle)
+        start_autostart.assert_called_once_with(self.config, runner)
 
     def test_queue_worker_handles_are_stoppable_non_daemon_threads(self) -> None:
         def wait_for_stop(

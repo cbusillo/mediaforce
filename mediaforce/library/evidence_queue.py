@@ -214,7 +214,13 @@ def queue_decision_evidence_work(
         work_reason: str,
         updated_at: str | None = None,
         manage_transaction: bool = True,
+        start_new_batch: bool = False,
 ) -> dict[str, Any]:
+    """Queue decision-priority evidence for the selected items.
+
+    A new batch starts paused for the operator unless start_new_batch is set, as it is for checks that
+    an approved production run is waiting on.
+    """
     scope_prefix = str(prefix or "").strip().strip("/")
     if not scope_prefix:
         raise ValueError("Decision evidence work requires an explicit item or folder scope.")
@@ -446,10 +452,10 @@ def queue_decision_evidence_work(
                 {
                     "queue_name": DEFAULT_EVIDENCE_QUEUE_NAME,
                     "batch_id": batch_id,
-                    "status": "paused",
+                    "status": "queued" if start_new_batch else "paused",
                     "scope": scope_payload,
                     "evidence_kinds": [selected_kind],
-                    "is_paused": True,
+                    "is_paused": not start_new_batch,
                     "cancel_requested": False,
                     "item_count": prepared_count,
                     "completed_count": 0,
@@ -475,6 +481,38 @@ def queue_decision_evidence_work(
         "terminal_failure_count": terminal_failure_count,
         "work": evidence_queue_summary(connection),
     }
+
+
+def _claimable_batch_id(connection: DBClient) -> str | None:
+    """The current batch when it may hand out work: active, unpaused, not cancelling, background running."""
+    queue_state = load_evidence_queue_state(connection)
+    batch_id = str(queue_state.get("batch_id") or "")
+    if (
+            not batch_id
+            or background_work_is_paused(connection)
+            or bool(queue_state.get("is_paused"))
+            or bool(queue_state.get("cancel_requested"))
+            or str(queue_state.get("status") or "") not in EVIDENCE_QUEUE_ACTIVE_STATUSES
+    ):
+        return None
+    return batch_id
+
+
+def runnable_evidence_work_count(connection: DBClient) -> int:
+    """Claimable items in the current batch, or zero when anything holds the queue back."""
+    batch_id = _claimable_batch_id(connection)
+    if not batch_id:
+        return 0
+    return int(
+        connection.execute(
+            select(func.count())
+            .select_from(library_item_evidence_state)
+            .where(
+                library_item_evidence_state.c.work_batch_id == batch_id,
+                library_item_evidence_state.c.work_status.in_(EVIDENCE_WORK_CLAIMABLE_STATUSES),
+            )
+        ).scalar_one()
+    )
 
 
 def evidence_queue_summary(connection: DBClient) -> dict[str, Any]:
@@ -595,15 +633,8 @@ def claim_next_evidence_work(
     connection.commit()
     connection.exec_driver_sql("BEGIN IMMEDIATE")
     try:
-        queue_state = load_evidence_queue_state(connection)
-        batch_id = str(queue_state.get("batch_id") or "")
-        if (
-                not batch_id
-                or background_work_is_paused(connection)
-                or bool(queue_state.get("is_paused"))
-                or bool(queue_state.get("cancel_requested"))
-                or str(queue_state.get("status") or "") not in EVIDENCE_QUEUE_ACTIVE_STATUSES
-        ):
+        batch_id = _claimable_batch_id(connection)
+        if not batch_id:
             connection.rollback()
             return None
         running_count = int(

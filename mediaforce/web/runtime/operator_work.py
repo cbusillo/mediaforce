@@ -1,6 +1,5 @@
 import logging
 import threading
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -8,12 +7,13 @@ from typing import Any
 from sqlalchemy import func, select
 
 from mediaforce.core.config import MediaforceConfig
-from mediaforce.core.db import DBClient
+from mediaforce.core.db import DBClient, open_db
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.type_defs import object_dict, object_list
 from mediaforce.library.background_work import list_evidence_backlog, load_background_work_state, \
     summarize_evidence_inventory
-from mediaforce.library.evidence_queue import EVIDENCE_QUEUE_ACTIVE_STATUSES, evidence_queue_summary
+from mediaforce.library.evidence_queue import DEFAULT_EVIDENCE_BATCH_LIMIT, EVIDENCE_QUEUE_ACTIVE_STATUSES, \
+    evidence_queue_summary, runnable_evidence_work_count
 from mediaforce.library.evidence_worker import run_evidence_queue_until_blocked
 from mediaforce.library.metadata_sync import metadata_configuration_status
 
@@ -77,6 +77,17 @@ class BoundedEvidenceRunner:
             with self._lock:
                 if self._thread is current_thread:
                     self._thread = None
+
+
+def start_ready_evidence_work(db_path: Path, runner: BoundedEvidenceRunner) -> bool:
+    """Run evidence work that is queued and unpaused but has no runner, such as checks production waits on."""
+    if runner.active:
+        return False
+    with open_db(db_path) as connection:
+        runnable = runnable_evidence_work_count(connection)
+    if runnable <= 0:
+        return False
+    return runner.start(max_work_items=min(runnable, DEFAULT_EVIDENCE_BATCH_LIMIT))
 
 
 def build_operator_work_payload(

@@ -25,9 +25,8 @@ from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete
-from sqlalchemy import and_, func
+from sqlalchemy import func
 from sqlalchemy import literal_column
-from sqlalchemy import or_
 from sqlalchemy import select
 
 from mediaforce.advisor import TuningPolicyResponse
@@ -93,7 +92,6 @@ from mediaforce.library.other_profiles import OTHER_FOLDER_SCOPE_MAX_ITEMS
 from mediaforce.library.planner import build_manifest_item
 from mediaforce.library.representatives import RepresentativeSelection, load_representative_selection, \
     public_representative_item
-from mediaforce.library.run_manifests import select_encode_candidates
 from mediaforce.library.candidate_selection import CandidateDecision, encode_candidate_decisions, \
     older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
     restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
@@ -245,7 +243,6 @@ from mediaforce.web.runtime.tool_capabilities import metric_support as runtime_m
     refresh_metric_support as runtime_refresh_metric_support
 from mediaforce.web.runtime.folder_tuning_helpers import proposal_compression_intent_drift, size_budget_sample_analysis
 from mediaforce.web.runtime.catalog_signature import (
-    catalog_signature_file as _catalog_signature_file,
     current_catalog_signature as _current_catalog_signature,
     load_catalog_signature as _load_catalog_signature,
     save_catalog_signature as _save_catalog_signature,
@@ -269,7 +266,8 @@ from mediaforce.web.runtime.job_runtime import JobRuntimeDeps, active_scan_from_
     save_scan_job_state as runtime_save_scan_job_state, scan_is_stale as runtime_scan_is_stale, \
     scan_job_belongs_to_current_process as runtime_scan_job_belongs_to_current_process, \
     scan_process_is_alive as runtime_scan_process_is_alive
-from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload
+from mediaforce.web.runtime.operator_work import BoundedEvidenceRunner, build_operator_work_payload, \
+    start_ready_evidence_work
 from mediaforce.web.settings_runtime import (
     ALWAYS_SCHEDULE_PROFILE,
     DEFAULT_HOST_SCHEDULE_PROFILE,
@@ -302,6 +300,7 @@ REPRESENTATIVE_SELECTION_CACHE_TTL_SECONDS = 60.0
 FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
 CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH = timedelta(days=1)
 CATALOG_REFRESH_POLL_SECONDS = 60.0
+EVIDENCE_AUTOSTART_POLL_SECONDS = 30.0
 CATALOG_REFRESH_FAILURE_COOLDOWN = timedelta(minutes=30)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
@@ -615,7 +614,7 @@ def create_app(
                             resolved_review_rows,
                         )
                     _recover_encode_queue(connection, config)
-                background_runtime = _start_background_workers(config)
+                background_runtime = _start_background_workers(config, evidence_runner=evidence_runner)
                 _safe_collect_host_statuses(config)
                 yield
             finally:
@@ -4591,6 +4590,38 @@ def _start_catalog_refresh_worker(config: MediaforceConfig) -> SupervisedWorkerH
     return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
 
 
+def _evidence_autostart_worker_loop(
+        *,
+        db_path: Path,
+        runner: BoundedEvidenceRunner,
+        stop_event: threading.Event,
+) -> None:
+    def start_when_ready() -> None:
+        start_ready_evidence_work(db_path, runner)
+
+    run_supervised_worker_loop(
+        process_once_fn=start_when_ready,
+        poll_seconds=EVIDENCE_AUTOSTART_POLL_SECONDS,
+        stop_event=stop_event,
+        logger=LOGGER,
+        failure_message="Automatic analysis start check failed; it will retry.",
+    )
+
+
+def _start_evidence_autostart_worker(
+        config: MediaforceConfig,
+        runner: BoundedEvidenceRunner,
+) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_evidence_autostart_worker_loop,
+        kwargs={"db_path": config.paths.db_path, "runner": runner, "stop_event": stop_event},
+        name="evidence-autostart-worker",
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
+
+
 def _start_controller_storage_worker(config: MediaforceConfig) -> SupervisedWorkerHandle:
     stop_event = threading.Event()
     thread = threading.Thread(
@@ -4604,6 +4635,8 @@ def _start_controller_storage_worker(config: MediaforceConfig) -> SupervisedWork
 
 def _start_background_workers(
         config: MediaforceConfig,
+        *,
+        evidence_runner: BoundedEvidenceRunner | None = None,
 ) -> BackgroundWorkerRuntime | None:
     lease = _acquire_background_worker_leadership(config)
     if lease is None:
@@ -4614,6 +4647,8 @@ def _start_background_workers(
         handles.append(_start_calibration_queue_worker(config))
         handles.append(_start_encode_queue_worker(config))
         handles.append(_start_catalog_refresh_worker(config))
+        if evidence_runner is not None:
+            handles.append(_start_evidence_autostart_worker(config, evidence_runner))
     except BaseException:
         for handle in handles:
             handle.stop()
