@@ -16,10 +16,10 @@ from sqlalchemy import select, update
 
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, open_db
-from mediaforce.core.db_tables import item_events, library_item_evidence_state, library_items
+from mediaforce.core.db_tables import item_events, library_items
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, accept_cadence_as_is, cadence_as_is_eligible, \
-    cadence_measurement_complete
-from mediaforce.library.evidence_state import EVIDENCE_STATE_CURRENT, sync_library_item_evidence_state
+    cadence_measurement_complete, reclassify_cadence_summary
+from mediaforce.library.evidence_state import sync_library_item_evidence_state
 from mediaforce.library.media_scopes import resolve_media_scope, scope_rel_path_filter
 from mediaforce.core.type_defs import object_dict
 
@@ -48,19 +48,16 @@ def ambiguous_motion_files(
         *,
         library_types: Mapping[str, str],
 ) -> AmbiguousMotionFiles:
+    """Files the current classifier leaves ambiguous after full measurement, read from their stored summaries.
+
+    Stored evidence-state rows are refreshed only when something re-projects them, so the decision is
+    offered from the measurements themselves rather than waiting for that refresh.
+    """
     scope = resolve_media_scope(connection, prefix, library_types=library_types)
     rows = connection.execute(
         select(library_items)
-        .select_from(
-            library_items.join(
-                library_item_evidence_state,
-                library_item_evidence_state.c.library_item_id == library_items.c.id,
-            )
-        )
         .where(
-            library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
-            library_item_evidence_state.c.state == EVIDENCE_STATE_CURRENT,
-            library_item_evidence_state.c.decision_status == "blocked",
+            library_items.c.cadence_summary_json.is_not(None),
             library_items.c.status != "missing",
             scope_rel_path_filter(library_items.c.rel_path, scope),
         )
@@ -70,7 +67,8 @@ def ambiguous_motion_files(
     partly_interlaced: list[Mapping[str, Any]] = []
     for row in rows:
         summary = _summary(row)
-        if str(object_dict(summary.get("decision")).get("classification") or "") != "unknown":
+        decision = object_dict(reclassify_cadence_summary(summary).get("decision"))
+        if decision.get("classification") != "unknown" or decision.get("status") == "resolved":
             continue
         if cadence_as_is_eligible(summary):
             eligible.append(row)
