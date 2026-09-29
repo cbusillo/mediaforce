@@ -665,16 +665,14 @@ def aggregate_encode_parent_job(
     stopped_children = [child for child in children if str(child.get("status") or "") == "stopped"]
     failed_children = [child for child in children if str(child.get("status") or "") == "failed"]
 
-    # A folder with work still to run reads as working; the files that need the owner are counted
-    # in the unfinished breakdown rather than turning the whole folder into a stopped one.
     if running_children:
         status = "running"
+    elif attention_children:
+        status = "needs_attention"
     elif any(str(child.get("status") or "") == "retry_backoff" for child in children):
         status = "retry_backoff"
     elif queued_children:
         status = "queued"
-    elif attention_children:
-        status = "needs_attention"
     elif len(completed_children) == len(children):
         status = "completed"
     elif stopped_children:
@@ -911,6 +909,8 @@ def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str]:
         if not waiting_reason:
             return "waiting_turn", "waiting for their turn"
         lowered = waiting_reason.lower()
+        if HOST_WINDOW_IMPOSSIBLE_MARKER in lowered:
+            return "schedule_too_short", "longer than every work window"
         for reason, label, needles in _WAITING_REASON_PATTERNS:
             if any(needle in lowered for needle in needles):
                 return reason, label
@@ -957,7 +957,8 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
                 "reason": reason,
                 "label": label,
                 "count": 0,
-                "needs_owner": status in _OWNER_CHILD_STATUSES,
+                # No schedule fits a file longer than every work window; only the owner can change that.
+                "needs_owner": status in _OWNER_CHILD_STATUSES or reason == "schedule_too_short",
                 "items": [],
             },
         )

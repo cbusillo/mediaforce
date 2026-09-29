@@ -562,7 +562,14 @@ def _encode_job_workflow_state(overlapping_rows: list[DBRow]) -> tuple[WorkflowL
         return "processing", detail
     latest = overlapping_rows[0] if overlapping_rows else None
     if latest is not None and latest["status"] in ATTENTION_JOB_STATUSES:
-        reasons = unfinished_breakdown_summary(unfinished_breakdown_groups(latest["progress_json"]))
-        error = reasons or str(latest["error"] or "Encode job needs operator attention.")
+        groups = unfinished_breakdown_groups(latest["progress_json"])
+        owner_groups = [group for group in groups if group.get("needs_owner")]
+        if owner_groups and len(owner_groups) < len(groups):
+            # Its other files are still queued or retrying, so the folder is still working.
+            return (
+                "processing",
+                f"Encode work continues for {latest['prefix']}. Needs you: {unfinished_breakdown_summary(owner_groups)}.",
+            )
+        error = unfinished_breakdown_summary(groups) or str(latest["error"] or "Encode job needs operator attention.")
         return "attention", f"Encode job is {latest['status']} for {latest['prefix']}: {error}"
     return None

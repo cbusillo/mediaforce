@@ -2048,7 +2048,10 @@ export function detailSeasonState(
 			reviewGateStatus === 'needs_approval' ||
 			(draftHash && draftHash !== acceptedHash));
 
-	if (isActiveJob(encodeJob) || workflow?.primary_lane === 'processing') {
+	// Files that need the owner do not stop a season whose other files are still queued or retrying.
+	const reasons = encodeWaitingReasons(encodeJob);
+	const workStillQueued = reasons.needsYou.length > 0 && reasons.waiting.length > 0;
+	if (isActiveJob(encodeJob) || workflow?.primary_lane === 'processing' || workStillQueued) {
 		return {
 			key: 'making_season',
 			label: exactEpisode ? 'Compressing the episode' : 'Compressing the season',

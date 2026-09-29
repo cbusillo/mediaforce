@@ -2759,6 +2759,36 @@ describe('encodeWaitingReasons', () => {
 		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
 	});
 
+	it('keeps a season with queued work in its working state while some files need the owner', () => {
+		const folder = {
+			prefix: 'tv/Show/Season 1',
+			encode_job: {
+				job_id: 'folder',
+				status: 'needs_attention',
+				progress: {
+					unfinished_breakdown: [
+						{
+							reason: 'storage_io',
+							label: 'storage error',
+							count: 1,
+							needs_owner: true,
+							items: []
+						},
+						{
+							reason: 'waiting_schedule',
+							label: 'waiting for a scheduled time',
+							count: 4,
+							needs_owner: false,
+							items: []
+						}
+					]
+				}
+			}
+		} as unknown as FolderPayload;
+
+		expect(detailSeasonState(folder, {} as FolderStatusPayload).key).toBe('making_season');
+	});
+
 	it('is empty without an encode job', () => {
 		expect(encodeWaitingReasons(null)).toEqual({ needsYou: [], waiting: [], fileCount: 0 });
 	});

@@ -20543,12 +20543,17 @@ raise SystemExit(0)
         self.assertEqual(progress["unfinished_breakdown"][0]["reason"], "quality_floor_size_conflict")
         self.assertEqual(progress["retrying_shard_count"], 1)
 
-    def test_folder_with_work_left_reads_as_working_and_lists_every_waiting_reason(self) -> None:
+    def test_working_folder_lists_every_waiting_reason_and_keeps_owner_files_visible(self) -> None:
+        impossible = (
+            "Estimated runtime 9h is longer than every configured host schedule window (longest 8h). "
+            "Widen a host window or use Bypass scheduler."
+        )
         children = [
             ("needs_attention", {"failure_analysis": {"kind": "final_size_target_miss"}}, "deterministic", None),
             ("needs_attention", {}, "storage_io", None),
-            ("queued", {}, None, "waiting for a host schedule window"),
+            ("running", {}, None, None),
             ("queued", {}, None, "Waiting for a host schedule window."),
+            ("queued", {}, None, impossible),
             ("completed", {}, None, None),
         ]
         manifest_path = self._write_manifest(
@@ -20572,7 +20577,7 @@ raise SystemExit(0)
         with open_db(self.config.paths.db_path) as connection:
             save_encode_job(connection, {
                 **base, "job_id": "folder-waiting", "job_kind": "folder", "parent_job_id": None,
-                "status": "queued", "manifest_indexes": None, "item_count": len(children), "error": None,
+                "status": "running", "manifest_indexes": None, "item_count": len(children), "error": None,
                 "last_failure_kind": None, "waiting_reason": None,
             })
             for index, (status, progress, failure_kind, waiting_reason) in enumerate(children):
@@ -20595,14 +20600,20 @@ raise SystemExit(0)
             badge = web_app._folder_needs_attention_badges(connection).get("tv/show")
             working_state = workflow_state_runtime._load_encode_job_state(connection, scope)
 
-            for index in (2, 3):
-                shard = load_encode_job(connection, f"waiting-shard-{index}")
-                assert shard is not None
-                save_encode_job(connection, {**shard, "status": "completed", "waiting_reason": None})
+            def complete(*indexes: int) -> None:
+                for index in indexes:
+                    shard = load_encode_job(connection, f"waiting-shard-{index}")
+                    assert shard is not None
+                    save_encode_job(connection, {**shard, "status": "completed", "waiting_reason": None})
+
+            complete(2)
+            queued_left = resync()
+            queued_left_state = workflow_state_runtime._load_encode_job_state(connection, scope)
+            complete(3, 4)
             ended = resync()
             ended_state = workflow_state_runtime._load_encode_job_state(connection, scope)
 
-        self.assertEqual(working["status"], "queued")
+        self.assertEqual(working["status"], "running")
         self.assertEqual(
             [
                 (group["label"], group["count"], group["needs_owner"])
@@ -20610,8 +20621,9 @@ raise SystemExit(0)
             ],
             [
                 ("outside size limit", 1, True),
+                ("longer than every work window", 1, True),
                 ("storage error", 1, True),
-                ("waiting for a scheduled time", 2, False),
+                ("waiting for a scheduled time", 1, False),
             ],
         )
         self.assertEqual(
@@ -20619,12 +20631,29 @@ raise SystemExit(0)
             {
                 "label": "Needs attention",
                 "tone": "warning",
-                "detail": "1 outside size limit · 1 storage error · 2 waiting for a scheduled time",
+                "detail": (
+                    "1 outside size limit · 1 longer than every work window · 1 storage error · "
+                    "1 waiting for a scheduled time"
+                ),
             },
         )
         self.assertEqual(
             working_state,
-            ("processing", "Encode job is queued for tv/show. Needs you: 1 outside size limit · 1 storage error."),
+            (
+                "processing",
+                "Encode job is running for tv/show. Needs you: 1 outside size limit · "
+                "1 longer than every work window · 1 storage error.",
+            ),
+        )
+        # Recovery and retry still see the stored status; only the reading stays "working".
+        self.assertEqual(queued_left["status"], "needs_attention")
+        self.assertEqual(
+            queued_left_state,
+            (
+                "processing",
+                "Encode work continues for tv/show. Needs you: 1 outside size limit · "
+                "1 longer than every work window · 1 storage error.",
+            ),
         )
         self.assertEqual(ended["status"], "needs_attention")
         self.assertEqual(
