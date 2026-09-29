@@ -77,6 +77,7 @@ from mediaforce.tuning.compression_intent import CompressionIntentV1
 from mediaforce.tuning.content_intent_observations import build_content_intent_boundary_compatibility, \
     content_intent_stream_plan_id
 from mediaforce.tuning.size_goals import SizeGoalIntent
+from mediaforce.tuning.target_size_search import TargetSizeSearchError
 from mediaforce.review import BrowserReviewClip, CompareClip, EncodedPreviewClip
 from mediaforce.reviewing.helpers import ReviewMoment
 from mediaforce.web import app as web_app
@@ -2022,6 +2023,22 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             ),
             "deterministic",
         )
+
+    def test_failures_a_retry_cannot_change_stay_certain(self) -> None:
+        job = {"host": {"key": "local", "label": "Local", "mode": "local"}}
+        probe_timeout = subprocess.TimeoutExpired(["ffprobe", "/staging/episode.mkv"], 60)
+        certain = (
+            # A large finished output whose probe timed out is kept for review; a retry would delete it.
+            staging_runtime.StagedOutputHeldForReviewError(str(probe_timeout)),
+            TargetSizeSearchError(
+                "Every quality-safe candidate stayed above the target band.",
+                status="smallest_quality_safe_candidate_over_target_band",
+                trace={},
+            ),
+        )
+        for exc in certain:
+            with self.subTest(type(exc).__name__):
+                self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "deterministic")
 
     def _job_failing_with(self, job_id: str, *, attempt_count: int) -> dict[str, Any]:
         source_path = self._create_source_file(f"{job_id}.mkv")
@@ -13726,7 +13743,7 @@ raise SystemExit(0)
         probe_failure = subprocess.CalledProcessError(1, ["ffprobe"])
         cases = (
             ("header-only", 1369, staging_runtime.UnreadableEncodeOutputError, False),
-            ("large", staging_runtime.HEADER_ONLY_OUTPUT_MAX_BYTES + 1, subprocess.CalledProcessError, True),
+            ("large", staging_runtime.HEADER_ONLY_OUTPUT_MAX_BYTES + 1, staging_runtime.StagedOutputHeldForReviewError, True),
         )
         for label, output_size, expected_error, output_kept in cases:
             with self.subTest(label), open_db(self.config.paths.db_path) as connection:

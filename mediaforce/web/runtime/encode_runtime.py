@@ -48,14 +48,23 @@ from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupEr
     analyze_quality_policy_failure, quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
-from mediaforce.encoding.staging import UnreadableEncodeOutputError, partial_output_path, safe_unlink
+from mediaforce.encoding.cadence import CadenceResolutionError
+from mediaforce.encoding.free_space import ReserveInputError
+from mediaforce.encoding.staging import StagedOutputHeldForReviewError, UnreadableEncodeOutputError, partial_output_path, \
+    safe_unlink
+from mediaforce.encoding.streams import StreamPlanIdentityError
+from mediaforce.tuning.av1_cold_start import AV1ColdStartContractError
+from mediaforce.tuning.content_intent_observations import ContentIntentObservationConflictError
+from mediaforce.tuning.quality_observations import QualityObservationConflictError
+from mediaforce.tuning.target_size_search import FinalSizeMissError, TargetSizeSearchError
 from mediaforce.tuning.compression_intent import (
     CompressionEvidenceRef,
     authorize_compression_change,
     compression_intent_from_item,
 )
 from mediaforce.tuning.size_goals import SizeGoalIntent, size_goal_from_policy
-from mediaforce.tuning.stream_budget import resolve_stream_budget_ledger
+from mediaforce.tuning.stream_budget import StreamBudgetIdentityError, StreamBudgetInfeasibleError, \
+    resolve_stream_budget_ledger
 from mediaforce.remote import HostReadinessError, execution_mode_for_host, host_media_access_for_host, run_remote_command
 from mediaforce.web.runtime.encode_scheduler import HOST_WINDOW_IMPOSSIBLE_MARKER, HOST_WINDOW_TOO_SHORT_REASON, \
     SCHEDULE_CLOSE_WAITING_REASON
@@ -126,6 +135,21 @@ UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE = (
     "The error details are saved with this job."
 )
 UNKNOWN_FAILURE_DETAIL_MAX_CHARS = 4000
+# Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
+# output kept for review (a retry's cleanup would delete it).
+CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
+    AV1ColdStartContractError,
+    CadenceResolutionError,
+    ContentIntentObservationConflictError,
+    FinalSizeMissError,
+    QualityObservationConflictError,
+    ReserveInputError,
+    StagedOutputHeldForReviewError,
+    StreamBudgetIdentityError,
+    StreamBudgetInfeasibleError,
+    StreamPlanIdentityError,
+    TargetSizeSearchError,
+)
 FINAL_SIZE_MISS_RE = re.compile(
     r"Final output size missed the approved target band: "
     r"status=(?P<status>[a-z_]+), "
@@ -3534,25 +3558,14 @@ def _classify_encode_failure(exc: Exception, job: dict[str, Any]) -> str:
         return "storage_io"
     if is_database_busy_failure(message):
         return "controller_database_busy"
-    if _encode_failure_has_measured_evidence(str(exc)):
+    if isinstance(exc, CERTAIN_ENCODE_FAILURES) or _encode_failure_has_measured_evidence(str(exc)):
         return "deterministic"
     if _encode_failure_is_ssh_transport(message, host_payload):
         return "ssh_transport"
     if "staging file already exists" in message:
         return "deterministic"
-    if _encode_failure_holds_output_for_review(str(exc)):
-        return "deterministic"
     # Nothing recognised it, so it has not been shown to be certain: retry before asking the owner.
     return "unknown"
-
-
-def _encode_failure_holds_output_for_review(error_message: str) -> bool:
-    """A finished output ffprobe cannot read is kept for repair; a retry would delete it."""
-    return (
-        error_message.startswith("Command '[")
-        and "ffprobe" in error_message
-        and "returned non-zero exit status" in error_message
-    )
 
 
 def _encode_failure_has_measured_evidence(error_message: str) -> bool:
