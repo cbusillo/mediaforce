@@ -2062,9 +2062,9 @@ def create_app(
     ) -> dict[str, Any]:
         current_config = load_config(config_path)
         with open_db(current_config.paths.db_path) as connection:
-            def approval(parent: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
+            def approval(parent: dict[str, Any], _manifest: dict[str, Any]) -> dict[str, Any]:
                 return child_recovery_approval(
-                    current_config, parent, manifest,
+                    current_config, parent,
                     load_calibration_state=_load_calibration_state,
                     review_gate=_review_gate,
                     load_advice_state=_load_advice_state_for_queue,

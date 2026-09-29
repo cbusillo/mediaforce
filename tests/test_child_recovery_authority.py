@@ -15,7 +15,7 @@ from mediaforce.encoding.cadence import analyze_cadence
 from mediaforce.web.runtime import folder_actions
 
 
-def test_recovery_requires_current_approval_and_matching_manifest() -> None:
+def test_recovery_approval_is_the_current_contract_behind_show_gates() -> None:
     config = Mock()
     calibration = {"accepted_sample_job_id": "sample", "accepted_policy_hash": "policy", "sample_item": {
         "resolved_operator_intent": {"request": {"compression_intent": "balanced"}},
@@ -26,29 +26,31 @@ def test_recovery_requires_current_approval_and_matching_manifest() -> None:
     with patch.object(folder_actions, "production_action_blocker", return_value=None), \
             patch.object(folder_actions, "build_quality_risk_contract", return_value={}), \
             patch.object(folder_actions, "_quality_risk_blocking_reason", return_value=None):
-        assert folder_actions.child_recovery_approval(config, {"prefix": "tv/Show"}, {
-            "selection": {"production_approval_contract": contract},
-        }, **kwargs) == contract
-        with pytest.raises(HTTPException):
-            folder_actions.child_recovery_approval(config, {"prefix": "tv/Show"}, {
-                "selection": {"production_approval_contract": {**contract, "sample_job_id": "old"}},
-            }, **kwargs)
+        assert folder_actions.child_recovery_approval(config, {"prefix": "tv/Show"}, **kwargs) == contract
         kwargs["review_gate"] = lambda _: {"can_confirm_full": False}
         with pytest.raises(HTTPException):
-            folder_actions.child_recovery_approval(config, {"prefix": "tv/Show"}, {
-                "selection": {"production_approval_contract": contract},
-            }, **kwargs)
+            folder_actions.child_recovery_approval(config, {"prefix": "tv/Show"}, **kwargs)
 
 
-@pytest.mark.parametrize("eligible,cleared", [(False, {1}), (True, set())])
-def test_recovery_rechecks_policy_and_cadence_without_writes(eligible: bool, cleared: set[int]) -> None:
-    decision = SimpleNamespace(item_id=1, eligible=eligible, override_applied=False, hold_reasons=[])
-    with patch.object(folder_actions, "project_candidates", return_value=[decision]), \
-            patch.object(folder_actions, "cadence_safety_partition", return_value=SimpleNamespace(cleared_item_ids=cleared)) as cadence:
-        with pytest.raises(HTTPException):
-            folder_actions.child_recovery_candidate_evidence(Mock(), Mock(), {"prefix": "tv/Show"}, [{"library_item_id": 1}])
-        if eligible:
-            assert cadence.call_args.kwargs["synchronize"] is False
+@pytest.mark.parametrize("eligible,cleared,evidence_required", [(False, set(), set()), (True, set(), {1})])
+def test_recovery_names_policy_and_cadence_blockers_per_item_without_writes(
+        eligible: bool, cleared: set[int], evidence_required: set[int],
+) -> None:
+    decisions = [
+        SimpleNamespace(item_id=1, eligible=eligible, override_applied=False, hold_reasons=[]),
+        SimpleNamespace(item_id=2, eligible=True, override_applied=False, hold_reasons=[]),
+    ]
+    partition = SimpleNamespace(
+        cleared_item_ids=cleared | {2}, blocked_item_ids=set(), evidence_required_item_ids=evidence_required,
+    )
+    with patch.object(folder_actions, "project_candidates", return_value=decisions), \
+            patch.object(folder_actions, "cadence_safety_partition", return_value=partition) as cadence:
+        evidence = folder_actions.child_recovery_candidate_evidence(
+            Mock(), Mock(), {"prefix": "tv/Show"}, [{"library_item_id": 1}, {"library_item_id": 2}],
+        )
+    assert evidence["items"]["1"]["blocked_reason"]
+    assert evidence["items"]["2"]["blocked_reason"] is None
+    assert cadence.call_args.kwargs["synchronize"] is False
 
 
 def test_recovery_only_reuses_original_in_scope_override() -> None:
@@ -57,7 +59,9 @@ def test_recovery_only_reuses_original_in_scope_override() -> None:
         "manual_override": True, "override_applied": True, "season_prefix": "tv/Show/Season 1", "is_current_season": False,
     }}
     with patch.object(folder_actions, "project_candidates", return_value=[decision]) as candidates, \
-            patch.object(folder_actions, "cadence_safety_partition", return_value=SimpleNamespace(cleared_item_ids={1})):
+            patch.object(folder_actions, "cadence_safety_partition", return_value=SimpleNamespace(
+                cleared_item_ids={1}, blocked_item_ids=set(), evidence_required_item_ids=set(),
+            )):
         evidence = folder_actions.child_recovery_candidate_evidence(Mock(), Mock(), {"prefix": "tv/Show"}, [item])
         assert evidence["cadence_cleared"] == [1]
         assert candidates.call_args.kwargs["manual_override_prefixes"] == {"tv/Show/Season 1"}
@@ -74,9 +78,8 @@ def test_recovery_refuses_new_lifecycle_holds_despite_original_override() -> Non
         "hold_reasons": [{"code": "old_hold"}], "is_current_season": False,
     }}
     with patch.object(folder_actions, "project_candidates", return_value=[decision]):
-        with pytest.raises(HTTPException) as exc:
-            folder_actions.child_recovery_candidate_evidence(Mock(), Mock(), {"prefix": "tv/Show"}, [item])
-        assert "original lifecycle override" in exc.value.detail
+        evidence = folder_actions.child_recovery_candidate_evidence(Mock(), Mock(), {"prefix": "tv/Show"}, [item])
+    assert "original lifecycle override" in evidence["items"]["1"]["blocked_reason"]
 
 
 def test_real_candidate_and_cadence_authorities_are_read_only_on_success_and_blocker() -> None:
@@ -95,6 +98,7 @@ def test_real_candidate_and_cadence_authorities_are_read_only_on_success_and_blo
 
                 assert evidence["cadence_cleared"] == [item_id]
                 assert evidence["items"][str(item_id)]["eligible"] is True
+                assert evidence["items"][str(item_id)]["blocked_reason"] is None
                 assert _database_snapshot(connection) == before_success
 
                 connection.execute(
@@ -103,13 +107,12 @@ def test_real_candidate_and_cadence_authorities_are_read_only_on_success_and_blo
                 connection.commit()
                 before_blocker = _database_snapshot(connection)
 
-                with pytest.raises(HTTPException) as raised:
-                    folder_actions.child_recovery_candidate_evidence(
-                        connection, config, {"prefix": "other/Collection"}, [{"library_item_id": item_id}],
-                    )
+                blocked = folder_actions.child_recovery_candidate_evidence(
+                    connection, config, {"prefix": "other/Collection"}, [{"library_item_id": item_id}],
+                )
 
-                assert raised.value.status_code == 409
-                assert "cadence evidence" in str(raised.value.detail).lower()
+                assert "motion pattern" in blocked["items"][str(item_id)]["blocked_reason"]
+                assert blocked["cadence_cleared"] == []
                 assert _database_snapshot(connection) == before_blocker
         finally:
             reset_engine_cache()
