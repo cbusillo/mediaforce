@@ -32,8 +32,7 @@ from mediaforce.library.workflow_state import build_folder_workflow_state
 from mediaforce.library.run_manifests import create_folder_manifest, write_manifest
 from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection, encode_candidate_decisions, \
     older_season_candidate_item_ids, older_season_override_selection, project_candidates, \
-    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, scope_target_size_blocker, \
-    workflow_eligibility
+    restrict_older_season_override_selection, scope_lifecycle_payload_from_decisions, workflow_eligibility
 from mediaforce.tuning.production_lineage import attach_target_lineage
 from mediaforce.tuning.quality_risk import build_quality_risk_contract
 from mediaforce.tuning.quality_risk import append_quality_risk_record
@@ -289,6 +288,46 @@ def _older_season_queue_message(
     )
 
 
+def _target_size_left_out(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+) -> tuple[list[LeftOutFile], ActionPayload | None]:
+    """Files whose size goal cannot fit stay out; the folder is refused only when no file is left to try."""
+    decisions = [
+        decision
+        for decision in encode_candidate_decisions(connection, config, prefixes=[prefix])
+        if decision.workflow_lane == "encode"
+    ]
+    blocked = sorted(
+        (
+            (str(decision.row.get("rel_path") or ""), decision.item_id, decision.target_size_blocker)
+            for decision in decisions
+            if decision.target_size_blocker is not None
+        ),
+        key=lambda entry: entry[0],
+    )
+    left_out = [
+        LeftOutFile(item_id, rel_path, "target_size_infeasible", blocker.message)
+        for rel_path, item_id, blocker in blocked
+    ]
+    if not blocked or len(blocked) < len(decisions):
+        return left_out, None
+    first = blocked[0][2]
+    messages = list(dict.fromkeys(file.reason for file in left_out))
+    return left_out, {
+        "ok": False,
+        "code": first.code,
+        "message": (
+            messages[0]
+            if len(messages) == 1
+            else f"None of the {len(left_out)} files can fit the size goal. {' '.join(messages)}"
+        ),
+        "target_size_blocker": first.to_payload(),
+        "left_out": left_out_payload(left_out),
+    }
+
+
 def _high_impact_policy_change(current_policy: ActionPayload, draft_policy: ActionPayload) -> bool:
     current_video = object_dict(current_policy.get("video"))
     draft_video = object_dict(draft_policy.get("video"))
@@ -518,15 +557,9 @@ def queue_folder_encode_action(
                 detail="Choose and confirm a compression goal before queueing production.",
             )
         preflight_config = with_folder_policy_override(config, normalized_prefix, calibration_policy)
-        left_out: list[LeftOutFile] = []
-        target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
-        if target_size_blocker is not None:
-            return {
-                "ok": False,
-                "code": target_size_blocker.code,
-                "message": target_size_blocker.message,
-                "target_size_blocker": target_size_blocker.to_payload(),
-            }
+        left_out, target_size_refusal = _target_size_left_out(connection, preflight_config, normalized_prefix)
+        if target_size_refusal is not None:
+            return target_size_refusal
         latest_failed_sample_job = (
             load_latest_failed_target_size_job_state(connection, config, normalized_prefix)
             if load_latest_failed_target_size_job_state is not None
@@ -569,39 +602,19 @@ def queue_folder_encode_action(
         if active_encode_job is not None:
             active_prefix = str(active_encode_job.get("prefix") or normalized_prefix).strip().strip("/")
             if active_prefix == normalized_prefix:
-                requeue_blocker = _movie_requeue_policy_blocker(
-                    connection,
-                    config,
-                    scope,
-                    active_encode_job,
-                )
-                if requeue_blocker is not None:
-                    raise HTTPException(status_code=409, detail=requeue_blocker)
                 recovery_plan = _folder_recovery_plan(connection, active_encode_job)
+                recovery_left_out: list[LeftOutFile] = []
                 if recovery_plan is not None:
-                    _recoverable_children, recoverable_indexes = recovery_plan
-                    recoverable_item_ids = _manifest_library_item_ids(
-                        active_encode_job,
-                        recoverable_indexes,
-                    )
-                    if len(recoverable_item_ids) != len(recoverable_indexes):
-                        return {
-                            "ok": False,
-                            "message": (
-                                "The active folder manifest does not identify every failed media item. "
-                                "Cancel this recovery and prepare the folder again."
-                            ),
-                        }
-                    cadence_blocker = cadence_evidence_blocker(
+                    recovery_plan, recovery_left_out = _partition_active_recovery_plan(
                         connection,
                         preflight_config,
                         normalized_prefix,
-                        library_item_ids=recoverable_item_ids,
-                        decision_label="retrying production",
-                        work_reason="encode_safety",
+                        scope,
+                        active_encode_job,
+                        recovery_plan,
                     )
-                    if cadence_blocker is not None:
-                        return cadence_blocker
+                    if recovery_plan is None:
+                        return nothing_queued_response(recovery_left_out)
                 recovered = _recover_active_folder_encode_job(
                     connection,
                     active_encode_job,
@@ -612,6 +625,12 @@ def queue_folder_encode_action(
                     recovery_plan=recovery_plan,
                 )
                 if recovered is not None:
+                    if recovery_left_out:
+                        recovered["left_out"] = left_out_payload(recovery_left_out)
+                        recovered["message"] = (
+                            f"{recovered['message']} Left {len(recovery_left_out)} out: "
+                            f"{left_out_summary(recovery_left_out)}."
+                        )
                     return recovered
             active_status = str(active_encode_job.get("status") or "queued").replace("_", " ")
             return {
@@ -627,15 +646,11 @@ def queue_folder_encode_action(
             "stopped",
             }
         )
+        retry_outside_policy: dict[int, LeftOutFile] = {}
         if terminal_job_needs_requeue and latest_encode_job is not None:
-            requeue_blocker = _movie_requeue_policy_blocker(
-                connection,
-                config,
-                scope,
-                latest_encode_job,
-            )
-            if requeue_blocker is not None:
-                raise HTTPException(status_code=409, detail=requeue_blocker)
+            # The fresh manifest below only selects files inside the current policy; name the ones it drops.
+            retry_outside_policy = _movie_requeue_policy_left_out(connection, config, scope, latest_encode_job)
+            left_out.extend(retry_outside_policy.values())
         preflight_decisions = encode_candidate_decisions(
             connection,
             preflight_config,
@@ -764,6 +779,8 @@ def queue_folder_encode_action(
                 "target_size_provenance_blocker": target_provenance_blocker,
             }
         if not manifest["items"]:
+            if left_out:
+                return nothing_queued_response(left_out)
             if older_season_selection is not None:
                 raise HTTPException(
                     status_code=409,
@@ -869,7 +886,12 @@ def queue_folder_encode_action(
                 "queued_count": 0,
             }
         if terminal_job_needs_requeue and latest_encode_job is not None:
-            prepare_terminal_encode_job_for_requeue_fn(connection, latest_encode_job)
+            _prepare_terminal_job_except(
+                connection,
+                latest_encode_job,
+                set(retry_outside_policy),
+                prepare_terminal_encode_job_for_requeue_fn,
+            )
             _reset_stale_prefix_encoding_items_for_requeue(connection, config, normalized_prefix, now_iso=now_iso)
         attach_target_lineage(
             connection, manifest=manifest, calibration=calibration_payload,
@@ -1010,14 +1032,13 @@ def approve_measured_encode_recovery_action(
             object_dict(item_recovery.get("policy")),
         )
     with open_db(config.paths.db_path) as connection:
-        target_size_blocker = scope_target_size_blocker(connection, preflight_config, normalized_prefix)
-    if target_size_blocker is not None:
-        return {
-            "ok": False,
-            "code": target_size_blocker.code,
-            "message": target_size_blocker.message,
-            "target_size_blocker": target_size_blocker.to_payload(),
-        }
+        _target_size_files, target_size_refusal = _target_size_left_out(
+            connection,
+            preflight_config,
+            normalized_prefix,
+        )
+    if target_size_refusal is not None:
+        return target_size_refusal
     recovery_indexes = [
         index
         for index in object_list(failure_analysis.get("manifest_indexes"))
@@ -1034,16 +1055,24 @@ def approve_measured_encode_recovery_action(
         }
     with open_db(config.paths.db_path) as connection:
         connection.exec_driver_sql("BEGIN IMMEDIATE")
-        cadence_blocker = cadence_evidence_blocker(
+        cadence_partition = cadence_queue_partition(
             connection,
             preflight_config,
             normalized_prefix,
             library_item_ids=recovery_item_ids,
-            decision_label="approving measured recovery",
             work_reason="encode_safety",
         )
-        if cadence_blocker is not None:
-            return cadence_blocker
+        if recovery_item_ids and not cadence_partition.cleared_item_ids:
+            return nothing_queued_response(
+                cadence_left_out_files(
+                    cadence_partition,
+                    {
+                        int(item.get("library_item_id") or 0): str(item.get("rel_path") or "")
+                        for item in manifest_items
+                    },
+                ),
+                evidence_work=cadence_partition.evidence_work,
+            )
 
     calibration_payload["accepted_at"] = now_iso()
     calibration_payload["accepted_policy_hash"] = _calibration_policy_hash(calibration_payload)
@@ -1970,6 +1999,99 @@ def _recover_active_folder_encode_job(
     }
 
 
+def _prepare_terminal_job_except(
+        connection: DBClient,
+        job: JobPayload,
+        excluded_indexes: set[int],
+        prepare_fn: PrepareTerminalEncodeJobForRequeueFn,
+) -> None:
+    """Clean up a failed job for retry without touching the artifacts of files left out of it."""
+    if not excluded_indexes:
+        prepare_fn(connection, job)
+        return
+    selected_indexes = [index for index in object_list(job.get("manifest_indexes")) if isinstance(index, int)]
+    if str(job.get("job_kind") or "") == "folder":
+        child_indexes = [
+            index
+            for child in list_child_encode_jobs(connection, str(job.get("job_id") or ""))
+            if str(child.get("status") or "") != "completed"
+            for index in object_list(child.get("manifest_indexes"))
+            if isinstance(index, int)
+        ]
+        if child_indexes:
+            selected_indexes = child_indexes
+    if not selected_indexes:
+        selected_indexes = list(range(len(_manifest_items(job))))
+    kept_indexes = sorted(set(selected_indexes) - excluded_indexes)
+    if kept_indexes:
+        prepare_fn(connection, {**job, "job_kind": "single", "manifest_indexes": kept_indexes})
+
+
+def _partition_active_recovery_plan(
+        connection: DBClient,
+        config: MediaforceConfig,
+        normalized_prefix: str,
+        scope: MediaScope,
+        active_encode_job: JobPayload,
+        recovery_plan: tuple[list[JobPayload], list[int]],
+) -> tuple[tuple[list[JobPayload], list[int]] | None, list[LeftOutFile]]:
+    """Recover the failed children that pass; leave each other child failed with its reason."""
+    children, indexes = recovery_plan
+    left_out_by_index = _movie_requeue_policy_left_out(connection, config, scope, active_encode_job)
+    manifest_items = _manifest_items(active_encode_job)
+    item_id_by_index = {
+        index: int(manifest_items[index].get("library_item_id") or 0)
+        for index in indexes
+        if 0 <= index < len(manifest_items)
+    }
+    for index in indexes:
+        if item_id_by_index.get(index, 0) <= 0 and index not in left_out_by_index:
+            left_out_by_index[index] = LeftOutFile(
+                0,
+                "",
+                "manifest_item_unknown",
+                "The folder's saved plan does not say which file this is. Prepare the folder again to retry it.",
+            )
+    cadence_ids = [
+        item_id
+        for index, item_id in item_id_by_index.items()
+        if item_id > 0 and index not in left_out_by_index
+    ]
+    cadence_partition = cadence_queue_partition(
+        connection,
+        config,
+        normalized_prefix,
+        library_item_ids=cadence_ids,
+        work_reason="encode_safety",
+    )
+    rel_paths = {
+        item_id: str(manifest_items[index].get("rel_path") or "")
+        for index, item_id in item_id_by_index.items()
+    }
+    cadence_files = {file.library_item_id: file for file in cadence_left_out_files(cadence_partition, rel_paths)}
+    for index, item_id in item_id_by_index.items():
+        if item_id in cadence_files and index not in left_out_by_index:
+            left_out_by_index[index] = cadence_files[item_id]
+    kept_children = [
+        child
+        for child in children
+        if not any(
+            isinstance(index, int) and index in left_out_by_index
+            for index in object_list(child.get("manifest_indexes"))
+        )
+    ]
+    kept_indexes = sorted({
+        index
+        for child in kept_children
+        for index in object_list(child.get("manifest_indexes"))
+        if isinstance(index, int)
+    })
+    left_out = [left_out_by_index[index] for index in sorted(left_out_by_index)]
+    if not kept_children or not kept_indexes:
+        return None, left_out
+    return (kept_children, kept_indexes), left_out
+
+
 def _folder_recovery_plan(
         connection: DBClient,
         active_encode_job: JobPayload,
@@ -2023,21 +2145,22 @@ def _folder_recoverable_children(connection: DBClient, parent_job_id: str) -> li
     ]
 
 
-def _movie_requeue_policy_blocker(
+def _movie_requeue_policy_left_out(
         connection: DBClient,
         config: MediaforceConfig,
         scope: MediaScope,
         job: JobPayload,
-) -> str | None:
+) -> dict[int, LeftOutFile]:
+    """Saved retry files now outside the movie title policy, by manifest index."""
     if scope.domain != "movie":
-        return None
+        return {}
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
     if not str(manifest_path):
-        return None
+        return {}
     try:
         manifest = object_dict(json.loads(manifest_path.read_text()))
     except (OSError, json.JSONDecodeError):
-        return None
+        return {}
     items = [object_dict(item) for item in object_list(manifest.get("items"))]
     selected_indexes = [index for index in object_list(job.get("manifest_indexes")) if isinstance(index, int)]
     if str(job.get("job_kind") or "") == "folder":
@@ -2055,6 +2178,7 @@ def _movie_requeue_policy_blocker(
 
     library = config.library_definition_map.get(scope.root, {})
     policy = object_dict(library.get("policy"))
+    left_out: dict[int, LeftOutFile] = {}
     for index in sorted(set(selected_indexes)):
         if index < 0 or index >= len(items):
             continue
@@ -2068,11 +2192,16 @@ def _movie_requeue_policy_blocker(
             explicit_exact=scope.match == "exact_item",
         )
         if not included:
-            return (
-                f"The saved retry includes {rel_path}, which is outside the current movie title policy. "
-                f"{blocker or 'Open that exact movie file to retry it deliberately.'}"
+            left_out[index] = LeftOutFile(
+                int(items[index].get("library_item_id") or 0),
+                rel_path,
+                "movie_title_policy",
+                (
+                    "Outside the current movie title policy. "
+                    f"{blocker or 'Open that exact movie file to retry it deliberately.'}"
+                ),
             )
-    return None
+    return left_out
 
 
 def _delivery_active_item_ids(

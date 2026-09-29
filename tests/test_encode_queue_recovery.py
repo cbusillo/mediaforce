@@ -23225,6 +23225,97 @@ raise SystemExit(0)
         self.assertEqual(percent_match["job_id"], "literal-percent-encode")
         self.assertIsNone(percent_miss)
 
+    def test_active_folder_recovery_leaves_out_cadence_problem_and_recovers_the_rest(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            blocked_item = self._insert_library_item(
+                connection, self._create_source_file("recover-blocked.mkv"), status="encoding",
+            )
+            clear_item = self._insert_library_item(
+                connection, self._create_source_file("recover-clear.mkv"), status="encoding",
+            )
+            blocked_summary = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == blocked_item)
+            ).scalar_one()))
+            blocked_summary["decision"].update({"status": "blocked", "rationale": "Fixture cadence needs review."})
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == blocked_item)
+                .values(cadence_summary_json=json.dumps(blocked_summary, separators=(",", ":")))
+            )
+            manifest_path = self._write_manifest(
+                "manifest-active-partition.json",
+                [
+                    {"library_item_id": blocked_item, "rel_path": "tv/show/recover-blocked.mkv"},
+                    {"library_item_id": clear_item, "rel_path": "tv/show/recover-clear.mkv"},
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="active-partition-parent",
+                manifest_name=manifest_path.name,
+                host={},
+                status="running",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "active-partition-parent")
+                .values(job_kind="folder")
+            )
+            for job_id, index in (("failed-blocked-shard", 0), ("failed-clear-shard", 1)):
+                self._save_job(
+                    connection,
+                    job_id=job_id,
+                    manifest_name=manifest_path.name,
+                    host={},
+                    status="needs_attention",
+                    attempt_count=3,
+                )
+                connection.execute(
+                    update(encode_jobs)
+                    .where(encode_jobs.c.job_id == job_id)
+                    .values(
+                        job_kind="shard",
+                        parent_job_id="active-partition-parent",
+                        manifest_indexes_json=json.dumps([index]),
+                    )
+                )
+
+        result = folder_actions_runtime.queue_folder_encode_action(
+            self.config,
+            "tv/show",
+            "",
+            False,
+            now_iso=web_app._now_iso,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+            save_encode_job=save_encode_job,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["recovered_item_count"], 1)
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
+            [(blocked_item, "cadence_unresolved")],
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            blocked_child = load_encode_job(connection, "failed-blocked-shard")
+            cleared_child = load_encode_job(connection, "failed-clear-shard")
+            requeued = [
+                child["manifest_indexes"]
+                for child in list_child_encode_jobs(connection, "active-partition-parent")
+                if child["status"] == "queued"
+            ]
+        self.assertIsNotNone(blocked_child)
+        self.assertEqual(object_dict(blocked_child)["status"], "needs_attention")
+        self.assertIsNone(cleared_child)
+        self.assertEqual(requeued, [[1]])
+
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
         source_b = self._create_source_file("recover-active-b.mkv")

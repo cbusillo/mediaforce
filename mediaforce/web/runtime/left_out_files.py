@@ -31,6 +31,10 @@ _SUMMARY_PHRASES: dict[str, tuple[str, str]] = {
         "missed the approved final size and need a fresh goal",
     ),
     "movie_title_policy": ("is outside the movie title policy", "are outside the movie title policy"),
+    "manifest_item_unknown": (
+        "is not named in the folder's saved plan",
+        "are not named in the folder's saved plan",
+    ),
 }
 
 
