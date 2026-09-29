@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -190,6 +190,9 @@ from mediaforce.web.routes.queues import (
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
+from mediaforce.web.runtime.folder_actions import production_approval_identity
+from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
+    MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
@@ -301,6 +304,7 @@ FULL_SCAN_STALE_AFTER = timedelta(minutes=15)
 CATALOG_STALE_AFTER_WITHOUT_AUTOMATIC_REFRESH = timedelta(days=1)
 CATALOG_REFRESH_POLL_SECONDS = 60.0
 EVIDENCE_AUTOSTART_POLL_SECONDS = 30.0
+HELD_FILES_POLL_SECONDS = 60.0
 CATALOG_REFRESH_FAILURE_COOLDOWN = timedelta(minutes=30)
 PREFIX_SCAN_STALE_AFTER = timedelta(minutes=15)
 SCAN_RETRY_COOLDOWN = timedelta(minutes=5)
@@ -614,7 +618,11 @@ def create_app(
                             resolved_review_rows,
                         )
                     _recover_encode_queue(connection, config)
-                background_runtime = _start_background_workers(config, evidence_runner=evidence_runner)
+                background_runtime = _start_background_workers(
+                    config,
+                    evidence_runner=evidence_runner,
+                    held_files_sweep=_join_cleared_held_files,
+                )
                 _safe_collect_host_statuses(config)
                 yield
             finally:
@@ -1827,6 +1835,7 @@ def create_app(
             override_older_seasons: bool = False,
             older_seasons_confirmed: bool = False,
             scope_membership_token: str = "",
+            only_library_item_ids: Collection[int] | None = None,
     ) -> ActionPayload:
         current_config = load_config(config.paths.config_path)
         return queue_folder_encode_action(
@@ -1837,6 +1846,7 @@ def create_app(
             override_policy_holds,
             override_older_seasons=override_older_seasons,
             older_seasons_confirmed=older_seasons_confirmed,
+            only_library_item_ids=only_library_item_ids,
             now_iso=_now_iso,
             load_job_state=_load_job_state,
             load_calibration_state=_load_calibration_state,
@@ -1859,6 +1869,35 @@ def create_app(
                 membership_token=scope_membership_token,
             ),
         )
+
+    def _held_files_current_approval(prefix: str) -> str | None:
+        calibration = _load_calibration_state(config, prefix)
+        if calibration is None or not _review_gate(calibration).get("can_confirm_full"):
+            return None
+        return production_approval_identity(object_dict(calibration))
+
+    def _queue_held_files(group: ClearedHoldGroup) -> ActionPayload:
+        try:
+            return _queue_encode_action(
+                group.prefix,
+                "Joined production after its motion-pattern check cleared.",
+                False,
+                override_policy_holds=group.mode == HOLD_MODE_SEASON_OVERRIDE,
+                override_older_seasons=group.mode == HOLD_MODE_OLDER_SEASONS,
+                older_seasons_confirmed=group.mode == HOLD_MODE_OLDER_SEASONS,
+                only_library_item_ids=group.library_item_ids,
+            )
+        except HTTPException as exc:
+            return {"ok": False, "code": HOLD_REFUSED, "message": str(exc.detail)}
+
+    def _join_cleared_held_files() -> None:
+        for result in join_cleared_held_files(
+                lambda: open_db(config.paths.db_path),
+                current_approval=_held_files_current_approval,
+                queue_held_files=_queue_held_files,
+                now_iso=_now_iso,
+        ):
+            LOGGER.info("Held files joining production: %s", result.get("message") or result.get("code"))
 
     def _queue_folder_encode_action(
             normalized_prefix: str,
@@ -4622,6 +4661,29 @@ def _start_evidence_autostart_worker(
     return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
 
 
+def _start_supervised_worker(
+        *,
+        name: str,
+        process_once_fn: Callable[[], None],
+        poll_seconds: float,
+        failure_message: str,
+) -> SupervisedWorkerHandle:
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=run_supervised_worker_loop,
+        kwargs={
+            "process_once_fn": process_once_fn,
+            "poll_seconds": poll_seconds,
+            "stop_event": stop_event,
+            "logger": LOGGER,
+            "failure_message": failure_message,
+        },
+        name=name,
+    )
+    thread.start()
+    return SupervisedWorkerHandle(thread=thread, stop_event=stop_event)
+
+
 def _start_controller_storage_worker(config: MediaforceConfig) -> SupervisedWorkerHandle:
     stop_event = threading.Event()
     thread = threading.Thread(
@@ -4637,6 +4699,7 @@ def _start_background_workers(
         config: MediaforceConfig,
         *,
         evidence_runner: BoundedEvidenceRunner | None = None,
+        held_files_sweep: Callable[[], None] | None = None,
 ) -> BackgroundWorkerRuntime | None:
     lease = _acquire_background_worker_leadership(config)
     if lease is None:
@@ -4649,6 +4712,13 @@ def _start_background_workers(
         handles.append(_start_catalog_refresh_worker(config))
         if evidence_runner is not None:
             handles.append(_start_evidence_autostart_worker(config, evidence_runner))
+        if held_files_sweep is not None:
+            handles.append(_start_supervised_worker(
+                name="held-files-worker",
+                process_once_fn=held_files_sweep,
+                poll_seconds=HELD_FILES_POLL_SECONDS,
+                failure_message="Joining held files to production failed; it will retry.",
+            ))
     except BaseException:
         for handle in handles:
             handle.stop()

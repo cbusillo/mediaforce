@@ -42,6 +42,7 @@ from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
 from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
+from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
@@ -89,6 +90,7 @@ from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.web.runtime import production_holds as production_holds_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
 from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
@@ -17384,6 +17386,23 @@ raise SystemExit(0)
         self.assertIs(runtime.handles[-1], autostart_handle)
         start_autostart.assert_called_once_with(self.config, runner)
 
+    def test_start_background_workers_starts_the_held_files_sweep(self) -> None:
+        sweep = Mock()
+        sweep_handle = Mock()
+        with patch("mediaforce.web.app._acquire_background_worker_leadership", return_value=Mock()), patch(
+                "mediaforce.web.app._start_calibration_queue_worker",
+        ), patch("mediaforce.web.app._start_encode_queue_worker"), patch(
+                "mediaforce.web.app._start_controller_storage_worker",
+        ), patch("mediaforce.web.app._start_catalog_refresh_worker"), patch(
+                "mediaforce.web.app._start_supervised_worker",
+                return_value=sweep_handle,
+        ) as start_supervised:
+            runtime = web_app._start_background_workers(self.config, held_files_sweep=sweep)
+
+        assert runtime is not None
+        self.assertIs(runtime.handles[-1], sweep_handle)
+        self.assertIs(start_supervised.call_args.kwargs["process_once_fn"], sweep)
+
     def test_queue_worker_handles_are_stoppable_non_daemon_threads(self) -> None:
         def wait_for_stop(
                 *,
@@ -22230,11 +22249,14 @@ raise SystemExit(0)
             self,
             queue_config: MediaforceConfig,
             saved_jobs: list[dict[str, Any]],
+            calibration: dict[str, Any] | None = None,
             **kwargs: Any,
     ) -> folder_actions_runtime.ActionPayload:
-        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
-        calibration["draft_hash"] = "approved-draft"
+        if calibration is None:
+            calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+            calibration["draft_hash"] = "approved-draft"
         kwargs.setdefault("prepare_terminal_encode_job_for_requeue_fn", lambda *_args, **_kwargs: None)
+        kwargs.setdefault("clear_terminal_encode_jobs_for_prefix_fn", lambda *_args, **_kwargs: None)
         with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
             return folder_actions_runtime.queue_folder_encode_action(
                 queue_config,
@@ -22248,7 +22270,6 @@ raise SystemExit(0)
                 review_gate=self._accepted_review_gate,
                 upsert_override=self._noop_upsert_override,
                 load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
-                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
                 save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
                 **kwargs,
             )
@@ -22412,6 +22433,106 @@ raise SystemExit(0)
             [(entry["library_item_id"], entry["code"], entry["reason"]) for entry in result["left_out"]],
             [(item_ids["Episode 1.mkv"], "target_size_provenance", "Fixture target cannot be traced.")],
         )
+
+    def _hold_rows(self) -> dict[int, dict[str, Any]]:
+        with open_db(self.config.paths.db_path) as connection:
+            return {
+                int(row["library_item_id"]): dict(row)
+                for row in connection.execute(select(production_holds)).mappings().fetchall()
+            }
+
+    def _held_episode_fixture(self) -> tuple[MediaforceConfig, dict[str, int], dict[str, Any], list[dict[str, Any]]]:
+        """Season 1 queued once: Episode 1 goes, Episode 2 is held waiting for its motion-pattern check."""
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 2.mkv"])
+                .values(cadence_summary_json=None)
+            )
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        saved_jobs: list[dict[str, Any]] = []
+        first = self._queue_show_folder(queue_config, saved_jobs, calibration=calibration)
+        self.assertTrue(first["ok"], first)
+        return queue_config, item_ids, calibration, saved_jobs
+
+    def _clear_cadence(self, item_id: int) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            cleared_summary = connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.cadence_summary_json.is_not(None))
+            ).scalars().first()
+            connection.execute(
+                update(library_items).where(library_items.c.id == item_id).values(cadence_summary_json=cleared_summary)
+            )
+
+    def test_queue_folder_records_a_hold_for_each_file_waiting_on_its_check(self) -> None:
+        _config, item_ids, _calibration, _jobs = self._held_episode_fixture()
+
+        holds = self._hold_rows()
+
+        self.assertEqual(set(holds), {item_ids["Episode 2.mkv"]})
+        hold = holds[item_ids["Episode 2.mkv"]]
+        self.assertEqual(
+            (hold["prefix"], hold["mode"], hold["status"], hold["reason_code"]),
+            ("tv/show/Season 1", "season_override", "waiting", "cadence_analysis_required"),
+        )
+
+    def test_held_file_joins_production_under_its_approval_once_its_check_clears(self) -> None:
+        queue_config, item_ids, calibration, first_jobs = self._held_episode_fixture()
+        self._clear_cadence(item_ids["Episode 2.mkv"])
+        joined_jobs: list[dict[str, Any]] = []
+        cleared_terminal: list[str] = []
+
+        results = production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            queue_held_files=lambda group: self._queue_show_folder(
+                queue_config,
+                joined_jobs,
+                calibration=calibration,
+                only_library_item_ids=group.library_item_ids,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: cleared_terminal.append("cleared"),
+            ),
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual([result["ok"] for result in results], [True])
+        self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
+        self.assertEqual(self._queued_manifest_item_ids(first_jobs), [item_ids["Episode 1.mkv"]])
+        self.assertEqual(cleared_terminal, [])
+        self.assertEqual(self._hold_rows(), {})
+
+    def test_held_file_waits_when_its_approval_has_changed(self) -> None:
+        _config, item_ids, _calibration, _jobs = self._held_episode_fixture()
+        self._clear_cadence(item_ids["Episode 2.mkv"])
+        queued: list[Any] = []
+
+        results = production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: "a-newer-approval",
+            queue_held_files=queued.append,
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual([result["code"] for result in results], ["approval_changed"])
+        self.assertEqual(queued, [])
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["status"], "approval_changed")
+
+    def test_held_file_refused_outright_stops_being_retried(self) -> None:
+        _config, item_ids, calibration, _jobs = self._held_episode_fixture()
+        self._clear_cadence(item_ids["Episode 2.mkv"])
+
+        production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            queue_held_files=lambda _group: {"ok": False, "code": "refused", "message": "No longer eligible."},
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["status"], "refused")
+        with open_db(self.config.paths.db_path) as connection:
+            self.assertEqual(production_holds_runtime.cleared_hold_groups(connection), [])
 
     def test_queue_older_seasons_queues_only_cadence_cleared_items(self) -> None:
         with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:

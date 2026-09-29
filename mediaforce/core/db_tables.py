@@ -691,6 +691,20 @@ target_production_outcomes = Table(
 )
 Index("idx_target_production_boundary", target_production_outcomes.c.observation_id)
 
+production_holds = Table(
+    "production_holds",
+    metadata,
+    Column("library_item_id", Integer, ForeignKey("library_items.id", ondelete="CASCADE"), primary_key=True),
+    Column("prefix", Text, nullable=False),
+    Column("mode", Text, nullable=False),
+    Column("approval_identity", Text, nullable=False),
+    Column("reason_code", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("held_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+)
+Index("idx_production_holds_status", production_holds.c.status)
+
 item_events = Table(
     "item_events",
     metadata,
