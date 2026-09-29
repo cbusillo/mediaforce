@@ -60,6 +60,7 @@ class RecoveryPreview:
     manifest_indexes: tuple[int, ...]
     token: str
     items: tuple[dict[str, Any], ...]
+    requested_child_ids: tuple[str, ...] = ()
     skipped: tuple[dict[str, str], ...] = ()
 
     def to_payload(self) -> dict[str, Any]:
@@ -68,6 +69,7 @@ class RecoveryPreview:
             "manifest_path": self.manifest_path,
             "manifest_sha256": self.manifest_sha256,
             "child_ids": list(self.child_ids),
+            "requested_child_ids": list(self.requested_child_ids),
             "manifest_indexes": list(self.manifest_indexes),
             "token": self.token,
             "items": [dict(item) for item in self.items],
@@ -399,6 +401,7 @@ def _build_preview(
         tuple(all_indexes),
         token,
         public_items,
+        tuple(str(value) for value in child_ids),
         skipped_payload,
     )
 

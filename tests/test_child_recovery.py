@@ -125,7 +125,7 @@ class ChildRecoveryTests(unittest.TestCase):
                 self.assertEqual(preview["child_ids"], ["child-0", "child-2"])
                 self.assertEqual([skip["job_id"] for skip in preview["skipped"]], ["child-1"])
                 self.assertTrue(preview["skipped"][0]["reason"].strip())
-                self._apply(connection, ["child-0", "child-1", "child-2"], preview["token"])
+                self._apply(connection, preview["requested_child_ids"], preview["token"])
                 statuses = {job_id: row["status"] for job_id, row in self._raw_jobs(connection).items()}
                 self.assertEqual(
                     [statuses[child] for child in ("child-0", "child-1", "child-2")],

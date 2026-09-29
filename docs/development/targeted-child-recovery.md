@@ -44,7 +44,8 @@ controller, using its normal trusted operator access:
 ```
 
 Inspect the returned child IDs, manifest indexes, source items and `skipped`
-entries. POST the same IDs and returned `token` to
+entries. POST the returned `requested_child_ids` (the IDs sent to preview,
+not only the eligible `child_ids`) and `token` to
 `/api/encode-queue/recover-children/apply` only when that result is
 intended. Start with one child and observe its admission before expanding.
 Both requests require JSON and reject cross-origin browser requests. They do not run the application's unrelated periodic artifact cleanup.
