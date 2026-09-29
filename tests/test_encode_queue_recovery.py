@@ -90,6 +90,7 @@ from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode
     host_runtime as host_runtime_module, job_runtime, queue_actions as queue_actions_runtime, \
     calibration_runtime
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
+from mediaforce.web.runtime import ambiguous_motion as ambiguous_motion_runtime
 from mediaforce.web.runtime import production_holds as production_holds_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
@@ -22237,17 +22238,28 @@ raise SystemExit(0)
             evidence_work={},
         )
 
-    @staticmethod
-    def _measured_mixed_cadence(summary: dict[str, Any]) -> dict[str, Any]:
+    @classmethod
+    def _measured_mixed_cadence(cls, summary: dict[str, Any]) -> dict[str, Any]:
         """A fully measured cadence summary that the classifier itself blocks as mixed."""
+        return cls._measured_cadence(summary, progressive=300, tff=303)
+
+    @staticmethod
+    def _measured_cadence(
+            summary: dict[str, Any],
+            *,
+            progressive: int,
+            tff: int = 0,
+            undetermined: int = 0,
+    ) -> dict[str, Any]:
+        """A fully measured cadence summary whose decision is the current classifier's own."""
         measured = copy.deepcopy(summary)
         measured["probe"]["idet_required"] = True
         measured["analysis"].update({
-            "progressive_frames": 300,
-            "tff_frames": 303,
+            "progressive_frames": progressive,
+            "tff_frames": tff,
             "bff_frames": 0,
-            "undetermined_frames": 0,
-            "sampled_frames": 603,
+            "undetermined_frames": undetermined,
+            "sampled_frames": progressive + tff + undetermined,
             "measured_range_count": 3,
             "coverage": 1.0,
             "ranges": [
@@ -22556,6 +22568,77 @@ raise SystemExit(0)
         self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["status"], "refused")
         with open_db(self.config.paths.db_path) as connection:
             self.assertEqual(production_holds_runtime.cleared_hold_groups(connection), [])
+
+    def test_owner_accepting_ambiguous_motion_lets_held_episodes_join_production(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            base = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["Episode 1.mkv"])
+            ).scalar_one()))
+            for name, summary in (
+                    ("Episode 2.mkv", self._measured_cadence(base, progressive=450, undetermined=153)),
+                    ("Episode 3.mkv", self._measured_cadence(base, progressive=420, tff=30, undetermined=153)),
+            ):
+                connection.execute(
+                    update(library_items)
+                    .where(library_items.c.id == item_ids[name])
+                    .values(cadence_summary_json=json.dumps(summary, separators=(",", ":")))
+                )
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        first_jobs: list[dict[str, Any]] = []
+        first = self._queue_show_folder(queue_config, first_jobs, calibration=calibration)
+        with open_db(self.config.paths.db_path) as connection:
+            offered = ambiguous_motion_runtime.ambiguous_motion_files(
+                connection, "tv/show", library_types=queue_config.library_type_map,
+            ).to_payload()
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(),
+        )
+        joined_jobs: list[dict[str, Any]] = []
+        production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
+            queue_held_files=lambda group: self._queue_show_folder(
+                queue_config, joined_jobs, calibration=calibration, only_library_item_ids=group.library_item_ids,
+            ),
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual(self._queued_manifest_item_ids(first_jobs), [item_ids["Episode 1.mkv"]])
+        self.assertEqual(
+            {entry["library_item_id"] for entry in first["left_out"]},
+            {item_ids["Episode 2.mkv"], item_ids["Episode 3.mkv"]},
+        )
+        self.assertEqual(
+            offered,
+            {
+                "eligible_count": 1,
+                "eligible_files": ["tv/show/Season 1/Episode 2.mkv"],
+                "partly_interlaced_count": 1,
+                "partly_interlaced_files": ["tv/show/Season 1/Episode 3.mkv"],
+            },
+        )
+        self.assertEqual(accepted["accepted_count"], 1)
+        self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
+        joined_manifest = json.loads(Path(
+            next(job for job in joined_jobs if job["job_kind"] == "folder")["manifest_path"]
+        ).read_text())
+        self.assertTrue(joined_manifest["items"][0]["cadence_decision"]["owner_accepted_as_is"])
+        self.assertEqual(set(self._hold_rows()), {item_ids["Episode 3.mkv"]})
+
+    def test_ambiguous_motion_is_decided_once_per_show_not_per_season(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            self._insert_show_episodes(connection, "Episode 1.mkv")
+
+        with self.assertRaises(HTTPException) as raised:
+            ambiguous_motion_runtime.accept_ambiguous_motion_action(
+                queue_config, "tv/show/Season 1", now_iso=web_app._now_iso(),
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
 
     def test_queue_older_seasons_queues_only_cadence_cleared_items(self) -> None:
         with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:

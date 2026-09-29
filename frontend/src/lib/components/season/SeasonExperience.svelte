@@ -92,7 +92,8 @@
 		| 'queueing'
 		| 'checking'
 		| 'finishing'
-		| 'recovering';
+		| 'recovering'
+		| 'deciding';
 
 	type RevisionMode = 'same_target' | 'roomier';
 
@@ -216,6 +217,7 @@
 	const canQueueOlderSeasons = $derived(
 		Boolean(olderSeasonOverride?.available && olderSeasonOverride.candidate_count > 0)
 	);
+	const ambiguousMotion = $derived(isSeriesScope ? (folder.ambiguous_motion ?? null) : null);
 	const cadenceBlockedEpisodeCount = $derived(
 		olderSeasonOverride?.cadence_blocked_candidate_count ?? 0
 	);
@@ -1079,6 +1081,20 @@
 		);
 	}
 
+	async function encodeAmbiguousMotionAsIs() {
+		await runAction('deciding', 'We couldn’t record that decision.', async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('accept-ambiguous-motion'), {}),
+				'We couldn’t record that decision.'
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
+	function episodeFileName(relPath: string): string {
+		return relPath.split('/').at(-1) ?? relPath;
+	}
+
 	async function performMeasuredRecovery() {
 		await runAction(
 			'recovering',
@@ -1233,6 +1249,10 @@
 			starting: {
 				title: 'Starting your sample',
 				detail: `Sending one representative episode to ${selectedHost?.label || 'an available computer'}.`
+			},
+			deciding: {
+				title: 'Saving your decision',
+				detail: 'Recording that these episodes can be encoded as they are.'
 			},
 			approving: {
 				title: 'Saving your decision',
@@ -1634,6 +1654,79 @@
 					{/if}
 				</div>
 			</div>
+		{/if}
+
+		{#if !folder.pending && ambiguousMotion && (ambiguousMotion.eligible_count > 0 || ambiguousMotion.partly_interlaced_count > 0)}
+			<section class="lifecycle-notice motion-decision" aria-labelledby="motion-decision-title">
+				<span aria-hidden="true">◆</span>
+				<div>
+					{#if ambiguousMotion.eligible_count > 0}
+						<strong id="motion-decision-title">
+							{ambiguousMotion.eligible_count}
+							{ambiguousMotion.eligible_count === 1 ? 'episode has' : 'episodes have'} an unclear motion
+							pattern
+						</strong>
+						<p>
+							{ambiguousMotion.eligible_count === 1 ? 'It was' : 'They were'} fully checked, but Mediaforce
+							can’t tell how {ambiguousMotion.eligible_count === 1 ? 'it was' : 'they were'} recorded.
+							Encode
+							{ambiguousMotion.eligible_count === 1 ? 'it' : 'them'} as-is? Nothing is converted, and
+							the usual quality check still has to pass.
+						</p>
+						<details>
+							<summary>
+								{ambiguousMotion.eligible_count === 1
+									? 'Show the episode to encode'
+									: `Show the ${ambiguousMotion.eligible_count} episodes to encode`}
+							</summary>
+							<ul>
+								{#each ambiguousMotion.eligible_files as relPath (relPath)}
+									<li>{episodeFileName(relPath)}</li>
+								{/each}
+							</ul>
+						</details>
+					{:else}
+						<strong id="motion-decision-title">
+							{ambiguousMotion.partly_interlaced_count}
+							{ambiguousMotion.partly_interlaced_count === 1
+								? 'episode stays original for its motion pattern'
+								: 'episodes stay original for their motion pattern'}
+						</strong>
+					{/if}
+					{#if ambiguousMotion.partly_interlaced_count > 0}
+						<p>
+							{ambiguousMotion.partly_interlaced_count}
+							{ambiguousMotion.partly_interlaced_count === 1 ? 'episode looks' : 'episodes look'} partly
+							interlaced, so {ambiguousMotion.partly_interlaced_count === 1
+								? 'it stays'
+								: 'they stay'}
+							original.
+						</p>
+						<details>
+							<summary>
+								{ambiguousMotion.partly_interlaced_count === 1
+									? 'Show the episode that stays original'
+									: `Show the ${ambiguousMotion.partly_interlaced_count} episodes that stay original`}
+							</summary>
+							<ul>
+								{#each ambiguousMotion.partly_interlaced_files as relPath (relPath)}
+									<li>{episodeFileName(relPath)}</li>
+								{/each}
+							</ul>
+						</details>
+					{/if}
+				</div>
+				{#if ambiguousMotion.eligible_count > 0}
+					<button
+						type="button"
+						class="primary-button motion-decision__action"
+						disabled={actionPending}
+						onclick={encodeAmbiguousMotionAsIs}
+					>
+						{actionPhase === 'deciding' ? 'Recording…' : 'Encode as-is'}
+					</button>
+				{/if}
+			</section>
 		{/if}
 
 		{#if !folder.pending && folder.media_scope?.kind === 'tv_season'}
@@ -4971,6 +5064,27 @@
 
 	.lifecycle-notice b {
 		color: var(--mf-wait-fg);
+	}
+
+	.motion-decision > div {
+		flex: 1;
+		min-width: 0;
+	}
+
+	.motion-decision details {
+		color: var(--mf-fg-secondary);
+		font-size: 12px;
+		margin-top: 6px;
+	}
+
+	.motion-decision ul {
+		margin: 4px 0 0;
+		padding-left: 18px;
+	}
+
+	.motion-decision__action {
+		align-self: center;
+		flex: none;
 	}
 
 	.series-season-index {

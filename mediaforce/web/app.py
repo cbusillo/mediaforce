@@ -191,6 +191,7 @@ from mediaforce.web.routes.queues import (
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.folder_actions import production_approval_identity
+from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
 from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
@@ -1262,6 +1263,7 @@ def create_app(
     def _folder_content_payload(normalized_prefix: str) -> tuple[dict[str, Any], int]:
         latest_failed_sample_job_payload: dict[str, Any] | None = None
         older_season_override: dict[str, Any] | None = None
+        ambiguous_motion: dict[str, Any] | None = None
         with open_db(config.paths.db_path) as connection:
             media_scope = resolve_media_scope(
                 connection,
@@ -1417,6 +1419,11 @@ def create_app(
                     older_season_selection,
                     cadence_partition,
                 )
+                ambiguous_motion = ambiguous_motion_files(
+                    connection,
+                    normalized_prefix,
+                    library_types=config.library_type_map,
+                ).to_payload()
             if media_scope.domain == "other":
                 other_context = load_other_scope_payload(
                     connection,
@@ -1579,6 +1586,7 @@ def create_app(
                 "workflow_state": workflow_state,
                 "lifecycle": lifecycle,
                 "older_season_override": older_season_override,
+                "ambiguous_motion": ambiguous_motion,
                 "series_context": series_context,
                 "resolved_metric": resolved_metric.upper(),
                 "sample_host_key": sample_host_key,
@@ -1935,6 +1943,12 @@ def create_app(
             scope_membership_token=scope_membership_token,
         )
 
+    def _accept_ambiguous_motion_action(normalized_prefix: str) -> ActionPayload:
+        blocker = production_action_blocker(config, normalized_prefix)
+        if blocker is not None:
+            return blocker
+        return accept_ambiguous_motion_action(config, normalized_prefix, now_iso=_now_iso())
+
     def _approve_measured_encode_recovery_action(
             normalized_prefix: str,
             scope_membership_token: str = "",
@@ -2204,6 +2218,7 @@ def create_app(
         clear_folder_tuning_action=_clear_folder_tuning_action,
         save_series_lifecycle_action=_save_series_lifecycle_action,
         approve_measured_encode_recovery_action=_approve_measured_encode_recovery_action,
+        accept_ambiguous_motion_action=_accept_ambiguous_motion_action,
         queue_folder_encode_action=_queue_folder_encode_action,
         queue_older_seasons_encode_action=_queue_older_seasons_encode_action,
         validate_folder_outputs_action=_validate_folder_outputs_action,

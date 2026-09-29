@@ -142,6 +142,11 @@ The managed smoke seeds a compact but non-empty workflow dataset:
   counts, active-series metadata, the `Auto` policy, and current/acquisition hold
   reasons without hiding either season. The Season 2 route must require explicit
   confirmation before its manual override can queue work.
+- Unclear motion decision: `tv/Unclear Motion` has one fully measured episode
+  whose motion pattern stays ambiguous and one that looks partly interlaced. The
+  show route must offer one `Encode as-is` decision naming the episode to
+  encode, list the partly interlaced episode as staying original, and after
+  the decision keep only the episode that stays original listed.
 - Unavailable worker state: `config/web-smoke.toml` includes a smoke-only remote
   host that is unavailable, so `/ops` can expose the no-ready-host blocker while
   queued encode work exists.

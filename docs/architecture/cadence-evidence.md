@@ -66,6 +66,15 @@ analysis. When every sampled range was measured and the result is still
 ambiguous, measuring again gives the same answer, so the file is current evidence
 with a blocked decision: a judgment for the owner, not more analysis.
 
+The owner can answer that judgment once per show: `Encode as-is` on the show
+page accepts every such file in the show whose measured frames are at most 2%
+interlaced-looking. The acceptance is written into the file's stored cadence
+summary as `owner_acceptance`, bound to the source fingerprint and a hash of the
+measurement. The one classifier path then resolves the file to `transform: none`
+with `owner_accepted_as_is`, so the queue gates, the manifest, and the filter
+compiler agree. A new measurement or a different source drops the acceptance.
+Files above 2% stay blocked and are listed on the show page.
+
 A stored decision is also compared with what the current classifier makes of the
 stored measurements. When they differ, because the classifier changed after the
 file was measured, the file needs only reclassification. The evidence worker

@@ -86,6 +86,13 @@ export interface LifecycleState {
 	seasons: SeasonLifecycleState[];
 }
 
+export interface AmbiguousMotionPayload {
+	eligible_count: number;
+	eligible_files: string[];
+	partly_interlaced_count: number;
+	partly_interlaced_files: string[];
+}
+
 export interface OlderSeasonOverridePayload {
 	schema_version: number;
 	mode: 'older_seasons';
@@ -1685,6 +1692,7 @@ export interface FolderPayload {
 	workflow_state?: FolderWorkflowState | null;
 	lifecycle?: LifecycleState | null;
 	older_season_override?: OlderSeasonOverridePayload | null;
+	ambiguous_motion?: AmbiguousMotionPayload | null;
 	movie_context?: MovieTitle | null;
 	other_context?: OtherScopeContext | null;
 }

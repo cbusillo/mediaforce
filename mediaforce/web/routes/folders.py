@@ -44,6 +44,7 @@ def register_folder_routes(
         folder_staged_integrity_payload: Callable[[str, int, int], dict[str, Any]] | None = None,
         checked_output_preview_payload: Callable[[str], dict[str, Any]] | None = None,
         checked_output_preview_stream_action: Callable[[str, str | None], Response] | None = None,
+        accept_ambiguous_motion_action: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     staged_integrity_payload = folder_staged_integrity_payload or (lambda _prefix, _offset, _limit: {})
     preview_payload = checked_output_preview_payload or (
@@ -151,6 +152,14 @@ def register_folder_routes(
             str(body.get("scope_membership_token", "")),
         )
         return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+    if accept_ambiguous_motion_action is not None:
+        accept_ambiguous_motion = accept_ambiguous_motion_action
+
+        @app.post("/api/folders/{prefix:path}/accept-ambiguous-motion")
+        async def api_folder_accept_ambiguous_motion(prefix: str) -> JSONResponse:
+            result = await run_in_threadpool(accept_ambiguous_motion, prefix.strip("/"))
+            return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
     @app.post("/api/folders/{prefix:path}/queue-older-seasons")
     async def api_folder_queue_older_seasons(prefix: str, request: Request) -> JSONResponse:
