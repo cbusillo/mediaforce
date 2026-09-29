@@ -723,6 +723,15 @@ def queue_folder_encode_action(
                 library_item_ids=older_season_candidate_ids,
                 synchronize=True,
             )
+            # Held files get their check queued now so they can join production once it clears.
+            older_season_checks = cadence_queue_partition(
+                connection,
+                preflight_config,
+                normalized_prefix,
+                library_item_ids=sorted(older_season_cadence_partition.evidence_required_item_ids),
+                work_reason="encode_safety",
+                synchronize=False,
+            )
             older_season_selection = restrict_older_season_override_selection(
                 older_season_decisions,
                 older_season_selection,
@@ -751,6 +760,7 @@ def queue_folder_encode_action(
                         f"{exclusion_detail[:1].upper()}{exclusion_detail[1:]}. No files were queued."
                     ),
                     "affected_item_count": blocked_count + evidence_required_count,
+                    "evidence_work": older_season_checks.evidence_work,
                     "next_route": "/ops",
                     "next_action_label": "Open Activity",
                 }

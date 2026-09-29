@@ -22498,6 +22498,61 @@ raise SystemExit(0)
         self.assertEqual(statuses[item_ids["tv/show/Season 2/Episode 1.mkv"]], "discovered")
         self.assertEqual(statuses[item_ids["tv/show/Season 3/Episode 1.mkv"]], "discovered")
 
+    def test_queue_older_seasons_queues_the_check_for_each_file_it_holds(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = {
+                rel_path: self._insert_library_item(
+                    connection,
+                    self._create_source_file(rel_path.replace("/", "-")),
+                    status="discovered",
+                    rel_path=rel_path,
+                )
+                for rel_path in (
+                    "tv/show/Season 1/Episode 1.mkv",
+                    "tv/show/Season 1/Episode 2.mkv",
+                    "tv/show/Season 2/Episode 1.mkv",
+                )
+            }
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["tv/show/Season 1/Episode 2.mkv"])
+                .values(cadence_summary_json=None)
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show"))
+        calibration["draft_hash"] = "approved-draft"
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            result = folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show",
+                "",
+                False,
+                override_older_seasons=True,
+                older_seasons_confirmed=True,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["tv/show/Season 1/Episode 1.mkv"]])
+        with open_db(self.config.paths.db_path) as connection:
+            work_status = connection.execute(
+                select(library_item_evidence_state.c.work_status).where(
+                    library_item_evidence_state.c.library_item_id == item_ids["tv/show/Season 1/Episode 2.mkv"],
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            ).scalar_one()
+        self.assertEqual(work_status, "queued")
+
     def test_queue_older_seasons_does_not_create_an_empty_job_when_none_are_cleared(self) -> None:
         with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
