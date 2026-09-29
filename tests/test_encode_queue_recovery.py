@@ -40,6 +40,7 @@ from mediaforce.core.db_tables import calibration_jobs
 from mediaforce.core.db_tables import content_intent_boundary_observations
 from mediaforce.core.db_tables import encode_jobs
 from mediaforce.core.db_tables import item_events
+from mediaforce.core.db_tables import library_item_evidence_state
 from mediaforce.core.db_tables import library_items
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
@@ -56,7 +57,7 @@ from mediaforce.encoding import quality_search
 from mediaforce.encoding import staging as staging_runtime
 from mediaforce.encoding import video_filters
 from mediaforce.encoding.free_space import ReservePreflight, VolumeCapacity
-from mediaforce.encoding.cadence import analyze_cadence
+from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND, analyze_cadence
 from mediaforce.encoding.duration_estimate import EncodeDurationSample, load_encode_duration_samples
 from mediaforce.encoding.encode_queue import clear_terminal_encode_jobs_for_prefix, list_child_encode_jobs, \
     load_active_encode_job_for_prefix, load_encode_job, load_latest_encode_job, \
@@ -90,6 +91,7 @@ from mediaforce.web.runtime import completed_runtime, dashboard_payloads, encode
 from mediaforce.web.runtime import folder_cards as folder_cards_runtime
 from mediaforce.web.runtime import host_status as web_host_status_runtime
 from mediaforce.library import workflow_state as workflow_state_runtime
+from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 
 
@@ -22186,6 +22188,213 @@ raise SystemExit(0)
             queued_manifest["selection"]["lifecycle_override"]["included_season_prefixes"],
         )
 
+    @staticmethod
+    def _cadence_clears_every_item(*_args: Any, library_item_ids: list[int], **_kwargs: Any) -> CadenceQueuePartition:
+        return CadenceQueuePartition(
+            cleared_item_ids=frozenset(library_item_ids),
+            blocked_item_ids=frozenset(),
+            analysis_queued_item_ids=frozenset(),
+            analysis_failed_item_ids=frozenset(),
+            analysis_unavailable_item_ids=frozenset(),
+            analysis_unavailable_reason=None,
+            evidence_work={},
+        )
+
+    def _complete_queue_config(self) -> MediaforceConfig:
+        with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
+            complete_raw = copy.deepcopy(tomllib.load(handle))
+        complete_raw["media"].update(self.config.raw["media"])
+        complete_raw["remote_hosts"] = []
+        complete_raw["encode_queue"] = self.config.raw["encode_queue"]
+        return MediaforceConfig(raw=complete_raw, paths=self.config.paths)
+
+    def _queue_show_folder(
+            self,
+            queue_config: MediaforceConfig,
+            saved_jobs: list[dict[str, Any]],
+            **kwargs: Any,
+    ) -> folder_actions_runtime.ActionPayload:
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        calibration["draft_hash"] = "approved-draft"
+        kwargs.setdefault("prepare_terminal_encode_job_for_requeue_fn", lambda *_args, **_kwargs: None)
+        with patch.object(folder_actions_runtime, "load_config", return_value=queue_config):
+            return folder_actions_runtime.queue_folder_encode_action(
+                queue_config,
+                "tv/show/Season 1",
+                "",
+                False,
+                True,
+                now_iso=web_app._now_iso,
+                load_job_state=self._noop_load_job_state,
+                load_calibration_state=lambda *_args, **_kwargs: calibration,
+                review_gate=self._accepted_review_gate,
+                upsert_override=self._noop_upsert_override,
+                load_active_encode_job_for_prefix_fn=lambda *_args, **_kwargs: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args, **_kwargs: None,
+                save_encode_job=lambda _connection, job: saved_jobs.append(dict(job)),
+                **kwargs,
+            )
+
+    def _insert_show_episodes(self, connection: DBClient, *names: str) -> dict[str, int]:
+        return {
+            name: self._insert_library_item(
+                connection,
+                self._create_source_file(f"Season 1-{name}"),
+                status="discovered",
+                rel_path=f"tv/show/Season 1/{name}",
+            )
+            for name in names
+        }
+
+    @staticmethod
+    def _queued_manifest_item_ids(saved_jobs: list[dict[str, Any]]) -> list[int]:
+        parent_job = next(job for job in saved_jobs if job["job_kind"] == "folder")
+        queued_manifest = json.loads(Path(parent_job["manifest_path"]).read_text())
+        return sorted(int(item["library_item_id"]) for item in queued_manifest["items"])
+
+    def test_queue_folder_leaves_out_cadence_problems_and_queues_the_rest(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            blocked_summary = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["Episode 1.mkv"])
+            ).scalar_one()))
+            blocked_summary["decision"].update({
+                "status": "blocked",
+                "rationale": "Fixture cadence requires operator review.",
+            })
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 2.mkv"])
+                .values(cadence_summary_json=json.dumps(blocked_summary, separators=(",", ":")))
+            )
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 3.mkv"])
+                .values(cadence_summary_json=None)
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        result = self._queue_show_folder(queue_config, saved_jobs)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 1.mkv"]])
+        left_out = {entry["library_item_id"]: entry for entry in result["left_out"]}
+        self.assertEqual(set(left_out), {item_ids["Episode 2.mkv"], item_ids["Episode 3.mkv"]})
+        self.assertEqual(left_out[item_ids["Episode 2.mkv"]]["code"], "cadence_unresolved")
+        self.assertEqual(left_out[item_ids["Episode 3.mkv"]]["code"], "cadence_analysis_required")
+        self.assertTrue(all(entry["reason"] for entry in left_out.values()))
+        self.assertIn("Queued 1", result["message"])
+        with open_db(self.config.paths.db_path) as connection:
+            work_status = connection.execute(
+                select(library_item_evidence_state.c.work_status).where(
+                    library_item_evidence_state.c.library_item_id == item_ids["Episode 3.mkv"],
+                    library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                )
+            ).scalar_one()
+        self.assertEqual(work_status, "queued")
+
+    def test_queue_folder_leaves_out_only_the_file_that_missed_final_size(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv", "Episode 3.mkv")
+            manifest_path = self._write_manifest(
+                "manifest-final-size-partition.json",
+                [
+                    {"library_item_id": item_ids["Episode 1.mkv"], "rel_path": "tv/show/Season 1/Episode 1.mkv"},
+                    {"library_item_id": item_ids["Episode 2.mkv"], "rel_path": "tv/show/Season 1/Episode 2.mkv"},
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="terminal-final-size-partition",
+                manifest_name=manifest_path.name,
+                host={},
+                status="needs_attention",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "terminal-final-size-partition")
+                .values(
+                    prefix="tv/show/Season 1",
+                    progress_json=json.dumps({
+                        "failure_analysis": {
+                            "kind": "final_size_target_miss",
+                            "retry_strategy": "fresh_goal_required",
+                            "manifest_indexes": [0, 1],
+                            "item_analyses": [
+                                {"kind": "final_size_target_miss", "manifest_index": 0, "manifest_indexes": [0]},
+                                {"kind": "quality_policy_failure", "manifest_index": 1, "manifest_indexes": [1]},
+                            ],
+                        }
+                    }),
+                )
+            )
+
+        saved_jobs: list[dict[str, Any]] = []
+        prepared: list[dict[str, Any]] = []
+        result = self._queue_show_folder(
+            queue_config,
+            saved_jobs,
+            prepare_terminal_encode_job_for_requeue_fn=lambda _connection, job: prepared.append(dict(job)),
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            self._queued_manifest_item_ids(saved_jobs),
+            sorted([item_ids["Episode 2.mkv"], item_ids["Episode 3.mkv"]]),
+        )
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
+            [(item_ids["Episode 1.mkv"], "final_size_recovery_contract_unchanged")],
+        )
+        self.assertEqual([job["manifest_indexes"] for job in prepared], [[1]])
+
+    def test_quality_risk_refusal_names_every_blocking_reason(self) -> None:
+        reason = folder_actions_runtime._quality_risk_blocking_reason({
+            "deterministic_gates": {
+                "blocked": True,
+                "blocking_reasons": [
+                    "The resolved stream budget leaves no positive video budget.",
+                    "The target-size search trace uses stale cadence evidence.",
+                ],
+            },
+        })
+
+        self.assertIn("no positive video budget", str(reason))
+        self.assertIn("stale cadence evidence", str(reason))
+
+    def test_queue_folder_leaves_out_file_with_untraceable_target_and_queues_the_rest(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            real_manifest = folder_actions_runtime.create_folder_manifest(
+                connection,
+                queue_config,
+                prefix="tv/show/Season 1",
+                manual_override_prefix="tv/show/Season 1",
+                prepare_only=True,
+            )[0]
+        blocked_item = next(
+            item for item in real_manifest["items"] if item["library_item_id"] == item_ids["Episode 1.mkv"]
+        )
+        blocked_item["target_size_provenance"] = {
+            **object_dict(blocked_item.get("target_size_provenance")),
+            "blocker": {"code": "target_provenance_unverified", "message": "Fixture target cannot be traced."},
+        }
+
+        saved_jobs: list[dict[str, Any]] = []
+        with patch.object(folder_actions_runtime, "create_folder_manifest", return_value=(real_manifest, None)):
+            result = self._queue_show_folder(queue_config, saved_jobs)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 2.mkv"]])
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"], entry["reason"]) for entry in result["left_out"]],
+            [(item_ids["Episode 1.mkv"], "target_size_provenance", "Fixture target cannot be traced.")],
+        )
+
     def test_queue_older_seasons_queues_only_cadence_cleared_items(self) -> None:
         with config_runtime.DEFAULT_CONFIG_PATH.open("rb") as handle:
             complete_raw = copy.deepcopy(tomllib.load(handle))
@@ -23117,6 +23326,97 @@ raise SystemExit(0)
         self.assertEqual(percent_match["job_id"], "literal-percent-encode")
         self.assertIsNone(percent_miss)
 
+    def test_active_folder_recovery_leaves_out_cadence_problem_and_recovers_the_rest(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            blocked_item = self._insert_library_item(
+                connection, self._create_source_file("recover-blocked.mkv"), status="encoding",
+            )
+            clear_item = self._insert_library_item(
+                connection, self._create_source_file("recover-clear.mkv"), status="encoding",
+            )
+            blocked_summary = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == blocked_item)
+            ).scalar_one()))
+            blocked_summary["decision"].update({"status": "blocked", "rationale": "Fixture cadence needs review."})
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == blocked_item)
+                .values(cadence_summary_json=json.dumps(blocked_summary, separators=(",", ":")))
+            )
+            manifest_path = self._write_manifest(
+                "manifest-active-partition.json",
+                [
+                    {"library_item_id": blocked_item, "rel_path": "tv/show/recover-blocked.mkv"},
+                    {"library_item_id": clear_item, "rel_path": "tv/show/recover-clear.mkv"},
+                ],
+            )
+            self._save_job(
+                connection,
+                job_id="active-partition-parent",
+                manifest_name=manifest_path.name,
+                host={},
+                status="running",
+                attempt_count=1,
+            )
+            connection.execute(
+                update(encode_jobs)
+                .where(encode_jobs.c.job_id == "active-partition-parent")
+                .values(job_kind="folder")
+            )
+            for job_id, index in (("failed-blocked-shard", 0), ("failed-clear-shard", 1)):
+                self._save_job(
+                    connection,
+                    job_id=job_id,
+                    manifest_name=manifest_path.name,
+                    host={},
+                    status="needs_attention",
+                    attempt_count=3,
+                )
+                connection.execute(
+                    update(encode_jobs)
+                    .where(encode_jobs.c.job_id == job_id)
+                    .values(
+                        job_kind="shard",
+                        parent_job_id="active-partition-parent",
+                        manifest_indexes_json=json.dumps([index]),
+                    )
+                )
+
+        result = folder_actions_runtime.queue_folder_encode_action(
+            self.config,
+            "tv/show",
+            "",
+            False,
+            now_iso=web_app._now_iso,
+            load_job_state=self._noop_load_job_state,
+            load_calibration_state=self._accepted_calibration_state,
+            review_gate=self._accepted_review_gate,
+            upsert_override=self._noop_upsert_override,
+            load_active_encode_job_for_prefix_fn=load_active_encode_job_for_prefix,
+            clear_terminal_encode_jobs_for_prefix_fn=clear_terminal_encode_jobs_for_prefix,
+            prepare_terminal_encode_job_for_requeue_fn=self._prepare_terminal_encode_job_for_requeue,
+            save_encode_job=save_encode_job,
+        )
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["recovered_item_count"], 1)
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
+            [(blocked_item, "cadence_unresolved")],
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            blocked_child = load_encode_job(connection, "failed-blocked-shard")
+            cleared_child = load_encode_job(connection, "failed-clear-shard")
+            requeued = [
+                child["manifest_indexes"]
+                for child in list_child_encode_jobs(connection, "active-partition-parent")
+                if child["status"] == "queued"
+            ]
+        self.assertIsNotNone(blocked_child)
+        self.assertEqual(object_dict(blocked_child)["status"], "needs_attention")
+        self.assertIsNone(cleared_child)
+        self.assertEqual(requeued, [[1]])
+
     def test_queue_folder_encode_recovers_failed_files_into_active_parent(self) -> None:
         source_a = self._create_source_file("recover-active-a.mkv")
         source_b = self._create_source_file("recover-active-b.mkv")
@@ -23385,8 +23685,8 @@ raise SystemExit(0)
                 {"selection": {}, "items": [{"library_item_id": 1}]},
                 manifest_path,
         )), patch(
-                "mediaforce.web.runtime.folder_actions.cadence_evidence_blocker",
-                return_value=None,
+                "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
+                side_effect=self._cadence_clears_every_item,
         ):
             result = folder_actions_runtime.queue_folder_encode_action(
                 self.config,
@@ -23479,8 +23779,8 @@ raise SystemExit(0)
                 "mediaforce.web.runtime.folder_actions.write_manifest",
                 side_effect=write_manifest_stub,
         ), patch(
-                "mediaforce.web.runtime.folder_actions.cadence_evidence_blocker",
-                return_value=None,
+                "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
+                side_effect=self._cadence_clears_every_item,
         ):
             result = folder_actions_runtime.queue_folder_encode_action(
                 self.config,

@@ -63,12 +63,14 @@ cadence transform.
 Sampling, preview clips, bakeoff plans, and production all call the same filter
 compiler, so the reviewed transform cannot drift before the final encode.
 
-Bulk older-season actions partition their candidate set before writing a run
-manifest. Only items with current, resolved cadence evidence enter production;
-measured blockers and items that still need cadence evidence remain original and
-are reported separately. Exact-season, sample, and recovery actions keep their
-hard blocker because silently dropping an explicitly selected item would change
-the operator's requested scope.
+Folder, season, older-season, and recovery actions partition their candidate
+set before writing a run manifest or requeueing failed children. Only items with
+current, resolved cadence evidence enter production; measured blockers and items
+that still need cadence evidence remain original, get their analysis queued, and
+are named one by one in the action's `left_out` list with a plain reason. The
+action is refused only when no selected item is cleared, so one file's cadence
+problem never holds its siblings. Sample actions keep their hard blocker because
+they select exactly one item.
 
 New manifests built from catalog rows without cadence evidence remain blocked
 until cadence analysis is refreshed. Already-written legacy manifests that

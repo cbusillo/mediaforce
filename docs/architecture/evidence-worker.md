@@ -52,8 +52,9 @@ One media file can contribute two updates because cadence and media fingerprint
 are independent evidence kinds.
 
 Sample and production actions use a separate just-in-time path. Missing or stale
-cadence blocks only the selected media items, adds those exact rows to the active
-batch at decision priority, and returns the operator to Activity. A retained
+cadence holds back only the affected media items, adds those exact rows to the
+active batch at decision priority, and lets the rest of a production selection
+queue; the operator sees each held item in Activity. A retained
 terminal failure is reported as a failure and requires an explicit item retry;
 repeating the blocked action does not reset its attempt budget. Fingerprint
 evidence remains advisory and never blocks sample or production queueing.

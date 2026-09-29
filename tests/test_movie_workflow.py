@@ -1,9 +1,11 @@
+import json
 import tempfile
 import unittest
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
@@ -28,6 +30,19 @@ from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action,
     validate_folder_outputs_action
 from mediaforce.web.runtime.folder_cards import list_folder_cards
 from mediaforce.web.runtime_lock import MediaforceRuntimeBusyError
+from mediaforce.web.runtime.decision_evidence import CadenceQueuePartition
+
+
+def _cadence_clears_every_item(*_args: object, library_item_ids: list[int], **_kwargs: object) -> CadenceQueuePartition:
+    return CadenceQueuePartition(
+        cleared_item_ids=frozenset(library_item_ids),
+        blocked_item_ids=frozenset(),
+        analysis_queued_item_ids=frozenset(),
+        analysis_failed_item_ids=frozenset(),
+        analysis_unavailable_item_ids=frozenset(),
+        analysis_unavailable_reason=None,
+        evidence_work={},
+    )
 
 
 class MovieWorkflowTests(unittest.TestCase):
@@ -1075,6 +1090,54 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(queued, [])
         create_manifest.assert_not_called()
 
+    def test_infeasible_target_leaves_out_only_that_movie(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        with open_db(config.paths.db_path) as connection:
+            blocked_id = self._insert_item(
+                connection,
+                "films/Small Target/Feature.mkv",
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+            feasible_id = self._insert_item(
+                connection,
+                "films/Larger Target/Feature.mkv",
+                size_bytes=800_000_000,
+                duration_seconds=5_520.0,
+            )
+        queued: list[dict[str, object]] = []
+
+        with patch("mediaforce.web.runtime.folder_actions.load_config", return_value=config), patch(
+            "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
+            side_effect=_cadence_clears_every_item,
+        ):
+            result = queue_folder_encode_action(
+                config,
+                "films",
+                "",
+                False,
+                now_iso=lambda: "2026-07-13T00:00:00+00:00",
+                load_job_state=lambda *_args: None,
+                load_calibration_state=lambda *_args: self._accepted_calibration(config),
+                review_gate=lambda _calibration: {"can_confirm_full": True, "message": "Ready"},
+                upsert_override=lambda *_args: None,
+                load_active_encode_job_for_prefix_fn=lambda *_args: None,
+                clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: None,
+                save_encode_job=lambda *_args: queued.append(_args[-1]),
+                reserve_preflight=lambda *_args: ReservePreflight(True, None, {}),
+            )
+
+        self.assertTrue(result["ok"], result)
+        parent = next(job for job in queued if job["job_kind"] == "folder")
+        manifest = json.loads(Path(cast(str, parent["manifest_path"])).read_text())
+        self.assertEqual([item["library_item_id"] for item in manifest["items"]], [feasible_id])
+        self.assertEqual(
+            [(entry["library_item_id"], entry["code"]) for entry in result["left_out"]],
+            [(blocked_id, "target_size_infeasible")],
+        )
+        self.assertIn("Target size exceeds the 80% source cap", result["left_out"][0]["reason"])
+
     def test_revised_feasible_target_can_queue_movie_work(self) -> None:
         config = self._config(extras="exclude", video=self._target_size_video_policy())
         prefix = "films/Revised Target"
@@ -1184,6 +1247,34 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertTrue(any("Target size exceeds the 80% source cap" in str(call) for call in print_line.call_args_list))
         write_manifest.assert_not_called()
+
+    def test_cli_plan_leaves_out_infeasible_target_and_plans_the_rest(self) -> None:
+        config = self._config(extras="exclude", video=self._target_size_video_policy())
+        with open_db(config.paths.db_path) as connection:
+            self._insert_item(
+                connection,
+                "films/Small Target/Feature.mkv",
+                size_bytes=360_000_000,
+                duration_seconds=5_520.0,
+            )
+            feasible_id = self._insert_item(
+                connection,
+                "films/Larger Target/Feature.mkv",
+                size_bytes=800_000_000,
+                duration_seconds=5_520.0,
+            )
+
+        with patch("mediaforce.cli.load_config", return_value=config), patch(
+            "mediaforce.cli.purge_transient_artifacts"
+        ), patch("mediaforce.cli._write_manifest") as write_manifest, patch("builtins.print") as print_line:
+            exit_code = cli_main(["--config", str(config.paths.config_path), "plan", "--prefix", "films"])
+
+        self.assertEqual(exit_code, 0)
+        planned_manifest = write_manifest.call_args.args[2]
+        self.assertEqual([item["library_item_id"] for item in planned_manifest["items"]], [feasible_id])
+        self.assertTrue(any(
+            "Left out films/Small Target/Feature.mkv" in str(call) for call in print_line.call_args_list
+        ))
 
     def test_cli_holds_runtime_lock_before_cleanup(self) -> None:
         lock_held = False
@@ -1301,30 +1392,35 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertIn("Extras/Trailer.mkv", result["message"])
         recover.assert_not_called()
 
-    def test_title_retry_preserves_artifacts_from_an_old_manifest_with_extras(self) -> None:
+    def test_title_retry_leaves_out_old_extra_and_preserves_its_artifacts(self) -> None:
         feature_prefix = "films/Example/Feature.mkv"
         extra_prefix = "films/Example/Extras/Trailer.mkv"
         with open_db(self.config.paths.db_path) as connection:
-            self._insert_item(connection, feature_prefix)
+            feature_id = self._insert_item(connection, feature_prefix)
         manifest_path = self.root / "old-movie-manifest.json"
-        manifest_path.write_text(
-            '{"items":[{"library_item_id":99,"rel_path":"films/Example/Extras/Trailer.mkv"}]}'
-        )
+        manifest_path.write_text(json.dumps({"items": [
+            {"library_item_id": 99, "rel_path": extra_prefix},
+            {"library_item_id": feature_id, "rel_path": feature_prefix},
+        ]}))
         terminal_job = {
             "job_id": "old-title-job",
             "prefix": "films/Example",
             "job_kind": "single",
             "status": "failed",
             "manifest_path": str(manifest_path),
-            "manifest_indexes": [0],
+            "manifest_indexes": [0, 1],
         }
-        prepared: list[str] = []
+        prepared: list[dict[str, object]] = []
+        queued: list[dict[str, object]] = []
 
         with patch(
             "mediaforce.web.runtime.folder_actions.load_latest_terminal_encode_job_for_prefix",
             return_value=terminal_job,
-        ), self.assertRaises(HTTPException) as raised:
-            queue_folder_encode_action(
+        ), patch("mediaforce.web.runtime.folder_actions.load_config", return_value=self.config), patch(
+            "mediaforce.web.runtime.folder_actions.cadence_queue_partition",
+            side_effect=_cadence_clears_every_item,
+        ):
+            result = queue_folder_encode_action(
                 self.config,
                 "films/Example",
                 "",
@@ -1336,13 +1432,20 @@ class MovieWorkflowTests(unittest.TestCase):
                 upsert_override=lambda *_args: None,
                 load_active_encode_job_for_prefix_fn=lambda *_args: None,
                 clear_terminal_encode_jobs_for_prefix_fn=lambda *_args: None,
-                prepare_terminal_encode_job_for_requeue_fn=lambda *_args: prepared.append("prepared"),
-                save_encode_job=lambda *_args: None,
+                prepare_terminal_encode_job_for_requeue_fn=lambda _connection, job: prepared.append(job),
+                save_encode_job=lambda *_args: queued.append(_args[-1]),
+                reserve_preflight=lambda *_args: ReservePreflight(True, None, {}),
             )
 
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertIn(extra_prefix, str(raised.exception.detail))
-        self.assertEqual(prepared, [])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(
+            [(entry["rel_path"], entry["code"]) for entry in result["left_out"]],
+            [(extra_prefix, "movie_title_policy")],
+        )
+        self.assertEqual([job["manifest_indexes"] for job in prepared], [[1]])
+        parent = next(job for job in queued if job["job_kind"] == "folder")
+        manifest = json.loads(Path(cast(str, parent["manifest_path"])).read_text())
+        self.assertEqual([item["library_item_id"] for item in manifest["items"]], [feature_id])
 
     def _record_sampled_calibration(
             self,

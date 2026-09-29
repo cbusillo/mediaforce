@@ -10,7 +10,8 @@ from mediaforce.core.db_tables import library_item_evidence_state, library_items
 from mediaforce.encoding.cadence import CADENCE_EVIDENCE_KIND
 from mediaforce.library.candidate_selection import OlderSeasonOverrideSelection
 from mediaforce.library.evidence_queue import EvidenceQueueConflict, queue_decision_evidence_work
-from mediaforce.library.evidence_state import EVIDENCE_STATE_CURRENT, project_evidence_state, \
+from mediaforce.library.evidence_state import EVIDENCE_STATE_ANALYSIS_REQUIRED, \
+    EVIDENCE_STATE_CLASSIFICATION_REQUIRED, EVIDENCE_STATE_CURRENT, project_evidence_state, \
     sync_library_item_evidence_state
 
 
@@ -155,29 +156,15 @@ def cadence_evidence_blocker(
             "next_route": "/ops",
             "next_action_label": "Open Activity",
         }
-    scope_prefix = str(prefix or "").strip().strip("/")
-    queue_groups: list[tuple[str, list[int]]]
-    if scope_prefix:
-        queue_groups = [(scope_prefix, normalized_ids)]
-    else:
-        item_ids_by_root: dict[str, list[int]] = {}
-        for item in items:
-            media_root = str(item.get("media_root") or "").strip()
-            if media_root:
-                item_ids_by_root.setdefault(media_root, []).append(int(item["id"]))
-        queue_groups = sorted(item_ids_by_root.items())
-    preparations: list[dict[str, Any]] = []
     try:
-        for group_prefix, group_item_ids in queue_groups:
-            preparations.append(queue_decision_evidence_work(
-                connection,
-                config,
-                group_prefix,
-                library_item_ids=group_item_ids,
-                evidence_kind=CADENCE_EVIDENCE_KIND,
-                work_reason=work_reason,
-                manage_transaction=False,
-            ))
+        preparations = _queue_cadence_evidence_work(
+            connection,
+            config,
+            prefix,
+            items,
+            normalized_ids,
+            work_reason=work_reason,
+        )
     except EvidenceQueueConflict as exc:
         return {
             "ok": False,
@@ -238,3 +225,139 @@ def cadence_evidence_blocker(
         "next_route": "/ops",
         "next_action_label": "Open Activity",
     }
+
+
+def _queue_cadence_evidence_work(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        items: Sequence[Any],
+        library_item_ids: Sequence[int],
+        *,
+        work_reason: str,
+) -> list[dict[str, Any]]:
+    scope_prefix = str(prefix or "").strip().strip("/")
+    queue_groups: list[tuple[str, list[int]]]
+    if scope_prefix:
+        queue_groups = [(scope_prefix, list(library_item_ids))]
+    else:
+        wanted_ids = set(library_item_ids)
+        item_ids_by_root: dict[str, list[int]] = {}
+        for item in items:
+            media_root = str(item.get("media_root") or "").strip()
+            if media_root and int(item["id"]) in wanted_ids:
+                item_ids_by_root.setdefault(media_root, []).append(int(item["id"]))
+        queue_groups = sorted(item_ids_by_root.items())
+    return [
+        queue_decision_evidence_work(
+            connection,
+            config,
+            group_prefix,
+            library_item_ids=group_item_ids,
+            evidence_kind=CADENCE_EVIDENCE_KIND,
+            work_reason=work_reason,
+            manage_transaction=False,
+        )
+        for group_prefix, group_item_ids in queue_groups
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class CadenceQueuePartition:
+    """Which files can be queued now, and why each of the others waits."""
+
+    cleared_item_ids: frozenset[int]
+    blocked_item_ids: frozenset[int]
+    analysis_queued_item_ids: frozenset[int]
+    analysis_failed_item_ids: frozenset[int]
+    analysis_unavailable_item_ids: frozenset[int]
+    analysis_unavailable_reason: str | None
+    evidence_work: dict[str, Any]
+
+
+def cadence_queue_partition(
+        connection: DBClient,
+        config: MediaforceConfig,
+        prefix: str,
+        *,
+        library_item_ids: Sequence[int],
+        work_reason: str,
+        synchronize: bool = True,
+) -> CadenceQueuePartition:
+    """Split files by cadence evidence and queue analysis for the files that still need it."""
+    partition = cadence_safety_partition(
+        connection,
+        library_item_ids=library_item_ids,
+        synchronize=synchronize,
+    )
+    # Only files whose evidence can be queued wait for it; the old folder gate passed the rest too.
+    evidence_ids = sorted(
+        int(row["library_item_id"])
+        for row in connection.execute(
+            select(library_item_evidence_state.c.library_item_id)
+            .select_from(
+                library_item_evidence_state.join(
+                    library_items,
+                    library_items.c.id == library_item_evidence_state.c.library_item_id,
+                )
+            )
+            .where(
+                library_item_evidence_state.c.library_item_id.in_(sorted(partition.evidence_required_item_ids)),
+                library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                library_item_evidence_state.c.state.in_((
+                    EVIDENCE_STATE_ANALYSIS_REQUIRED,
+                    EVIDENCE_STATE_CLASSIFICATION_REQUIRED,
+                )),
+                library_items.c.status != "missing",
+            )
+        ).mappings().fetchall()
+    ) if partition.evidence_required_item_ids else []
+    unavailable_reason: str | None = None
+    work: dict[str, Any] = {}
+    failed_ids: set[int] = set()
+    if evidence_ids:
+        items = connection.execute(
+            select(library_items).where(library_items.c.id.in_(evidence_ids))
+        ).mappings().fetchall()
+        try:
+            preparations = _queue_cadence_evidence_work(
+                connection,
+                config,
+                prefix,
+                items,
+                evidence_ids,
+                work_reason=work_reason,
+            )
+        except EvidenceQueueConflict as exc:
+            unavailable_reason = str(exc)
+        else:
+            work = next(
+                (
+                    preparation["work"]
+                    for preparation in reversed(preparations)
+                    if isinstance(preparation.get("work"), dict)
+                ),
+                {},
+            )
+            failed_ids = {
+                int(row["library_item_id"])
+                for row in connection.execute(
+                    select(library_item_evidence_state.c.library_item_id).where(
+                        library_item_evidence_state.c.library_item_id.in_(evidence_ids),
+                        library_item_evidence_state.c.evidence_kind == CADENCE_EVIDENCE_KIND,
+                        library_item_evidence_state.c.work_status == "failed",
+                    )
+                ).mappings().fetchall()
+            }
+    evidence_id_set = frozenset(evidence_ids)
+    return CadenceQueuePartition(
+        cleared_item_ids=partition.cleared_item_ids | (partition.evidence_required_item_ids - evidence_id_set),
+        blocked_item_ids=partition.blocked_item_ids,
+        analysis_queued_item_ids=(
+            frozenset() if unavailable_reason is not None else evidence_id_set - failed_ids
+        ),
+        analysis_failed_item_ids=frozenset(failed_ids),
+        analysis_unavailable_item_ids=evidence_id_set if unavailable_reason is not None else frozenset(),
+        analysis_unavailable_reason=unavailable_reason,
+        evidence_work=work,
+    )
