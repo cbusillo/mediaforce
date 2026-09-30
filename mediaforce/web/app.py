@@ -187,9 +187,10 @@ from mediaforce.web.runtime_lock import (
     reserve_mediaforce_database_identity,
 )
 from mediaforce.web.routes.queues import (
-    CHILD_RECOVERY_APPLY_PATH, CHILD_RECOVERY_PREVIEW_PATH, register_child_recovery_routes,
+    CHILD_RECOVERY_APPLY_PATH, CHILD_RECOVERY_PREVIEW_PATH, register_child_recovery_routes, register_size_decision_routes,
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
+from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.folder_actions import production_approval_identity
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
@@ -2092,6 +2093,19 @@ def create_app(
                 now_iso=_now_iso,
             )
 
+    def _decide_size_exception_action(job_id: str, allow: bool) -> dict[str, Any]:
+        current_config = load_config(config_path)
+        with open_db(current_config.paths.db_path) as connection:
+            return decide_size_exception(
+                connection,
+                job_id,
+                allow=allow,
+                now_iso=_now_iso,
+                sync_parent=lambda current_connection, child: sync_encode_job_parent(
+                    current_connection, child, _encode_queue_runtime_deps(),
+                ),
+            )
+
     def _pause_encode_queue_action() -> dict[str, Any]:
         return pause_encode_queue_action(
             connection_factory=lambda: open_db(config.paths.db_path),
@@ -2227,6 +2241,7 @@ def create_app(
         save_profile_action=_save_profile_action,
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
+    register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)
     register_queue_routes(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,

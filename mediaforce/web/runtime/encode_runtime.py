@@ -881,6 +881,7 @@ _UNFINISHED_REASON_LABELS = {
     "retrying": "still retrying",
     "stopped": "stopped",
     "quality_floor_size_conflict": "size goal below quality floor",
+    "size_exception_declined": "kept original, your choice",
     "final_size_target_miss": "outside size limit",
     "controller_database_busy": "controller database busy",
     "storage_io": "storage error",
@@ -921,11 +922,44 @@ def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
     if status == "retry_backoff":
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
     reason = "stopped" if status == "stopped" else _attention_child_reason(child)
-    return reason, _UNFINISHED_REASON_LABELS[reason], True
+    return reason, _UNFINISHED_REASON_LABELS[reason], reason != "size_exception_declined"
+
+
+def size_exception_question(child: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The one-file size question a waiting child puts to the owner, or None when it has none.
+
+    Only a quality-floor conflict beyond the automatic allowance asks it: the automatic retry
+    handles the rest, and a goal the saved compression intent cannot authorize needs that goal
+    confirmed first.
+    """
+    if str(child.get("status") or "") != "needs_attention":
+        return None
+    analysis = object_dict(object_dict(child.get("progress")).get("failure_analysis"))
+    if (
+            str(analysis.get("kind") or "") != "quality_floor_size_conflict"
+            or str(analysis.get("retry_strategy") or "") != "needs_operator_approval"
+            or "compression_authorization" in analysis
+            or object_dict(analysis.get("owner_size_decision"))
+    ):
+        return None
+    goal_bytes = int_value(analysis.get("target_size_bytes"))
+    safe_bytes = int_value(analysis.get("proposed_target_size_bytes"))
+    rel_path = str(analysis.get("item_rel_path") or "").strip()
+    if goal_bytes <= 0 or safe_bytes <= goal_bytes or not rel_path:
+        return None
+    return {
+        "job_id": str(child.get("job_id") or ""),
+        "rel_path": rel_path,
+        "goal_bytes": goal_bytes,
+        "smallest_quality_safe_bytes": safe_bytes,
+    }
 
 
 def _attention_child_reason(child: Mapping[str, Any]) -> str:
-    analysis_kind = str(object_dict(object_dict(child.get("progress")).get("failure_analysis")).get("kind") or "")
+    analysis = object_dict(object_dict(child.get("progress")).get("failure_analysis"))
+    if str(object_dict(analysis.get("owner_size_decision")).get("answer") or "") == "keep_original":
+        return "size_exception_declined"
+    analysis_kind = str(analysis.get("kind") or "")
     if analysis_kind in _UNFINISHED_REASON_LABELS:
         return analysis_kind
     error = str(child.get("error") or "")
@@ -967,6 +1001,10 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         ).strip()
         if rel_path and len(group["items"]) < _UNFINISHED_BREAKDOWN_ITEM_LIMIT:
             group["items"].append(rel_path)
+        question = size_exception_question(child)
+        # Every file asks its own question, so none is capped away behind the item preview.
+        if question is not None:
+            group.setdefault("size_questions", []).append(question)
     return sorted(
         groups.values(),
         key=lambda group: (not group["needs_owner"], -int(group["count"]), str(group["reason"])),
@@ -1429,8 +1467,8 @@ def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | Non
             "quality-safe size as a recorded item-local exception."
             if within_bound
             else (
-                f"The smallest quality-safe size is more than {QUALITY_FLOOR_EXCEPTION_MAX_GROWTH:g}x the goal. "
-                "Choose a fresh size or compression goal for this item before retrying."
+                "Keeping the picture quality needs a much bigger file than the size goal allows. "
+                "Allow that size for this file, or keep the original."
             )
         ),
     }
@@ -1528,7 +1566,7 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
     if not analysis or not bool(analysis.get("auto_retry_allowed")):
         return False
     if str(analysis.get("retry_strategy") or "") == "auto_raise_target":
-        return _apply_quality_floor_target_retry(job, analysis)
+        return apply_quality_floor_size_exception(job, analysis)
     if str(analysis.get("retry_strategy") or "") != "auto_adjust_cap":
         return False
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
@@ -1619,7 +1657,18 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
     return True
 
 
-def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, Any]) -> bool:
+def apply_quality_floor_size_exception(
+        job: dict[str, Any],
+        analysis: dict[str, Any],
+        *,
+        owner_approved: bool = False,
+) -> bool:
+    """Record an item-local size exception at the smallest quality-safe size.
+
+    The measured floor violation is the evidence either way. Within the automatic allowance it
+    authorizes the exception alone; beyond it the owner's yes is recorded as a second piece of
+    evidence, and the saved compression goal still has to authorize a larger result.
+    """
     index = int_value(analysis.get("manifest_index"))
     proposed_bytes = int_value(analysis.get("proposed_target_size_bytes"))
     current_bytes = int_value(analysis.get("target_size_bytes"))
@@ -1660,16 +1709,34 @@ def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, A
             policy_hash=policy_hash,
             job_id=job_id,
         )
+        evidence_refs = [evidence]
+        if owner_approved:
+            evidence_refs.append(
+                CompressionEvidenceRef(
+                    kind="operator_override",
+                    evidence_id=f"ce1_{stable_json_hash({**evidence_identity, 'kind': 'operator_override'})[:32]}",
+                    intent_id=intent.semantic_id,
+                    observed_bytes=proposed_bytes,
+                    source_id=source_id,
+                    policy_hash=policy_hash,
+                    job_id=job_id,
+                )
+            )
         decision = authorize_compression_change(
             intent,
             authoritative_anchor_bytes=current_bytes,
             candidate_bytes=proposed_bytes,
-            evidence=(evidence,),
+            evidence=tuple(evidence_refs),
             source_id=source_id,
             policy_hash=policy_hash,
             job_id=job_id,
         )
         evidence_payload, decision_payload = evidence.to_payload(), decision.to_payload()
+        if owner_approved:
+            evidence_payload = {
+                **evidence_payload,
+                "owner_approval": evidence_refs[1].to_payload(),
+            }
         analysis["compression_evidence"] = evidence_payload
         analysis["compression_authorization"] = decision_payload
         if decision.outcome != "authorized" or decision.escalation_scope != "item":
