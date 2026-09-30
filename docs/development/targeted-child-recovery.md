@@ -107,15 +107,19 @@ ends `needs_attention`, because it may be repairable.
 A quality measurement over SSH that passes its time limit raises
 `RemoteQualityTimeoutError` instead of the raw timeout, whose text named the
 whole SSH command. Stopping the local SSH client does not stop the run on the
-computer, so Mediaforce then runs a short stop step there: it ends every
-process whose command line names the run's own scoped temp folder
-(`.mediaforce-ab-av1-<id>`, passed as an argument and matched as fixed text),
-first politely and then forcibly, and reports success only when none is left.
+computer, so Mediaforce then runs a short stop step there. From one process
+listing it collects every process whose command line names the run's own
+scoped temp folder (`.mediaforce-ab-av1-<id>`, passed as an argument and
+matched as fixed text) plus all their descendants, stops them first politely
+and then forcibly, and reports success only when a fresh listing shows nothing
+naming the folder and none of the collected processes still running. A failed
+or empty process listing never counts as success.
 
 - Shown stopped: the temp folder is removed as usual, and an encode records
   `remote_quality_timeout` and retries within its normal attempt limit. The
   owner sees which computer, that the run was stopped, and that it will be
-  tried again.
+  tried again. If the folder cannot be removed, the owner is told so in one
+  plain sentence; the raw detail stays on the error as a diagnostic.
 - Not shown stopped (the step failed, timed out, found survivors, or the run
   had no scoped temp folder): the temp folder is kept, and an encode records
   `containment_unproven` and waits for the owner, with a plain instruction to
