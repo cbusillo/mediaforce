@@ -32,11 +32,13 @@ Recoverable classes include:
   queue's ordinary retry cleanup removes it before the encode starts. A larger
   unreadable output still blocks and follows the retained-output rules below.
 - `remote_quality_timeout`: a quality measurement over SSH ran past its time
-  limit and the automatic retries ran out (#596). It measured nothing about
-  the item. A `deterministic` child whose error is the raw timeout of a remote
-  `ab-av1 crf-search` or `sample-encode` SSH command, recorded before this kind
-  existed, is recovered the same way. The run on that computer was not
-  confirmed stopped, so check that it is idle before recovering onto it.
+  limit, was shown stopped on that computer, and the automatic retries ran out
+  (#596). It measured nothing about the item. A `deterministic` child whose
+  error is the raw timeout of a remote `ab-av1 crf-search` or `sample-encode`
+  SSH command, recorded before this kind existed, is recovered the same way.
+  Nothing showed that legacy run stopped, so check that the computer is idle
+  before recovering it. A timeout whose run was not shown stopped is
+  `containment_unproven` and is not recoverable here.
 
 Every other `deterministic` failure, including a final-size miss, stays
 ineligible. Host isolation and retained-output reconciliation remain
@@ -104,14 +106,23 @@ ends `needs_attention`, because it may be repairable.
 
 A quality measurement over SSH that passes its time limit raises
 `RemoteQualityTimeoutError` instead of the raw timeout, whose text named the
-whole SSH command. Only the local SSH client is stopped, so the run on that
-computer may still be going: its temp folder is left for the periodic sweeps
-rather than removed under it. An encode classifies it `remote_quality_timeout`,
-retries within the normal attempt limit, and puts that file's retry on a host
-cooldown so it goes to another computer or waits for the cooldown. It does not
-block the computer for other files. The owner sees which computer, what
-happened and that it will be tried again. A sample job records the same kind
-and message in its result without retrying on its own.
+whole SSH command. Stopping the local SSH client does not stop the run on the
+computer, so Mediaforce then runs a short stop step there: it ends every
+process whose command line names the run's own scoped temp folder
+(`.mediaforce-ab-av1-<id>`, passed as an argument and matched as fixed text),
+first politely and then forcibly, and reports success only when none is left.
+
+- Shown stopped: the temp folder is removed as usual, and an encode records
+  `remote_quality_timeout` and retries within its normal attempt limit. The
+  owner sees which computer, that the run was stopped, and that it will be
+  tried again.
+- Not shown stopped (the step failed, timed out, found survivors, or the run
+  had no scoped temp folder): the temp folder is kept, and an encode records
+  `containment_unproven` and waits for the owner, with a plain instruction to
+  check that computer is idle and then try the file again.
+
+A sample job records the same kind, message and whether the run was stopped in
+its result, without retrying on its own.
 
 ## Progress and heartbeat failures
 
