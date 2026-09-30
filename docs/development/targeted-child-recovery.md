@@ -12,10 +12,10 @@ schedule and reserve admission.
 First restore the failed host's storage/readiness or keep it excluded from
 admission. This recovery API does not implement host isolation or prove remote
 process termination. Only unleased terminal shards are eligible. Do not use it
-to work around a quality failure, timeout, containment failure or an unverified
-completed output.
+to work around a quality failure, a timeout other than the remote quality one
+below, a containment failure or an unverified completed output.
 
-Five classes are recoverable:
+Recoverable classes include:
 
 - `host_configuration`.
 - `unreadable_output`: the encode removed its own header-only output and used
@@ -31,6 +31,12 @@ Five classes are recoverable:
   `header_only_output`, and apply requeues the child as `retry_backoff` so the
   queue's ordinary retry cleanup removes it before the encode starts. A larger
   unreadable output still blocks and follows the retained-output rules below.
+- `remote_quality_timeout`: a quality measurement over SSH ran past its time
+  limit and the automatic retries ran out (#596). It measured nothing about
+  the item. A `deterministic` child whose error is the raw timeout of a remote
+  `ab-av1 crf-search` or `sample-encode` SSH command, recorded before this kind
+  existed, is recovered the same way. The run on that computer was not
+  confirmed stopped, so check that it is idle before recovering onto it.
 
 Every other `deterministic` failure, including a final-size miss, stays
 ineligible. Host isolation and retained-output reconciliation remain
@@ -93,6 +99,19 @@ staged output is at most 64 KiB and cannot be probed, the encode removes that
 output and fails with the retryable kind `unreadable_output`, so the queue
 retries within its normal attempt limit. A larger unreadable output is kept and
 ends `needs_attention`, because it may be repairable.
+
+## Remote quality runs that run too long
+
+A quality measurement over SSH that passes its time limit raises
+`RemoteQualityTimeoutError` instead of the raw timeout, whose text named the
+whole SSH command. Only the local SSH client is stopped, so the run on that
+computer may still be going: its temp folder is left for the periodic sweeps
+rather than removed under it. An encode classifies it `remote_quality_timeout`,
+retries within the normal attempt limit, and puts that file's retry on a host
+cooldown so it goes to another computer or waits for the cooldown. It does not
+block the computer for other files. The owner sees which computer, what
+happened and that it will be tried again. A sample job records the same kind
+and message in its result without retrying on its own.
 
 ## Progress and heartbeat failures
 
