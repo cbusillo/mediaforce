@@ -154,6 +154,13 @@ class RemoteQualityTimeoutError(RuntimeError):
         self.host_key = host_key
         self.host_label = host_label
         self.output_tail = output_tail
+        self.temp_cleanup_error: str | None = None
+
+    def note_temp_files_left(self, cleanup_error: str) -> None:
+        """Tell the owner in plain words; the raw detail names paths and SSH, so it stays a diagnostic."""
+        self.temp_cleanup_error = cleanup_error
+        self.add_note(f"{QUALITY_CLEANUP_NOTE_PREFIX}{cleanup_error}")
+        self.args = (f"{self.args[0]} {REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE}",)
 
 
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
@@ -162,6 +169,7 @@ REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS = 500
 REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
 REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS = 30
 REMOTE_QUALITY_CONTAINED_MARKER = "mediaforce-quality-run-stopped"
+REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed; they will be cleaned up later."
 # Stops what is left of one timed-out run on the computer. The run's scoped temp folder is unique to
 # it and comes in as $1, matched as fixed text. Before any signal it takes one process listing and
 # collects every process naming the folder plus all their descendants, so a child that does not name
@@ -988,8 +996,12 @@ def _cleanup_after_failed_quality_command(
         # The run on that computer may still be writing there; the periodic sweeps remove it later.
         return
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
-    if cleanup_error is not None:
-        _attach_quality_cleanup_detail(exc, cleanup_error)
+    if cleanup_error is None:
+        return
+    if isinstance(exc, RemoteQualityTimeoutError):
+        exc.note_temp_files_left(cleanup_error)
+        return
+    _attach_quality_cleanup_detail(exc, cleanup_error)
 
 
 def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:

@@ -24,6 +24,7 @@ from mediaforce.encoding.quality import (
     REMOTE_QUALITY_CONTAINED_MARKER,
     REMOTE_QUALITY_CONTAINMENT_SCRIPT,
     REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
+    REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE,
     REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
     REMOTE_QUALITY_TIMEOUT_SECONDS,
     RemoteQualityTimeoutError,
@@ -499,6 +500,21 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
                 self.assertEqual(containment_timeout, REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS)
                 self.assertNotIn(SCHEDULE_CLOSE_DEADLINE_KEY, containment_host)
                 self.assertEqual(calls[-1][1], ["rm", "-rf", temp_dir])
+
+    def test_temp_folder_left_after_a_stopped_run_is_told_in_plain_words(self) -> None:
+        cleanup = subprocess.CompletedProcess(
+            ["ssh"], 1, "", "rm: /remote/quality-temp/.mediaforce-ab-av1-x: Permission denied\nssh: exit status 1",
+        )
+
+        exc, _ = self._run_with_quality_failure("crf_search", None, cleanup=cleanup)
+
+        assert isinstance(exc, RemoteQualityTimeoutError)
+        self.assertTrue(exc.remote_process_contained)
+        message = quality_error_message(exc)
+        self.assertTrue(message.endswith(REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE), message)
+        for raw in ("/remote/quality-temp", "Permission denied", "ssh", "rm:"):
+            self.assertNotIn(raw, message)
+        self.assertIn("Permission denied", exc.temp_cleanup_error or "")
 
     def test_timed_out_run_not_shown_stopped_is_unproven_and_keeps_its_temp_folder(self) -> None:
         cases = {
