@@ -97,7 +97,8 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertTrue(integrity_disposition_blocks_promotion("partial_or_temporary"))
         self.assertFalse(report.discovery_truncated)
 
-    def _held_validation(self, *, other_failure: str | None = None) -> str:
+    @staticmethod
+    def _held_validation(*, other_failure: str | None = None) -> str:
         checks = [{"passed": False, "message": FAR_BELOW_PREDICTION_CHECK}]
         if other_failure:
             checks.append({"passed": False, "message": other_failure})
