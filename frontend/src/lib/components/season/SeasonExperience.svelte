@@ -7,6 +7,7 @@
 	import ComparisonWorkspace from '$lib/components/review/ComparisonWorkspace.svelte';
 	import SeasonIntegrityPanel from '$lib/components/season/SeasonIntegrityPanel.svelte';
 	import WaitingReasons from '$lib/components/season/WaitingReasons.svelte';
+	import SizeHeldQuestions from '$lib/components/season/SizeHeldQuestions.svelte';
 	import TargetDefaultEvidence from '$lib/components/TargetDefaultEvidence.svelte';
 	import StateBadge from '$lib/components/workstation/StateBadge.svelte';
 	import type {
@@ -71,6 +72,7 @@
 		seasonNumberLabel,
 		seasonEpisodeNavigationUnavailable,
 		seasonPromotionIntegrity,
+		sizeHeldRecords,
 		seasonEpisodeOptions,
 		stagedEpisodeLinks,
 		shouldPrioritizeScopeActivity,
@@ -1103,6 +1105,20 @@
 
 	function episodeFileName(relPath: string): string {
 		return relPath.split('/').at(-1) ?? relPath;
+	}
+
+	async function decideSizeHeld(libraryItemId: number, keep: boolean) {
+		const fallback = 'We couldn’t record that decision about this file.';
+		await runAction('deciding', fallback, async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>(endpoint('size-held-decision'), {
+					library_item_id: libraryItemId,
+					keep
+				}),
+				fallback
+			);
+			actionMessage = response.message || '';
+		});
 	}
 
 	async function decideSize(jobId: string, allow: boolean) {
@@ -3231,6 +3247,13 @@
 				</div>
 			</div>
 		{/if}
+
+		<!-- A held file's question stays on screen in every season state, not only while checking or replacing. -->
+		<SizeHeldQuestions
+			records={sizeHeldRecords(promotionIntegrity)}
+			busy={actionPhase !== 'idle'}
+			onDecision={decideSizeHeld}
+		/>
 
 		<section
 			hidden={['sample_waiting', 'making_test'].includes(humanState.key) ||

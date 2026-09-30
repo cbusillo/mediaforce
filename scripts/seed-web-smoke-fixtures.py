@@ -14,6 +14,7 @@ from typing import Any
 from mediaforce.core.binaries import ffmpeg_binary
 from mediaforce.core.config import load_config, update_runtime_settings
 from mediaforce.core.db import open_db
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.core.db_tables import (
     background_work_state,
     calibration_jobs,
@@ -199,6 +200,19 @@ def _ambiguous_cadence_summary_json(base_json: str, *, tff_frames: int) -> str:
         }
     )
     return json.dumps(reclassify_cadence_summary(summary), sort_keys=True)
+
+
+def _held_size_validation() -> dict[str, Any]:
+    """A finished file held only for coming out far smaller than its sample predicted."""
+    return {
+        "passed": False,
+        "source": "web-smoke",
+        "checks": [{"passed": False, "message": FAR_BELOW_PREDICTION_CHECK}],
+        "size_prediction": {
+            "predicted_bytes": 262_000_000, "source": "sample", "actual_bytes": 172_000_000, "ratio": 0.6565,
+            "threshold": 0.7, "owner_kept_at": None, "held": True,
+        },
+    }
 
 
 def _library_item(
@@ -1669,6 +1683,17 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                 recommendation="already_optimized",
                 recommendation_reason="Fixture unreachable worker output waits without holding back the season.",
             ),
+            _library_item(
+                project_root=project_root,
+                media_root="tv",
+                rel_path="tv/Partial Promotion/Season 1/Episode 09 Much Smaller.mkv",
+                size_bytes=5 * 1024**3,
+                status="validated",
+                video_codec="h264",
+                priority_score=17,
+                recommendation="already_optimized",
+                recommendation_reason="Fixture file far smaller than its sample predicted waits for the owner.",
+            ),
         ]
         rows.append(
             _library_item(
@@ -1982,7 +2007,11 @@ def seed(config_path: Path, *, profile: str = "default") -> dict[str, Any]:
                     staging_mtime_ns=expected_mtime,
                     bytes_saved=max(1, int(row["size_bytes"]) // 2),
                     size_ratio=0.5,
-                    validation_json=json.dumps({"passed": validation_passed, "source": "web-smoke"}),
+                    validation_json=json.dumps(
+                        _held_size_validation()
+                        if "Much Smaller" in rel_path
+                        else {"passed": validation_passed, "source": "web-smoke"}
+                    ),
                     staged_at=timestamp,
                     validated_at=timestamp,
                     updated_at=timestamp,

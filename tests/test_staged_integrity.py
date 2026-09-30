@@ -18,8 +18,10 @@ from mediaforce.library.staged_integrity import (
     integrity_disposition_blocks_promotion,
     staged_integrity_report,
 )
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.execution import PromotionResult
 from mediaforce.web.runtime.folder_actions import promote_folder_outputs_action
+from mediaforce.web.runtime.size_held import decide_size_held_file
 
 
 class StagedIntegrityTests(unittest.TestCase):
@@ -94,6 +96,160 @@ class StagedIntegrityTests(unittest.TestCase):
         self.assertFalse(integrity_disposition_blocks_promotion("retained"))
         self.assertTrue(integrity_disposition_blocks_promotion("partial_or_temporary"))
         self.assertFalse(report.discovery_truncated)
+
+    @staticmethod
+    def _held_validation(*, other_failure: str | None = None) -> str:
+        checks = [{"passed": False, "message": FAR_BELOW_PREDICTION_CHECK}]
+        if other_failure:
+            checks.append({"passed": False, "message": other_failure})
+        return json.dumps({
+            "passed": False,
+            "checks": checks,
+            "size_prediction": {
+                "predicted_bytes": 100, "source": "sample", "actual_bytes": 50, "ratio": 0.5,
+                "threshold": 0.7, "owner_kept_at": None, "held": True,
+            },
+        })
+
+    def _held_file(self, connection: DBClient, name: str, **artifact: object) -> tuple[int, Path]:
+        rel_path = f"tv/Show/Season 1/{name}"
+        item_id = self._insert_item(connection, rel_path, status="encoded")
+        stage = self._write_stage(rel_path, b"small")
+        self._insert_artifact(connection, item_id, stage, **artifact)
+        connection.execute(
+            staged_artifacts.update()
+            .where(staged_artifacts.c.library_item_id == item_id)
+            .values(validation_json=self._held_validation(), validated_at=datetime.now(tz=UTC).isoformat())
+        )
+        return item_id, stage
+
+    def test_a_file_held_only_for_its_size_gets_its_own_state_with_both_sizes(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._held_file(connection, "Held.mkv")
+            other = self._insert_item(connection, "tv/Show/Season 1/AlsoBroken.mkv", status="encoded")
+            self._insert_artifact(connection, other, self._write_stage("tv/Show/Season 1/AlsoBroken.mkv", b"x"))
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == other)
+                .values(validation_json=self._held_validation(other_failure="staged duration closely matches the source"))
+            )
+            report = staged_integrity_report(connection, self.config, "tv/Show/Season 1", discover=False)
+
+        records = {record.rel_path: record for record in report.records}
+        held = records["tv/Show/Season 1/Held.mkv"]
+        self.assertEqual(held.disposition, "size_held")
+        self.assertEqual(held.to_payload()["size_prediction"]["predicted_bytes"], 100)
+        self.assertEqual(records["tv/Show/Season 1/AlsoBroken.mkv"].disposition, "validation_failed")
+        self.assertTrue(integrity_disposition_blocks_promotion("size_held"))
+
+    def test_keeping_a_held_file_records_the_owner_and_checks_only_that_file(self) -> None:
+        checked: list[tuple[str, list[int]]] = []
+        with open_db(self.config.paths.db_path) as connection:
+            item_id, _stage = self._held_file(connection, "Keep.mkv")
+
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=True, now_iso=lambda: "2026-09-30T12:00:00+00:00",
+            validate_items=lambda prefix, ids: checked.append((prefix, list(ids))) or {"ok": True, "validated_count": 1},
+            queue_items=lambda *_args: self.fail("keeping must not queue anything"),
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            stored = json.loads(str(connection.execute(
+                select(staged_artifacts.c.validation_json).where(staged_artifacts.c.library_item_id == item_id)
+            ).scalar_one()))
+
+        self.assertTrue(result["ok"], result)
+        self.assertIn("can be replaced now", result["message"])
+        self.assertEqual(checked, [("tv/Show/Season 1", [item_id])])
+        self.assertEqual(stored["size_prediction"]["owner_kept_at"], "2026-09-30T12:00:00+00:00")
+        self.assertFalse(stored["size_prediction"]["held"])
+
+    def test_making_a_held_file_again_removes_it_and_queues_only_that_file_in_its_run_mode(self) -> None:
+        manifest_path = self.root / "runs" / "manifest-held.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(json.dumps({"selection": {"queue_mode": "season_override"}, "items": []}))
+        queued: list[tuple[str, str, list[int]]] = []
+        with open_db(self.config.paths.db_path) as connection:
+            item_id, stage = self._held_file(connection, "Remake.mkv", manifest_path=manifest_path, item_index=0)
+
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "2026-09-30T12:00:00+00:00",
+            validate_items=lambda *_args: self.fail("making it again must not check the old file"),
+            queue_items=lambda prefix, mode, ids: queued.append((prefix, mode, list(ids))) or {"ok": True},
+        )
+        with open_db(self.config.paths.db_path) as connection:
+            artifact = connection.execute(
+                select(staged_artifacts.c.library_item_id).where(staged_artifacts.c.library_item_id == item_id)
+            ).first()
+            status = connection.execute(select(library_items.c.status).where(library_items.c.id == item_id)).scalar_one()
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(stage.exists())
+        self.assertIsNone(artifact)
+        self.assertEqual(status, "planned")
+        self.assertEqual(queued, [("tv/Show/Season 1", "season_override", [item_id])])
+
+    def test_making_a_held_file_again_waits_while_its_run_is_still_active(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id, stage = self._held_file(connection, "Busy.mkv")
+            connection.execute(
+                encode_jobs.insert().values(
+                    job_id="active-run", prefix="tv/Show/Season 1", status="running", job_kind="shard", host_json="{}",
+                    manifest_path=str(self.root / "runs" / "active.json"), item_count=1,
+                    created_at=datetime.now(tz=UTC).isoformat(), updated_at=datetime.now(tz=UTC).isoformat(),
+                )
+            )
+
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=False, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("nothing to check"),
+            queue_items=lambda *_args: self.fail("nothing may be queued while the run is active"),
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("still compressing", result["message"])
+        self.assertTrue(stage.exists())
+
+    def test_promotion_refuses_a_held_file_even_when_its_stored_record_says_passed(self) -> None:
+        from mediaforce.encoding.staging import PromotionWaiting, staged_size_prediction
+
+        stored = {"passed": True, "target_size_trace": {"selected_candidate": {"predicted_whole_episode_bytes": 1_000}}}
+        self.assertTrue(staged_size_prediction(stored, 500)["held"])
+        with open_db(self.config.paths.db_path) as connection:
+            rel_path = "tv/Show/Season 1/Skipped Check.mkv"
+            item_id = self._insert_item(connection, rel_path, status="validated")
+            stage = self._write_stage(rel_path, b"x" * 500)
+            self._insert_artifact(connection, item_id, stage)
+            connection.execute(
+                staged_artifacts.update()
+                .where(staged_artifacts.c.library_item_id == item_id)
+                .values(validation_json=json.dumps(stored))
+            )
+            source = self.root / "library" / rel_path
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(b"original")
+            from mediaforce.execution import promote_one_item
+
+            with self.assertRaises(PromotionWaiting):
+                promote_one_item(
+                    connection, self.config,
+                    {"library_item_id": item_id, "source_path": str(source), "rel_path": rel_path,
+                     "source_size_bytes": 10_000},
+                    force=False,
+                )
+        self.assertTrue(source.exists())
+
+    def test_a_file_that_is_not_held_gets_no_size_decision(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_item(connection, "tv/Show/Season 1/Fine.mkv", status="encoded")
+            self._insert_artifact(connection, item_id, self._write_stage("tv/Show/Season 1/Fine.mkv", b"ok"), passed=True)
+
+        result = decide_size_held_file(
+            self.config, "tv/Show/Season 1", item_id, keep=True, now_iso=lambda: "now",
+            validate_items=lambda *_args: self.fail("nothing to check"),
+            queue_items=lambda *_args: self.fail("nothing to queue"),
+        )
+
+        self.assertFalse(result["ok"])
 
     def test_remote_only_is_distinct_from_missing(self) -> None:
         with open_db(self.config.paths.db_path) as connection:

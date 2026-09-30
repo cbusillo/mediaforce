@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -13,6 +13,8 @@ from sqlalchemy import select
 from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import DBClient, DBRow
 from mediaforce.core.db_tables import library_items, staged_artifacts
+from mediaforce.core.type_defs import object_dict, object_list
+from mediaforce.encoding.staging import FAR_BELOW_PREDICTION_CHECK
 from mediaforce.library.media_scopes import (
     MediaScope,
     media_group_scope_for_rel_path,
@@ -26,6 +28,7 @@ IntegrityDisposition = Literal[
     "tracked",
     "unvalidated",
     "validation_failed",
+    "size_held",
     "missing",
     "drifted",
     "orphaned",
@@ -42,6 +45,7 @@ MAX_DETAIL_PAGE_SIZE = 100
 _BLOCKING_DISPOSITION_VALUES: tuple[IntegrityDisposition, ...] = (
     "unvalidated",
     "validation_failed",
+    "size_held",
     "missing",
     "drifted",
     "orphaned",
@@ -68,9 +72,11 @@ class StagedIntegrityRecord:
     code: str
     next_action: str
     detail: str
+    # The finished and predicted sizes of a file held for being far smaller than its sample predicted.
+    size_prediction: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "disposition": self.disposition,
             "item_id": self.item_id,
             "rel_path": self.rel_path,
@@ -79,6 +85,9 @@ class StagedIntegrityRecord:
             "next_action": self.next_action,
             "detail": self.detail,
         }
+        if self.size_prediction is not None:
+            payload["size_prediction"] = self.size_prediction
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,6 +406,18 @@ def _classify_row(row: DBRow, staging_roots: tuple[_StagingRoot, ...]) -> Staged
             "The local staged output no longer matches the recorded size or modification time.",
         )
     validation_passed = _validation_passed(row["validation_json"])
+    held_size_prediction = _held_size_prediction(row["validation_json"])
+    if held_size_prediction is not None:
+        return replace(
+            _record(
+                "size_held",
+                item_id,
+                rel_path,
+                staging_path,
+                "The finished file is far smaller than its sample predicted and waits for the owner.",
+            ),
+            size_prediction=held_size_prediction,
+        )
     if validation_passed is False:
         return _record("validation_failed", item_id, rel_path, staging_path, "Machine validation recorded a failure.")
     if validation_passed is not True or row["validated_at"] is None:
@@ -553,6 +574,7 @@ def _next_action(disposition: IntegrityDisposition) -> str:
         "tracked": "none",
         "unvalidated": "validate_output",
         "validation_failed": "inspect_validation_failure",
+        "size_held": "keep_or_remake_output",
         "missing": "recreate_staged_output",
         "drifted": "revalidate_or_recreate_output",
         "orphaned": "inspect_untracked_output",
@@ -561,6 +583,25 @@ def _next_action(disposition: IntegrityDisposition) -> str:
         "not_started": "queue_encode",
         "retained": "release_retained_output",
     }[disposition]
+
+
+def _held_size_prediction(raw_validation: Any) -> dict[str, Any] | None:
+    """The size comparison of a file whose only failed check is being far smaller than predicted."""
+    try:
+        payload = object_dict(json.loads(str(raw_validation or "{}")))
+    except json.JSONDecodeError:
+        return None
+    size_prediction = object_dict(payload.get("size_prediction"))
+    if payload.get("passed") is not False or not size_prediction.get("held"):
+        return None
+    failed = [
+        str(object_dict(check).get("message") or "")
+        for check in object_list(payload.get("checks"))
+        if object_dict(check).get("passed") is False
+    ]
+    if failed != [FAR_BELOW_PREDICTION_CHECK]:
+        return None
+    return size_prediction
 
 
 def _validation_passed(raw_validation: Any) -> bool | None:
