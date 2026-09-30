@@ -496,6 +496,7 @@ class ChildRecoveryTests(unittest.TestCase):
             timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
             host_key="remote-a",
             host_label="Remote A",
+            remote_process_contained=True,
         )
         # Recorded before this failure had its own kind: the raw timeout of the whole SSH command.
         legacy_error = str(_remote_command_timeout("ab-av1 crf-search -i '/media/Episode 002.mkv' --min-vmaf 95"))

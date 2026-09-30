@@ -50,7 +50,8 @@ from mediaforce.core.db_tables import tuning_sessions
 from mediaforce.core.evidence import stable_policy_hash
 from mediaforce.core.process_control import ProcessCancelledError
 from mediaforce.core.type_defs import object_dict
-from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_SECONDS, RemoteQualityTimeoutError
+from mediaforce.encoding.quality import CONTAINMENT_UNPROVEN_FAILURE_KIND, REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, \
+    REMOTE_QUALITY_TIMEOUT_SECONDS, RemoteQualityTimeoutError
 from mediaforce.execution import resolve_stream_budget_ledger
 from mediaforce.hosts.types import HostReadinessError, HostStatus
 from mediaforce.tuning.tuning_memory import (
@@ -9189,20 +9190,31 @@ class TuningRuntimeTests(unittest.TestCase):
         )
 
     def test_run_calibration_job_records_a_remote_quality_timeout_in_plain_words(self) -> None:
-        timeout = RemoteQualityTimeoutError(
-            phase="sample_encode",
-            timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
-            host_key="remote-a",
-            host_label="Remote A",
-        )
+        for contained, failure_kind in (
+                (True, REMOTE_QUALITY_TIMEOUT_FAILURE_KIND),
+                (False, CONTAINMENT_UNPROVEN_FAILURE_KIND),
+        ):
+            with self.subTest(contained=contained):
+                timeout = RemoteQualityTimeoutError(
+                    phase="sample_encode",
+                    timeout_seconds=REMOTE_QUALITY_TIMEOUT_SECONDS,
+                    host_key="remote-a",
+                    host_label="Remote A",
+                    remote_process_contained=contained,
+                )
 
-        failed = self._run_calibration_job_with_failing_quality_search(timeout)
+                failed = self._run_calibration_job_with_failing_quality_search(timeout)
 
-        self.assertEqual(failed["error"], str(timeout))
-        self.assertEqual(
-            failed["result"],
-            {"failure_kind": timeout.failure_kind, "failure_message": str(timeout), "host_key": "remote-a"},
-        )
+                self.assertEqual(failed["error"], str(timeout))
+                self.assertEqual(
+                    failed["result"],
+                    {
+                        "failure_kind": failure_kind,
+                        "failure_message": str(timeout),
+                        "host_key": "remote-a",
+                        "remote_process_contained": contained,
+                    },
+                )
 
     def _run_calibration_job_with_failing_quality_search(self, quality_error: Exception) -> dict[str, object]:
         saved_payloads: list[dict[str, object]] = []

@@ -34,7 +34,7 @@ from mediaforce.core.db_tables import (
 )
 from mediaforce.core.type_defs import int_value, object_dict, object_list
 from mediaforce.encoding.encode_queue import list_child_encode_jobs, save_encode_job
-from mediaforce.encoding.quality import RemoteQualityTimeoutError
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
 from mediaforce.encoding.staging import HEADER_ONLY_OUTPUT_MAX_BYTES, partial_output_path
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 
@@ -499,8 +499,8 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
     if failure_kind == "unknown":
         # An unrecognised error used up its automatic retries; nothing showed it was certain to fail again.
         return failure_kind
-    if failure_kind == RemoteQualityTimeoutError.failure_kind:
-        # A quality run on another computer ran out of time; it measured nothing about the item.
+    if failure_kind == REMOTE_QUALITY_TIMEOUT_FAILURE_KIND:
+        # A quality run on another computer ran out of time and was stopped; it measured nothing about the item.
         return failure_kind
     if failure_kind != "deterministic":
         return None
@@ -521,7 +521,7 @@ def _recoverable_failure_class(child: Mapping[str, Any]) -> str | None:
         return "unreadable_staged_output"
     if LEGACY_REMOTE_QUALITY_TIMEOUT_RE.search(error):
         # Recorded before a remote quality run that ran out of time had its own failure kind.
-        return RemoteQualityTimeoutError.failure_kind
+        return REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
     return None
 
 

@@ -628,6 +628,7 @@ def run_calibration_job(
                         "failure_kind": exc.failure_kind,
                         "failure_message": str(exc),
                         "host_key": exc.host_key,
+                        "remote_process_contained": exc.remote_process_contained,
                     },
                 },
             )

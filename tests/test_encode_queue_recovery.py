@@ -3612,6 +3612,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             name: str,
             *,
             attempt_count: int,
+            remote_process_contained: bool = True,
     ) -> tuple[dict[str, Any], str]:
         source_path = self._create_source_file(f"{name}.mkv")
         item_id = self._insert_library_item(connection, source_path, status="encoding")
@@ -3634,6 +3635,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
             timeout_seconds=encoding_quality.REMOTE_QUALITY_TIMEOUT_SECONDS,
             host_key="remote-a",
             host_label="Remote A",
+            remote_process_contained=remote_process_contained,
         )
         web_app._transition_encode_job_failure(
             connection,
@@ -3647,37 +3649,30 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         return updated, str(exc)
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
-    def test_remote_quality_timeout_retries_that_file_away_from_the_computer_that_may_still_run_it(self) -> None:
-        deps = web_app._encode_queue_runtime_deps()
+    def test_remote_quality_timeout_that_was_stopped_retries_like_any_other_attempt(self) -> None:
         with open_db(self.config.paths.db_path) as connection:
-            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
-                updated, plain_message = self._remote_quality_timeout_failure(
-                    connection, f"episode-quality-timeout-{index}", attempt_count=1,
-                )
-            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+            updated, plain_message = self._remote_quality_timeout_failure(
+                connection, "episode-quality-timeout", attempt_count=1,
+            )
 
         self.assertEqual(updated["status"], "retry_backoff")
-        self.assertEqual(updated["last_failure_kind"], encoding_quality.RemoteQualityTimeoutError.failure_kind)
+        self.assertEqual(updated["last_failure_kind"], encoding_quality.REMOTE_QUALITY_TIMEOUT_FAILURE_KIND)
         self.assertEqual(updated["error"], f"{plain_message} {encode_runtime.REMOTE_QUALITY_TIMEOUT_RETRY_NOTE}")
-        self.assertIsNotNone(updated["host_cooldown_until"])
-        self.assertEqual(updated["last_host"]["key"], "remote-a")
-        # Other files may still use that computer; only this file stays off it for a while.
-        self.assertEqual(blocked, {})
+        # The run was shown stopped, so nothing keeps the file off that computer.
+        self.assertIsNone(updated["host_cooldown_until"])
 
-        def host(key: str, priority: int) -> dict[str, Any]:
-            return {
-                "key": key, "host": key, "label": key.title(), "mode": "ssh", "media_access": "mounted",
-                "priority": priority, "capabilities": ["encode_queue"], "available": True, "probe_available": True,
-                "active_encode_count": 0, "max_parallel_encodes": 1, "queue_active": True,
-            }
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_remote_quality_timeout_not_shown_stopped_waits_for_the_owner(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, plain_message = self._remote_quality_timeout_failure(
+                connection, "episode-quality-timeout-unproven", attempt_count=1, remote_process_contained=False,
+            )
 
-        with open_db(self.config.paths.db_path) as connection, patch(
-                "mediaforce.web.app._host_runtime_rows", return_value=[host("remote-a", 90), host("mounted-b", 70)],
-        ):
-            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, updated)
-
-        assert host_payload is not None, waiting_reason
-        self.assertEqual(host_payload["key"], "mounted-b")
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["last_failure_kind"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+        self.assertEqual(updated["terminal_reason"], encoding_quality.CONTAINMENT_UNPROVEN_FAILURE_KIND)
+        self.assertEqual(updated["error"], plain_message)
+        self.assertIsNone(updated["retry_not_before"])
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_remote_quality_timeout_at_the_attempt_cap_goes_to_the_owner_in_plain_words(self) -> None:
@@ -3688,7 +3683,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
                 attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
             )
 
-        failure_kind = encoding_quality.RemoteQualityTimeoutError.failure_kind
+        failure_kind = encoding_quality.REMOTE_QUALITY_TIMEOUT_FAILURE_KIND
         self.assertEqual(updated["status"], "needs_attention")
         self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
         self.assertEqual(updated["error"], f"{plain_message} {encode_runtime.REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE}")
@@ -3719,23 +3714,6 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertNotIn("failure_streak", first["last_host"])
         self.assertEqual(first["status"], "retry_backoff")
         self.assertEqual(still_cooling["host_cooldown_until"], other["host_cooldown_until"])
-
-    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
-    def test_a_computer_passing_readiness_keeps_a_file_off_it_whose_quality_run_may_still_be_going(self) -> None:
-        with open_db(self.config.paths.db_path) as connection:
-            timed_out, _ = self._remote_quality_timeout_failure(connection, "episode-ready-timeout", attempt_count=1)
-            self._computer_setup_failure(connection, "episode-ready-setup", attempt_count=1)
-
-            released = encode_runtime.release_host_cooldowns(
-                connection, {"key": "remote-a", "label": "Remote A"}, updated_at=web_app._now_iso(),
-            )
-            still_cooling = load_encode_job(connection, "job-episode-ready-timeout")
-            setup = load_encode_job(connection, "job-episode-ready-setup")
-
-        self.assertEqual(released, 1)
-        assert still_cooling is not None and setup is not None
-        self.assertEqual(still_cooling["host_cooldown_until"], timed_out["host_cooldown_until"])
-        self.assertIsNone(setup["host_cooldown_until"])
 
     @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
     def test_releasing_a_computer_keeps_a_failure_recorded_after_it_was_read(self) -> None:

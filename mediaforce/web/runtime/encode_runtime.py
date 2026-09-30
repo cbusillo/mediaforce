@@ -44,8 +44,9 @@ from mediaforce.core.type_defs import float_value, int_value, object_dict, objec
 from mediaforce.encoding.duration_estimate import EncodeDurationEstimate, EncodeDurationSample, \
     estimate_encode_job_duration, estimate_fits_before_schedule_close, load_encode_duration_samples
 from mediaforce.encoding.free_space import CapacityCache, encode_reserve_preflight, large_job_requires_serialization
-from mediaforce.encoding.quality import QualitySearchError, QualityTempCleanupError, QualityTempSetupError, \
-    RemoteQualityTimeoutError, analyze_quality_policy_failure, quality_error_message
+from mediaforce.encoding.quality import REMOTE_QUALITY_TIMEOUT_FAILURE_KIND, QualitySearchError, \
+    QualityTempCleanupError, QualityTempSetupError, RemoteQualityTimeoutError, analyze_quality_policy_failure, \
+    quality_error_message
 from mediaforce.encoding.staged_host import StagedScratchError
 from mediaforce.hosts.types import is_storage_io_failure, is_vmaf_model_load_failure
 from mediaforce.encoding.cadence import CadenceResolutionError
@@ -135,13 +136,8 @@ UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE = (
     "The error details are saved with this job."
 )
 UNKNOWN_FAILURE_DETAIL_MAX_CHARS = 4000
-REMOTE_QUALITY_TIMEOUT_RETRY_NOTE = (
-    "It will be tried again on another computer, or on that one after it has had time to finish."
-)
+REMOTE_QUALITY_TIMEOUT_RETRY_NOTE = "It will be tried again."
 REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE = "It kept running too long, so this file needs you."
-# Failures that keep only this job off the computer for a while. They do not count toward blocking
-# the computer for everyone, and they keep the normal attempt cap.
-JOB_HOST_COOLDOWN_FAILURE_KINDS = frozenset({"host_scratch", RemoteQualityTimeoutError.failure_kind})
 # Failures a retry cannot change: a measured result, a plan or evidence contract, or a finished
 # output kept for review (a retry's cleanup would delete it).
 CERTAIN_ENCODE_FAILURES: tuple[type[Exception], ...] = (
@@ -905,7 +901,7 @@ _UNFINISHED_REASON_LABELS = {
     "storage_io": "had trouble reading or writing media",
     "host_unavailable": "computer unavailable",
     "ssh_transport": "couldn't connect to a computer",
-    RemoteQualityTimeoutError.failure_kind: "measuring quality ran too long on a computer",
+    REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "measuring quality ran too long on a computer",
     "needs_review": "waiting for you to take a look",
 }
 # Queued files wait for the scheduler; group its sentences under short plain labels, first match
@@ -1262,7 +1258,7 @@ def transition_encode_job_failure(
     # An unrecognised error is often a raw tool log: the owner sees a plain summary, and the
     # raw text stays on the job for diagnosis.
     owner_error = UNKNOWN_ENCODE_FAILURE_MESSAGE if failure_kind == "unknown" else error_message
-    if failure_kind == RemoteQualityTimeoutError.failure_kind:
+    if failure_kind == REMOTE_QUALITY_TIMEOUT_FAILURE_KIND:
         owner_error = f"{error_message} {REMOTE_QUALITY_TIMEOUT_RETRY_NOTE}"
     job.update(
         {
@@ -1300,12 +1296,11 @@ def transition_encode_job_failure(
                 "retry_not_before": retry_not_before,
                 "waiting_reason": retry_reason,
                 "terminal_reason": None,
-                # A file that did not fit a computer's scratch folder, or whose quality run there may still
-                # be going, tries another computer next. Only this job avoids it: the global block counts
-                # host-related failures, and other files may still run there.
+                # A file that did not fit a computer's scratch folder tries another computer next. Only this
+                # job avoids it: the global block counts host-related failures, and a smaller file may still fit.
                 "host_cooldown_until": (
                     (now + timedelta(seconds=deps.encode_host_cooldown_seconds)).isoformat(timespec="seconds")
-                    if (host_related or failure_kind in JOB_HOST_COOLDOWN_FAILURE_KINDS) and assigned_host
+                    if (host_related or failure_kind == "host_scratch") and assigned_host
                     else None
                 ),
                 "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="retry_backoff"),
@@ -1329,7 +1324,7 @@ def transition_encode_job_failure(
     terminal_reason = "max_attempts_exhausted" if retryable else failure_kind
     if failure_kind == "unknown":
         job["error"] = UNKNOWN_ENCODE_FAILURE_EXHAUSTED_MESSAGE
-    elif failure_kind == RemoteQualityTimeoutError.failure_kind:
+    elif failure_kind == REMOTE_QUALITY_TIMEOUT_FAILURE_KIND:
         job["error"] = f"{error_message} {REMOTE_QUALITY_TIMEOUT_EXHAUSTED_NOTE}"
     job.update(
         {
@@ -2241,26 +2236,17 @@ def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, upd
     """A computer that just passed an explicit readiness check takes work again at once.
 
     Its cooldowns and failure streak on every job are cleared, so neither the jobs it failed nor the
-    global host block keep it out until the cooldown would have run out. A job whose quality run there
-    ran out of time keeps its cooldown: passing readiness does not show that run has stopped. Returns
-    how many jobs changed.
+    global host block keep it out until the cooldown would have run out. Returns how many jobs changed.
     """
     identity = dict(host)
     if not _host_identity_tokens(identity):
         return 0
     rows = connection.execute(
-        select(
-            encode_jobs.c.job_id,
-            encode_jobs.c.last_host_json,
-            encode_jobs.c.host_cooldown_until,
-            encode_jobs.c.last_failure_kind,
-        )
+        select(encode_jobs.c.job_id, encode_jobs.c.last_host_json, encode_jobs.c.host_cooldown_until)
         .where(encode_jobs.c.host_cooldown_until.is_not(None))
     ).mappings().fetchall()
     released = 0
     for row in rows:
-        if row["last_failure_kind"] == RemoteQualityTimeoutError.failure_kind:
-            continue
         last_host = _load_quarantine_host_payload(row["last_host_json"])
         if not _host_identity_matches(last_host, identity):
             continue
@@ -3554,7 +3540,7 @@ def _encode_failure_is_retryable(failure_kind: str, error_message: str, host_pay
         "ssh_transport",
         "unreadable_output",
         "host_scratch",
-        RemoteQualityTimeoutError.failure_kind,
+        REMOTE_QUALITY_TIMEOUT_FAILURE_KIND,
         "storage_io",
         "controller_database_busy",
         "unknown",
@@ -3591,7 +3577,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_configuration": "a setup problem on that computer",
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
-        RemoteQualityTimeoutError.failure_kind: "a quality check that ran too long on a computer",
+        REMOTE_QUALITY_TIMEOUT_FAILURE_KIND: "a quality check that ran too long on a computer",
         "storage_io": "media storage read or write error",
         "controller_database_busy": "controller database contention",
         "unknown": "an error Mediaforce does not recognise",

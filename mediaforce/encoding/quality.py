@@ -114,15 +114,16 @@ class QualityTempSetupError(RuntimeError):
     pass
 
 
+REMOTE_QUALITY_TIMEOUT_FAILURE_KIND = "remote_quality_timeout"
+CONTAINMENT_UNPROVEN_FAILURE_KIND = "containment_unproven"
+
+
 class RemoteQualityTimeoutError(RuntimeError):
     """A quality run on another computer outlasted its time limit.
 
-    Only the local SSH session was stopped; the run on that computer may still be going, so its
-    temp folder is left for the periodic sweeps and the computer should rest before it is reused.
+    ``remote_process_contained`` says whether every process of that run was shown stopped on
+    that computer. Until it is, the run may still be using its temp folder and the computer.
     """
-
-    failure_kind = "remote_quality_timeout"
-    remote_process_contained = False
 
     def __init__(
             self,
@@ -131,11 +132,22 @@ class RemoteQualityTimeoutError(RuntimeError):
             timeout_seconds: float,
             host_key: str,
             host_label: str,
+            remote_process_contained: bool,
             output_tail: str | None = None,
     ) -> None:
+        outcome = (
+            "that run was stopped."
+            if remote_process_contained
+            else "the run on that computer was not confirmed stopped. "
+                 "Check that computer is idle, then try this file again."
+        )
         super().__init__(
             f"Measuring quality on {host_label} ran past {_plain_duration(timeout_seconds)} without a result; "
-            "the run on that computer was not confirmed stopped."
+            f"{outcome}"
+        )
+        self.remote_process_contained = remote_process_contained
+        self.failure_kind = (
+            REMOTE_QUALITY_TIMEOUT_FAILURE_KIND if remote_process_contained else CONTAINMENT_UNPROVEN_FAILURE_KIND
         )
         self.phase = phase
         self.timeout_seconds = timeout_seconds
@@ -148,6 +160,29 @@ REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
 REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_LINES = 5
 REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS = 500
 REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
+REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS = 30
+REMOTE_QUALITY_CONTAINED_MARKER = "mediaforce-quality-run-stopped"
+# Stops every process on the computer whose command line names this run's scoped temp folder,
+# which is unique to the run, then prints the marker only when none is left. The folder comes in
+# as $1 and is matched as a fixed string. Processes in this script's own group (its shells and
+# command substitutions, whose arguments also name the folder) are never matched.
+REMOTE_QUALITY_CONTAINMENT_SCRIPT = (
+    'target=$1; [ -n "$target" ] || exit 2; '
+    "self_pgid=$(ps -o pgid= -p $$ | tr -d ' '); "
+    "matching() { ps -axo pid=,pgid=,command= | TARGET=\"$target\" awk -v self=\"$self_pgid\" "
+    "'$2 != self && index($0, ENVIRON[\"TARGET\"]) > 0 { print $1 \" \" $2 }'; }; "
+    "kill_tree() ( signal=$1; parent=$2; "
+    "for child in $(ps -axo pid=,ppid= | awk -v parent=\"$parent\" '$2 == parent { print $1 }'); "
+    'do kill_tree "$signal" "$child"; done; kill -"$signal" "$parent" 2>/dev/null || true; ); '
+    "stop_all() { matching | while read -r pid pgid; do "
+    'if [ "${pgid:-0}" -gt 1 ]; then kill -"$1" -"$pgid" 2>/dev/null || true; fi; kill_tree "$1" "$pid"; '
+    "done; }; "
+    "stop_all TERM; "
+    'waited=0; while [ -n "$(matching)" ] && [ "$waited" -lt 5 ]; do sleep 1; waited=$((waited + 1)); done; '
+    'if [ -n "$(matching)" ]; then stop_all KILL; sleep 1; fi; '
+    '[ -z "$(matching)" ] || exit 1; '
+    f"echo {REMOTE_QUALITY_CONTAINED_MARKER}"
+)
 LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
 DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
 LEGACY_LOCAL_QUALITY_TEMP_ROOT_NAME = "quality-temp"
@@ -770,11 +805,33 @@ def _run_quality_command(
             timeout_seconds=exc.timeout,
             host_key=host_key,
             host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
+            remote_process_contained=_stop_timed_out_remote_quality_run(host_payload, temp_dir),
             output_tail=output_tail,
         )
         if output_tail is not None:
             error.add_note(f"Last output from that computer:\n{output_tail}")
         raise error from None
+
+
+def _stop_timed_out_remote_quality_run(host: dict[str, object], scoped_temp_dir: str | None) -> bool:
+    """Stop what is left of a timed-out run on that computer; True only once nothing of it is left.
+
+    Stopping the local SSH client does not stop the run on the computer. Without its scoped temp
+    folder there is nothing that names only this run, so it cannot be shown stopped.
+    """
+    if scoped_temp_dir is None:
+        return False
+    containment_host = dict(host)
+    containment_host.pop(SCHEDULE_CLOSE_DEADLINE_KEY, None)
+    try:
+        result = run_remote_command(
+            containment_host,
+            ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh", scoped_temp_dir],
+            REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS,
+        )
+    except Exception:  # noqa: BLE001 - any failure here leaves the run unproven, which is the safe answer.
+        return False
+    return result.returncode == 0 and REMOTE_QUALITY_CONTAINED_MARKER in result.stdout.split()
 
 
 def _quality_phase(cmd: list[str]) -> str:
@@ -880,7 +937,7 @@ def _cleanup_after_failed_quality_command(
         *,
         host: dict[str, object] | None,
 ) -> None:
-    if isinstance(exc, RemoteQualityTimeoutError):
+    if isinstance(exc, RemoteQualityTimeoutError) and not exc.remote_process_contained:
         # The run on that computer may still be writing there; the periodic sweeps remove it later.
         return
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
