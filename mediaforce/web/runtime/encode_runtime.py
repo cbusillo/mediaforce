@@ -550,15 +550,23 @@ def _remove_stale_staging_path(
     )
     if remote_mounted_host and prefer_remote:
         return _remove_remote_stale_staging_path(path, host_payload)
-    if path.exists():
+    try:
+        if path.exists():
+            result = _remove_path(path)
+            _prune_empty_quality_temp_dir(path.parent)
+            return result
+        if remote_mounted_host:
+            return _remove_remote_stale_staging_path(path, host_payload)
         result = _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
         return result
-    if remote_mounted_host:
-        return _remove_remote_stale_staging_path(path, host_payload)
-    result = _remove_path(path)
-    _prune_empty_quality_temp_dir(path.parent)
-    return result
+    except OSError as exc:
+        # A share that dropped mid-encode fails the existence check itself (TimeoutError, errno 60).
+        # Nothing was removed; the existing backoff tries again once the storage answers.
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail=f"{path}: storage did not answer ({exc})",
+        )
 
 
 def remove_stale_staging_path(
@@ -2164,7 +2172,9 @@ def _globally_backed_off_encode_hosts(
             continue
         failure_kind = str(row["last_failure_kind"] or "").strip()
         error_message = str(row["error"] or "")
-        if not _encode_failure_retries_after_attempt_cap(failure_kind, error_message, host_payload):
+        if failure_kind != "host_configuration" and not _encode_failure_retries_after_attempt_cap(
+                failure_kind, error_message, host_payload,
+        ):
             continue
         failure_state = _matching_host_failure_state(host_failures, identity_tokens)
         if failure_state is None:
@@ -3404,7 +3414,9 @@ def _finalize_encode_job_progress(
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
     if failure_kind == "containment_unproven":
         return False
-    if failure_kind in {"controller_storage_unavailable", "host_unavailable", "ssh_transport"}:
+    # A computer that cannot set itself up (its media share would not reconnect, or its tools would not
+    # load) judged nothing about the episode: the computer cools down and the episode goes elsewhere.
+    if failure_kind in {"controller_storage_unavailable", "host_unavailable", "ssh_transport", "host_configuration"}:
         return True
     return _encode_failure_is_ssh_transport(error_message, host_payload)
 
@@ -3487,7 +3499,9 @@ def _encode_failure_retries_after_attempt_cap(
         error_message: str,
         host_payload: dict[str, Any],
 ) -> bool:
-    if failure_kind == "controller_storage_unavailable":
+    # A setup problem needs someone to fix the computer, so an episode that no healthy computer took within
+    # its attempts goes to the owner with that reason instead of waiting on the broken one forever.
+    if failure_kind in {"controller_storage_unavailable", "host_configuration"}:
         return False
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
@@ -3503,6 +3517,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_unavailable": "host availability issue",
         "controller_storage_unavailable": "controller storage issue",
         "ssh_transport": "SSH transport failure",
+        "host_configuration": "a setup problem on that computer",
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
         "storage_io": "media storage read or write error",
