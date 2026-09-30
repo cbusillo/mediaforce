@@ -550,15 +550,26 @@ def _remove_stale_staging_path(
     )
     if remote_mounted_host and prefer_remote:
         return _remove_remote_stale_staging_path(path, host_payload)
-    if path.exists():
+    try:
+        if path.exists():
+            result = _remove_path(path)
+            _prune_empty_quality_temp_dir(path.parent)
+            return result
+        if remote_mounted_host:
+            return _remove_remote_stale_staging_path(path, host_payload)
         result = _remove_path(path)
         _prune_empty_quality_temp_dir(path.parent)
         return result
-    if remote_mounted_host:
-        return _remove_remote_stale_staging_path(path, host_payload)
-    result = _remove_path(path)
-    _prune_empty_quality_temp_dir(path.parent)
-    return result
+    except PermissionError as exc:
+        # Access was refused outright; waiting would not change that.
+        return _StagingPathCleanupResult(_StagingPathCleanupOutcome.CLEANUP_FAILED, detail=f"{path}: {exc}")
+    except OSError as exc:
+        # A share that dropped mid-encode fails the existence check itself (TimeoutError, errno 60).
+        # Nothing was removed; the existing backoff tries again once the storage answers.
+        return _StagingPathCleanupResult(
+            _StagingPathCleanupOutcome.CLEANUP_DEFERRED,
+            detail=f"{path}: storage did not answer ({exc})",
+        )
 
 
 def remove_stale_staging_path(
@@ -878,15 +889,16 @@ def aggregate_encode_parent_job(
 
 
 _UNFINISHED_REASON_LABELS = {
-    "retrying": "still retrying",
+    "retrying": "trying again soon",
     "stopped": "stopped",
-    "quality_floor_size_conflict": "size goal below quality floor",
-    "final_size_target_miss": "outside size limit",
-    "controller_database_busy": "controller database busy",
-    "storage_io": "storage error",
+    "quality_floor_size_conflict": "waiting for your OK to use more space",
+    "size_exception_declined": "kept as the original, your choice",
+    "final_size_target_miss": "didn't pass the final size check",
+    "controller_database_busy": "hit a busy moment in Mediaforce",
+    "storage_io": "had trouble reading or writing media",
     "host_unavailable": "computer unavailable",
-    "ssh_transport": "connection failed",
-    "needs_review": "need review",
+    "ssh_transport": "couldn't connect to a computer",
+    "needs_review": "waiting for you to take a look",
 }
 # Queued files wait for the scheduler; group its sentences under short plain labels, first match
 # wins. Some waits only end when the owner acts, so they count as needing the owner. A reason that
@@ -921,11 +933,44 @@ def _unfinished_child_reason(child: Mapping[str, Any]) -> tuple[str, str, bool]:
     if status == "retry_backoff":
         return "retrying", _UNFINISHED_REASON_LABELS["retrying"], False
     reason = "stopped" if status == "stopped" else _attention_child_reason(child)
-    return reason, _UNFINISHED_REASON_LABELS[reason], True
+    return reason, _UNFINISHED_REASON_LABELS[reason], reason != "size_exception_declined"
+
+
+def size_exception_question(child: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The one-file size question a waiting child puts to the owner, or None when it has none.
+
+    Only a quality-floor conflict beyond the automatic allowance asks it: the automatic retry
+    handles the rest, and a goal the saved compression intent cannot authorize needs that goal
+    confirmed first.
+    """
+    if str(child.get("status") or "") != "needs_attention":
+        return None
+    analysis = object_dict(object_dict(child.get("progress")).get("failure_analysis"))
+    if (
+            str(analysis.get("kind") or "") != "quality_floor_size_conflict"
+            or str(analysis.get("retry_strategy") or "") != "needs_operator_approval"
+            or "compression_authorization" in analysis
+            or object_dict(analysis.get("owner_size_decision"))
+    ):
+        return None
+    goal_bytes = int_value(analysis.get("target_size_bytes"))
+    safe_bytes = int_value(analysis.get("proposed_target_size_bytes"))
+    rel_path = str(analysis.get("item_rel_path") or "").strip()
+    if goal_bytes <= 0 or safe_bytes <= goal_bytes or not rel_path:
+        return None
+    return {
+        "job_id": str(child.get("job_id") or ""),
+        "rel_path": rel_path,
+        "goal_bytes": goal_bytes,
+        "smallest_quality_safe_bytes": safe_bytes,
+    }
 
 
 def _attention_child_reason(child: Mapping[str, Any]) -> str:
-    analysis_kind = str(object_dict(object_dict(child.get("progress")).get("failure_analysis")).get("kind") or "")
+    analysis = object_dict(object_dict(child.get("progress")).get("failure_analysis"))
+    if str(object_dict(analysis.get("owner_size_decision")).get("answer") or "") == "keep_original":
+        return "size_exception_declined"
+    analysis_kind = str(analysis.get("kind") or "")
     if analysis_kind in _UNFINISHED_REASON_LABELS:
         return analysis_kind
     error = str(child.get("error") or "")
@@ -953,7 +998,15 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         reason, label, needs_owner = _unfinished_child_reason(child)
         group = groups.setdefault(
             reason,
-            {"reason": reason, "label": label, "count": 0, "needs_owner": needs_owner, "items": []},
+            {
+                "reason": reason,
+                "label": label,
+                "count": 0,
+                "needs_owner": needs_owner,
+                # The owner already answered for these files; they are listed, not waiting.
+                "owner_choice": reason == "size_exception_declined",
+                "items": [],
+            },
         )
         indexes = child.get("manifest_indexes")
         group["count"] += len(indexes) if isinstance(indexes, list) and indexes else max(
@@ -967,6 +1020,10 @@ def _unfinished_child_breakdown(children: list[dict[str, Any]]) -> list[dict[str
         ).strip()
         if rel_path and len(group["items"]) < _UNFINISHED_BREAKDOWN_ITEM_LIMIT:
             group["items"].append(rel_path)
+        question = size_exception_question(child)
+        # Every file asks its own question, so none is capped away behind the item preview.
+        if question is not None:
+            group.setdefault("size_questions", []).append(question)
     return sorted(
         groups.values(),
         key=lambda group: (not group["needs_owner"], -int(group["count"]), str(group["reason"])),
@@ -1233,9 +1290,11 @@ def transition_encode_job_failure(
                 "retry_not_before": retry_not_before,
                 "waiting_reason": retry_reason,
                 "terminal_reason": None,
+                # A file that did not fit a computer's scratch folder tries another computer next. Only this
+                # job avoids it: the global block counts host-related failures, and a smaller file may still fit.
                 "host_cooldown_until": (
                     (now + timedelta(seconds=deps.encode_host_cooldown_seconds)).isoformat(timespec="seconds")
-                    if host_related and assigned_host
+                    if (host_related or failure_kind == "host_scratch") and assigned_host
                     else None
                 ),
                 "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="retry_backoff"),
@@ -1266,7 +1325,13 @@ def transition_encode_job_failure(
             "retry_not_before": None,
             "waiting_reason": None,
             "terminal_reason": terminal_reason,
-            "host_cooldown_until": None,
+            # A computer that failed an episode's last attempt still cools down and counts toward blocking it,
+            # so it does not go on to fail the next episode's last attempt too.
+            "host_cooldown_until": (
+                (now + timedelta(seconds=deps.encode_host_cooldown_seconds)).isoformat(timespec="seconds")
+                if host_related and assigned_host
+                else None
+            ),
             "progress": _finalize_encode_job_progress(job, deps=deps, terminal_state="needs_attention"),
         }
     )
@@ -1429,8 +1494,8 @@ def _quality_floor_conflict_analysis(error_message: str) -> dict[str, Any] | Non
             "quality-safe size as a recorded item-local exception."
             if within_bound
             else (
-                f"The smallest quality-safe size is more than {QUALITY_FLOOR_EXCEPTION_MAX_GROWTH:g}x the goal. "
-                "Choose a fresh size or compression goal for this item before retrying."
+                "Keeping the picture quality needs a much bigger file than the size goal allows. "
+                "Allow that size for this file, or keep the original."
             )
         ),
     }
@@ -1528,7 +1593,7 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
     if not analysis or not bool(analysis.get("auto_retry_allowed")):
         return False
     if str(analysis.get("retry_strategy") or "") == "auto_raise_target":
-        return _apply_quality_floor_target_retry(job, analysis)
+        return apply_quality_floor_size_exception(job, analysis)
     if str(analysis.get("retry_strategy") or "") != "auto_adjust_cap":
         return False
     manifest_path = Path(str(job.get("manifest_path") or "").strip())
@@ -1613,13 +1678,24 @@ def _apply_auto_quality_policy_retry(job: dict[str, Any], analysis: dict[str, An
                 return False
             manifest["items"][index] = item
         try:
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            _write_manifest(manifest_path, manifest)
         except OSError:
             return False
     return True
 
 
-def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, Any]) -> bool:
+def apply_quality_floor_size_exception(
+        job: dict[str, Any],
+        analysis: dict[str, Any],
+        *,
+        owner_approved: bool = False,
+) -> bool:
+    """Record an item-local size exception at the smallest quality-safe size.
+
+    The measured floor violation is the evidence either way. Within the automatic allowance it
+    authorizes the exception alone; beyond it the owner's yes is recorded as a second piece of
+    evidence, and the saved compression goal still has to authorize a larger result.
+    """
     index = int_value(analysis.get("manifest_index"))
     proposed_bytes = int_value(analysis.get("proposed_target_size_bytes"))
     current_bytes = int_value(analysis.get("target_size_bytes"))
@@ -1660,16 +1736,34 @@ def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, A
             policy_hash=policy_hash,
             job_id=job_id,
         )
+        evidence_refs = [evidence]
+        if owner_approved:
+            evidence_refs.append(
+                CompressionEvidenceRef(
+                    kind="operator_override",
+                    evidence_id=f"ce1_{stable_json_hash({**evidence_identity, 'kind': 'operator_override'})[:32]}",
+                    intent_id=intent.semantic_id,
+                    observed_bytes=proposed_bytes,
+                    source_id=source_id,
+                    policy_hash=policy_hash,
+                    job_id=job_id,
+                )
+            )
         decision = authorize_compression_change(
             intent,
             authoritative_anchor_bytes=current_bytes,
             candidate_bytes=proposed_bytes,
-            evidence=(evidence,),
+            evidence=tuple(evidence_refs),
             source_id=source_id,
             policy_hash=policy_hash,
             job_id=job_id,
         )
         evidence_payload, decision_payload = evidence.to_payload(), decision.to_payload()
+        if owner_approved:
+            evidence_payload = {
+                **evidence_payload,
+                "owner_approval": evidence_refs[1].to_payload(),
+            }
         analysis["compression_evidence"] = evidence_payload
         analysis["compression_authorization"] = decision_payload
         if decision.outcome != "authorized" or decision.escalation_scope != "item":
@@ -1710,7 +1804,7 @@ def _apply_quality_floor_target_retry(job: dict[str, Any], analysis: dict[str, A
             return False
         manifest["items"][index] = item
         try:
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            _write_manifest(manifest_path, manifest)
         except OSError:
             return False
     return True
@@ -1818,6 +1912,24 @@ def _quality_policy_retry_caps_by_index(
         return {}
     proposed_cap = int_value(analysis.get("proposed_max_encoded_percent"))
     return {indexes[0]: proposed_cap} if proposed_cap > 0 else {}
+
+
+def restore_manifest_item(manifest_path: Path, index: int, item: dict[str, Any]) -> None:
+    """Put one manifest item back as it was, leaving every sibling's later updates in place."""
+    with _locked_manifest_file(manifest_path):
+        manifest = json.loads(manifest_path.read_text())
+        manifest["items"][index] = item
+        _write_manifest(manifest_path, manifest)
+
+
+def _write_manifest(manifest_path: Path, manifest: dict[str, Any]) -> None:
+    """Replace the shared manifest whole, so a failed write never leaves siblings a truncated file."""
+    temp_path = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        os.replace(temp_path, manifest_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -2071,7 +2183,9 @@ def _globally_backed_off_encode_hosts(
             continue
         failure_kind = str(row["last_failure_kind"] or "").strip()
         error_message = str(row["error"] or "")
-        if not _encode_failure_retries_after_attempt_cap(failure_kind, error_message, host_payload):
+        if failure_kind != "host_configuration" and not _encode_failure_retries_after_attempt_cap(
+                failure_kind, error_message, host_payload,
+        ):
             continue
         failure_state = _matching_host_failure_state(host_failures, identity_tokens)
         if failure_state is None:
@@ -2108,6 +2222,43 @@ def _globally_backed_off_encode_hosts(
         f"blocked-{index}": payload
         for index, payload in enumerate(blocked_hosts)
     }
+
+
+def release_host_cooldowns(connection: DBClient, host: Mapping[str, Any], *, updated_at: str) -> int:
+    """A computer that just passed an explicit readiness check takes work again at once.
+
+    Its cooldowns and failure streak on every job are cleared, so neither the jobs it failed nor the
+    global host block keep it out until the cooldown would have run out. Returns how many jobs changed.
+    """
+    identity = dict(host)
+    if not _host_identity_tokens(identity):
+        return 0
+    rows = connection.execute(
+        select(encode_jobs.c.job_id, encode_jobs.c.last_host_json, encode_jobs.c.host_cooldown_until)
+        .where(encode_jobs.c.host_cooldown_until.is_not(None))
+    ).mappings().fetchall()
+    released = 0
+    for row in rows:
+        last_host = _load_quarantine_host_payload(row["last_host_json"])
+        if not _host_identity_matches(last_host, identity):
+            continue
+        last_host.pop("failure_streak", None)
+        # Only the cooldown that was read is released: a failure a worker records meanwhile stays.
+        result = connection.execute(
+            update(encode_jobs)
+            .where(
+                encode_jobs.c.job_id == row["job_id"],
+                encode_jobs.c.host_cooldown_until == row["host_cooldown_until"],
+                encode_jobs.c.last_host_json == row["last_host_json"],
+            )
+            .values(
+                host_cooldown_until=None,
+                last_host_json=json.dumps(persisted_encode_host_payload(last_host), sort_keys=True),
+                updated_at=updated_at,
+            )
+        )
+        released += result.rowcount
+    return released
 
 
 def _encode_failure_last_host_payload(
@@ -3311,7 +3462,9 @@ def _finalize_encode_job_progress(
 def _encode_failure_is_host_related(failure_kind: str, error_message: str, host_payload: dict[str, Any]) -> bool:
     if failure_kind == "containment_unproven":
         return False
-    if failure_kind in {"controller_storage_unavailable", "host_unavailable", "ssh_transport"}:
+    # A computer that cannot set itself up (its media share would not reconnect, or its tools would not
+    # load) judged nothing about the episode: the computer cools down and the episode goes elsewhere.
+    if failure_kind in {"controller_storage_unavailable", "host_unavailable", "ssh_transport", "host_configuration"}:
         return True
     return _encode_failure_is_ssh_transport(error_message, host_payload)
 
@@ -3394,7 +3547,9 @@ def _encode_failure_retries_after_attempt_cap(
         error_message: str,
         host_payload: dict[str, Any],
 ) -> bool:
-    if failure_kind == "controller_storage_unavailable":
+    # A setup problem needs someone to fix the computer, so an episode that no healthy computer took within
+    # its attempts goes to the owner with that reason instead of waiting on the broken one forever.
+    if failure_kind in {"controller_storage_unavailable", "host_configuration"}:
         return False
     if not _encode_failure_is_host_related(failure_kind, error_message, host_payload):
         return False
@@ -3410,6 +3565,7 @@ def _encode_retry_waiting_reason(*, failure_kind: str, retry_not_before: str) ->
         "host_unavailable": "host availability issue",
         "controller_storage_unavailable": "controller storage issue",
         "ssh_transport": "SSH transport failure",
+        "host_configuration": "a setup problem on that computer",
         "unreadable_output": "unreadable encoder output",
         "host_scratch": "scratch folder problem on the computer",
         "storage_io": "media storage read or write error",

@@ -951,10 +951,12 @@ def queue_folder_encode_action(
                 )
                 for item_id in sorted(set(final_size_miss_indexes.values()))
             )
+        selection = object_dict(manifest.get("selection"))
+        # Files accepted later can join this run under the same mode; see ambiguous_motion.
+        selection["queue_mode"] = hold_mode
         if production_approval_contract is not None:
-            selection = object_dict(manifest.get("selection"))
             selection["production_approval_contract"] = production_approval_contract
-            manifest["selection"] = selection
+        manifest["selection"] = selection
         if older_season_selection is not None and older_season_cadence_partition is not None:
             manifest_item_ids = {
                 int(item.get("library_item_id") or 0)
@@ -1843,10 +1845,21 @@ def tv_promotion_readiness_payload(
     }
 
 
-def active_encode_library_item_ids(connection: DBClient, prefix: str) -> set[int] | None:
-    """Files an active encode may still write. None means a job's files cannot be read, so fail closed."""
+def active_encode_library_item_ids(
+        connection: DBClient,
+        prefix: str,
+        *,
+        exclude_job_ids: Collection[str] = (),
+) -> set[int] | None:
+    """Files an active encode may still write. None means a job's files cannot be read, so fail closed.
+
+    A folder parent counts every file in its manifest; exclude it by id to count only the files its
+    own active parts still hold.
+    """
     item_ids: set[int] = set()
     for job in load_active_encode_jobs_for_prefix(connection, prefix):
+        if str(job.get("job_id") or "") in exclude_job_ids:
+            continue
         manifest_items = _manifest_items(job)
         if not manifest_items:
             return None

@@ -1259,13 +1259,13 @@ describe('season experience translation', () => {
 			...card,
 			workflow_state: { ...card.workflow_state, primary_lane: 'processing' },
 			review_badge_label: 'Needs attention',
-			review_badge_detail: '1 storage error · 4 waiting for a scheduled time'
+			review_badge_detail: '1 had trouble reading or writing media · 4 waiting for a scheduled time'
 		} as FolderCard;
 
 		expect(librarySeasonState(working, dashboard)).toMatchObject({
 			key: 'making_season',
 			label: 'Compressing · needs you',
-			detail: '1 storage error · 4 waiting for a scheduled time'
+			detail: '1 had trouble reading or writing media · 4 waiting for a scheduled time'
 		});
 	});
 
@@ -2736,12 +2736,18 @@ describe('encodeWaitingReasons', () => {
 			job([
 				{
 					reason: 'final_size_target_miss',
-					label: 'outside size limit',
+					label: "didn't pass the final size check",
 					count: 1,
 					needs_owner: true,
 					items: []
 				},
-				{ reason: 'storage_io', label: 'storage error', count: 2, needs_owner: true, items: [] },
+				{
+					reason: 'storage_io',
+					label: 'had trouble reading or writing media',
+					count: 2,
+					needs_owner: true,
+					items: []
+				},
 				{
 					reason: 'waiting_schedule',
 					label: 'waiting for a scheduled time',
@@ -2749,13 +2755,13 @@ describe('encodeWaitingReasons', () => {
 					needs_owner: false,
 					items: []
 				},
-				{ reason: 'retrying', label: 'still retrying', count: 0, needs_owner: false, items: [] }
+				{ reason: 'retrying', label: 'trying again soon', count: 0, needs_owner: false, items: [] }
 			])
 		);
 
 		expect(reasons.needsYou.map((group) => `${group.count} ${group.label}`)).toEqual([
-			'1 outside size limit',
-			'2 storage error'
+			"1 didn't pass the final size check",
+			'2 had trouble reading or writing media'
 		]);
 		expect(reasons.waiting.map((group) => `${group.count} ${group.label}`)).toEqual([
 			'20 waiting for a scheduled time'
@@ -2767,12 +2773,49 @@ describe('encodeWaitingReasons', () => {
 		const reasons = encodeWaitingReasons(
 			job([
 				{ reason: 'stopped', label: 'stopped', count: 1, items: [] },
-				{ reason: 'retrying', label: 'still retrying', count: 1, items: [] }
+				{ reason: 'retrying', label: 'trying again soon', count: 1, items: [] }
 			])
 		);
 
 		expect(reasons.needsYou.map((group) => group.reason)).toEqual(['stopped']);
 		expect(reasons.waiting.map((group) => group.reason)).toEqual(['retrying']);
+	});
+
+	it('lists files the owner already answered for apart from what is waiting', () => {
+		const reasons = encodeWaitingReasons(
+			job([
+				{
+					reason: 'quality_floor_size_conflict',
+					label: 'waiting for your OK to use more space',
+					count: 1,
+					needs_owner: true,
+					items: [],
+					size_questions: [
+						{
+							job_id: 'shard-1',
+							rel_path: 'tv/Show/Season 1/Show S01E01.mkv',
+							goal_bytes: 191_800_000,
+							smallest_quality_safe_bytes: 358_900_000
+						}
+					]
+				},
+				{
+					reason: 'size_exception_declined',
+					label: 'kept as the original, your choice',
+					count: 2,
+					needs_owner: false,
+					owner_choice: true,
+					items: []
+				}
+			])
+		);
+
+		expect(reasons.needsYou.map((group) => group.size_questions?.length)).toEqual([1]);
+		expect(reasons.waiting).toEqual([]);
+		expect(reasons.yourChoices.map((group) => `${group.count} ${group.label}`)).toEqual([
+			'2 kept as the original, your choice'
+		]);
+		expect(reasons.fileCount).toBe(3);
 	});
 
 	it('names the scope a borrowed reason list covers', () => {
@@ -2781,6 +2824,11 @@ describe('encodeWaitingReasons', () => {
 	});
 
 	it('is empty without an encode job', () => {
-		expect(encodeWaitingReasons(null)).toEqual({ needsYou: [], waiting: [], fileCount: 0 });
+		expect(encodeWaitingReasons(null)).toEqual({
+			needsYou: [],
+			waiting: [],
+			yourChoices: [],
+			fileCount: 0
+		});
 	});
 });

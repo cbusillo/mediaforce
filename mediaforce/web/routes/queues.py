@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 CHILD_RECOVERY_PREVIEW_PATH = "/api/encode-queue/recover-children/preview"
 CHILD_RECOVERY_APPLY_PATH = "/api/encode-queue/recover-children/apply"
+SIZE_DECISION_PATH = "/api/encode-queue/size-decision"
 
 
 def register_queue_routes(
@@ -58,26 +59,7 @@ def register_child_recovery_routes(
         recover_children_action: Callable[[str, list[str], str | None], dict[str, Any]],
 ) -> None:
     async def dispatch(request: Request, *, apply: bool) -> JSONResponse:
-        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
-            raise HTTPException(status_code=415, detail="Recovery requires application/json.")
-        origin = request.headers.get("origin")
-        try:
-            parsed_origin = urlsplit(origin) if origin is not None else None
-        except ValueError:
-            raise HTTPException(status_code=403, detail="Invalid recovery origin.") from None
-        if request.headers.get("sec-fetch-site") == "cross-site" or (
-                parsed_origin is not None and (
-                    parsed_origin.scheme != request.url.scheme
-                    or parsed_origin.netloc != request.url.netloc
-                )
-        ):
-            raise HTTPException(status_code=403, detail="Recovery must originate from this controller.")
-        try:
-            body = await request.json()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="A JSON recovery request is required.") from None
-        if not isinstance(body, dict):
-            raise HTTPException(status_code=400, detail="A recovery request object is required.")
+        body = await _controller_json_body(request)
         parent_id = body.get("parent_job_id")
         child_ids = body.get("child_ids")
         if (
@@ -100,3 +82,44 @@ def register_child_recovery_routes(
     @app.post(CHILD_RECOVERY_APPLY_PATH)
     async def apply_child_recovery(request: Request) -> JSONResponse:
         return await dispatch(request, apply=True)
+
+
+def register_size_decision_routes(
+        app: FastAPI,
+        *,
+        decide_size_exception_action: Callable[[str, bool], dict[str, Any]],
+) -> None:
+    @app.post(SIZE_DECISION_PATH)
+    async def decide_size_exception(request: Request) -> JSONResponse:
+        body = await _controller_json_body(request)
+        job_id = body.get("job_id")
+        allow = body.get("allow")
+        if not isinstance(job_id, str) or not job_id.strip() or not isinstance(allow, bool):
+            raise HTTPException(status_code=400, detail="Name one file's job and whether to allow the larger size.")
+        result = await run_in_threadpool(decide_size_exception_action, job_id.strip(), allow)
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
+
+
+async def _controller_json_body(request: Request) -> dict[str, Any]:
+    """A JSON object posted from this controller's own pages; anything else is refused."""
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=415, detail="Recovery requires application/json.")
+    origin = request.headers.get("origin")
+    try:
+        parsed_origin = urlsplit(origin) if origin is not None else None
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Invalid recovery origin.") from None
+    if request.headers.get("sec-fetch-site") == "cross-site" or (
+            parsed_origin is not None and (
+                parsed_origin.scheme != request.url.scheme
+                or parsed_origin.netloc != request.url.netloc
+            )
+    ):
+        raise HTTPException(status_code=403, detail="Recovery must originate from this controller.")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="A JSON recovery request is required.") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="A recovery request object is required.")
+    return body

@@ -46,6 +46,7 @@ from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
+from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
     ProcessDeadlineEnforcementError, ScheduleWindowClosedError
@@ -2337,6 +2338,227 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(analysis["compression_authorization"]["reason_code"], "compression_intent_unconfirmed")
         self.assertNotIn("compression_escalation", manifest["items"][0])
 
+    def _decide_size(self, connection: DBClient, job_id: str, *, allow: bool) -> dict[str, Any]:
+        synced: list[str] = []
+        result = decide_size_exception(
+            connection,
+            job_id,
+            allow=allow,
+            now_iso=lambda: "2026-09-29T23:00:00+00:00",
+            sync_parent=lambda _connection, child: synced.append(str(child["job_id"])),
+        )
+        if result["ok"]:
+            self.assertEqual(synced, [job_id])
+        return result
+
+    def test_quality_floor_conflict_far_above_goal_asks_the_owner_about_that_file(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, _manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "floor-conflict-question",
+                best_reachable_bytes=400_000_000,
+            )
+
+        assert updated is not None
+        self.assertEqual(
+            encode_runtime.size_exception_question(updated),
+            {
+                "job_id": "job-floor-conflict-question",
+                "rel_path": "tv/show/floor-conflict-question.mkv",
+                "goal_bytes": 200_000_000,
+                "smallest_quality_safe_bytes": 400_000_000,
+            },
+        )
+
+    def test_breakdown_asks_every_waiting_file_its_size_question(self) -> None:
+        children = [
+            {
+                "job_id": f"shard-{index}",
+                "status": "needs_attention",
+                "manifest_indexes": [index],
+                "progress": {
+                    "failure_analysis": {
+                        "kind": "quality_floor_size_conflict",
+                        "retry_strategy": "needs_operator_approval",
+                        "target_size_bytes": 200,
+                        "proposed_target_size_bytes": 400 + index,
+                        "item_rel_path": f"tv/show/episode-{index}.mkv",
+                    }
+                },
+            }
+            for index in range(encode_runtime._UNFINISHED_BREAKDOWN_ITEM_LIMIT + 2)
+        ]
+
+        (group,) = encode_runtime._unfinished_child_breakdown(children)
+
+        self.assertEqual(group["reason"], "quality_floor_size_conflict")
+        self.assertTrue(group["needs_owner"])
+        self.assertEqual(
+            [question["job_id"] for question in group["size_questions"]],
+            [child["job_id"] for child in children],
+        )
+        self.assertEqual(group["size_questions"][1]["smallest_quality_safe_bytes"], 401)
+
+    def test_owner_allowing_the_larger_size_retries_only_that_file_under_an_item_exception(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._quality_floor_conflict_job(connection, "floor-allow", best_reachable_bytes=400_000_000)
+            self._quality_floor_conflict_job(connection, "floor-sibling", best_reachable_bytes=400_000_000)
+            result = self._decide_size(connection, "job-floor-allow", allow=True)
+            updated = load_encode_job(connection, "job-floor-allow")
+            sibling = load_encode_job(connection, "job-floor-sibling")
+            events = connection.execute(
+                select(item_events.c.event_type).where(item_events.c.event_type == "owner_size_decision")
+            ).fetchall()
+        manifest = json.loads((self.root / "runs" / "manifest-floor-allow.json").read_text())
+        sibling_manifest = json.loads((self.root / "runs" / "manifest-floor-sibling.json").read_text())
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None and sibling is not None
+        self.assertEqual(updated["status"], "queued")
+        self.assertIsNone(updated["finished_at"])
+        self.assertEqual(sibling["status"], "needs_attention")
+        item = manifest["items"][0]
+        self.assertEqual(item["resolved_policy"]["video"]["target_size_bytes"], 400_000_000)
+        self.assertEqual(item["resolved_policy"]["video"]["size_goal_source"], "quality_floor_exception")
+        self.assertEqual(item["stream_budget_ledger"]["totals"]["total_target_bytes"], 400_000_000)
+        escalation = item["compression_escalation"]
+        self.assertEqual(escalation["scope"], "item")
+        self.assertEqual(escalation["evidence"]["kind"], "measured_quality_floor_violation")
+        self.assertEqual(escalation["evidence"]["owner_approval"]["kind"], "operator_override")
+        self.assertEqual(escalation["decision"]["outcome"], "authorized")
+        self.assertEqual(sibling_manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+        analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(analysis["owner_size_decision"]["answer"], "allow")
+        self.assertEqual(len(events), 1)
+
+    def _floor_conflict_shard_under_running_folder(self, connection: DBClient, name: str) -> dict[str, Any]:
+        child, _manifest_path = self._quality_floor_conflict_job(connection, name, best_reachable_bytes=400_000_000)
+        assert child is not None
+        parent = {
+            **child,
+            "job_id": f"folder-{name}",
+            "job_kind": "folder",
+            "parent_job_id": None,
+            "status": "running",
+            "manifest_indexes": None,
+            "progress": {},
+            "error": None,
+            "finished_at": None,
+        }
+        save_encode_job(connection, parent)
+        child = {**child, "job_kind": "shard", "parent_job_id": parent["job_id"], "manifest_indexes": [0]}
+        save_encode_job(connection, child)
+        connection.commit()
+        return child
+
+    def test_allowing_a_larger_size_is_not_blocked_by_its_own_running_folder(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._floor_conflict_shard_under_running_folder(connection, "floor-under-folder")
+            result = self._decide_size(connection, "job-floor-under-folder", allow=True)
+            updated = load_encode_job(connection, "job-floor-under-folder")
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "queued")
+
+    def test_allowing_a_larger_size_refuses_a_file_another_active_part_holds(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            child = self._floor_conflict_shard_under_running_folder(connection, "floor-held")
+            save_encode_job(connection, {**child, "job_id": "job-floor-held-again", "status": "queued"})
+            connection.commit()
+            result = self._decide_size(connection, "job-floor-held", allow=True)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("already queued again", result["message"])
+
+    def test_a_failed_allow_puts_the_file_manifest_item_back(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            _updated, manifest_path = self._quality_floor_conflict_job(
+                connection, "floor-allow-fails", best_reachable_bytes=400_000_000,
+            )
+            before = json.loads(manifest_path.read_text())["items"][0]
+
+            def failing_sync(_connection: DBClient, _child: dict[str, Any]) -> None:
+                raise RuntimeError("parent sync failed")
+
+            with self.assertRaises(RuntimeError):
+                decide_size_exception(
+                    connection,
+                    "job-floor-allow-fails",
+                    allow=True,
+                    now_iso=lambda: "2026-09-29T23:00:00+00:00",
+                    sync_parent=failing_sync,
+                )
+            updated = load_encode_job(connection, "job-floor-allow-fails")
+
+        self.assertEqual(json.loads(manifest_path.read_text())["items"][0], before)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertIsNotNone(encode_runtime.size_exception_question(updated))
+
+    def test_a_failed_manifest_write_leaves_the_shared_manifest_whole(self) -> None:
+        manifest_path = self._write_manifest("manifest-atomic.json", [{"library_item_id": 1, "rel_path": "a.mkv"}])
+        before = manifest_path.read_text()
+        real_write_text = Path.write_text
+
+        def write_then_fail(path: Path, data: str, *args: Any, **kwargs: Any) -> int:
+            real_write_text(path, data[: len(data) // 2], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(Path, "write_text", write_then_fail), self.assertRaises(OSError):
+            encode_runtime.restore_manifest_item(manifest_path, 0, {"library_item_id": 1, "rel_path": "b.mkv"})
+
+        self.assertEqual(manifest_path.read_text(), before)
+        self.assertEqual(sorted(path.name for path in manifest_path.parent.iterdir() if ".tmp" in path.name), [])
+
+    def test_owner_keeping_the_original_leaves_the_file_listed_and_unchanged(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            _updated, manifest_path = self._quality_floor_conflict_job(
+                connection, "floor-keep", best_reachable_bytes=400_000_000,
+            )
+            result = self._decide_size(connection, "job-floor-keep", allow=False)
+            updated = load_encode_job(connection, "job-floor-keep")
+            again = self._decide_size(connection, "job-floor-keep", allow=True)
+        manifest = json.loads(manifest_path.read_text())
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+        self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+        self.assertIsNone(encode_runtime.size_exception_question(updated))
+        (group,) = encode_runtime._unfinished_child_breakdown([updated])
+        self.assertEqual(group["reason"], "size_exception_declined")
+        self.assertFalse(group["needs_owner"])
+        self.assertTrue(group["owner_choice"])
+        self.assertNotIn("size_questions", group)
+        self.assertFalse(again["ok"])
+
+    def test_size_decision_refuses_a_file_the_automatic_retry_or_goal_confirmation_owns(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._quality_floor_conflict_job(connection, "floor-auto", best_reachable_bytes=240_000_000)
+            self._quality_floor_conflict_job(
+                connection,
+                "floor-unconfirmed",
+                best_reachable_bytes=400_000_000,
+                compression_intent={
+                    "schema_version": 1, "level": "legacy_unconfirmed", "source": "legacy", "confirmed": False,
+                },
+            )
+            auto = self._decide_size(connection, "job-floor-auto", allow=True)
+            unconfirmed = self._decide_size(connection, "job-floor-unconfirmed", allow=True)
+            missing = self._decide_size(connection, "job-does-not-exist", allow=True)
+            unconfirmed_job = load_encode_job(connection, "job-floor-unconfirmed")
+        manifest = json.loads((self.root / "runs" / "manifest-floor-unconfirmed.json").read_text())
+
+        self.assertFalse(auto["ok"])
+        self.assertFalse(missing["ok"])
+        self.assertFalse(unconfirmed["ok"])
+        self.assertIn("Confirm this show's size choice", unconfirmed["message"])
+        assert unconfirmed_job is not None
+        self.assertEqual(unconfirmed_job["status"], "needs_attention")
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+
     def test_final_size_miss_requires_a_fresh_goal_instead_of_plain_retry(self) -> None:
         source_path = self._create_source_file("episode-final-size-miss.mkv")
         staging_path = self._staging_path("episode-final-size-miss.mkv")
@@ -3229,7 +3451,7 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(encode_runtime._classify_encode_failure(exc, job), "host_unavailable")
         self.assertTrue(encode_runtime._encode_failure_is_retryable("host_unavailable", str(exc), job["host"]))
 
-    def test_mount_configuration_failure_is_not_retryable(self) -> None:
+    def test_mount_configuration_failure_retries_the_episode_but_not_past_its_attempts(self) -> None:
         job = {"host": {"key": "remote-a", "label": "Remote A", "mode": "ssh"}}
         exc = remote.HostReadinessError(
             "Mediaforce could not identify the SMB share.",
@@ -3238,7 +3460,219 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
 
         failure_kind = encode_runtime._classify_encode_failure(exc, job)
         self.assertEqual(failure_kind, "host_configuration")
-        self.assertFalse(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+        self.assertTrue(encode_runtime._encode_failure_is_retryable(failure_kind, str(exc), job["host"]))
+        self.assertTrue(encode_runtime._encode_failure_is_host_related(failure_kind, str(exc), job["host"]))
+        self.assertFalse(
+            encode_runtime._encode_failure_retries_after_attempt_cap(failure_kind, str(exc), job["host"])
+        )
+
+    def _computer_setup_failure(
+            self,
+            connection: DBClient,
+            name: str,
+            *,
+            attempt_count: int,
+            host_key: str = "remote-a",
+    ) -> dict[str, Any] | None:
+        source_path = self._create_source_file(f"{name}.mkv")
+        item_id = self._insert_library_item(connection, source_path, status="encoding")
+        self._write_manifest(
+            f"manifest-{name}.json",
+            [{"library_item_id": item_id, "staging_path": str(self._staging_path(f"{name}.mkv"))}],
+        )
+        self._save_job(
+            connection,
+            job_id=f"job-{name}",
+            manifest_name=f"manifest-{name}.json",
+            host={"key": host_key, "label": host_key.title(), "mode": "ssh"},
+            status="running",
+            attempt_count=attempt_count,
+        )
+        job = load_encode_job(connection, f"job-{name}")
+        assert job is not None
+        web_app._transition_encode_job_failure(
+            connection,
+            self.config,
+            job,
+            failure_kind="host_configuration",
+            error_message="Remote A could not connect the media share with Finder.",
+        )
+        return load_encode_job(connection, f"job-{name}")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_computer_setup_failure_returns_the_episode_and_cools_that_computer_down(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._computer_setup_failure(connection, "episode-setup-retry", attempt_count=1)
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIsNone(updated["terminal_reason"])
+        self.assertIn("a setup problem on that computer", str(updated["waiting_reason"]))
+        self.assertIsNotNone(updated["host_cooldown_until"])
+        self.assertEqual(updated["last_host"]["key"], "remote-a")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_computer_setup_failure_at_the_attempt_cap_goes_to_the_owner(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated = self._computer_setup_failure(
+                connection,
+                "episode-setup-exhausted",
+                attempt_count=web_app._encode_queue_runtime_deps().encode_job_max_attempts,
+            )
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertEqual(updated["terminal_reason"], "max_attempts_exhausted")
+        self.assertEqual(updated["last_failure_kind"], "host_configuration")
+        # The computer still cools down, so it counts toward blocking it for the next episode.
+        self.assertIsNotNone(updated["host_cooldown_until"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_last_attempt_setup_failures_still_block_that_computer(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(
+                    connection, f"episode-setup-last-{index}", attempt_count=deps.encode_job_max_attempts,
+                )
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_repeated_computer_setup_failures_block_that_computer_for_everyone(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            self._computer_setup_failure(connection, "episode-setup-first", attempt_count=1)
+            after_one = encode_runtime._globally_backed_off_encode_hosts(
+                connection, deps, now=datetime.now(tz=UTC),
+            )
+            for index in range(1, encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(connection, f"episode-setup-{index}", attempt_count=1)
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        if encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD > 1:
+            self.assertEqual(after_one, {})
+        self.assertEqual([payload["key"] for payload in blocked.values()], ["remote-a"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_scratch_failure_sends_that_file_to_another_computer_without_blocking_the_computer(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        source_path = self._create_source_file("episode-scratch-full.mkv")
+        with open_db(self.config.paths.db_path) as connection:
+            item_id = self._insert_library_item(connection, source_path, status="encoding")
+            self._write_manifest(
+                "manifest-scratch-full.json",
+                [{"library_item_id": item_id, "staging_path": str(self._staging_path("episode-scratch-full.mkv"))}],
+            )
+            self._save_job(
+                connection,
+                job_id="job-scratch-full",
+                manifest_name="manifest-scratch-full.json",
+                host={"key": "staged-a", "label": "Staged A", "mode": "ssh"},
+                status="running",
+                attempt_count=1,
+            )
+            job = load_encode_job(connection, "job-scratch-full")
+            assert job is not None
+            web_app._transition_encode_job_failure(
+                connection,
+                self.config,
+                job,
+                failure_kind="host_scratch",
+                error_message="The encode host scratch folder has 3 GiB free; this file needs about 9 GiB.",
+            )
+            updated = load_encode_job(connection, "job-scratch-full")
+            blocked = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+        assert updated is not None
+        self.assertEqual(updated["status"], "retry_backoff")
+        self.assertIsNotNone(updated["host_cooldown_until"])
+        self.assertEqual(updated["last_host"]["key"], "staged-a")
+        self.assertEqual(blocked, {})
+
+        def host(key: str, priority: int) -> dict[str, Any]:
+            return {
+                "key": key, "host": key, "label": key.title(), "mode": "ssh", "media_access": "mounted",
+                "priority": priority, "capabilities": ["encode_queue"], "available": True, "probe_available": True,
+                "active_encode_count": 0, "max_parallel_encodes": 1, "queue_active": True,
+            }
+
+        with open_db(self.config.paths.db_path) as connection, patch(
+                "mediaforce.web.app._host_runtime_rows", return_value=[host("staged-a", 90), host("mounted-b", 70)],
+        ):
+            host_payload, waiting_reason = web_app._select_encode_host(connection, self.config, updated)
+
+        assert host_payload is not None, waiting_reason
+        self.assertEqual(host_payload["key"], "mounted-b")
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_a_computer_that_passes_its_readiness_check_takes_work_again_at_once(self) -> None:
+        deps = web_app._encode_queue_runtime_deps()
+        with open_db(self.config.paths.db_path) as connection:
+            for index in range(encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD):
+                self._computer_setup_failure(connection, f"episode-ready-a-{index}", attempt_count=1)
+            other = self._computer_setup_failure(connection, "episode-ready-b", attempt_count=1, host_key="remote-b")
+            before = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+
+            released = encode_runtime.release_host_cooldowns(
+                connection, {"key": "remote-a", "label": "Remote A"}, updated_at=web_app._now_iso(),
+            )
+            after = encode_runtime._globally_backed_off_encode_hosts(connection, deps, now=datetime.now(tz=UTC))
+            first = load_encode_job(connection, "job-episode-ready-a-0")
+            still_cooling = load_encode_job(connection, "job-episode-ready-b")
+
+        self.assertEqual([payload["key"] for payload in before.values()], ["remote-a"])
+        self.assertEqual(released, encode_runtime.ENCODE_HOST_BACKUP_FAILURE_THRESHOLD)
+        self.assertEqual(after, {})
+        assert first is not None and still_cooling is not None and other is not None
+        self.assertIsNone(first["host_cooldown_until"])
+        self.assertNotIn("failure_streak", first["last_host"])
+        self.assertEqual(first["status"], "retry_backoff")
+        self.assertEqual(still_cooling["host_cooldown_until"], other["host_cooldown_until"])
+
+    @patch("mediaforce.web.runtime.encode_runtime.run_remote_command", new=_remote_host_unreachable)
+    def test_releasing_a_computer_keeps_a_failure_recorded_after_it_was_read(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._computer_setup_failure(connection, "episode-ready-race", attempt_count=1)
+            real_execute = connection.execute
+            raced: list[bool] = []
+
+            def execute_with_fresh_failure(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                if getattr(statement, "is_update", False) and not raced:
+                    raced.append(True)
+                    real_execute(
+                        update(encode_jobs)
+                        .where(encode_jobs.c.job_id == "job-episode-ready-race")
+                        .values(host_cooldown_until="2999-01-01T00:00:00+00:00")
+                    )
+                return real_execute(statement, *args, **kwargs)
+
+            with patch.object(connection, "execute", side_effect=execute_with_fresh_failure):
+                released = encode_runtime.release_host_cooldowns(
+                    connection, {"key": "remote-a"}, updated_at=web_app._now_iso(),
+                )
+            job = load_encode_job(connection, "job-episode-ready-race")
+
+        self.assertEqual(released, 0)
+        assert job is not None
+        self.assertEqual(job["host_cooldown_until"], "2999-01-01T00:00:00+00:00")
+
+    def test_cleanup_on_a_share_that_stopped_answering_is_deferred_not_crashed(self) -> None:
+        staging_path = self._staging_path("episode-dead-mount.mkv")
+
+        with patch.object(Path, "exists", side_effect=TimeoutError(60, "Operation timed out")):
+            result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
+
+        self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_DEFERRED)
+
+    def test_cleanup_refused_by_permissions_fails_instead_of_waiting_forever(self) -> None:
+        staging_path = self._staging_path("episode-no-access.mkv")
+
+        with patch.object(Path, "exists", side_effect=PermissionError(13, "Permission denied")):
+            result = encode_runtime._remove_stale_staging_path(staging_path, host={"key": "local", "mode": "local"})
+
+        self.assertEqual(result.outcome, encode_runtime._StagingPathCleanupOutcome.CLEANUP_FAILED)
 
     def test_containment_failure_is_not_retried_from_embedded_ssh_markers(self) -> None:
         host = {"key": "remote-a", "label": "Remote A", "mode": "ssh"}
@@ -20613,6 +21047,7 @@ raise SystemExit(0)
             ended = resync()
             ended_state = workflow_state_runtime._load_encode_job_state(connection, scope)
 
+        labels = encode_runtime._UNFINISHED_REASON_LABELS
         self.assertEqual(working["status"], "running")
         self.assertEqual(
             [
@@ -20620,9 +21055,9 @@ raise SystemExit(0)
                 for group in object_dict(working["progress"])["unfinished_breakdown"]
             ],
             [
-                ("outside size limit", 1, True),
+                (labels["final_size_target_miss"], 1, True),
                 ("longer than every work window", 1, True),
-                ("storage error", 1, True),
+                (labels["storage_io"], 1, True),
                 ("waiting for a scheduled time", 1, False),
             ],
         )
@@ -20632,8 +21067,8 @@ raise SystemExit(0)
                 "label": "Needs attention",
                 "tone": "warning",
                 "detail": (
-                    "1 outside size limit · 1 longer than every work window · 1 storage error · "
-                    "1 waiting for a scheduled time"
+                    f"1 {labels['final_size_target_miss']} · 1 longer than every work window · "
+                    f"1 {labels['storage_io']} · 1 waiting for a scheduled time"
                 ),
             },
         )
@@ -20641,8 +21076,8 @@ raise SystemExit(0)
             working_state,
             (
                 "processing",
-                "Encode job is running for tv/show. Needs you: 1 outside size limit · "
-                "1 longer than every work window · 1 storage error.",
+                f"Encode job is running for tv/show. Needs you: 1 {labels['final_size_target_miss']} · "
+                f"1 longer than every work window · 1 {labels['storage_io']}.",
             ),
         )
         # Recovery and retry still see the stored status; only the reading stays "working".
@@ -20651,14 +21086,18 @@ raise SystemExit(0)
             queued_left_state,
             (
                 "processing",
-                "Encode job is queued for tv/show. Needs you: 1 outside size limit · "
-                "1 longer than every work window · 1 storage error.",
+                f"Encode job is queued for tv/show. Needs you: 1 {labels['final_size_target_miss']} · "
+                f"1 longer than every work window · 1 {labels['storage_io']}.",
             ),
         )
         self.assertEqual(ended["status"], "needs_attention")
         self.assertEqual(
             ended_state,
-            ("attention", "Encode job is needs_attention for tv/show: 1 outside size limit · 1 storage error"),
+            (
+                "attention",
+                f"Encode job is needs_attention for tv/show: 1 {labels['final_size_target_miss']} · "
+                f"1 {labels['storage_io']}",
+            ),
         )
 
     def test_unfinished_breakdown_separates_waits_that_need_the_owner(self) -> None:
@@ -22674,6 +23113,36 @@ raise SystemExit(0)
                 update(library_items).where(library_items.c.id == item_id).values(cadence_summary_json=cleared_summary)
             )
 
+    def test_paused_background_work_still_admits_files_whose_evidence_is_current(self) -> None:
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 2.mkv"])
+                .values(cadence_summary_json=None)
+            )
+            set_background_work_paused(connection, is_paused=True)
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        saved_jobs: list[dict[str, Any]] = []
+
+        result = self._queue_show_folder(queue_config, saved_jobs, calibration=calibration)
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self._queued_manifest_item_ids(saved_jobs), [item_ids["Episode 1.mkv"]])
+        self.assertEqual(
+            {entry["library_item_id"]: entry["code"] for entry in result["left_out"]},
+            {item_ids["Episode 2.mkv"]: "cadence_analysis_unavailable"},
+        )
+        self.assertEqual(set(self._hold_rows()), {item_ids["Episode 2.mkv"]})
+        with open_db(self.config.paths.db_path) as connection:
+            queued_evidence = connection.execute(
+                select(library_item_evidence_state.c.library_item_id).where(
+                    library_item_evidence_state.c.work_status.in_(("queued", "running")),
+                )
+            ).scalars().all()
+        self.assertEqual(queued_evidence, [])
+
     def test_queue_folder_records_a_hold_for_each_file_waiting_on_its_check(self) -> None:
         _config, item_ids, _calibration, _jobs = self._held_episode_fixture()
 
@@ -22767,7 +23236,10 @@ raise SystemExit(0)
             ).to_payload()
 
         accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
-            queue_config, "tv/show", now_iso=web_app._now_iso(),
+            queue_config,
+            "tv/show",
+            now_iso=web_app._now_iso(),
+            current_approval=lambda _prefix: production_holds_runtime.approval_identity(calibration, None),
         )
         joined_jobs: list[dict[str, Any]] = []
         production_holds_runtime.join_cleared_held_files(
@@ -22801,6 +23273,147 @@ raise SystemExit(0)
         self.assertTrue(joined_manifest["items"][0]["cadence_decision"]["owner_accepted_as_is"])
         self.assertEqual(set(self._hold_rows()), {item_ids["Episode 3.mkv"]})
 
+    def _accepted_episode_never_held(self, *, save_run: bool) -> tuple[MediaforceConfig, dict[str, int], dict[str, Any]]:
+        """Season 1 queued once with Episode 2 left out for its motion pattern, but no hold kept for it."""
+        queue_config = self._complete_queue_config()
+        with open_db(self.config.paths.db_path) as connection:
+            item_ids = self._insert_show_episodes(connection, "Episode 1.mkv", "Episode 2.mkv")
+            base = json.loads(str(connection.execute(
+                select(library_items.c.cadence_summary_json).where(library_items.c.id == item_ids["Episode 1.mkv"])
+            ).scalar_one()))
+            connection.execute(
+                update(library_items)
+                .where(library_items.c.id == item_ids["Episode 2.mkv"])
+                .values(cadence_summary_json=json.dumps(
+                    self._measured_cadence(base, progressive=450, undetermined=153), separators=(",", ":"),
+                ))
+            )
+        calibration = object_dict(self._accepted_calibration_state(queue_config, "tv/show/Season 1"))
+        first_jobs: list[dict[str, Any]] = []
+        self._queue_show_folder(queue_config, first_jobs, calibration=calibration)
+        with open_db(self.config.paths.db_path) as connection:
+            if save_run:
+                save_encode_job(connection, {
+                    **next(job for job in first_jobs if job["job_kind"] == "folder"), "status": "completed",
+                })
+            connection.execute(delete(production_holds))
+        return queue_config, item_ids, calibration
+
+    def test_accepted_episode_no_run_held_joins_production_without_queueing_the_show_again(self) -> None:
+        queue_config, item_ids, calibration = self._accepted_episode_never_held(save_run=True)
+        approval = production_holds_runtime.approval_identity(calibration, None)
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: approval,
+        )
+        holds = self._hold_rows()
+        joined_jobs: list[dict[str, Any]] = []
+        production_holds_runtime.join_cleared_held_files(
+            lambda: open_db(self.config.paths.db_path),
+            current_approval=lambda _prefix: approval,
+            queue_held_files=lambda group: self._queue_show_folder(
+                queue_config, joined_jobs, calibration=calibration, only_library_item_ids=group.library_item_ids,
+            ),
+            now_iso=web_app._now_iso,
+        )
+
+        self.assertEqual(accepted["accepted_count"], 1)
+        self.assertIn("It joins production once nothing else is encoding in the show.", accepted["message"])
+        hold = holds[item_ids["Episode 2.mkv"]]
+        self.assertEqual(
+            (hold["prefix"], hold["mode"], hold["approval_identity"], hold["status"]),
+            # The run was queued with the season override, so the file joins it the same way.
+            ("tv/show/Season 1", "season_override", approval, "waiting"),
+        )
+        self.assertEqual(self._queued_manifest_item_ids(joined_jobs), [item_ids["Episode 2.mkv"]])
+
+    def test_accepted_episode_joins_a_season_override_run_queued_before_modes_were_recorded(self) -> None:
+        queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+        with open_db(self.config.paths.db_path) as connection:
+            run = load_latest_encode_job(connection, "tv/show")
+        assert run is not None
+        manifest_path = Path(str(run["manifest_path"]))
+        manifest = json.loads(manifest_path.read_text())
+        manifest["selection"].pop("queue_mode")
+        manifest_path.write_text(json.dumps(manifest))
+
+        ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+        )
+
+        self.assertTrue(any(
+            item["selection_provenance"]["manual_override"] for item in manifest["items"]
+        ))
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["mode"], "season_override")
+
+    def test_accepted_episode_joins_the_newest_run_that_covers_it_not_the_show_latest(self) -> None:
+        queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+        with open_db(self.config.paths.db_path) as connection:
+            season_1_run = load_latest_encode_job(connection, "tv/show")
+            assert season_1_run is not None
+            save_encode_job(connection, {
+                **season_1_run,
+                "job_id": "season-2-run",
+                "prefix": "tv/show/Season 2",
+                "created_at": "2999-01-01T00:00:00+00:00",
+            })
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+        )
+
+        self.assertIn("It joins production once nothing else is encoding", accepted["message"])
+        self.assertEqual(self._hold_rows()[item_ids["Episode 2.mkv"]]["prefix"], "tv/show/Season 1")
+
+    def test_accepted_episode_joins_an_older_seasons_run_only_for_a_season_it_included(self) -> None:
+        for season, expected_mode in (("tv/show/Season 1", "older_seasons"), ("tv/show/Season 2", None)):
+            with self.subTest(season=season):
+                queue_config, item_ids, _calibration = self._accepted_episode_never_held(save_run=True)
+                with open_db(self.config.paths.db_path) as connection:
+                    run = load_latest_encode_job(connection, "tv/show")
+                    connection.execute(delete(encode_jobs))
+                assert run is not None
+                manifest_path = Path(str(run["manifest_path"]))
+                manifest = json.loads(manifest_path.read_text())
+                manifest["selection"]["lifecycle_override"] = {
+                    "mode": "older_seasons", "included_season_prefixes": [season],
+                }
+                # A run queued before its mode was recorded shows older seasons only through this selection.
+                manifest["selection"].pop("queue_mode", None)
+                manifest_path.write_text(json.dumps(manifest))
+                with open_db(self.config.paths.db_path) as connection:
+                    save_encode_job(connection, run)
+
+                ambiguous_motion_runtime.accept_ambiguous_motion_action(
+                    queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: "approval",
+                )
+                holds = self._hold_rows()
+
+                self.assertEqual(
+                    holds[item_ids["Episode 2.mkv"]]["mode"] if expected_mode else holds,
+                    expected_mode or {},
+                )
+                with open_db(self.config.paths.db_path) as connection:
+                    connection.execute(delete(production_holds))
+                    connection.execute(delete(encode_jobs))
+                    connection.execute(delete(library_items))
+
+    def _assert_accepted_episode_waits_for_the_next_queue(self, *, save_run: bool, approval: str | None) -> None:
+        queue_config, _item_ids, _calibration = self._accepted_episode_never_held(save_run=save_run)
+
+        accepted = ambiguous_motion_runtime.accept_ambiguous_motion_action(
+            queue_config, "tv/show", now_iso=web_app._now_iso(), current_approval=lambda _prefix: approval,
+        )
+
+        self.assertIn("It joins production the next time you queue the show", accepted["message"])
+        self.assertEqual(self._hold_rows(), {})
+
+    def test_accepted_episode_with_no_run_says_it_joins_at_the_next_queue(self) -> None:
+        self._assert_accepted_episode_waits_for_the_next_queue(save_run=False, approval="any-approval")
+
+    def test_accepted_episode_whose_run_lost_its_approval_says_it_joins_at_the_next_queue(self) -> None:
+        self._assert_accepted_episode_waits_for_the_next_queue(save_run=True, approval=None)
+
     def test_show_offers_the_as_is_decision_before_stored_evidence_is_refreshed(self) -> None:
         queue_config = self._complete_queue_config()
         with open_db(self.config.paths.db_path) as connection:
@@ -22828,7 +23441,7 @@ raise SystemExit(0)
 
         with self.assertRaises(HTTPException) as raised:
             ambiguous_motion_runtime.accept_ambiguous_motion_action(
-                queue_config, "tv/show/Season 1", now_iso=web_app._now_iso(),
+                queue_config, "tv/show/Season 1", now_iso=web_app._now_iso(), current_approval=lambda _prefix: None,
             )
 
         self.assertEqual(raised.exception.status_code, 400)

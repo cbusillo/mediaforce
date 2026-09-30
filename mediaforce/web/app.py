@@ -187,15 +187,16 @@ from mediaforce.web.runtime_lock import (
     reserve_mediaforce_database_identity,
 )
 from mediaforce.web.routes.queues import (
-    CHILD_RECOVERY_APPLY_PATH, CHILD_RECOVERY_PREVIEW_PATH, register_child_recovery_routes,
+    CHILD_RECOVERY_APPLY_PATH, CHILD_RECOVERY_PREVIEW_PATH, register_child_recovery_routes, register_size_decision_routes,
 )
 from mediaforce.web.runtime.child_recovery import apply_child_recovery, preview_child_recovery
+from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.web.runtime.folder_actions import child_recovery_approval, child_recovery_candidate_evidence
 from mediaforce.web.runtime.folder_actions import production_approval_identity
 from mediaforce.web.runtime.ambiguous_motion import accept_ambiguous_motion_action, ambiguous_motion_files
 from mediaforce.web.runtime.production_holds import HOLD_REFUSED, MODE_OLDER_SEASONS as HOLD_MODE_OLDER_SEASONS, \
     MODE_SEASON_OVERRIDE as HOLD_MODE_SEASON_OVERRIDE, ClearedHoldGroup, join_cleared_held_files
-from mediaforce.web.runtime.encode_runtime import sync_encode_job_parent
+from mediaforce.web.runtime.encode_runtime import release_host_cooldowns, sync_encode_job_parent
 from mediaforce.web.runtime.host_runtime import lifecycle_command_error_detail as runtime_lifecycle_command_error_detail
 from mediaforce.web.runtime.worker_leadership import WorkerLeadershipLease
 from mediaforce.web.runtime.worker_supervision import SupervisedWorkerHandle, run_supervised_worker_loop
@@ -1039,7 +1040,21 @@ def create_app(
     def _prepare_host_action(host_key: str, remote_password: str | None = None) -> dict[str, Any]:
         nonlocal config
         result = prepare_remote_host_with_password(config, host_key, password=remote_password or None)
+        if result.ok:
+            _release_ready_host_cooldowns(host_key)
         return _host_action_result(result)
+
+    def _release_ready_host_cooldowns(host_key: str) -> None:
+        """A computer that just passed Prepare or Start takes work again instead of waiting out its cooldown."""
+        host = host_config_for_key(config, host_key)
+        if not host:
+            return
+        # The computer's own key and address name it; the requested name may be a label another computer uses.
+        identity = {name: host[name] for name in ("key", "host") if str(host.get(name) or "").strip()}
+        with open_db(config.paths.db_path) as connection:
+            released = release_host_cooldowns(connection, identity, updated_at=_now_iso())
+        if released:
+            LOGGER.info("Released %s encode job cooldown(s) for %s after a successful readiness check.", released, host_key)
 
     def _start_host_action(host_key: str) -> dict[str, Any]:
         nonlocal config
@@ -1060,6 +1075,7 @@ def create_app(
             message = f"{label} accepted the start command and is reachable now."
         else:
             message = f"{label} is reachable now."
+        _release_ready_host_cooldowns(host_key)
         return _host_action_result(HostSetupResult(ok=True, message=message))
 
     def _reset_host_trust_action(host_key: str) -> dict[str, Any]:
@@ -1948,7 +1964,9 @@ def create_app(
         blocker = production_action_blocker(config, normalized_prefix)
         if blocker is not None:
             return blocker
-        return accept_ambiguous_motion_action(config, normalized_prefix, now_iso=_now_iso())
+        return accept_ambiguous_motion_action(
+            config, normalized_prefix, now_iso=_now_iso(), current_approval=_held_files_current_approval,
+        )
 
     def _approve_measured_encode_recovery_action(
             normalized_prefix: str,
@@ -2092,6 +2110,19 @@ def create_app(
                 now_iso=_now_iso,
             )
 
+    def _decide_size_exception_action(job_id: str, allow: bool) -> dict[str, Any]:
+        current_config = load_config(config_path)
+        with open_db(current_config.paths.db_path) as connection:
+            return decide_size_exception(
+                connection,
+                job_id,
+                allow=allow,
+                now_iso=_now_iso,
+                sync_parent=lambda current_connection, child: sync_encode_job_parent(
+                    current_connection, child, _encode_queue_runtime_deps(),
+                ),
+            )
+
     def _pause_encode_queue_action() -> dict[str, Any]:
         return pause_encode_queue_action(
             connection_factory=lambda: open_db(config.paths.db_path),
@@ -2227,6 +2258,7 @@ def create_app(
         save_profile_action=_save_profile_action,
     )
     register_child_recovery_routes(app, recover_children_action=_recover_children_action)
+    register_size_decision_routes(app, decide_size_exception_action=_decide_size_exception_action)
     register_queue_routes(
         app,
         pause_encode_queue_action=_pause_encode_queue_action,
