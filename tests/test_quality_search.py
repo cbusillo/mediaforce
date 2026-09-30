@@ -9,12 +9,16 @@ from mediaforce.encoding.quality import (
     QualitySearchWarmStart,
     QualityTempSetupError,
     REMOTE_QUALITY_TIMEOUT_SECONDS,
+    RemoteQualityTimeoutError,
     SampleEncodeError,
     SampleEncodeResult,
     _probe_libvmaf,
     _quality_execution_mode,
     _run_quality_command,
+    quality_error_message,
     quality_toolchain_identity,
+    run_crf_search,
+    run_sample_encode,
 )
 from mediaforce.encoding.quality_search import search_quality
 
@@ -378,6 +382,82 @@ class QualitySearchWarmStartTests(unittest.TestCase):
             "max_crf": 38,
             "max_encoded_percent": 80,
         }
+
+
+class RemoteQualityTimeoutTests(unittest.TestCase):
+    HOST = {"mode": "ssh", "host": "encoder@example.invalid", "key": "remote-a", "label": "Remote A"}
+    PATH_EXPORT = "export PATH=/opt/homebrew/bin:$PATH"
+
+    def _timeout(self, cmd: list[str]) -> subprocess.TimeoutExpired:
+        script = f"{self.PATH_EXPORT}\n{' '.join(cmd)}"
+        return subprocess.TimeoutExpired(
+            ["ssh", "-o", "BatchMode=yes", "encoder@example.invalid", "sh", "-lc", script],
+            REMOTE_QUALITY_TIMEOUT_SECONDS,
+            output="crf 30 VMAF 94.1\n",
+            stderr=f"{self.PATH_EXPORT}\nEncoding sample 3/5\rEncoding sample 4/5\n",
+        )
+
+    def _run_with_quality_failure(self, run: str, failure: Exception | None) -> tuple[Exception, list[list[str]]]:
+        """Run one quality phase over SSH whose ab-av1 step raises ``failure``, or times out when it is None."""
+        calls: list[list[str]] = []
+
+        def fake_remote(_host: dict[str, object], cmd: list[str], _timeout: int, **_kwargs: object) -> object:
+            calls.append(cmd)
+            if cmd[0] == "ab-av1":
+                raise failure or self._timeout(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        common = {
+            "preferred_metric": "xpsnr",
+            "preset": 4,
+            "pixel_format": "yuv420p10le",
+            "sample_every": "12m",
+            "sample_duration": "20s",
+            "svt_params": [],
+            "host": self.HOST,
+            "quality_temp_dir": Path("/remote/quality-temp"),
+        }
+        with patch("mediaforce.encoding.quality.run_remote_command", side_effect=fake_remote):
+            try:
+                if run == "crf_search":
+                    run_crf_search(
+                        Path("/remote/input.mkv"), metric_target=41.0, min_crf=20, max_crf=35,
+                        max_encoded_percent=70, thorough=False, **common,
+                    )
+                else:
+                    run_sample_encode(Path("/remote/input.mkv"), crf=28.0, **common)
+            except Exception as exc:  # noqa: BLE001 - the test inspects whichever error the run raised.
+                return exc, calls
+        self.fail("the quality run should have failed")
+
+    def test_timed_out_remote_run_raises_plain_error_and_leaves_its_temp_folder(self) -> None:
+        for phase in ("crf_search", "sample_encode"):
+            with self.subTest(phase=phase):
+                exc, calls = self._run_with_quality_failure(phase, None)
+
+                assert isinstance(exc, RemoteQualityTimeoutError)
+                self.assertEqual(exc.phase, phase)
+                self.assertEqual(exc.timeout_seconds, REMOTE_QUALITY_TIMEOUT_SECONDS)
+                self.assertEqual(exc.host_key, self.HOST["key"])
+                self.assertFalse(exc.remote_process_contained)
+                message = quality_error_message(exc)
+                self.assertIn(self.HOST["label"], message)
+                for raw in ("ssh", "export PATH", "ab-av1", "timed out after", str(REMOTE_QUALITY_TIMEOUT_SECONDS)):
+                    self.assertNotIn(raw, message)
+                assert exc.output_tail is not None
+                self.assertIn("Encoding sample 4/5", exc.output_tail)
+                self.assertNotIn("export PATH", exc.output_tail)
+                # The run on that computer may still be using its temp folder, so it is not removed.
+                self.assertNotIn("rm", [cmd[0] for cmd in calls])
+
+    def test_other_remote_quality_failures_still_remove_the_temp_folder(self) -> None:
+        for phase in ("crf_search", "sample_encode"):
+            with self.subTest(phase=phase):
+                exc, calls = self._run_with_quality_failure(phase, RuntimeError("connection lost"))
+
+                self.assertNotIsInstance(exc, RemoteQualityTimeoutError)
+                temp_dir = next(cmd[2] for cmd in calls if cmd[0] == "mkdir")
+                self.assertEqual(calls[-1], ["rm", "-rf", temp_dir])
 
 
 if __name__ == "__main__":

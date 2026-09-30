@@ -114,7 +114,39 @@ class QualityTempSetupError(RuntimeError):
     pass
 
 
+class RemoteQualityTimeoutError(RuntimeError):
+    """A quality run on another computer outlasted its time limit.
+
+    Only the local SSH session was stopped; the run on that computer may still be going, so its
+    temp folder is left for the periodic sweeps and the computer should rest before it is reused.
+    """
+
+    failure_kind = "remote_quality_timeout"
+    remote_process_contained = False
+
+    def __init__(
+            self,
+            *,
+            phase: str,
+            timeout_seconds: float,
+            host_key: str,
+            host_label: str,
+            output_tail: str | None = None,
+    ) -> None:
+        super().__init__(
+            f"Measuring quality on {host_label} ran past {_plain_duration(timeout_seconds)} without a result; "
+            "the run on that computer was not confirmed stopped."
+        )
+        self.phase = phase
+        self.timeout_seconds = timeout_seconds
+        self.host_key = host_key
+        self.host_label = host_label
+        self.output_tail = output_tail
+
+
 REMOTE_QUALITY_TIMEOUT_SECONDS = 2 * 60 * 60
+REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_LINES = 5
+REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS = 500
 REMOTE_QUALITY_CLEANUP_TIMEOUT_SECONDS = 15
 LOCAL_QUALITY_PATH_PREFIX = "/opt/homebrew/opt/ffmpeg-full/bin:/usr/local/opt/ffmpeg-full/bin"
 DEFAULT_LOCAL_QUALITY_TEMP_ROOT_NAME = "mediaforce-quality-temp"
@@ -497,9 +529,7 @@ def run_crf_search(
     try:
         result = _run_quality_command(cmd, process_controller=process_controller, host=host)
     except Exception as exc:
-        cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
-        if cleanup_error is not None:
-            _attach_quality_cleanup_detail(exc, cleanup_error)
+        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
         raise
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if result.returncode != 0:
@@ -597,9 +627,7 @@ def run_sample_encode(
     try:
         result = _run_quality_command(cmd, process_controller=process_controller, host=host)
     except Exception as exc:
-        cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
-        if cleanup_error is not None:
-            _attach_quality_cleanup_detail(exc, cleanup_error)
+        _cleanup_after_failed_quality_command(exc, scoped_temp_dir, host=host)
         raise
     cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
     if result.returncode != 0:
@@ -739,12 +767,59 @@ def _run_quality_command(
             if mkdir_result.stderr.strip():
                 details = f"{details}\n{mkdir_result.stderr.strip()}".strip()
             raise QualityTempSetupError(details or f"Failed to prepare remote temp dir: {temp_dir}")
-    return run_remote_command(
-        object_dict(host),
-        cmd,
-        REMOTE_QUALITY_TIMEOUT_SECONDS,
-        process_controller=process_controller,
-    )
+    try:
+        return run_remote_command(
+            object_dict(host),
+            cmd,
+            REMOTE_QUALITY_TIMEOUT_SECONDS,
+            process_controller=process_controller,
+        )
+    except subprocess.TimeoutExpired as exc:
+        host_payload = object_dict(host)
+        host_key = str(host_payload.get("key") or host_payload.get("host") or "").strip()
+        output_tail = _remote_quality_output_tail(exc.stdout, exc.stderr)
+        # The raw timeout names the whole SSH command and its PATH setup; the owner gets plain words.
+        error = RemoteQualityTimeoutError(
+            phase=_quality_phase(cmd),
+            timeout_seconds=exc.timeout,
+            host_key=host_key,
+            host_label=str(host_payload.get("label") or "").strip() or host_key or "another computer",
+            output_tail=output_tail,
+        )
+        if output_tail is not None:
+            error.add_note(f"Last output from that computer:\n{output_tail}")
+        raise error from None
+
+
+def _quality_phase(cmd: list[str]) -> str:
+    subcommand = cmd[1] if len(cmd) > 1 else ""
+    return subcommand.replace("-", "_") or "quality"
+
+
+def _remote_quality_output_tail(*outputs: str | bytes | None) -> str | None:
+    """The last few lines the remote run printed, without the PATH setup that started it."""
+    lines: list[str] = []
+    for output in outputs:
+        if output is None:
+            continue
+        text = output.decode(errors="replace") if isinstance(output, bytes) else output
+        lines.extend(
+            line.strip()
+            for line in re.split(r"[\r\n]+", text)
+            if line.strip() and not line.strip().startswith("export PATH=")
+        )
+    if not lines:
+        return None
+    return "\n".join(lines[-REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_LINES:])[-REMOTE_QUALITY_TIMEOUT_OUTPUT_TAIL_MAX_CHARS:]
+
+
+def _plain_duration(seconds: float) -> str:
+    whole_seconds = int(seconds)
+    for unit_seconds, unit in ((3600, "hour"), (60, "minute")):
+        if whole_seconds >= unit_seconds and whole_seconds % unit_seconds == 0:
+            count = whole_seconds // unit_seconds
+            return f"{count} {unit}{'' if count == 1 else 's'}"
+    return f"{whole_seconds} second{'' if whole_seconds == 1 else 's'}"
 
 
 def _scoped_quality_temp_dir(quality_temp_dir: Path | None, *, host: dict[str, object] | None) -> Path | None:
@@ -789,6 +864,20 @@ def _cleanup_scoped_quality_temp_dir(scoped_temp_dir: Path | None, *, host: dict
     if result.stderr.strip():
         details = f"{details}\n{result.stderr.strip()}".strip()
     return details or f"Failed to remove remote quality temp dir {scoped_temp_dir}"
+
+
+def _cleanup_after_failed_quality_command(
+        exc: Exception,
+        scoped_temp_dir: Path | None,
+        *,
+        host: dict[str, object] | None,
+) -> None:
+    if isinstance(exc, RemoteQualityTimeoutError):
+        # The run on that computer may still be writing there; the periodic sweeps remove it later.
+        return
+    cleanup_error = _cleanup_scoped_quality_temp_dir(scoped_temp_dir, host=host)
+    if cleanup_error is not None:
+        _attach_quality_cleanup_detail(exc, cleanup_error)
 
 
 def _attach_quality_cleanup_detail(exc: Exception, cleanup_error: str) -> None:
