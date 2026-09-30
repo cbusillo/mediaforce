@@ -18,6 +18,7 @@ from mediaforce.core.config import MediaforceConfig
 from mediaforce.core.db import open_db
 from mediaforce.core.db_tables import encode_jobs, item_events, library_items, staged_artifacts
 from mediaforce.core.type_defs import object_dict
+from mediaforce.encoding.encode_queue import load_active_encode_job_for_prefix
 from mediaforce.encoding.staging import partial_output_path
 from mediaforce.library.media_scopes import path_matches_scope
 from mediaforce.web.runtime.encode_runtime import remove_stale_staging_path
@@ -78,6 +79,13 @@ def decide_size_held_file(
                 ).scalar_one_or_none()
                 or prefix
             )
+            # A run still working on this scope would take over the new request (or refuse it) after the
+            # finished file was already gone, so nothing is removed until that run is done.
+            if load_active_encode_job_for_prefix(connection, run_prefix) is not None:
+                return {
+                    "ok": False,
+                    "message": f"Mediaforce is still compressing here. Make {name} again once that run finishes.",
+                }
             if not _remove_finished_output(config, row):
                 return {
                     "ok": False,

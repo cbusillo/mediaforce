@@ -1,24 +1,16 @@
 <script lang="ts">
-	import SizeHeldQuestions from '$lib/components/season/SizeHeldQuestions.svelte';
 	import {
-		sizeHeldRecords,
 		stagedIntegrityDispositionCopy,
 		type SeasonPromotionIntegrity
 	} from '$lib/season/experience';
 
 	let {
 		integrity,
-		tone,
-		busy = false,
-		onSizeHeldDecision
+		tone
 	}: {
 		integrity: SeasonPromotionIntegrity;
 		tone: 'blocked' | 'ready';
-		busy?: boolean;
-		onSizeHeldDecision?: (libraryItemId: number, keep: boolean) => void;
 	} = $props();
-
-	const heldFiles = $derived(sizeHeldRecords(integrity));
 
 	function recordPath(relPath: string | null, stagingPath: string | null): string {
 		return relPath || stagingPath || 'Unidentified staged file';
@@ -40,10 +32,6 @@
 			<strong>{integrity.unresolvedCount}</strong>
 		</div>
 	</div>
-
-	{#if onSizeHeldDecision}
-		<SizeHeldQuestions records={heldFiles} {busy} onDecision={onSizeHeldDecision} />
-	{/if}
 
 	{#if integrity.blockers.length > 0}
 		<div class="integrity-blockers" aria-label="Files not ready yet" role="group">

@@ -603,6 +603,15 @@ def promote_one_item(
     validation = json.loads(stage_row["validation_json"] or "{}")
     if not force and not validation.get("passed"):
         raise RuntimeError(f"Item {item['library_item_id']} must be validated before promotion")
+    # The stage-time record can say "passed" before the size check ever ran, so the hold is enforced here too.
+    staged_size_bytes = int_value(stage_row.get("staging_size_bytes"))
+    if staged_size_bytes <= 0 and Path(str(stage_row.get("staging_path") or "")).is_file():
+        staged_size_bytes = Path(str(stage_row["staging_path"])).stat().st_size
+    size_prediction = staged_size_prediction(object_dict(validation), staged_size_bytes)
+    if not force and size_prediction is not None and size_prediction["held"]:
+        raise PromotionWaiting(
+            "It came out far smaller than its sample predicted. Keep it or make it again before it is replaced."
+        )
 
     source_path = Path(item["source_path"])
     staging_path = Path(stage_row["staging_path"])

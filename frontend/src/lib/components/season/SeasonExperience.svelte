@@ -2994,11 +2994,6 @@
 						{/each}
 					</div>
 				{/if}
-				<SizeHeldQuestions
-					records={sizeHeldRecords(promotionIntegrity)}
-					busy={actionPhase !== 'idle'}
-					onDecision={decideSizeHeld}
-				/>
 				{#if stagedAccessBlocked && storageRecoveryHost}
 					<button
 						class="primary-button"
@@ -3055,12 +3050,7 @@
 						? 'The current original moves to the cleanup folder so it can be recovered later.'
 						: 'The current originals move to the cleanup folder so they can be recovered later.'}
 				</p>
-				<SeasonIntegrityPanel
-					integrity={promotionIntegrity}
-					tone="ready"
-					busy={actionPhase !== 'idle'}
-					onSizeHeldDecision={decideSizeHeld}
-				/>
+				<SeasonIntegrityPanel integrity={promotionIntegrity} tone="ready" />
 				<button class="primary-button" type="button" onclick={finishSeason}>
 					{promotionIntegrity.readyCount === 1
 						? 'Replace the original episode'
@@ -3079,12 +3069,7 @@
 					folder until an episode is ready.
 				</p>
 				{#if promotionIntegrity.available}
-					<SeasonIntegrityPanel
-						integrity={promotionIntegrity}
-						tone="blocked"
-						busy={actionPhase !== 'idle'}
-						onSizeHeldDecision={decideSizeHeld}
-					/>
+					<SeasonIntegrityPanel integrity={promotionIntegrity} tone="blocked" />
 				{:else if promotionIntegrity.error}
 					<div class="integrity-loading integrity-loading--error" role="alert">
 						<strong
@@ -3262,6 +3247,13 @@
 				</div>
 			</div>
 		{/if}
+
+		<!-- A held file's question stays on screen in every season state, not only while checking or replacing. -->
+		<SizeHeldQuestions
+			records={sizeHeldRecords(promotionIntegrity)}
+			busy={actionPhase !== 'idle'}
+			onDecision={decideSizeHeld}
+		/>
 
 		<section
 			hidden={['sample_waiting', 'making_test'].includes(humanState.key) ||
