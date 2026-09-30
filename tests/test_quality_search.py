@@ -559,7 +559,7 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
 
         assert isinstance(exc, RemoteQualityTimeoutError)
         self.assertTrue(exc.remote_process_contained)
-        containment = next(shlex.split(script.split("\n", 1)[1]) for script in scripts if "index($0" in script)
+        containment = next(shlex.split(script.split("\n", 1)[1]) for script in scripts if REMOTE_QUALITY_CONTAINED_MARKER in script)
         self.assertEqual(containment[:4], ["sh", "-c", REMOTE_QUALITY_CONTAINMENT_SCRIPT, "sh"])
         self.assertEqual(Path(containment[4]).parent, temp_root)
         self.assertEqual(len(containment), 5)
@@ -599,12 +599,10 @@ class RemoteQualityTimeoutTests(unittest.TestCase):
         self.assertEqual(host, self.HOST)
 
 
-def _process_exists(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+def _process_stopped(pid: int) -> bool:
+    """Gone, or exited and waiting to be reaped: the same test the stop step uses."""
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
+    return not state or state.startswith("Z")
 
 
 def _wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> bool:
@@ -617,28 +615,41 @@ def _wait_until(condition: Callable[[], bool], timeout: float = 10.0) -> bool:
 
 
 class RemoteQualityContainmentScriptTests(unittest.TestCase):
-    """Run the stop step in a real shell against processes this test starts; it needs no SSH."""
+    """Run the stop step in a real shell against processes this test starts; it needs no SSH.
+
+    Every fixture writes a ready file once it is set up and keeps its identifying argument in its
+    own command line, and the test waits for all of them before stopping anything.
+    """
 
     # Ignores the polite stop, so only the forced one ends it; it does not name the run's folder.
-    STUBBORN = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(300)"
-    # Names the run's folder in its arguments, starts a stubborn child in its own process group,
-    # and dies on the polite stop, so that child is re-parented before anything looks for it.
-    RUN = (
-        "import subprocess, sys, time; "
-        f"child = subprocess.Popen([sys.executable, '-c', {STUBBORN!r}], start_new_session=True); "
-        "print(child.pid, flush=True); time.sleep(300)"
+    STUBBORN_CHILD = (
+        "import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pathlib.Path(sys.argv[1]).write_text('ready'); time.sleep(300)"
     )
+    # Names the run's folder, starts a stubborn child in its own session that does not name it, and
+    # dies on the polite stop, so the child is re-parented before anything looks for it again.
+    RUN = (
+        "import pathlib, subprocess, sys, time; "
+        f"child = subprocess.Popen([sys.executable, '-c', {STUBBORN_CHILD!r}, sys.argv[2] + '.child'], "
+        "start_new_session=True); "
+        "ready = pathlib.Path(sys.argv[2]); partial = ready.with_suffix('.partial'); "
+        "partial.write_text(str(child.pid)); partial.rename(ready); time.sleep(300)"
+    )
+    # Names its folder as the argument after the script and loops, so the shell cannot exec away the argument.
+    SHELL_RUN = 'trap "" TERM; : > "$2"; while :; do sleep 1; done'
+    SHELL_BYSTANDER = ': > "$2"; while :; do sleep 1; done'
 
     def setUp(self) -> None:
         self.folder = f"/remote/it's a \"quality\" $(temp)/.mediaforce-ab-av1-{uuid.uuid4().hex}"
-        self.started: list[int] = []
+        ready_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(ready_dir.cleanup)
+        self.ready_dir = Path(ready_dir.name)
+        self.started: list[subprocess.Popen[str]] = []
 
     def tearDown(self) -> None:
-        for pid in self.started:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        for process in self.started:
+            process.kill()
+            process.wait(timeout=10)
 
     def _stop(self, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -646,28 +657,39 @@ class RemoteQualityContainmentScriptTests(unittest.TestCase):
             capture_output=True, text=True, start_new_session=True, env=env, timeout=60,
         )
 
-    def _start(self, argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
-        process = subprocess.Popen(argv, start_new_session=True, text=True, **kwargs)
-        self.started.append(process.pid)
-        return process
+    def _start(self, name: str, argv: list[str]) -> Path:
+        ready = self.ready_dir / name
+        self.started.append(subprocess.Popen([*argv, str(ready)], start_new_session=True, text=True))
+        return ready
 
     def test_stops_the_run_and_its_descendants_and_leaves_other_folders_alone(self) -> None:
-        run = self._start([sys.executable, "-c", self.RUN, self.folder], stdout=subprocess.PIPE)
-        assert run.stdout is not None
-        child_pid = int(run.stdout.readline())
-        self.started.append(child_pid)
-        self.assertEqual(run.stdout.readline().strip(), "ready")
-        stubborn_run = self._start(["sh", "-c", "trap '' TERM; sleep 300", self.folder])
-        other_run = self._start(["sh", "-c", "sleep 300", f"{self.folder}0"])
+        run_ready = self._start("run", [sys.executable, "-c", self.RUN, self.folder])
+        stubborn_ready = self._start("stubborn", ["sh", "-c", self.SHELL_RUN, "sh", self.folder])
+        bystander_readies = [
+            self._start(f"bystander-{index}", ["sh", "-c", self.SHELL_BYSTANDER, "sh", folder])
+            for index, folder in enumerate((f"{self.folder}0", f"{self.folder}-x"))
+        ]
+        child_ready = Path(f"{run_ready}.child")
+        readies = [run_ready, stubborn_ready, child_ready, *bystander_readies]
+        self.assertTrue(_wait_until(lambda: all(ready.exists() for ready in readies)), "fixtures never became ready")
+        child_pid = int(run_ready.read_text())
+        run, stubborn, *bystanders = self.started
 
         result = self._stop()
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout.split())
-        run.wait(timeout=10)
-        stubborn_run.wait(timeout=10)
-        self.assertTrue(_wait_until(lambda: not _process_exists(child_pid)))
-        self.assertIsNone(other_run.poll())
+        try:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(REMOTE_QUALITY_CONTAINED_MARKER, result.stdout.split())
+            for process in (run, stubborn):
+                self.assertTrue(_wait_until(lambda: _process_stopped(process.pid)))
+            self.assertTrue(_wait_until(lambda: _process_stopped(child_pid)))
+            for bystander in bystanders:
+                self.assertIsNone(bystander.poll())
+        finally:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def test_a_process_listing_that_fails_or_is_empty_is_never_proof(self) -> None:
         real_ps = shutil.which("ps")

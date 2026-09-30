@@ -171,13 +171,19 @@ REMOTE_QUALITY_CONTAINMENT_TIMEOUT_SECONDS = 30
 REMOTE_QUALITY_CONTAINED_MARKER = "mediaforce-quality-run-stopped"
 REMOTE_QUALITY_TEMP_FILES_LEFT_NOTE = "Its temporary files could not be removed; they will be cleaned up later."
 # Stops what is left of one timed-out run on the computer. The run's scoped temp folder is unique to
-# it and comes in as $1, matched as fixed text. Before any signal it takes one process listing and
-# collects every process naming the folder plus all their descendants, so a child that does not name
-# the folder is still found after its parent dies. It prints the marker only when a fresh listing
+# it and comes in as $1. A command line names it only as a whole path: fixed text that starts the line
+# or follows whitespace, "=" or a quote, and ends the line or is followed by "/", whitespace or a
+# quote, so "<folder>0" or "<folder>-x" is someone else's. Before any signal it takes one process
+# listing and collects every process naming the folder plus all their descendants, so a child that
+# does not name the folder is still found after its parent dies. Only those processes are signalled,
+# never their process groups: nothing proves a group belongs only to this run. ab-av1's ffmpeg
+# children write into the folder, so their own command lines name it. A process that neither names
+# the folder nor descends from one that does is not seen; confirming ab-av1's children behave this
+# way is part of the owner-watched host session. It prints the marker only when a fresh listing
 # shows nothing naming the folder and none of the collected processes is still there other than as
-# an exited zombie (a reused pid counts as alive, the safe side). Every listing fails
-# closed: a failed ps, or one that does not show this script itself, is never proof. Processes in
-# this script's own group (its shells, whose arguments also name the folder) are never collected.
+# an exited zombie (a reused pid counts as alive, the safe side). Every listing fails closed: a
+# failed ps, or one that does not show this script itself, is never proof. Processes in this
+# script's own group (its shells, whose arguments also name the folder) are never collected.
 REMOTE_QUALITY_CONTAINMENT_SCRIPT = """target=$1
 [ -n "$target" ] || exit 2
 self=$$
@@ -191,9 +197,19 @@ own_group=$(printf '%s\\n' "$listing" | awk -v self="$self" '$1 == self { print 
 [ -n "$own_group" ] || exit 3
 collect() {
   printf '%s\\n' "$1" | TARGET="$target" awk -v own="$own_group" '
+    function names_folder(line, folder,   rest, offset, at, before, after) {
+      rest = line; offset = 0
+      while ((at = index(rest, folder)) > 0) {
+        before = offset + at > 1 ? substr(line, offset + at - 1, 1) : ""
+        after = substr(rest, at + length(folder), 1)
+        if ((before == "" || before ~ /[[:space:]=\\042\\047]/) && (after == "" || after ~ /[[:space:]\\/\\042\\047]/)) return 1
+        offset += at; rest = substr(rest, at + 1)
+      }
+      return 0
+    }
     $3 == own || $4 ~ /^Z/ { next }
-    { count++; pids[count] = $1; parent[$1] = $2; group[$1] = $3 }
-    index($0, ENVIRON["TARGET"]) > 0 { hit[$1] = 1 }
+    { count++; pids[count] = $1; parent[$1] = $2 }
+    names_folder($0, ENVIRON["TARGET"]) { hit[$1] = 1 }
     END {
       do {
         grew = 0
@@ -201,14 +217,12 @@ collect() {
           if (!(pids[i] in hit) && (parent[pids[i]] in hit)) { hit[pids[i]] = 1; grew = 1 }
         }
       } while (grew)
-      for (pid in hit) print pid, group[pid]
+      for (pid in hit) print pid
     }'
 }
 targets=$(collect "$listing")
 signal_all() {
-  printf '%s\\n' "$targets" | while read -r pid group; do
-    [ -n "$pid" ] || continue
-    if [ "$group" -gt 1 ] 2>/dev/null && [ "$group" != "$own_group" ]; then kill -"$1" -"$group" 2>/dev/null; fi
+  for pid in $targets; do
     kill -"$1" "$pid" 2>/dev/null
   done
   return 0
@@ -217,7 +231,7 @@ settled() {
   now=$(snapshot) || return 2
   [ -z "$(collect "$now")" ] || return 1
   printf '%s\\n' "$now" | TARGETS="$targets" awk '
-    BEGIN { lines = split(ENVIRON["TARGETS"], rows, "\\n"); for (i = 1; i <= lines; i++) { split(rows[i], f, " "); want[f[1]] = 1 } }
+    BEGIN { count = split(ENVIRON["TARGETS"], pids); for (i = 1; i <= count; i++) want[pids[i]] = 1 }
     $4 !~ /^Z/ && ($1 in want) { alive = 1 }
     END { exit alive }' || return 1
   return 0
