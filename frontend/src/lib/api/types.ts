@@ -463,7 +463,18 @@ export interface EncodeUnfinishedGroup {
 	count: number;
 	/** True when the owner has to act; absent on rows saved before it was recorded. */
 	needs_owner?: boolean;
+	/** True when the owner already answered for these files, so they are listed, not waiting. */
+	owner_choice?: boolean;
 	items: string[];
+	/** One question per file whose quality needs more than its size goal allows. */
+	size_questions?: EncodeSizeQuestion[];
+}
+
+export interface EncodeSizeQuestion {
+	job_id: string;
+	rel_path: string;
+	goal_bytes: number;
+	smallest_quality_safe_bytes: number;
 }
 
 export interface EncodeQueueJob {

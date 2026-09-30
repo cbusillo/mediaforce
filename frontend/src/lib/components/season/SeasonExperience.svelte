@@ -1105,6 +1105,20 @@
 		return relPath.split('/').at(-1) ?? relPath;
 	}
 
+	async function decideSize(jobId: string, allow: boolean) {
+		const fallback = 'We couldn’t record that size decision.';
+		await runAction('deciding', fallback, async () => {
+			const response = ensureOk(
+				await postJson<ActionResponse>('/api/encode-queue/size-decision', {
+					job_id: jobId,
+					allow
+				}),
+				fallback
+			);
+			actionMessage = response.message || '';
+		});
+	}
+
 	async function performMeasuredRecovery() {
 		await runAction(
 			'recovering',
@@ -2901,7 +2915,12 @@
 						<span>{isExactItemScope ? 'episode finished' : 'episodes finished'}</span>
 						{#if encodeProgress.eta}<small>{encodeProgress.eta}</small>{/if}
 					</div>
-					<WaitingReasons reasons={waitingReasons} scope={waitingReasonsScope} />
+					<WaitingReasons
+						reasons={waitingReasons}
+						scope={waitingReasonsScope}
+						busy={actionPhase !== 'idle'}
+						onSizeDecision={decideSize}
+					/>
 				</div>
 				<div
 					class="progress-ring"
@@ -3087,7 +3106,12 @@
 				</p>
 				<h1>{targetConstraint?.title || `${humanState.label}.`}</h1>
 				<p class="lede">{targetConstraint?.detail || plainFailureMessage(folder, status)}</p>
-				<WaitingReasons reasons={waitingReasons} scope={waitingReasonsScope} />
+				<WaitingReasons
+					reasons={waitingReasons}
+					scope={waitingReasonsScope}
+					busy={actionPhase !== 'idle'}
+					onSizeDecision={decideSize}
+				/>
 				<div class="help-safety">
 					{#if targetConstraint}
 						<strong>No quality rule was silently relaxed.</strong>

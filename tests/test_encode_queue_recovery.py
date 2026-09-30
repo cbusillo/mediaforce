@@ -46,6 +46,7 @@ from mediaforce.core.db_tables import production_holds
 from mediaforce.core.db_tables import scan_runs
 from mediaforce.core.db_tables import staged_artifacts
 from mediaforce.core.evidence import stable_policy_hash, stable_source_id
+from mediaforce.web.runtime.size_exception import decide_size_exception
 from mediaforce.core.models import ProbeSummary
 from mediaforce.core.process_control import ManagedProcessController, ProcessCancelledError, \
     ProcessDeadlineEnforcementError, ScheduleWindowClosedError
@@ -2335,6 +2336,227 @@ class EncodeQueueRecoveryTests(unittest.TestCase):
         self.assertEqual(updated["status"], "needs_attention")
         analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
         self.assertEqual(analysis["compression_authorization"]["reason_code"], "compression_intent_unconfirmed")
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+
+    def _decide_size(self, connection: DBClient, job_id: str, *, allow: bool) -> dict[str, Any]:
+        synced: list[str] = []
+        result = decide_size_exception(
+            connection,
+            job_id,
+            allow=allow,
+            now_iso=lambda: "2026-09-29T23:00:00+00:00",
+            sync_parent=lambda _connection, child: synced.append(str(child["job_id"])),
+        )
+        if result["ok"]:
+            self.assertEqual(synced, [job_id])
+        return result
+
+    def test_quality_floor_conflict_far_above_goal_asks_the_owner_about_that_file(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            updated, _manifest_path = self._quality_floor_conflict_job(
+                connection,
+                "floor-conflict-question",
+                best_reachable_bytes=400_000_000,
+            )
+
+        assert updated is not None
+        self.assertEqual(
+            encode_runtime.size_exception_question(updated),
+            {
+                "job_id": "job-floor-conflict-question",
+                "rel_path": "tv/show/floor-conflict-question.mkv",
+                "goal_bytes": 200_000_000,
+                "smallest_quality_safe_bytes": 400_000_000,
+            },
+        )
+
+    def test_breakdown_asks_every_waiting_file_its_size_question(self) -> None:
+        children = [
+            {
+                "job_id": f"shard-{index}",
+                "status": "needs_attention",
+                "manifest_indexes": [index],
+                "progress": {
+                    "failure_analysis": {
+                        "kind": "quality_floor_size_conflict",
+                        "retry_strategy": "needs_operator_approval",
+                        "target_size_bytes": 200,
+                        "proposed_target_size_bytes": 400 + index,
+                        "item_rel_path": f"tv/show/episode-{index}.mkv",
+                    }
+                },
+            }
+            for index in range(encode_runtime._UNFINISHED_BREAKDOWN_ITEM_LIMIT + 2)
+        ]
+
+        (group,) = encode_runtime._unfinished_child_breakdown(children)
+
+        self.assertEqual(group["reason"], "quality_floor_size_conflict")
+        self.assertTrue(group["needs_owner"])
+        self.assertEqual(
+            [question["job_id"] for question in group["size_questions"]],
+            [child["job_id"] for child in children],
+        )
+        self.assertEqual(group["size_questions"][1]["smallest_quality_safe_bytes"], 401)
+
+    def test_owner_allowing_the_larger_size_retries_only_that_file_under_an_item_exception(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._quality_floor_conflict_job(connection, "floor-allow", best_reachable_bytes=400_000_000)
+            self._quality_floor_conflict_job(connection, "floor-sibling", best_reachable_bytes=400_000_000)
+            result = self._decide_size(connection, "job-floor-allow", allow=True)
+            updated = load_encode_job(connection, "job-floor-allow")
+            sibling = load_encode_job(connection, "job-floor-sibling")
+            events = connection.execute(
+                select(item_events.c.event_type).where(item_events.c.event_type == "owner_size_decision")
+            ).fetchall()
+        manifest = json.loads((self.root / "runs" / "manifest-floor-allow.json").read_text())
+        sibling_manifest = json.loads((self.root / "runs" / "manifest-floor-sibling.json").read_text())
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None and sibling is not None
+        self.assertEqual(updated["status"], "queued")
+        self.assertIsNone(updated["finished_at"])
+        self.assertEqual(sibling["status"], "needs_attention")
+        item = manifest["items"][0]
+        self.assertEqual(item["resolved_policy"]["video"]["target_size_bytes"], 400_000_000)
+        self.assertEqual(item["resolved_policy"]["video"]["size_goal_source"], "quality_floor_exception")
+        self.assertEqual(item["stream_budget_ledger"]["totals"]["total_target_bytes"], 400_000_000)
+        escalation = item["compression_escalation"]
+        self.assertEqual(escalation["scope"], "item")
+        self.assertEqual(escalation["evidence"]["kind"], "measured_quality_floor_violation")
+        self.assertEqual(escalation["evidence"]["owner_approval"]["kind"], "operator_override")
+        self.assertEqual(escalation["decision"]["outcome"], "authorized")
+        self.assertEqual(sibling_manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+        analysis = object_dict(object_dict(updated.get("progress")).get("failure_analysis"))
+        self.assertEqual(analysis["owner_size_decision"]["answer"], "allow")
+        self.assertEqual(len(events), 1)
+
+    def _floor_conflict_shard_under_running_folder(self, connection: DBClient, name: str) -> dict[str, Any]:
+        child, _manifest_path = self._quality_floor_conflict_job(connection, name, best_reachable_bytes=400_000_000)
+        assert child is not None
+        parent = {
+            **child,
+            "job_id": f"folder-{name}",
+            "job_kind": "folder",
+            "parent_job_id": None,
+            "status": "running",
+            "manifest_indexes": None,
+            "progress": {},
+            "error": None,
+            "finished_at": None,
+        }
+        save_encode_job(connection, parent)
+        child = {**child, "job_kind": "shard", "parent_job_id": parent["job_id"], "manifest_indexes": [0]}
+        save_encode_job(connection, child)
+        connection.commit()
+        return child
+
+    def test_allowing_a_larger_size_is_not_blocked_by_its_own_running_folder(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._floor_conflict_shard_under_running_folder(connection, "floor-under-folder")
+            result = self._decide_size(connection, "job-floor-under-folder", allow=True)
+            updated = load_encode_job(connection, "job-floor-under-folder")
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "queued")
+
+    def test_allowing_a_larger_size_refuses_a_file_another_active_part_holds(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            child = self._floor_conflict_shard_under_running_folder(connection, "floor-held")
+            save_encode_job(connection, {**child, "job_id": "job-floor-held-again", "status": "queued"})
+            connection.commit()
+            result = self._decide_size(connection, "job-floor-held", allow=True)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("already queued again", result["message"])
+
+    def test_a_failed_allow_puts_the_file_manifest_item_back(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            _updated, manifest_path = self._quality_floor_conflict_job(
+                connection, "floor-allow-fails", best_reachable_bytes=400_000_000,
+            )
+            before = json.loads(manifest_path.read_text())["items"][0]
+
+            def failing_sync(_connection: DBClient, _child: dict[str, Any]) -> None:
+                raise RuntimeError("parent sync failed")
+
+            with self.assertRaises(RuntimeError):
+                decide_size_exception(
+                    connection,
+                    "job-floor-allow-fails",
+                    allow=True,
+                    now_iso=lambda: "2026-09-29T23:00:00+00:00",
+                    sync_parent=failing_sync,
+                )
+            updated = load_encode_job(connection, "job-floor-allow-fails")
+
+        self.assertEqual(json.loads(manifest_path.read_text())["items"][0], before)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertIsNotNone(encode_runtime.size_exception_question(updated))
+
+    def test_a_failed_manifest_write_leaves_the_shared_manifest_whole(self) -> None:
+        manifest_path = self._write_manifest("manifest-atomic.json", [{"library_item_id": 1, "rel_path": "a.mkv"}])
+        before = manifest_path.read_text()
+        real_write_text = Path.write_text
+
+        def write_then_fail(path: Path, data: str, *args: Any, **kwargs: Any) -> int:
+            real_write_text(path, data[: len(data) // 2], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(Path, "write_text", write_then_fail), self.assertRaises(OSError):
+            encode_runtime.restore_manifest_item(manifest_path, 0, {"library_item_id": 1, "rel_path": "b.mkv"})
+
+        self.assertEqual(manifest_path.read_text(), before)
+        self.assertEqual(sorted(path.name for path in manifest_path.parent.iterdir() if ".tmp" in path.name), [])
+
+    def test_owner_keeping_the_original_leaves_the_file_listed_and_unchanged(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            _updated, manifest_path = self._quality_floor_conflict_job(
+                connection, "floor-keep", best_reachable_bytes=400_000_000,
+            )
+            result = self._decide_size(connection, "job-floor-keep", allow=False)
+            updated = load_encode_job(connection, "job-floor-keep")
+            again = self._decide_size(connection, "job-floor-keep", allow=True)
+        manifest = json.loads(manifest_path.read_text())
+
+        self.assertTrue(result["ok"], result)
+        assert updated is not None
+        self.assertEqual(updated["status"], "needs_attention")
+        self.assertNotIn("compression_escalation", manifest["items"][0])
+        self.assertEqual(manifest["items"][0]["resolved_policy"]["video"]["target_size_bytes"], 200_000_000)
+        self.assertIsNone(encode_runtime.size_exception_question(updated))
+        (group,) = encode_runtime._unfinished_child_breakdown([updated])
+        self.assertEqual(group["reason"], "size_exception_declined")
+        self.assertFalse(group["needs_owner"])
+        self.assertTrue(group["owner_choice"])
+        self.assertNotIn("size_questions", group)
+        self.assertFalse(again["ok"])
+
+    def test_size_decision_refuses_a_file_the_automatic_retry_or_goal_confirmation_owns(self) -> None:
+        with open_db(self.config.paths.db_path) as connection:
+            self._quality_floor_conflict_job(connection, "floor-auto", best_reachable_bytes=240_000_000)
+            self._quality_floor_conflict_job(
+                connection,
+                "floor-unconfirmed",
+                best_reachable_bytes=400_000_000,
+                compression_intent={
+                    "schema_version": 1, "level": "legacy_unconfirmed", "source": "legacy", "confirmed": False,
+                },
+            )
+            auto = self._decide_size(connection, "job-floor-auto", allow=True)
+            unconfirmed = self._decide_size(connection, "job-floor-unconfirmed", allow=True)
+            missing = self._decide_size(connection, "job-does-not-exist", allow=True)
+            unconfirmed_job = load_encode_job(connection, "job-floor-unconfirmed")
+        manifest = json.loads((self.root / "runs" / "manifest-floor-unconfirmed.json").read_text())
+
+        self.assertFalse(auto["ok"])
+        self.assertFalse(missing["ok"])
+        self.assertFalse(unconfirmed["ok"])
+        self.assertIn("Confirm this show's size choice", unconfirmed["message"])
+        assert unconfirmed_job is not None
+        self.assertEqual(unconfirmed_job["status"], "needs_attention")
         self.assertNotIn("compression_escalation", manifest["items"][0])
 
     def test_final_size_miss_requires_a_fresh_goal_instead_of_plain_retry(self) -> None:

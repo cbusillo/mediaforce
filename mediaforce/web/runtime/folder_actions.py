@@ -1843,10 +1843,21 @@ def tv_promotion_readiness_payload(
     }
 
 
-def active_encode_library_item_ids(connection: DBClient, prefix: str) -> set[int] | None:
-    """Files an active encode may still write. None means a job's files cannot be read, so fail closed."""
+def active_encode_library_item_ids(
+        connection: DBClient,
+        prefix: str,
+        *,
+        exclude_job_ids: Collection[str] = (),
+) -> set[int] | None:
+    """Files an active encode may still write. None means a job's files cannot be read, so fail closed.
+
+    A folder parent counts every file in its manifest; exclude it by id to count only the files its
+    own active parts still hold.
+    """
     item_ids: set[int] = set()
     for job in load_active_encode_jobs_for_prefix(connection, prefix):
+        if str(job.get("job_id") or "") in exclude_job_ids:
+            continue
         manifest_items = _manifest_items(job)
         if not manifest_items:
             return None
